@@ -203,6 +203,14 @@ impl SemiPlanarPlanes {
     }
 }
 
+unsafe fn clear_to_black(gl: &glow::Context) {
+    // SAFETY: forwarded from the caller.
+    unsafe {
+        gl.clear_color(0.0, 0.0, 0.0, 1.0);
+        gl.clear(glow::COLOR_BUFFER_BIT);
+    }
+}
+
 /// GL render state, built once the EGL context is current. Holds the program,
 /// its textures, the fullscreen-quad buffer, and (lazily, on the first frame,
 /// once the decoder's CUDA context is known) the CUDA-GL interop.
@@ -526,8 +534,7 @@ impl GlState {
         // SAFETY: the GL context is current on this thread for the worker's life.
         unsafe {
             let gl = &self.gl;
-            gl.clear_color(0.0, 0.0, 0.0, 1.0);
-            gl.clear(glow::COLOR_BUFFER_BIT);
+            clear_to_black(gl);
             gl.use_program(Some(self.program));
             gl.uniform_1_f32(self.dither_step_loc.as_ref(), dither_step);
 
@@ -899,6 +906,29 @@ impl GlVideoRenderer {
             dither_step(Some(target.bits_per_channel)),
         );
         Ok(viewport)
+    }
+
+    /// # Safety
+    /// The GL context `loader` resolves entry points for must be current, with
+    /// `target.framebuffer` a framebuffer of it.
+    pub unsafe fn clear(&mut self, target: GlTarget) {
+        let loaded;
+        let gl = match &self.state {
+            Some(built) => &built.gl.gl,
+            None => {
+                // SAFETY: the caller guarantees the context `loader` resolves for is current.
+                loaded = unsafe { glow::Context::from_loader_function(|name| (self.loader)(name)) };
+                &loaded
+            }
+        };
+        // SAFETY: the caller guarantees the framebuffer belongs to the current context.
+        unsafe {
+            gl.bind_framebuffer(
+                glow::FRAMEBUFFER,
+                core::num::NonZeroU32::new(target.framebuffer).map(glow::NativeFramebuffer),
+            );
+            clear_to_black(gl);
+        }
     }
 
     /// # Safety

@@ -144,6 +144,8 @@ impl GlRenderContext {
     /// current, with `target.framebuffer` a framebuffer of it.
     pub unsafe fn render(&mut self, target: GlTarget) -> Result<(), G2gError> {
         let Some((frame, new_caps)) = self.feed.latest() else {
+            // SAFETY: forwarded from the caller.
+            unsafe { self.renderer.clear(target) };
             return Ok(());
         };
         if let Some(caps) = new_caps {
@@ -225,13 +227,14 @@ mod wgpu_target {
                 self.feed.configured_caps = None;
             }
             let renderer = self.renderer.as_mut().expect("built above");
+            let view = target.create_view(&wgpu::TextureViewDescriptor::default());
             let Some((frame, new_caps)) = self.feed.latest() else {
+                renderer.clear(&view);
                 return Ok(());
             };
             if let Some(caps) = new_caps {
                 renderer.configure(caps)?;
             }
-            let view = target.create_view(&wgpu::TextureViewDescriptor::default());
             let target_size = (target.width(), target.height());
             let picture = renderer.draw(&frame.frame.domain, &view, target_size)?;
             renderer.draw_rectangles(&self.feed.overlay_in_target(picture), &view, target_size);

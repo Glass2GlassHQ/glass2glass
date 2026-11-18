@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2413: player render contexts clear the target to black until the first frame arrives.
 - M2412: audio sinks play again after a seek made while paused.
 - M2411: the GL video renderer turns off Apple client storage a host left on, so its textures allocate on macOS.
 - M2410: `wasapisink` drops queued audio when the pipeline stops instead of waiting for it to play.

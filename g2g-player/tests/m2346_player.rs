@@ -112,6 +112,45 @@ fn rendered_pixels(
 }
 
 #[test]
+fn a_render_before_the_first_frame_clears_the_target_to_black() {
+    let Ok(context) = pollster::block_on(GpuContext::headless()) else {
+        return;
+    };
+    let player = Player::new();
+    let mut render = WgpuRenderContext::new(&player, context.clone());
+    let target = rgba_target(&context, (CLIP_WIDTH, CLIP_HEIGHT));
+    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut encoder = context
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: None,
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &view,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                store: wgpu::StoreOp::Store,
+            },
+            depth_slice: None,
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    context.queue.submit([encoder.finish()]);
+
+    let pixels = rendered_pixels(&mut render, &context, &target);
+    let (rgba, _) = pixels.as_chunks::<{ RGBA_BYTES_PER_PIXEL as usize }>();
+    assert!(
+        rgba.iter().all(|pixel| *pixel == [0, 0, 0, u8::MAX]),
+        "{:?}",
+        rgba[0]
+    );
+}
+
+#[test]
 fn a_clip_renders_pauses_seeks_and_stays_open_at_the_end() {
     let Ok(context) = pollster::block_on(GpuContext::headless()) else {
         return;

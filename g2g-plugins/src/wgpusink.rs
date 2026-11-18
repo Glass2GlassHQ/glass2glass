@@ -945,6 +945,32 @@ impl VideoRenderer {
         Ok(viewport)
     }
 
+    pub fn clear(&self, view: &wgpu::TextureView) {
+        let mut encoder = self
+            .ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("wgpu-sink-clear"),
+            });
+        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("wgpu-sink-clear"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: BlitCompositing::ReplaceTarget.load(),
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        self.ctx.queue.submit([encoder.finish()]);
+    }
+
     pub fn draw_rectangles(
         &self,
         rectangles: &[FilledRectangle],
