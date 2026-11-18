@@ -1057,6 +1057,8 @@ posted before it was switched off still arrive after. A probe in front of the me
 sets `audio-params` from the decoded caps: the rate, the channel count and the
 speaker layout, the conventional layout for the count when the stream names none.
 The video and audio probes are one `CapsProbe` element with a callback.
+`set_sound_output(SoundOutput::Discard)`, mpv's `ao=null`, ends the sound branch
+in `fakeaudiosink` instead of `autoaudiosink` from the next load on.
 
 The host draws the frame due now into its own target, as with libmpv's render API.
 A URI load builds `playbin uri=... video-sink=playervideosink`, and a launch line

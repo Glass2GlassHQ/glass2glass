@@ -70,6 +70,23 @@ pub struct LoadOptions {
     pub pause: Option<bool>,
 }
 
+// mpv's ao, where Discard is ao=null
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SoundOutput {
+    #[default]
+    Device,
+    Discard,
+}
+
+impl SoundOutput {
+    fn sink(self) -> &'static str {
+        match self {
+            SoundOutput::Device => "autoaudiosink",
+            SoundOutput::Discard => "fakeaudiosink",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VideoSize {
     pub width: u32,
@@ -394,6 +411,7 @@ pub struct Player {
     // mpv keeps its vf chain across loads
     picture_filters: tokio::sync::watch::Sender<Vec<PictureFilter>>,
     level_meter_window: tokio::sync::watch::Sender<Option<Duration>>,
+    sound_output: Mutex<SoundOutput>,
 }
 
 impl Default for Player {
@@ -406,7 +424,7 @@ fn nanoseconds(position: Duration) -> u64 {
     u64::try_from(position.as_nanos()).unwrap_or(u64::MAX)
 }
 
-fn edl_launch_line(uri: &str) -> Result<String, LoadError> {
+fn edl_launch_line(uri: &str, sound_output: SoundOutput) -> Result<String, LoadError> {
     // guikit's timelines carry their sound file in the stream after the first !new_stream
     const SOUND_STREAM: usize = 1;
     let edl = parse_edl_uri(uri).map_err(LoadError::Edl)?;
@@ -414,7 +432,8 @@ fn edl_launch_line(uri: &str) -> Result<String, LoadError> {
     let mut line = format!("edlsrc uri={quoted} ! {PLAYER_VIDEO_SINK}");
     if edl.streams.len() > SOUND_STREAM {
         line.push_str(&format!(
-            "  edlsrc uri={quoted} stream={SOUND_STREAM} media=audio ! audioconvert ! audioresample ! autoaudiosink"
+            "  edlsrc uri={quoted} stream={SOUND_STREAM} media=audio ! audioconvert ! audioresample ! {}",
+            sound_output.sink()
         ));
     }
     Ok(line)
@@ -433,16 +452,19 @@ impl Player {
             playback: Mutex::new(None),
             picture_filters: tokio::sync::watch::Sender::new(Vec::new()),
             level_meter_window: tokio::sync::watch::Sender::new(None),
+            sound_output: Mutex::new(SoundOutput::default()),
         }
     }
 
     pub fn load(&self, media: Media<'_>, options: LoadOptions) -> Result<(), LoadError> {
         self.stop();
+        let sound_output = *self.sound_output.lock().expect("sound output lock");
         let line = match media {
-            Media::Uri(uri) if uri.starts_with("edl://") => edl_launch_line(uri)?,
+            Media::Uri(uri) if uri.starts_with("edl://") => edl_launch_line(uri, sound_output)?,
             Media::Uri(uri) => format!(
-                "playbin uri={} video-sink={PLAYER_VIDEO_SINK}",
-                launch_quote(uri)
+                "playbin uri={} video-sink={PLAYER_VIDEO_SINK} audio-sink={}",
+                launch_quote(uri),
+                sound_output.sink()
             ),
             Media::LaunchLine(line) => line.to_string(),
         };
@@ -739,6 +761,11 @@ impl Player {
     pub fn set_video_filters(&self, filters: &[&str]) -> Result<(), VideoFilterError> {
         self.picture_filters.send_replace(parse_filters(filters)?);
         Ok(())
+    }
+
+    // takes effect at the next load
+    pub fn set_sound_output(&self, output: SoundOutput) {
+        *self.sound_output.lock().expect("sound output lock") = output;
     }
 
     pub fn set_level_meter(&self, window: Option<Duration>) {

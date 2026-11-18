@@ -52,8 +52,6 @@ The plan is [remote.md](remote.md).
 - Duration of an Ogg file with no audio stream (Theora or VP8 granules), and
   of an FLV file without `onMetaData`, from its last tag.
 - Track selection and the `track-list` property.
-- `edl://` timelines: play the audio of the picture stream's files when the
-  timeline has no sound stream, as mpv does.
 - Read the index segments of every partition the MXF random index pack lists
   before playback, so a seek in a long MXF file with a body partition every
   10 s, as ffmpeg writes, lands by index instead of reading from byte 0.

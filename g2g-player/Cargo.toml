@@ -15,7 +15,7 @@ publish = false
 [features]
 wgpu = ["g2g-plugins/wgpu-sink", "dep:wgpu"]
 openh264 = ["g2g-plugins/openh264"]
-ffmpeg = ["g2g-plugins/ffmpeg", "g2g-plugins/ffmpeg-long-tail", "g2g-plugins/vorbis"]
+ffmpeg = ["g2g-plugins/ffmpeg", "g2g-plugins/ffmpeg-long-tail", "g2g-plugins/vorbis", "g2g-plugins/mjpeg"]
 alsa = ["g2g-plugins/alsa-sink"]
 
 [dependencies]
