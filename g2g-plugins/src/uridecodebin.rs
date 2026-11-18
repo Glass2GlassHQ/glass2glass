@@ -1124,32 +1124,13 @@ impl MxfProbe {
 }
 
 #[cfg(feature = "std")]
-pub fn mxf_playbin(
-    reg: &Registry,
-    sinks: &PlaybinSinks<'_>,
-    uri: &str,
-) -> Result<Option<Graph<GraphNode>>, ParseError> {
-    let Some(probe) = mxf_probe(uri) else {
-        return Ok(None);
-    };
-    build_av_fanout(
-        reg,
-        sinks,
-        byte_source(&probe.path, MxfProbe::ENCODING),
-        probe.demux(),
-        &probe.av(),
-    )
-    .map(Some)
-}
-
-#[cfg(feature = "std")]
 pub fn mxf_uri_fanout(_reg: &Registry, uri: &str) -> Result<Option<UriFanout>, ParseError> {
     Ok(mxf_probe(uri)
         .map(|probe| file_fanout(&probe.path, MxfProbe::ENCODING, probe.demux(), &probe.av())))
 }
 
 #[cfg(feature = "std")]
-pub fn flv_playbin(
+pub fn decodebin_fanout_playbin(
     reg: &Registry,
     sinks: &PlaybinSinks<'_>,
     uri: &str,
@@ -1157,21 +1138,20 @@ pub fn flv_playbin(
     let Some((path, prefix)) = open_file_prefix(uri) else {
         return Ok(None);
     };
-    let sniffed = crate::typefind::sniff_caps(&prefix);
-    if !sniffed.is_some_and(|caps| is_container(&caps, &[ByteStreamEncoding::Flv])) {
-        return Ok(None);
-    }
-    let Some((demux, caps)) = flv_select(&path, every_stream) else {
+    let Some(caps) = crate::typefind::sniff_caps(&prefix) else {
         return Ok(None);
     };
-    build_av_fanout(
-        reg,
-        sinks,
-        byte_source(&path, ByteStreamEncoding::Flv),
-        demux,
-        &uncropped_ports(caps),
-    )
-    .map(Some)
+    let Caps::ByteStream { encoding } = caps else {
+        return Ok(None);
+    };
+    let Some((demux, ports)) = reg
+        .decodebin_select_hooks()
+        .iter()
+        .find_map(|hook| hook(&path, &caps))
+    else {
+        return Ok(None);
+    };
+    build_av_fanout(reg, sinks, byte_source(&path, encoding), demux, &ports).map(Some)
 }
 
 #[cfg(feature = "std")]

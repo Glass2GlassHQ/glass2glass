@@ -1013,10 +1013,12 @@ as before.
   appends and `parse_launch` tries each in turn, so one hook per container type
   coexists: `ts_playbin` is the MPEG-TS sibling (`TsDemuxN` multi-output
   demuxer), and a TS file is handled by it while an MKV file is handled by
-  `mkv_playbin`, each declining the other's container. `flv_playbin` is the
-  FLV sibling (`FlvDemuxN`). A container with no hook falls back to the
-  single-stream path, whose chain search stops at a demuxer that lists raw PCM
-  among its streams, so a video sink gets compressed video. `mp4_playbin` is the
+  `mkv_playbin`, each declining the other's container. `decodebin_fanout_playbin`
+  is registered after the container hooks: it sniffs the file and builds the
+  same fan-out from the first `decodebin_select` hook that opens it (FLV, AVI,
+  MXF and the rest). On the single-stream path, a `playbin` that names a sink
+  decodes to raw video or raw audio by the sink's kind, because demuxers such as
+  `flvdemux` list raw PCM among their streams. `mp4_playbin` is the
   fragmented-MP4 sibling (`Mp4DemuxN` multi-output demuxer), the multi-track
   read-side analog of the single-video-track `Mp4Src`: it parses every `moov/trak`
   (`fmp4::parse_all_tracks`) and routes each sample to the port matching its

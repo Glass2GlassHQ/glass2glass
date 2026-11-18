@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2401: `playbin` fans out every container a `decodebin_select` hook opens, AVI included.
 - M2400: `playbin` decodes FLV files, each stream on its own branch.
 - M2399: `g2g-player` reports `video-params` and `audio-params` from the stream's caps, never the negotiation placeholder.
 - M2398: a single-output `mxfdemux`, so bare `decodebin`, `edl://` timelines and `g2g-discover` open MXF files.

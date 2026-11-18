@@ -3071,7 +3071,16 @@ fn expand_uri_sources(
                 });
             let needs_convert = sink.is_some() && decodes_video_to_sink && sink_target.is_none();
             let any_raw = |c: &Caps| is_raw_video(c) || is_raw_audio(c);
-            let target = sink_target.as_deref().unwrap_or(&any_raw);
+            // demuxers list raw sound among their streams, which a video sink cannot take
+            let raw_for_sink = |c: &Caps| match plays_audio {
+                true => is_raw_audio(c),
+                false => is_raw_video(c),
+            };
+            let raw: &dyn Fn(&Caps) -> bool = match sink {
+                Some(_) => &raw_for_sink,
+                None => &any_raw,
+            };
+            let target = sink_target.as_deref().unwrap_or(raw);
             let decoders = decode_chain(registry, &caps, target, preferred, avoided)
                 .ok_or_else(|| ParseError::no_decode_chain(&caps))?;
             new_chain.push(Item::Prebuilt {
