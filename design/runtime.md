@@ -1044,7 +1044,14 @@ into a table.
 
 The probe also sets `video-params`, the decoded size, and `playervideosink` sets
 `video-out-params`, the size after the filters, and `container-fps`, the frame
-rate of its fixed-rate caps. All three clear on `stop`. A render
+rate of its fixed-rate caps. A second `CapsProbe`, on the edge into the first
+`Codec/Decoder/Video` element upstream of the video sink, sets `demux-size` from
+the compressed caps, mpv's `demux-w` / `demux-h`. All four clear on `stop`.
+`set_lowres` (feature `ffmpeg`), mpv's `vd-lavc-o=lowres`, sets `lowres` on every
+node that declares it when the next file loads. `ffmpegdec` caps it at the codec's
+`max_lowres`, so JPEG 2000, MPEG-1/2, MPEG-4 Part 2 and H.263 decode smaller while
+the other codecs keep their size. A timeline's clips decode inside `edlsrc`, which
+the setting does not reach. A render
 context sets `osd-dimensions` from the rectangle the renderer letterboxed the
 picture into: the target's size and the bars on each side of the picture.
 

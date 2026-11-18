@@ -412,6 +412,42 @@ impl ThreadType {
     }
 }
 
+// gst-libav's `lowres`, libavcodec halves each dimension per level
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Lowres {
+    #[default]
+    Full,
+    Half,
+    Quarter,
+}
+
+impl Lowres {
+    fn level(self) -> i32 {
+        match self {
+            Self::Full => 0,
+            Self::Half => 1,
+            Self::Quarter => 2,
+        }
+    }
+
+    pub fn nick(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Half => "1/2-size",
+            Self::Quarter => "1/4-size",
+        }
+    }
+
+    fn from_nick(nick: &str) -> Option<Self> {
+        match nick {
+            "full" => Some(Self::Full),
+            "1/2-size" => Some(Self::Half),
+            "1/4-size" => Some(Self::Quarter),
+            _ => None,
+        }
+    }
+}
+
 /// libavcodec decoder backend. The element shape (input H.264 Annex-B,
 /// output NV12 / I420 in system memory) is identical across variants —
 /// only the codec used internally and the path through libavcodec change.
@@ -516,6 +552,7 @@ pub struct FfmpegVideoDec {
     max_threads: u32,
     /// Which threading method the software decoder may use. See [`ThreadType`].
     thread_type: ThreadType,
+    lowres: Lowres,
     /// Whether the path this decoder sits on has a live source, from the
     /// runner's latency fold. Only [`ThreadType::Auto`] reads it. True
     /// until the runner says otherwise, so an element driven without one keeps
@@ -647,6 +684,7 @@ impl FfmpegVideoDec {
             low_delay: false,
             max_threads: AUTO_MAX_THREADS,
             thread_type: ThreadType::Auto,
+            lowres: Lowres::Full,
             live: true,
             thread_delay_frames: 0,
             input_caps: None,
@@ -1292,12 +1330,17 @@ impl FfmpegVideoDec {
         // slice threading (no pictures held back) on a live one (see
         // `ThreadType`).
         // SAFETY: `decoder_ctx` is freshly allocated and not yet opened;
-        // `thread_count` and `thread_type` are plain int fields libavcodec reads
-        // at open.
+        // `thread_count`, `thread_type` and `lowres` are plain int fields
+        // libavcodec reads at open. `codec` is a registered, static `AVCodec`.
         unsafe {
             let raw = decoder_ctx.as_mut_ptr();
             (*raw).thread_count = self.max_threads as i32;
             (*raw).thread_type = self.thread_type.ff_bits(self.live);
+            // avcodec_open2 logs a warning for a lowres above the decoder's max_lowres, zero for most decoders
+            (*raw).lowres = self
+                .lowres
+                .level()
+                .min(i32::from((*codec.as_ptr()).max_lowres));
         }
         if let DecoderCodec::Typed(VideoCodec::ProRes { variant }) = target {
             // SAFETY: freshly allocated, not-yet-opened context; the ProRes
@@ -1743,6 +1786,11 @@ impl AsyncElement for FfmpegVideoDec {
                 self.thread_type = ThreadType::from_nick(nick).ok_or(PropError::Value)?;
                 Ok(())
             }
+            "lowres" => {
+                let nick = value.as_str().ok_or(PropError::Type)?;
+                self.lowres = Lowres::from_nick(nick).ok_or(PropError::Value)?;
+                Ok(())
+            }
             "qos" => {
                 self.qos = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
@@ -1797,6 +1845,7 @@ impl AsyncElement for FfmpegVideoDec {
             "low-delay" => Some(PropValue::Bool(self.low_delay)),
             "max-threads" => Some(PropValue::Uint(self.max_threads as u64)),
             "thread-type" => Some(PropValue::Str(self.thread_type.nick().into())),
+            "lowres" => Some(PropValue::Str(self.lowres.nick().into())),
             "qos" => Some(PropValue::Bool(self.qos)),
             "max-skip-frames" => Some(PropValue::Uint(self.max_skip_frames)),
             _ => None,
@@ -2233,6 +2282,13 @@ static FFMPEGDEC_PROPS: &[PropertySpec] = &[
     )
     .with_enum_values("auto | frame | slice")
     .with_default("auto"),
+    PropertySpec::new(
+        "lowres",
+        PropKind::Str,
+        "decode at a fraction of the picture size, only where the decoder implements it",
+    )
+    .with_enum_values("full | 1/2-size | 1/4-size")
+    .with_default("full"),
     PropertySpec::new(
         "qos",
         PropKind::Bool,
@@ -4448,6 +4504,78 @@ mod tests {
             access_units.len(),
             "every unit after the orphan decodes"
         );
+    }
+
+    async fn decoded_picture_size(
+        codec: VideoCodec,
+        lowres: Lowres,
+        units: &[&[u8]],
+    ) -> (u32, u32) {
+        let mut dec = FfmpegVideoDec::new().with_output_format(OutputFormat::I420);
+        dec.set_property("lowres", PropValue::Str(lowres.nick().into()))
+            .expect("lowres takes its nick");
+        let mut caps = h264_caps(0, 0);
+        if let Caps::CompressedVideo {
+            codec: caps_codec,
+            width,
+            height,
+            ..
+        } = &mut caps
+        {
+            *caps_codec = codec;
+            *width = Dim::Any;
+            *height = Dim::Any;
+        }
+        dec.configure_pipeline(&caps).expect("configure");
+        let mut sink = crate::testutil::CollectSink::default();
+        for (sequence, unit) in units.iter().enumerate() {
+            let frame = crate::testutil::frame_with_bytes(sequence as u64, unit.to_vec());
+            dec.process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await
+                .expect("decodes");
+        }
+        dec.process(PipelinePacket::Eos, &mut sink)
+            .await
+            .expect("drains");
+        sink.packets
+            .iter()
+            .rev()
+            .find_map(|packet| match packet {
+                PipelinePacket::CapsChanged(Caps::RawVideo {
+                    width: Dim::Fixed(width),
+                    height: Dim::Fixed(height),
+                    ..
+                }) => Some((*width, *height)),
+                _ => None,
+            })
+            .expect("the decoder announces its picture size")
+    }
+
+    #[tokio::test]
+    async fn half_lowres_halves_jpeg_2000_and_leaves_h264_whole() {
+        const JPEG_2000: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/mxf_jpeg2000.mxf.v.data"
+        ));
+        const H264: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/h264_320x180.h264"
+        ));
+
+        let full = decoded_picture_size(VideoCodec::Jpeg2000, Lowres::Full, &[JPEG_2000]).await;
+        let half = decoded_picture_size(VideoCodec::Jpeg2000, Lowres::Half, &[JPEG_2000]).await;
+        assert_eq!(half, (full.0.div_ceil(2), full.1.div_ceil(2)));
+
+        let mut starts = crate::access_unit::access_unit_starts(
+            H264,
+            true,
+            <crate::h264parse::H264Codec as crate::nalparse::NalCodec>::unit_role,
+        );
+        starts.push(H264.len());
+        let access_units: Vec<&[u8]> = starts.windows(2).map(|w| &H264[w[0]..w[1]]).collect();
+        let full = decoded_picture_size(VideoCodec::H264, Lowres::Full, &access_units).await;
+        let half = decoded_picture_size(VideoCodec::H264, Lowres::Half, &access_units).await;
+        assert_eq!(half, full);
     }
 
     /// Regression: when a strict-NV12 downstream sink (e.g. `WaylandSink`)

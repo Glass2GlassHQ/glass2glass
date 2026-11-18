@@ -934,6 +934,47 @@ fn a_jpeg_2000_picture_with_no_matching_raw_format_plays() {
     );
 }
 
+#[cfg(feature = "ffmpeg")]
+#[test]
+fn half_lowres_halves_the_decoded_jpeg_2000_picture_and_keeps_the_demux_size() {
+    const MXF_CLIP: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../g2g-plugins/tests/fixtures/mxf_jpeg2000.mxf"
+    );
+    let player = Player::new();
+    player.set_lowres(g2g_player::Lowres::Half);
+    player
+        .load(
+            Media::Uri(&format!("file://{MXF_CLIP}")),
+            LoadOptions {
+                start: None,
+                pause: Some(true),
+            },
+        )
+        .unwrap();
+    wait_until(|| {
+        matches!(
+            player.property(Property::VideoParams),
+            PropertyChange::VideoParams(Some(_))
+        )
+    });
+    assert_eq!(
+        player.property(Property::DemuxSize),
+        PropertyChange::DemuxSize(Some(VideoSize {
+            width: CLIP_WIDTH,
+            height: CLIP_HEIGHT,
+        }))
+    );
+    assert_eq!(
+        player.property(Property::VideoParams),
+        PropertyChange::VideoParams(Some(VideoSize {
+            width: CLIP_WIDTH / 2,
+            height: CLIP_HEIGHT / 2,
+        }))
+    );
+    player.stop();
+}
+
 #[test]
 fn an_mxf_file_reports_its_size_rate_and_duration() {
     const MXF_CLIP: &str = concat!(

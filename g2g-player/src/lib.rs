@@ -36,6 +36,8 @@ mod subtitles;
 mod videosink;
 
 pub use g2g_core::{ChannelLayout, ChannelPosition};
+#[cfg(feature = "ffmpeg")]
+pub use g2g_plugins::ffmpegdec::Lowres;
 pub use g2g_plugins::glnv12::GlTarget;
 pub use level_meter::AudioLevels;
 pub use picture_filters::VideoFilterError;
@@ -138,6 +140,8 @@ pub enum Property {
     AudioParams,
     // frames per second of the video stream
     ContainerFps,
+    // the picture size the container declares, before a decoder shrinks it, mpv's demux-w/h
+    DemuxSize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -151,6 +155,7 @@ pub enum PropertyChange {
     OsdDimensions(Option<OsdDimensions>),
     AudioParams(Option<AudioParams>),
     ContainerFps(Option<f64>),
+    DemuxSize(Option<VideoSize>),
 }
 
 impl PropertyChange {
@@ -160,6 +165,7 @@ impl PropertyChange {
             PropertyChange::TimePos(_) => Property::TimePos,
             PropertyChange::Duration(_) => Property::Duration,
             PropertyChange::EofReached(_) => Property::EofReached,
+            PropertyChange::DemuxSize(_) => Property::DemuxSize,
             PropertyChange::VideoParams(_) => Property::VideoParams,
             PropertyChange::VideoOutParams(_) => Property::VideoOutParams,
             PropertyChange::OsdDimensions(_) => Property::OsdDimensions,
@@ -284,6 +290,7 @@ pub(crate) struct Shared {
     paused: AtomicBool,
     eof_reached: AtomicBool,
     framerate_q16: Mutex<Option<u32>>,
+    demux_size: Mutex<Option<VideoSize>>,
     video_params: Mutex<Option<VideoSize>>,
     video_out_params: Mutex<Option<VideoSize>>,
     osd_dimensions: Mutex<Option<OsdDimensions>>,
@@ -336,6 +343,11 @@ impl Shared {
     fn reach_end(&self, state: &StateController) {
         self.set_paused(true, Some(state));
         self.set_eof_reached(true);
+    }
+
+    fn set_demux_size(&self, size: Option<VideoSize>) {
+        *self.demux_size.lock().expect("demux size lock") = size;
+        self.report(PropertyChange::DemuxSize(size));
     }
 
     pub(crate) fn set_video_params(&self, size: Option<VideoSize>) {
@@ -412,6 +424,8 @@ pub struct Player {
     picture_filters: tokio::sync::watch::Sender<Vec<PictureFilter>>,
     level_meter_window: tokio::sync::watch::Sender<Option<Duration>>,
     sound_output: Mutex<SoundOutput>,
+    #[cfg(feature = "ffmpeg")]
+    lowres: Mutex<Lowres>,
 }
 
 impl Default for Player {
@@ -453,6 +467,8 @@ impl Player {
             picture_filters: tokio::sync::watch::Sender::new(Vec::new()),
             level_meter_window: tokio::sync::watch::Sender::new(None),
             sound_output: Mutex::new(SoundOutput::default()),
+            #[cfg(feature = "ffmpeg")]
+            lowres: Mutex::new(Lowres::default()),
         }
     }
 
@@ -469,6 +485,8 @@ impl Player {
             Media::LaunchLine(line) => line.to_string(),
         };
         let mut graph = parse_launch(&self.registry, &line).map_err(LoadError::Parse)?;
+        #[cfg(feature = "ffmpeg")]
+        set_lowres_on_decoders(&mut graph, *self.lowres.lock().expect("lowres lock"));
         let video_sinks = connect_video_sinks(&mut graph, &self.shared);
         if video_sinks.is_empty() && matches!(media, Media::LaunchLine(_)) {
             return Err(LoadError::NoVideoSink);
@@ -476,6 +494,7 @@ impl Player {
         let (decoded_size, decoded) = tokio::sync::watch::channel(None);
         if let Some(&first_sink) = video_sinks.first() {
             insert_video_params_probe(&mut graph, first_sink, &self.shared, decoded_size);
+            insert_demux_size_probe(&mut graph, first_sink, &self.shared);
         }
         let mut level_meter_window = self.level_meter_window.subscribe();
         let has_level_meter = insert_level_meter(
@@ -550,6 +569,7 @@ impl Player {
             .join()
             .expect("the playback thread catches its own errors");
         self.shared.seek_landed();
+        self.shared.set_demux_size(None);
         self.shared.set_video_params(None);
         self.shared.set_video_out_params(None);
         self.shared.set_framerate_q16(None);
@@ -675,6 +695,9 @@ impl Player {
             Property::EofReached => {
                 PropertyChange::EofReached(self.shared.eof_reached.load(Ordering::SeqCst))
             }
+            Property::DemuxSize => {
+                PropertyChange::DemuxSize(*self.shared.demux_size.lock().expect("demux size lock"))
+            }
             Property::VideoParams => PropertyChange::VideoParams(
                 *self.shared.video_params.lock().expect("video params lock"),
             ),
@@ -768,6 +791,12 @@ impl Player {
         *self.sound_output.lock().expect("sound output lock") = output;
     }
 
+    // mpv's vd-lavc-o=lowres, takes effect at the next load
+    #[cfg(feature = "ffmpeg")]
+    pub fn set_lowres(&self, lowres: Lowres) {
+        *self.lowres.lock().expect("lowres lock") = lowres;
+    }
+
     pub fn set_level_meter(&self, window: Option<Duration>) {
         self.level_meter_window.send_replace(window);
     }
@@ -849,6 +878,68 @@ fn insert_video_params_probe(
     );
     let probe = graph.insert_on_edge(into_sink, GraphNodeRef::element(probe));
     graph.set_node_name(probe, VIDEO_PARAMS_PROBE.to_string());
+}
+
+#[cfg(feature = "ffmpeg")]
+fn set_lowres_on_decoders(graph: &mut Graph<GraphNode>, lowres: Lowres) {
+    const LOWRES_PROPERTY: &str = "lowres";
+    for index in 0..graph.node_count() {
+        let Some(GraphNodeRef::Element(element)) = graph.element_mut(NodeId(index as u32)) else {
+            continue;
+        };
+        if element
+            .properties()
+            .iter()
+            .any(|spec| spec.name == LOWRES_PROPERTY)
+        {
+            element
+                .set_property(
+                    LOWRES_PROPERTY,
+                    g2g_core::PropValue::Str(lowres.nick().into()),
+                )
+                .expect("ffmpegdec takes every Lowres nick");
+        }
+    }
+}
+
+fn is_video_decoder(graph: &Graph<GraphNode>, node: NodeId) -> bool {
+    const VIDEO_DECODER_CLASSIFICATION: &str = "Codec/Decoder/Video";
+    matches!(
+        graph.element(node),
+        Some(GraphNodeRef::Element(element))
+            if element.metadata().classification.starts_with(VIDEO_DECODER_CLASSIFICATION)
+    )
+}
+
+fn insert_demux_size_probe(graph: &mut Graph<GraphNode>, sink: NodeId, shared: &Arc<Shared>) {
+    let edge_into = |graph: &Graph<GraphNode>, node: NodeId| {
+        graph.edges().iter().position(|edge| edge.dst.node == node)
+    };
+    let mut node = sink;
+    let into_decoder = loop {
+        let Some(edge) = edge_into(graph, node) else {
+            return;
+        };
+        node = graph.edges()[edge].src.node;
+        if is_video_decoder(graph, node) {
+            break edge_into(graph, node).expect("decoders have an input");
+        }
+    };
+    let shared = shared.clone();
+    let probe = CapsProbe::new(
+        g2g_core::ElementMetadata::new(
+            "Player demux size probe",
+            "Filter/Video",
+            "Reports the picture size the container declares to the g2g-player run",
+            "Aaron Boxer <boxerab@protonmail.com>",
+        ),
+        move |caps| {
+            if let Some(size) = video_size_of(caps) {
+                shared.set_demux_size(Some(size));
+            }
+        },
+    );
+    graph.insert_on_edge(into_decoder, GraphNodeRef::element(probe));
 }
 
 struct PlaybackRun {

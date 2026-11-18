@@ -340,6 +340,11 @@ pub(crate) fn video_size_of(caps: &Caps) -> Option<VideoSize> {
             width: Dim::Fixed(width),
             height: Dim::Fixed(height),
             ..
+        }
+        | Caps::CompressedVideo {
+            width: Dim::Fixed(width),
+            height: Dim::Fixed(height),
+            ..
         } => Some(VideoSize {
             width: *width,
             height: *height,
