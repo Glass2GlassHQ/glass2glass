@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2402: `playbin` sound branches hold 2 s, so B-frame video with sound shows its first picture.
 - M2401: `playbin` fans out every container a `decodebin_select` hook opens, AVI included.
 - M2400: `playbin` decodes FLV files, each stream on its own branch.
 - M2399: `g2g-player` reports `video-params` and `audio-params` from the stream's caps, never the negotiation placeholder.

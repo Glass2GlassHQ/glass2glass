@@ -1398,6 +1398,10 @@ fn subpicture_decoder(caps: &Caps) -> Option<GraphNode> {
 /// always present 2ch / 48000 to the sink. The `audioconvert` / `audioresample`
 /// are `register_launch` elements outside the auto-plug pool, so they are wired
 /// explicitly (like the overlay's converters), while the decoder is auto-plugged.
+// gstreamer's multiqueue holds 2 s per stream, and opus frames are 20 ms by default
+#[cfg(feature = "std")]
+const PLAYBIN_AUDIO_LINK_CAPACITY: usize = 2000 / 20;
+
 #[cfg(feature = "std")]
 fn wire_audio_branch(
     reg: &Registry,
@@ -1417,7 +1421,15 @@ fn wire_audio_branch(
         crate::audioconvert::AudioConvert::new(g2g_core::AudioFormat::PcmS16Le, 2),
     ));
     graph.link(convert, resample).map_err(ParseError::Graph)?;
-    graph.link(resample, snk).map_err(ParseError::Graph)?;
+    // video decoders with frame threads hold up to 32 pictures before the first one comes out
+    graph
+        .link_full(
+            resample,
+            snk,
+            g2g_core::LinkPolicy::Block,
+            Some(PLAYBIN_AUDIO_LINK_CAPACITY),
+        )
+        .map_err(ParseError::Graph)?;
     reg.decodebin(graph, src, convert, caps, &is_raw_audio, PLAYBIN_MAX_DEPTH)
         .map_err(|e| map_decode_err(caps, e))?;
     Ok(())

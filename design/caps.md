@@ -1018,7 +1018,11 @@ as before.
   same fan-out from the first `decodebin_select` hook that opens it (FLV, AVI,
   MXF and the rest). On the single-stream path, a `playbin` that names a sink
   decodes to raw video or raw audio by the sink's kind, because demuxers such as
-  `flvdemux` list raw PCM among their streams. `mp4_playbin` is the
+  `flvdemux` list raw PCM among their streams. Every fan-out's sound branch ends
+  in a link of `PLAYBIN_AUDIO_LINK_CAPACITY` frames (2 s of 20 ms frames, as
+  gst's multiqueue), because a frame-threaded video decoder takes up to 32
+  pictures before it releases the first, and the sound branch must absorb the
+  interleaved audio until the video sink prerolls. `mp4_playbin` is the
   fragmented-MP4 sibling (`Mp4DemuxN` multi-output demuxer), the multi-track
   read-side analog of the single-video-track `Mp4Src`: it parses every `moov/trak`
   (`fmp4::parse_all_tracks`) and routes each sample to the port matching its

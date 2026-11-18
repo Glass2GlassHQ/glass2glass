@@ -876,6 +876,33 @@ fn an_flv_file_plays() {
 
 #[cfg(feature = "ffmpeg")]
 #[test]
+fn an_avi_file_with_b_frames_and_sound_shows_its_first_picture() {
+    const AVI_CLIP: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../g2g-plugins/tests/fixtures/avi_h264_mp3.avi"
+    );
+    // ffprobe: avi_h264_mp3.avi.probe
+    const AVI_CLIP_SIZE: VideoSize = VideoSize {
+        width: 160,
+        height: 120,
+    };
+    let player = Player::new();
+    player
+        .load(
+            Media::Uri(&format!("file://{AVI_CLIP}")),
+            LoadOptions {
+                start: None,
+                pause: Some(true),
+            },
+        )
+        .unwrap();
+    wait_until(|| {
+        player.property(Property::VideoParams) == PropertyChange::VideoParams(Some(AVI_CLIP_SIZE))
+    });
+}
+
+#[cfg(feature = "ffmpeg")]
+#[test]
 fn a_jpeg_2000_picture_with_no_matching_raw_format_plays() {
     // 48-bit rgb, which g2g has no raw format for, see tools/mxf-fixtures.sh
     const MXF_CLIP: &str = concat!(
