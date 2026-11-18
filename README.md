@@ -642,6 +642,7 @@ cargo clippy --workspace --all-targets
 | `HipConvertScale` (`hipconvertscale`: format conversion, scaling and `video-direction` rotation on HIP, including planar and float RGB for model input; `hipconvert` and `hipscale` do one of the two) | `hip` | Linux + ROCm (libamdhip64, libhiprtc) or NVIDIA (libcuda, libnvrtc) |
 | `HipCompositor` (`hipcompositor`: picture-in-picture and grids of Hip inputs in any `hipconvertscale` format, on the GPU) | `hip` | Linux + ROCm (libamdhip64, libhiprtc) or NVIDIA (libcuda, libnvrtc) |
 | `WgpuDownload` (`wgpudownload`: wgpu texture or buffer to System), `WgpuUpload` (`wgpuupload`: System to wgpu buffer) | `wgpu-sink` | wgpu adapter |
+| `WgpuBayer2Rgb` (`wgpubayer2rgb`: system-memory Bayer to an RGBA wgpu texture, the same output as `bayer2rgb`) | `wgpu-sink` | wgpu adapter |
 | `CudaGlSink` (CUDA-GL present), `CudaKmsSink` (CUDA-GL on KMS) | `cuda-gl`, `cuda-kms` | Linux + NVIDIA + EGL + GL (+ libdrm for KMS) |
 | `CudaToWgpu` / `WgpuToCuda` (zero-copy bridge) | `cuda-wgpu` | Linux + NVIDIA + Vulkan |
 | `UdpSink` + H.264 / Opus RTP packetizer, or raw datagrams (`multiudpsink` `clients=`) | `udp-egress` | none |

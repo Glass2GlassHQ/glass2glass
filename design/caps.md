@@ -145,9 +145,17 @@ second to last column copies its left neighbour and the row below the last row
 is four rows up (two rows up in frames under four rows), both as GStreamer does.
 For 8-bit outputs, samples above 8 bits shift down to 8. RGBA64_LE multiplies
 8-bit samples by 257 and scales wider ones by 65535 over two to the depth,
-alpha included. Any frame of at least 2x2 works. `rgb2bayer` takes ARGB and keeps the one colour each sensor
-site sees, widening 8-bit values by repeating their top bits. Both match
-GStreamer's elements byte for byte on the fixtures from `tools/bayer-fixtures.sh`.
+alpha included. Any frame of at least 2x2 works.
+
+`rgb2bayer` takes ARGB and keeps the one colour each sensor site sees, widening
+8-bit values by repeating their top bits. Both elements match GStreamer's
+elements byte for byte on the fixtures from `tools/bayer-fixtures.sh`.
+
+`wgpubayer2rgb` runs the same demosaic in a compute shader. It takes
+system-memory Bayer, uploads the plane as a storage buffer and writes an
+`Rgba8Unorm` texture, matching the same fixtures. It opens its device at
+configure, or takes the one a producer already published, and publishes it so a
+display sink presents the texture without a copy.
 
 ## The solver
 

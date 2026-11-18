@@ -4041,6 +4041,11 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(LaunchFactory::new("wgpucolorconvert", Vec::new(), || {
         Box::new(crate::wgpucolorconvert::WgpuColorConvert::new())
     }));
+    #[cfg(feature = "wgpu-sink")]
+    reg.register_launch(LaunchFactory::of::<crate::wgpubayer2rgb::WgpuBayer2Rgb>(
+        "wgpubayer2rgb",
+        || Box::new(crate::wgpubayer2rgb::WgpuBayer2Rgb::new()),
+    ));
     #[cfg(feature = "vello-overlay")]
     reg.register_launch(LaunchFactory::new("vellooverlay", Vec::new(), || {
         Box::new(crate::vellooverlay::VelloAnalyticsOverlay::new())

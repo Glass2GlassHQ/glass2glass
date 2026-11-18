@@ -28,7 +28,7 @@ const DEMOSAIC_FORMATS: [RawVideoFormat; 5] = [
 
 const MOSAIC_INPUT_FORMAT: RawVideoFormat = RawVideoFormat::Argb8;
 
-fn bayer_formats() -> Vec<RawVideoFormat> {
+pub(crate) fn bayer_formats() -> Vec<RawVideoFormat> {
     g2g_core::caps::ALL_BAYER_FORMATS
         .map(RawVideoFormat::Bayer)
         .to_vec()
@@ -50,14 +50,17 @@ fn any_geometry_set(formats: &[RawVideoFormat]) -> CapsSet {
     CapsSet::from_alternatives(formats.iter().copied().map(any_geometry).collect())
 }
 
-fn first_supported(upstream_caps: &Caps, formats: &[RawVideoFormat]) -> Result<Caps, G2gError> {
+pub(crate) fn first_supported(
+    upstream_caps: &Caps,
+    formats: &[RawVideoFormat],
+) -> Result<Caps, G2gError> {
     formats
         .iter()
         .find_map(|&format| upstream_caps.intersect(&any_geometry(format)).ok())
         .ok_or(G2gError::CapsMismatch)
 }
 
-fn format_changing_constraint(
+pub(crate) fn format_changing_constraint(
     accept: Vec<RawVideoFormat>,
     produce: Vec<RawVideoFormat>,
 ) -> CapsConstraint<'static> {
@@ -73,10 +76,10 @@ fn format_changing_constraint(
 }
 
 #[derive(Clone, Debug)]
-struct Stream {
-    format: RawVideoFormat,
-    width: u32,
-    height: u32,
+pub(crate) struct Stream {
+    pub(crate) format: RawVideoFormat,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
     framerate: Rate,
     pixel_aspect: g2g_core::PixelAspect,
 }
@@ -116,51 +119,50 @@ impl Stream {
     }
 }
 
-trait BayerConversion {
+pub(crate) trait BayerConversion {
     const NAME: &'static str;
+    fn state(&mut self) -> &mut ConversionState;
     fn is_input(format: RawVideoFormat) -> bool;
     fn input_stream(caps: &Caps) -> Result<Stream, G2gError>;
-    fn convert(bytes: &[u8], input: &Stream, output: RawVideoFormat) -> Result<Vec<u8>, G2gError>;
+    async fn convert(
+        &mut self,
+        bytes: &[u8],
+        input: &Stream,
+        output: RawVideoFormat,
+    ) -> Result<MemoryDomain, G2gError>;
 }
 
 #[derive(Debug, Default)]
-struct ConversionState {
-    input: Option<Stream>,
-    output_format: Option<RawVideoFormat>,
+pub(crate) struct ConversionState {
+    pub(crate) input: Option<Stream>,
+    pub(crate) output_format: Option<RawVideoFormat>,
     last_caps: Option<Caps>,
     emitted: u64,
 }
 
-async fn drive<C: BayerConversion + 'static>(
-    state: &mut ConversionState,
+pub(crate) async fn drive<C: BayerConversion>(
+    element: &mut C,
     packet: PipelinePacket,
     out: &mut dyn OutputSink,
 ) -> Result<(), G2gError> {
     match packet {
         PipelinePacket::DataFrame(frame) => {
-            let input = state.input.as_ref().ok_or(G2gError::NotConfigured)?;
+            let state = element.state();
+            let input = state.input.clone().ok_or(G2gError::NotConfigured)?;
             let output_format = state.output_format.ok_or(G2gError::NotConfigured)?;
             let bytes = frame.domain.require_system_bytes(C::NAME)?;
             if bytes.len() < frame_byte_size(input.format, input.width, input.height) {
                 return Err(G2gError::CapsMismatch);
             }
-            #[cfg(feature = "offload")]
-            let converted = {
-                let (owned, owned_input) = (bytes.to_vec(), input.clone());
-                g2g_core::offload::run_blocking(move || {
-                    C::convert(&owned, &owned_input, output_format)
-                })
-                .await?
-            };
-            #[cfg(not(feature = "offload"))]
-            let converted = C::convert(&bytes, input, output_format)?;
+            let domain = element.convert(&bytes, &input, output_format).await?;
+            let state = element.state();
             let caps = input.with_format(output_format);
             if state.last_caps.as_ref() != Some(&caps) {
                 out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
                 state.last_caps = Some(caps);
             }
             let out_frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(converted.into_boxed_slice())),
+                domain,
                 timing: frame.timing,
                 sequence: state.emitted,
                 meta: Default::default(),
@@ -171,6 +173,7 @@ async fn drive<C: BayerConversion + 'static>(
         }
         // the runner also sends an element its own solved output caps, told apart from an input by format
         PipelinePacket::CapsChanged(caps) => {
+            let state = element.state();
             let Caps::RawVideo { format, .. } = &caps else {
                 return Err(G2gError::CapsMismatch);
             };
@@ -184,7 +187,7 @@ async fn drive<C: BayerConversion + 'static>(
             Ok(())
         }
         PipelinePacket::Flush => {
-            state.last_caps = None;
+            element.state().last_caps = None;
             out.push(PipelinePacket::Flush).await?;
             Ok(())
         }
@@ -209,32 +212,54 @@ impl Bayer2Rgb {
 impl BayerConversion for Bayer2Rgb {
     const NAME: &'static str = "bayer2rgb";
 
+    fn state(&mut self) -> &mut ConversionState {
+        &mut self.state
+    }
+
     fn is_input(format: RawVideoFormat) -> bool {
         matches!(format, RawVideoFormat::Bayer(_))
     }
 
     fn input_stream(caps: &Caps) -> Result<Stream, G2gError> {
-        let stream = Stream::from_caps(caps)?;
-        // a single row or column holds only two of the three colours
-        let demosaicable = Self::is_input(stream.format) && stream.width >= 2 && stream.height >= 2;
-        match demosaicable {
-            true => Ok(stream),
-            false => Err(G2gError::CapsMismatch),
-        }
+        demosaic_input(caps)
     }
 
-    fn convert(bytes: &[u8], input: &Stream, output: RawVideoFormat) -> Result<Vec<u8>, G2gError> {
+    async fn convert(
+        &mut self,
+        bytes: &[u8],
+        input: &Stream,
+        output: RawVideoFormat,
+    ) -> Result<MemoryDomain, G2gError> {
         let RawVideoFormat::Bayer(bayer) = input.format else {
             return Err(G2gError::CapsMismatch);
         };
-        demosaic(
-            bytes,
-            bayer,
-            input.width as usize,
-            input.height as usize,
-            output,
-        )
+        let (width, height) = (input.width as usize, input.height as usize);
+        #[cfg(feature = "offload")]
+        let converted = {
+            let owned = bytes.to_vec();
+            g2g_core::offload::run_blocking(move || demosaic(&owned, bayer, width, height, output))
+                .await?
+        };
+        #[cfg(not(feature = "offload"))]
+        let converted = demosaic(bytes, bayer, width, height, output)?;
+        Ok(system_domain(converted))
     }
+}
+
+pub(crate) fn demosaic_input(caps: &Caps) -> Result<Stream, G2gError> {
+    let stream = Stream::from_caps(caps)?;
+    // a single row or column holds only two of the three colours
+    let demosaicable = matches!(stream.format, RawVideoFormat::Bayer(_))
+        && stream.width >= 2
+        && stream.height >= 2;
+    match demosaicable {
+        true => Ok(stream),
+        false => Err(G2gError::CapsMismatch),
+    }
+}
+
+fn system_domain(bytes: Vec<u8>) -> MemoryDomain {
+    MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice()))
 }
 
 impl AsyncElement for Bayer2Rgb {
@@ -285,17 +310,21 @@ impl AsyncElement for Bayer2Rgb {
         packet: PipelinePacket,
         out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
-        Box::pin(drive::<Self>(&mut self.state, packet, out))
+        Box::pin(drive(self, packet, out))
     }
 }
 
 impl PadTemplates for Bayer2Rgb {
     fn pad_templates() -> Vec<PadTemplate> {
-        Vec::from([
-            PadTemplate::sink(any_geometry_set(&bayer_formats())),
-            PadTemplate::source(any_geometry_set(&DEMOSAIC_FORMATS)),
-        ])
+        demosaic_pad_templates(&DEMOSAIC_FORMATS)
     }
+}
+
+pub(crate) fn demosaic_pad_templates(outputs: &[RawVideoFormat]) -> Vec<PadTemplate> {
+    Vec::from([
+        PadTemplate::sink(any_geometry_set(&bayer_formats())),
+        PadTemplate::source(any_geometry_set(outputs)),
+    ])
 }
 
 fn read_samples(src: &[u8], bayer: BayerFormat, count: usize) -> Vec<u32> {
@@ -368,6 +397,14 @@ fn to_16_bits(value: u32, depth: u8) -> u16 {
     }
 }
 
+pub(crate) fn first_row_holds_blue_or_red(pattern: BayerPattern) -> bool {
+    matches!(pattern, BayerPattern::Bggr | BayerPattern::Rggb)
+}
+
+pub(crate) fn red_where_blue_is(pattern: BayerPattern) -> bool {
+    matches!(pattern, BayerPattern::Rggb | BayerPattern::Gbrg)
+}
+
 fn demosaic(
     src: &[u8],
     bayer: BayerFormat,
@@ -415,9 +452,8 @@ fn demosaic(
         .plane_stride(0, width as u32)
         .ok_or(G2gError::CapsMismatch)? as usize;
     let split = |y: usize| split_row(&read_samples(&src[y * row_stride..], bayer, width));
-    let first_row_holds_blue_or_red =
-        matches!(bayer.pattern, BayerPattern::Bggr | BayerPattern::Rggb);
-    let red_where_blue_is = matches!(bayer.pattern, BayerPattern::Rggb | BayerPattern::Gbrg);
+    let first_row_holds_blue_or_red = first_row_holds_blue_or_red(bayer.pattern);
+    let red_where_blue_is = red_where_blue_is(bayer.pattern);
     let mut split_rows: [Option<(usize, RowColours)>; 4] = Default::default();
     let mut out = Vec::with_capacity(width * height * 8);
     for y in 0..height {
@@ -501,6 +537,10 @@ impl Rgb2Bayer {
 impl BayerConversion for Rgb2Bayer {
     const NAME: &'static str = "rgb2bayer";
 
+    fn state(&mut self) -> &mut ConversionState {
+        &mut self.state
+    }
+
     fn is_input(format: RawVideoFormat) -> bool {
         format == MOSAIC_INPUT_FORMAT
     }
@@ -513,11 +553,24 @@ impl BayerConversion for Rgb2Bayer {
         }
     }
 
-    fn convert(bytes: &[u8], input: &Stream, output: RawVideoFormat) -> Result<Vec<u8>, G2gError> {
+    async fn convert(
+        &mut self,
+        bytes: &[u8],
+        input: &Stream,
+        output: RawVideoFormat,
+    ) -> Result<MemoryDomain, G2gError> {
         let RawVideoFormat::Bayer(bayer) = output else {
             return Err(G2gError::CapsMismatch);
         };
-        mosaic(bytes, bayer, input.width as usize, input.height as usize)
+        let (width, height) = (input.width as usize, input.height as usize);
+        #[cfg(feature = "offload")]
+        let converted = {
+            let owned = bytes.to_vec();
+            g2g_core::offload::run_blocking(move || mosaic(&owned, bayer, width, height)).await?
+        };
+        #[cfg(not(feature = "offload"))]
+        let converted = mosaic(bytes, bayer, width, height)?;
+        Ok(system_domain(converted))
     }
 }
 
@@ -570,7 +623,7 @@ impl AsyncElement for Rgb2Bayer {
         packet: PipelinePacket,
         out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
-        Box::pin(drive::<Self>(&mut self.state, packet, out))
+        Box::pin(drive(self, packet, out))
     }
 }
 

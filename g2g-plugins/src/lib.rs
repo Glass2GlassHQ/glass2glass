@@ -481,6 +481,8 @@ pub mod wgpudownload;
 pub mod gstplanes;
 // Copies a system frame into a wgpu buffer (`wgpuupload`).
 #[cfg(feature = "wgpu-sink")]
+pub mod wgpubayer2rgb;
+#[cfg(feature = "wgpu-sink")]
 pub mod wgpuupload;
 // The owner of a `WgpuBuffer` frame's buffer, shared by upload, download and dma-buf export.
 #[cfg(any(
