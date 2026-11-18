@@ -936,6 +936,7 @@ fn put_caps(w: &mut Writer, c: &Caps) {
             w.u8(match compression {
                 LosslessCompression::Zlib => 0,
                 LosslessCompression::Deflate => 1,
+                LosslessCompression::Brotli => 2,
             });
             match original {
                 Some(original) => {
@@ -1031,6 +1032,7 @@ fn get_caps(r: &mut Reader) -> Result<Caps, WireError> {
             let compression = match r.u8()? {
                 0 => LosslessCompression::Zlib,
                 1 => LosslessCompression::Deflate,
+                2 => LosslessCompression::Brotli,
                 _ => return Err(WireError::BadTag),
             };
             let original = match r.u8()? {
@@ -1967,6 +1969,10 @@ mod tests {
             Caps::LosslesslyCompressed {
                 compression: LosslessCompression::Zlib,
                 original: None,
+            },
+            Caps::LosslesslyCompressed {
+                compression: LosslessCompression::Brotli,
+                original: Some(Box::new(Caps::Id3)),
             },
         ];
         for caps in cases {

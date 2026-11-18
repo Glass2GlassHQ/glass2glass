@@ -161,19 +161,25 @@ display sink presents the texture without a copy.
 
 `Caps::LosslesslyCompressed { compression, original }` is a stream that a
 general-purpose lossless compressor wrapped buffer by buffer.
-`LosslessCompression` is zlib (`application/x-zlib-compressed`) or raw deflate
-(`application/x-deflate-compressed`). `original` holds the caps the stream had
+`LosslessCompression` is zlib (`application/x-zlib-compressed`), raw deflate
+(`application/x-deflate-compressed`) or brotli
+(`application/x-brotli-compressed`). `original` holds the caps the stream had
 before compression, printed as GStreamer's `original-caps=(caps)[...]`, and is
 `None` in a template or a filter that leaves it open. Wire messages reject
 compressed caps nested directly in compressed caps or in a batch, so a crafted
 message cannot recurse.
 
-`zlibcompress` / `deflatecompress` (`zlib-rs`, `level` 0 to 9, default 6) write
-each input buffer as one complete stream. `zlibdecompress` / `deflatedecompress`
-keep one inflate state across input buffers, so a stream may span buffers and
-one buffer may end a stream and start the next. A raw video original fixes the
-decompressed size exactly, and any other original caps it at 256 MiB, so a
-crafted stream fails instead of exhausting memory. A partial stream at
+`zlibcompress` / `deflatecompress` (`zlib-rs`, `level` 0 to 9, default 6) and
+`brotlicompress` (the `brotli` crate, `level` 0 to 11, default 6) write each
+input buffer as one complete stream. The decompressors keep one decoder state
+across input buffers, so a stream may span buffers and one buffer may end a
+stream and start the next. A raw video original fixes the decompressed size
+exactly, and any other original caps it at 256 MiB, so a crafted stream fails
+instead of exhausting memory. The output buffer has one byte of room past that
+bound, which shows an over-long stream, and the decoder runs again while its
+output is full, because brotli takes all of its input before it writes all of
+its output. `brotlidecompress` refuses large-window streams, whose window
+reaches 1 GiB. A partial stream at
 end-of-stream is an error. The decompressor's autoplug descriptor derives its
 output from the input's `original`, so `decodebin` plugs it, and
 `is_raw_video` excludes Bayer, so `decodebin` plugs `bayer2rgb` after it.

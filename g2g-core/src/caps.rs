@@ -185,16 +185,21 @@ pub enum Caps {
 pub enum LosslessCompression {
     Zlib,
     Deflate,
+    Brotli,
 }
 
 impl LosslessCompression {
-    pub const ALL: [LosslessCompression; 2] =
-        [LosslessCompression::Zlib, LosslessCompression::Deflate];
+    pub const ALL: [LosslessCompression; 3] = [
+        LosslessCompression::Zlib,
+        LosslessCompression::Deflate,
+        LosslessCompression::Brotli,
+    ];
 
     pub const fn gst_media_type(self) -> &'static str {
         match self {
             LosslessCompression::Zlib => "application/x-zlib-compressed",
             LosslessCompression::Deflate => "application/x-deflate-compressed",
+            LosslessCompression::Brotli => "application/x-brotli-compressed",
         }
     }
 }

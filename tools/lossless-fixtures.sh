@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: MPL-2.0
 
-# a 64x48 NV12 frame and the same frame compressed by C zlib, as a zlib stream and as raw deflate
+# a 64x48 NV12 frame and the same frame compressed by C zlib (zlib stream and raw deflate) and C brotli
 set -euo pipefail
 
 fixtures="$(cd "$(dirname "$0")/.." && pwd)/g2g-plugins/tests/fixtures"
@@ -19,3 +19,4 @@ open(f'{fixtures}/nv12_64x48.zlib', 'wb').write(zlib.compress(frame, 6))
 deflate = zlib.compressobj(6, zlib.DEFLATED, -15)
 open(f'{fixtures}/nv12_64x48.deflate', 'wb').write(deflate.compress(frame) + deflate.flush())
 " "$fixtures"
+brotli --quality=6 --force --output="$fixtures/nv12_64x48.br" "$fixtures/nv12_64x48.raw"

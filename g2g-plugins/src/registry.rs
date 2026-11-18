@@ -962,7 +962,7 @@ pub fn default_registry() -> Registry {
         || Box::new(crate::bayer::Rgb2Bayer::new()),
     ));
     type Build = fn() -> Box<dyn DynAsyncElement>;
-    let lossless: [(&str, &str, LosslessCompression, Build, Build); 2] = [
+    let lossless: [(&str, &str, LosslessCompression, Build, Build); 3] = [
         (
             "zlibcompress",
             "zlibdecompress",
@@ -976,6 +976,13 @@ pub fn default_registry() -> Registry {
             LosslessCompression::Deflate,
             || Box::new(LosslessCompress::new(LosslessCompression::Deflate)),
             || Box::new(LosslessDecompress::new(LosslessCompression::Deflate)),
+        ),
+        (
+            "brotlicompress",
+            "brotlidecompress",
+            LosslessCompression::Brotli,
+            || Box::new(LosslessCompress::new(LosslessCompression::Brotli)),
+            || Box::new(LosslessDecompress::new(LosslessCompression::Brotli)),
         ),
     ];
     for (compress, decompress, compression, build_compress, build_decompress) in lossless {
@@ -2203,6 +2210,14 @@ fn register_autoplug_candidates(reg: &mut Registry) {
             |_| Box::new(LosslessDecompress::new(LosslessCompression::Deflate)),
         )
         .deriving_output(crate::losslesscompress::deflate_decompressed_caps),
+    );
+    reg.register(
+        ElementFactory::new(
+            "brotlidecompress",
+            crate::losslesscompress::decompress_pad_templates(LosslessCompression::Brotli),
+            |_| Box::new(LosslessDecompress::new(LosslessCompression::Brotli)),
+        )
+        .deriving_output(crate::losslesscompress::brotli_decompressed_caps),
     );
     reg.register(ElementFactory::of::<crate::bayer::Bayer2Rgb>(
         "bayer2rgb",

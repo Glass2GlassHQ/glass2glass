@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2420: `brotlicompress` / `brotlidecompress` losslessly compress any stream with brotli.
 - M2419: `zlibcompress` / `zlibdecompress` and `deflatecompress` / `deflatedecompress` losslessly compress any stream, and `decodebin` plugs the decompressor.
 - M2418: `wgpubayer2rgb` demosaics Bayer into an RGBA wgpu texture on the GPU.
 - M2417: `bayer2rgb` and `rgb2bayer` convert between Bayer and packed RGB on the CPU, including RGBA64_LE.

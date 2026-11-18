@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
-// tools/zlib-fixtures.sh writes the C zlib streams
+// tools/lossless-fixtures.sh writes the C zlib and brotli streams
 #![cfg(feature = "std")]
 
 #[path = "common/collect_sink.rs"]
@@ -88,11 +88,12 @@ fn decompressor(compression: LosslessCompression) -> LosslessDecompress {
 }
 
 #[tokio::test]
-async fn c_zlib_streams_decompress_to_the_original_frame() {
+async fn c_streams_decompress_to_the_original_frame() {
     let raw = read_fixture("nv12_64x48.raw");
     for (compression, stream) in [
         (LosslessCompression::Zlib, "nv12_64x48.zlib"),
         (LosslessCompression::Deflate, "nv12_64x48.deflate"),
+        (LosslessCompression::Brotli, "nv12_64x48.br"),
     ] {
         let mut element = decompressor(compression);
         let mut out = CollectSink::default();
@@ -113,63 +114,94 @@ async fn c_zlib_streams_decompress_to_the_original_frame() {
 #[tokio::test]
 async fn streams_split_across_buffers_and_joined_in_one_decompress_whole() {
     let raw = read_fixture("nv12_64x48.raw");
-    let stream = read_fixture("nv12_64x48.zlib");
-    let two_streams = [stream.clone(), stream].concat();
-    let mut element = decompressor(LosslessCompression::Zlib);
-    let mut out = CollectSink::default();
-    for chunk in two_streams.chunks(97) {
-        element
-            .process(system(chunk), &mut out)
-            .await
-            .expect("decompresses");
+    for (compression, stream) in [
+        (LosslessCompression::Zlib, "nv12_64x48.zlib"),
+        (LosslessCompression::Brotli, "nv12_64x48.br"),
+    ] {
+        let stream = read_fixture(stream);
+        let two_streams = [stream.clone(), stream].concat();
+        for chunk_size in [1, 97] {
+            let mut element = decompressor(compression);
+            let mut out = CollectSink::default();
+            for chunk in two_streams.chunks(chunk_size) {
+                element
+                    .process(system(chunk), &mut out)
+                    .await
+                    .expect("decompresses");
+            }
+            assert_eq!(
+                frames(&out),
+                vec![raw.clone(), raw.clone()],
+                "{compression:?} in {chunk_size} byte chunks"
+            );
+        }
     }
-    assert_eq!(frames(&out), vec![raw.clone(), raw]);
 }
 
 #[tokio::test]
 async fn a_stream_larger_than_the_original_frame_fails() {
     let raw = read_fixture("nv12_64x48.raw");
-    let mut compress = LosslessCompress::new(LosslessCompression::Deflate);
-    compress
-        .configure_pipeline(&caps(NV12_CAPS))
-        .expect("raw input");
-    let mut out = CollectSink::default();
-    compress
-        .process(system(&[raw.clone(), raw].concat()), &mut out)
-        .await
-        .expect("compresses");
-    let oversized = frames(&out).remove(0);
-    let result = decompressor(LosslessCompression::Deflate)
-        .process(system(&oversized), &mut CollectSink::default())
-        .await;
-    assert!(result.is_err());
+    for compression in [LosslessCompression::Deflate, LosslessCompression::Brotli] {
+        let mut compress = LosslessCompress::new(compression);
+        compress
+            .configure_pipeline(&caps(NV12_CAPS))
+            .expect("raw input");
+        let mut out = CollectSink::default();
+        compress
+            .process(system(&[raw.clone(), raw.clone()].concat()), &mut out)
+            .await
+            .expect("compresses");
+        let oversized = frames(&out).remove(0);
+        let result = decompressor(compression)
+            .process(system(&oversized), &mut CollectSink::default())
+            .await;
+        assert!(result.is_err(), "{compression:?}");
+    }
 }
 
 #[tokio::test]
 async fn a_truncated_stream_fails_at_end_of_stream() {
-    let stream = read_fixture("nv12_64x48.zlib");
-    let mut element = decompressor(LosslessCompression::Zlib);
-    let mut out = CollectSink::default();
-    element
-        .process(system(&stream[..stream.len() / 2]), &mut out)
-        .await
-        .expect("half a stream waits for more");
-    assert!(frames(&out).is_empty());
-    assert!(element
-        .process(PipelinePacket::Eos, &mut out)
-        .await
-        .is_err());
+    for (compression, stream) in [
+        (LosslessCompression::Zlib, "nv12_64x48.zlib"),
+        (LosslessCompression::Brotli, "nv12_64x48.br"),
+    ] {
+        let stream = read_fixture(stream);
+        let mut element = decompressor(compression);
+        let mut out = CollectSink::default();
+        element
+            .process(system(&stream[..stream.len() / 2]), &mut out)
+            .await
+            .expect("half a stream waits for more");
+        assert!(frames(&out).is_empty());
+        assert!(
+            element
+                .process(PipelinePacket::Eos, &mut out)
+                .await
+                .is_err(),
+            "{compression:?}"
+        );
+    }
 }
 
 #[tokio::test]
-async fn the_level_property_takes_zero_to_nine() {
-    let mut element = LosslessCompress::new(LosslessCompression::Zlib);
-    assert_eq!(element.get_property("level"), Some(PropValue::Uint(6)));
-    element
-        .set_property("level", PropValue::Uint(9))
-        .expect("level 9");
-    assert_eq!(element.get_property("level"), Some(PropValue::Uint(9)));
-    assert!(element.set_property("level", PropValue::Uint(10)).is_err());
+async fn the_level_property_takes_zero_to_nine_or_eleven_for_brotli() {
+    for (compression, max) in [
+        (LosslessCompression::Zlib, 9),
+        (LosslessCompression::Brotli, 11),
+    ] {
+        let mut element = LosslessCompress::new(compression);
+        assert_eq!(element.get_property("level"), Some(PropValue::Uint(6)));
+        element
+            .set_property("level", PropValue::Uint(max))
+            .expect("the highest level");
+        assert_eq!(element.get_property("level"), Some(PropValue::Uint(max)));
+        assert!(
+            element
+                .set_property("level", PropValue::Uint(max + 1))
+                .is_err(),
+            "{compression:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -178,6 +210,8 @@ async fn video_survives_a_compress_and_decompress_round_trip() {
     for (compress, decompress) in [
         ("zlibcompress level=1", "zlibdecompress"),
         ("deflatecompress level=9", "deflatedecompress"),
+        ("brotlicompress level=1", "brotlidecompress"),
+        ("brotlicompress level=11", "brotlidecompress"),
     ] {
         let source =
             "videotestsrc num-buffers=5 pattern=ball ! video/x-raw,format=NV12,width=64,height=48";
@@ -231,6 +265,10 @@ fn decodebin_plugs_the_decompressor_and_then_demosaics_bayer() {
             "video/x-bayer,format=rggb,width=12,height=8"
         )),
         Some(vec!["deflatedecompress", "bayer2rgb"])
+    );
+    assert_eq!(
+        decode(&compressed(LosslessCompression::Brotli, NV12_CAPS)),
+        Some(vec!["brotlidecompress"])
     );
 }
 

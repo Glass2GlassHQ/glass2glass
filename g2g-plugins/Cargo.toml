@@ -899,6 +899,9 @@ miniz_oxide = { version = "0.8", default-features = false, features = ["with-all
 # and no_std with only its Rust-allocator feature. 3x faster than miniz_oxide at
 # level 6 on 4K NV12 frames.
 zlib-rs = { version = "0.6", default-features = false, features = ["rust-allocator"] }
+# brotli for `brotlicompress` / `brotlidecompress`, the crate gst uses. Pure Rust
+# and no_std with default-features off, given a heap allocator.
+brotli = { version = "9.1.3", default-features = false }
 # bzip2 for `matroska-compression`: the pure-Rust libbzip2 port, no_std with only
 # its Rust-allocator feature
 libbz2-rs-sys = { version = "0.2.5", optional = true, default-features = false, features = ["rust-allocator"] }

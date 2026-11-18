@@ -9,6 +9,11 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use brotli::enc::encode::{BrotliEncoderOperation, BrotliEncoderStateStruct};
+use brotli::enc::{BrotliAlloc, BrotliEncoderMaxCompressedSize};
+use brotli::{
+    Allocator, BrotliDecompressStream, BrotliResult, BrotliState, SliceWrapper, SliceWrapperMut,
+};
 use g2g_core::frame::Frame;
 use g2g_core::memory::{DomainSet, MemoryDomain, MemoryDomainKind, SystemSlice};
 use g2g_core::{
@@ -21,16 +26,51 @@ use zlib_rs::{Deflate, DeflateFlush, Inflate, InflateFlush, Status};
 use crate::pixel::frame_byte_size;
 
 const DEFAULT_LEVEL: u32 = 6;
-const MAX_LEVEL: u32 = 9;
 // zlib's largest window, the one every zlib and raw deflate decoder accepts
 const WINDOW_BITS: u8 = 15;
 
-fn zlib_header(compression: LosslessCompression) -> bool {
+fn max_level(compression: LosslessCompression) -> u32 {
     match compression {
-        LosslessCompression::Zlib => true,
-        LosslessCompression::Deflate => false,
+        LosslessCompression::Zlib | LosslessCompression::Deflate => 9,
+        LosslessCompression::Brotli => 11,
     }
 }
+
+#[derive(Clone, Copy, Debug, Default)]
+struct HeapAllocator;
+
+#[derive(Debug)]
+struct HeapSlice<T>(Box<[T]>);
+
+impl<T> Default for HeapSlice<T> {
+    fn default() -> Self {
+        HeapSlice(Box::default())
+    }
+}
+
+impl<T> SliceWrapper<T> for HeapSlice<T> {
+    fn slice(&self) -> &[T] {
+        &self.0
+    }
+}
+
+impl<T> SliceWrapperMut<T> for HeapSlice<T> {
+    fn slice_mut(&mut self) -> &mut [T] {
+        &mut self.0
+    }
+}
+
+impl<T: Clone + Default> Allocator<T> for HeapAllocator {
+    type AllocatedMemory = HeapSlice<T>;
+
+    fn alloc_cell(&mut self, len: usize) -> HeapSlice<T> {
+        HeapSlice(vec![T::default(); len].into_boxed_slice())
+    }
+
+    fn free_cell(&mut self, _data: HeapSlice<T>) {}
+}
+
+impl BrotliAlloc for HeapAllocator {}
 
 fn compressed_caps(compression: LosslessCompression, original: Option<&Caps>) -> Caps {
     Caps::LosslesslyCompressed {
@@ -48,12 +88,7 @@ fn system_frame(bytes: Vec<u8>, timing: FrameTiming, sequence: u64) -> Frame {
     }
 }
 
-fn compress(
-    bytes: &[u8],
-    compression: LosslessCompression,
-    level: u32,
-) -> Result<Vec<u8>, G2gError> {
-    let mut deflate = Deflate::new(level as i32, zlib_header(compression), WINDOW_BITS);
+fn deflate(bytes: &[u8], mut deflate: Deflate) -> Result<Vec<u8>, G2gError> {
     let mut out = vec![0; zlib_rs::compress_bound(bytes.len())];
     match deflate.compress(bytes, &mut out, DeflateFlush::Finish) {
         Ok(Status::StreamEnd) => {
@@ -64,10 +99,54 @@ fn compress(
     }
 }
 
-static COMPRESS_PROPS: &[PropertySpec] = &[PropertySpec::new(
+fn brotli_compress(bytes: &[u8], level: u32) -> Result<Vec<u8>, G2gError> {
+    let mut encoder = BrotliEncoderStateStruct::new(HeapAllocator);
+    encoder.params.quality = level as i32;
+    let mut out = vec![0; BrotliEncoderMaxCompressedSize(bytes.len())];
+    let (mut available_in, mut input_offset) = (bytes.len(), 0);
+    let (mut available_out, mut output_offset) = (out.len(), 0);
+    let accepted = encoder.compress_stream(
+        BrotliEncoderOperation::BROTLI_OPERATION_FINISH,
+        &mut available_in,
+        bytes,
+        &mut input_offset,
+        &mut available_out,
+        &mut out,
+        &mut output_offset,
+        &mut None,
+        &mut |_, _, _, _| (),
+    );
+    if !accepted || !encoder.is_finished() {
+        return Err(G2gError::CapsMismatch);
+    }
+    out.truncate(output_offset);
+    Ok(out)
+}
+
+fn compress(
+    bytes: &[u8],
+    compression: LosslessCompression,
+    level: u32,
+) -> Result<Vec<u8>, G2gError> {
+    match compression {
+        LosslessCompression::Zlib => deflate(bytes, Deflate::new(level as i32, true, WINDOW_BITS)),
+        LosslessCompression::Deflate => {
+            deflate(bytes, Deflate::new(level as i32, false, WINDOW_BITS))
+        }
+        LosslessCompression::Brotli => brotli_compress(bytes, level),
+    }
+}
+
+static ZLIB_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "level",
     PropKind::Uint,
     "compression level, 0 stores the data and 9 compresses best",
+)];
+
+static BROTLI_PROPS: &[PropertySpec] = &[PropertySpec::new(
+    "level",
+    PropKind::Uint,
+    "compression level, 0 is fastest and 11 compresses best",
 )];
 
 #[derive(Debug)]
@@ -89,10 +168,8 @@ impl LosslessCompress {
     }
 
     pub fn with_level(mut self, level: u32) -> Self {
-        assert!(
-            level <= MAX_LEVEL,
-            "compression level {level} is above {MAX_LEVEL}"
-        );
+        let max = max_level(self.compression);
+        assert!(level <= max, "compression level {level} is above {max}");
         self.level = level;
         self
     }
@@ -113,6 +190,10 @@ impl AsyncElement for LosslessCompress {
             LosslessCompression::Deflate => (
                 "Deflate compressor",
                 "Compresses each buffer into one raw deflate stream",
+            ),
+            LosslessCompression::Brotli => (
+                "Brotli compressor",
+                "Compresses each buffer into one brotli stream",
             ),
         };
         ElementMetadata::new(name, "Encoder/Generic", description, crate::AARON_BOXER)
@@ -139,7 +220,10 @@ impl AsyncElement for LosslessCompress {
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
-        COMPRESS_PROPS
+        match self.compression {
+            LosslessCompression::Zlib | LosslessCompression::Deflate => ZLIB_PROPS,
+            LosslessCompression::Brotli => BROTLI_PROPS,
+        }
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
@@ -148,7 +232,7 @@ impl AsyncElement for LosslessCompress {
                 let level = value.as_uint().ok_or(PropError::Type)?;
                 self.level = u32::try_from(level)
                     .ok()
-                    .filter(|level| *level <= MAX_LEVEL)
+                    .filter(|level| *level <= max_level(self.compression))
                     .ok_or(PropError::Value)?;
                 Ok(())
             }
@@ -256,16 +340,82 @@ impl DecompressedSize {
     }
 }
 
-struct Inflating {
-    inflate: Inflate,
+enum StreamDecoder {
+    Zlib(Inflate),
+    Brotli(Box<BrotliState<HeapAllocator, HeapAllocator, HeapAllocator>>),
+}
+
+struct DecodeStep {
+    consumed: usize,
+    produced: usize,
+    stream_end: bool,
+}
+
+impl StreamDecoder {
+    fn new(compression: LosslessCompression) -> Self {
+        match compression {
+            LosslessCompression::Zlib => StreamDecoder::Zlib(Inflate::new(true, WINDOW_BITS)),
+            LosslessCompression::Deflate => StreamDecoder::Zlib(Inflate::new(false, WINDOW_BITS)),
+            LosslessCompression::Brotli => {
+                let mut state = BrotliState::new(HeapAllocator, HeapAllocator, HeapAllocator);
+                // large windows reach 1 GiB and are outside RFC 7932
+                state.large_window = false;
+                StreamDecoder::Brotli(Box::new(state))
+            }
+        }
+    }
+
+    fn decode(&mut self, input: &[u8], output: &mut [u8]) -> Result<DecodeStep, G2gError> {
+        match self {
+            StreamDecoder::Zlib(inflate) => {
+                let (in_before, out_before) = (inflate.total_in(), inflate.total_out());
+                let status = inflate
+                    .decompress(input, output, InflateFlush::NoFlush)
+                    .map_err(|_| G2gError::CapsMismatch)?;
+                Ok(DecodeStep {
+                    consumed: (inflate.total_in() - in_before) as usize,
+                    produced: (inflate.total_out() - out_before) as usize,
+                    stream_end: status == Status::StreamEnd,
+                })
+            }
+            StreamDecoder::Brotli(state) => {
+                let (mut available_in, mut consumed) = (input.len(), 0);
+                let (mut available_out, mut produced, mut total_out) = (output.len(), 0, 0);
+                let result = BrotliDecompressStream(
+                    &mut available_in,
+                    &mut consumed,
+                    input,
+                    &mut available_out,
+                    &mut produced,
+                    output,
+                    &mut total_out,
+                    state,
+                );
+                let stream_end = match result {
+                    BrotliResult::ResultFailure => return Err(G2gError::CapsMismatch),
+                    BrotliResult::ResultSuccess => true,
+                    BrotliResult::NeedsMoreInput | BrotliResult::NeedsMoreOutput => false,
+                };
+                Ok(DecodeStep {
+                    consumed,
+                    produced,
+                    stream_end,
+                })
+            }
+        }
+    }
+}
+
+struct PartialStream {
+    decoder: StreamDecoder,
     output: Vec<u8>,
     written: usize,
     timing: FrameTiming,
 }
 
-impl core::fmt::Debug for Inflating {
+impl core::fmt::Debug for PartialStream {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Inflating")
+        f.debug_struct("PartialStream")
             .field("written", &self.written)
             .field("timing", &self.timing)
             .finish_non_exhaustive()
@@ -278,45 +428,43 @@ struct Decompressed {
     timing: FrameTiming,
 }
 
-fn inflate_chunk(
-    mut pending: Option<Inflating>,
+fn decompress_chunk(
+    mut pending: Option<PartialStream>,
     mut input: &[u8],
     compression: LosslessCompression,
     size: DecompressedSize,
     timing: FrameTiming,
-) -> Result<(Option<Inflating>, Vec<Decompressed>), G2gError> {
+) -> Result<(Option<PartialStream>, Vec<Decompressed>), G2gError> {
     let mut finished = Vec::new();
+    // one byte past the bound shows that a stream is too large
+    let capacity = size.limit() + 1;
+    let mut output_full = false;
     // streams can span input buffers, and one buffer can end one stream and start the next
-    while !input.is_empty() {
-        let stream = pending.get_or_insert_with(|| Inflating {
-            inflate: Inflate::new(zlib_header(compression), WINDOW_BITS),
+    while !input.is_empty() || output_full {
+        let stream = pending.get_or_insert_with(|| PartialStream {
+            decoder: StreamDecoder::new(compression),
             output: Vec::new(),
             written: 0,
             timing,
         });
         if stream.written == stream.output.len() {
-            let limit = size.limit();
-            if stream.written >= limit {
-                return Err(G2gError::CapsMismatch);
-            }
             let grown = stream.output.len().max(FIRST_OUTPUT_BLOCK / 2) * 2;
-            stream.output.resize(grown.min(limit), 0);
+            stream.output.resize(grown.min(capacity), 0);
         }
-        let (in_before, out_before) = (stream.inflate.total_in(), stream.inflate.total_out());
-        let status = stream
-            .inflate
-            .decompress(
-                input,
-                &mut stream.output[stream.written..],
-                InflateFlush::NoFlush,
-            )
-            .map_err(|_| G2gError::CapsMismatch)?;
-        let consumed = (stream.inflate.total_in() - in_before) as usize;
-        let produced = (stream.inflate.total_out() - out_before) as usize;
+        let DecodeStep {
+            consumed,
+            produced,
+            stream_end,
+        } = stream
+            .decoder
+            .decode(input, &mut stream.output[stream.written..])?;
         input = &input[consumed..];
         stream.written += produced;
-        if status == Status::StreamEnd {
-            let mut done = pending.take().expect("a stream is being inflated");
+        if stream.written > size.limit() {
+            return Err(G2gError::CapsMismatch);
+        }
+        if stream_end {
+            let mut done = pending.take().expect("a stream is being decompressed");
             if matches!(size, DecompressedSize::Exact(expected) if expected != done.written) {
                 return Err(G2gError::CapsMismatch);
             }
@@ -325,12 +473,14 @@ fn inflate_chunk(
                 bytes: done.output,
                 timing: done.timing,
             });
+            output_full = false;
             continue;
         }
-        let output_full = stream.written == stream.output.len();
-        if consumed == 0 && produced == 0 && !output_full {
+        if consumed == 0 && produced == 0 && !input.is_empty() {
             return Err(G2gError::CapsMismatch);
         }
+        // brotli takes all of its input before it has written all of its output
+        output_full = stream.written == stream.output.len();
     }
     Ok((pending, finished))
 }
@@ -339,7 +489,7 @@ fn inflate_chunk(
 pub struct LosslessDecompress {
     compression: LosslessCompression,
     original: Option<Caps>,
-    pending: Option<Inflating>,
+    pending: Option<PartialStream>,
     last_caps: Option<Caps>,
     emitted: u64,
 }
@@ -376,6 +526,7 @@ impl AsyncElement for LosslessDecompress {
         let name = match self.compression {
             LosslessCompression::Zlib => "Zlib decompressor",
             LosslessCompression::Deflate => "Deflate decompressor",
+            LosslessCompression::Brotli => "Brotli decompressor",
         };
         ElementMetadata::new(
             name,
@@ -422,13 +573,13 @@ impl AsyncElement for LosslessDecompress {
                         let owned = bytes.to_vec();
                         let timing = frame.timing;
                         g2g_core::offload::run_blocking(move || {
-                            inflate_chunk(pending, &owned, compression, size, timing)
+                            decompress_chunk(pending, &owned, compression, size, timing)
                         })
                         .await?
                     };
                     #[cfg(not(feature = "offload"))]
                     let (pending, finished) =
-                        inflate_chunk(pending, &bytes, compression, size, frame.timing)?;
+                        decompress_chunk(pending, &bytes, compression, size, frame.timing)?;
                     self.pending = pending;
                     if !finished.is_empty() && self.last_caps.as_ref() != Some(&original) {
                         out.push(PipelinePacket::CapsChanged(original.clone()))
@@ -483,6 +634,10 @@ pub fn zlib_decompressed_caps(input: &Caps) -> CapsSet {
 
 pub fn deflate_decompressed_caps(input: &Caps) -> CapsSet {
     decompressed_caps(LosslessCompression::Deflate, input)
+}
+
+pub fn brotli_decompressed_caps(input: &Caps) -> CapsSet {
+    decompressed_caps(LosslessCompression::Brotli, input)
 }
 
 pub fn decompress_pad_templates(compression: LosslessCompression) -> Vec<PadTemplate> {
