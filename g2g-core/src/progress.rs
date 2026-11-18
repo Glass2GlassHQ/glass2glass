@@ -62,16 +62,19 @@ impl SinkPosition {
     }
 
     pub fn set_at_pts(&self, segment: Option<&Segment>, pts_ns: u64) {
-        // a pts outside its segment, or before any segment, stands for its own stream time
-        let stream_ns = segment
-            .and_then(|segment| segment.to_stream_time(pts_ns))
-            .unwrap_or(pts_ns);
-        self.set(stream_ns);
+        self.set(stream_time_of(segment, pts_ns));
     }
 
     pub fn forget(&self) {
         self.position_ns.store(POSITION_UNKNOWN, Ordering::Relaxed);
     }
+}
+
+pub fn stream_time_of(segment: Option<&Segment>, pts_ns: u64) -> u64 {
+    // a pts outside its segment, or before any segment, stands for its own stream time
+    segment
+        .and_then(|segment| segment.to_stream_time(pts_ns))
+        .unwrap_or(pts_ns)
 }
 
 fn known_position(ns: u64) -> u64 {

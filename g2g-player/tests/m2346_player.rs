@@ -195,6 +195,56 @@ fn a_clip_renders_pauses_seeks_and_stays_open_at_the_end() {
 }
 
 #[test]
+fn hud_counters_follow_a_clip_played_with_no_host_rendering() {
+    let player = Player::new();
+    player.observe(Property::EofReached);
+    let mut events = EventLog {
+        player: &player,
+        seen: Vec::new(),
+    };
+    player
+        .load(
+            Media::Uri(&format!("file://{CLIP}")),
+            LoadOptions::default(),
+        )
+        .unwrap();
+    wait_until(|| {
+        matches!(
+            player.property(Property::DemuxerCacheDuration),
+            PropertyChange::DemuxerCacheDuration(Some(cached)) if cached > Duration::ZERO
+        )
+    });
+    events.wait_for(&Event::PropertyChange(PropertyChange::EofReached(true)));
+
+    let PropertyChange::EstimatedVfFps(Some(fps)) = player.property(Property::EstimatedVfFps)
+    else {
+        panic!("no estimated fps after playing the clip");
+    };
+    assert!(
+        (fps - f64::from(CLIP_FRAMES_PER_SECOND)).abs() < 1e-6,
+        "estimated {fps} fps"
+    );
+    let PropertyChange::Duration(Some(duration)) = player.property(Property::Duration) else {
+        panic!("no duration at the end");
+    };
+    let frames = (duration.as_nanos() / CLIP_FRAME_PERIOD.as_nanos()) as u64;
+    // only the last frame is still waiting for the host
+    assert_eq!(
+        player.property(Property::FrameDropCount),
+        PropertyChange::FrameDropCount(frames - 1)
+    );
+    player.stop();
+    assert_eq!(
+        player.property(Property::DemuxerCacheDuration),
+        PropertyChange::DemuxerCacheDuration(None)
+    );
+    assert_eq!(
+        player.property(Property::FrameDropCount),
+        PropertyChange::FrameDropCount(0)
+    );
+}
+
+#[test]
 fn a_clip_loads_paused_at_its_start_position() {
     let player = Player::new();
     let prerolled_at = load_paused_at_start(&player);

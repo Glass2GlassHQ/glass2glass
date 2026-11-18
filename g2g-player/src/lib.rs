@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -29,6 +29,7 @@ use g2g_plugins::launched::RunFailure;
 use g2g_plugins::registry::default_registry;
 
 mod caps_probe;
+mod demux_probe;
 mod level_meter;
 mod picture_filters;
 mod render;
@@ -47,6 +48,7 @@ pub use render::WgpuRenderContext;
 pub use subtitles::SubtitleSlot;
 
 use caps_probe::CapsProbe;
+use demux_probe::DemuxProbe;
 use level_meter::{apply_level_meter, insert_level_meter, LEVEL_METER};
 use picture_filters::{
     launch_chain, parse_filters, video_size_of, PictureFilter, VIDEO_PARAMS_PROBE,
@@ -142,6 +144,14 @@ pub enum Property {
     ContainerFps,
     // the picture size the container declares, before a decoder shrinks it, mpv's demux-w/h
     DemuxSize,
+    // frames never shown, late past max-lateness or replaced before the host rendered them
+    FrameDropCount,
+    // frames shown after their deadline
+    DelayedFrameCount,
+    // frames per second over the last frame durations after the video filters
+    EstimatedVfFps,
+    // how far the demuxer has read past time-pos
+    DemuxerCacheDuration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -156,6 +166,10 @@ pub enum PropertyChange {
     AudioParams(Option<AudioParams>),
     ContainerFps(Option<f64>),
     DemuxSize(Option<VideoSize>),
+    FrameDropCount(u64),
+    DelayedFrameCount(u64),
+    EstimatedVfFps(Option<f64>),
+    DemuxerCacheDuration(Option<Duration>),
 }
 
 impl PropertyChange {
@@ -166,6 +180,10 @@ impl PropertyChange {
             PropertyChange::Duration(_) => Property::Duration,
             PropertyChange::EofReached(_) => Property::EofReached,
             PropertyChange::DemuxSize(_) => Property::DemuxSize,
+            PropertyChange::FrameDropCount(_) => Property::FrameDropCount,
+            PropertyChange::DelayedFrameCount(_) => Property::DelayedFrameCount,
+            PropertyChange::EstimatedVfFps(_) => Property::EstimatedVfFps,
+            PropertyChange::DemuxerCacheDuration(_) => Property::DemuxerCacheDuration,
             PropertyChange::VideoParams(_) => Property::VideoParams,
             PropertyChange::VideoOutParams(_) => Property::VideoOutParams,
             PropertyChange::OsdDimensions(_) => Property::OsdDimensions,
@@ -291,6 +309,11 @@ pub(crate) struct Shared {
     eof_reached: AtomicBool,
     framerate_q16: Mutex<Option<u32>>,
     demux_size: Mutex<Option<VideoSize>>,
+    // stream time of the furthest frame that reached the video decoder
+    demuxed_position_ns: Mutex<Option<u64>>,
+    frame_drop_count: AtomicU64,
+    delayed_frame_count: AtomicU64,
+    estimated_vf_fps: Mutex<Option<f64>>,
     video_params: Mutex<Option<VideoSize>>,
     video_out_params: Mutex<Option<VideoSize>>,
     osd_dimensions: Mutex<Option<OsdDimensions>>,
@@ -345,9 +368,40 @@ impl Shared {
         self.set_eof_reached(true);
     }
 
-    fn set_demux_size(&self, size: Option<VideoSize>) {
+    pub(crate) fn set_demux_size(&self, size: Option<VideoSize>) {
         *self.demux_size.lock().expect("demux size lock") = size;
         self.report(PropertyChange::DemuxSize(size));
+    }
+
+    pub(crate) fn set_demuxed_position(&self, stream_time_ns: Option<u64>) {
+        *self
+            .demuxed_position_ns
+            .lock()
+            .expect("demuxed position lock") = stream_time_ns;
+    }
+
+    fn demuxer_cache_duration(&self, progress: Option<&PipelineProgress>) -> Option<Duration> {
+        let demuxed_ns = (*self
+            .demuxed_position_ns
+            .lock()
+            .expect("demuxed position lock"))?;
+        let played = self.time_pos(progress)?;
+        Some(Duration::from_nanos(demuxed_ns).saturating_sub(played))
+    }
+
+    pub(crate) fn set_frame_drop_count(&self, count: u64) {
+        self.frame_drop_count.store(count, Ordering::SeqCst);
+        self.report(PropertyChange::FrameDropCount(count));
+    }
+
+    pub(crate) fn set_delayed_frame_count(&self, count: u64) {
+        self.delayed_frame_count.store(count, Ordering::SeqCst);
+        self.report(PropertyChange::DelayedFrameCount(count));
+    }
+
+    pub(crate) fn set_estimated_vf_fps(&self, fps: Option<f64>) {
+        *self.estimated_vf_fps.lock().expect("estimated fps lock") = fps;
+        self.report(PropertyChange::EstimatedVfFps(fps));
     }
 
     pub(crate) fn set_video_params(&self, size: Option<VideoSize>) {
@@ -399,6 +453,9 @@ impl Shared {
 
     fn report_progress(&self, progress: &PipelineProgress) {
         self.report(PropertyChange::TimePos(self.time_pos(Some(progress))));
+        self.report(PropertyChange::DemuxerCacheDuration(
+            self.demuxer_cache_duration(Some(progress)),
+        ));
         self.report(PropertyChange::Duration(
             progress.duration().map(Duration::from_nanos),
         ));
@@ -494,7 +551,7 @@ impl Player {
         let (decoded_size, decoded) = tokio::sync::watch::channel(None);
         if let Some(&first_sink) = video_sinks.first() {
             insert_video_params_probe(&mut graph, first_sink, &self.shared, decoded_size);
-            insert_demux_size_probe(&mut graph, first_sink, &self.shared);
+            insert_demux_probe(&mut graph, first_sink, &self.shared);
         }
         let mut level_meter_window = self.level_meter_window.subscribe();
         let has_level_meter = insert_level_meter(
@@ -570,6 +627,10 @@ impl Player {
             .expect("the playback thread catches its own errors");
         self.shared.seek_landed();
         self.shared.set_demux_size(None);
+        self.shared.set_demuxed_position(None);
+        self.shared.set_frame_drop_count(0);
+        self.shared.set_delayed_frame_count(0);
+        self.shared.set_estimated_vf_fps(None);
         self.shared.set_video_params(None);
         self.shared.set_video_out_params(None);
         self.shared.set_framerate_q16(None);
@@ -697,6 +758,22 @@ impl Player {
             }
             Property::DemuxSize => {
                 PropertyChange::DemuxSize(*self.shared.demux_size.lock().expect("demux size lock"))
+            }
+            Property::FrameDropCount => {
+                PropertyChange::FrameDropCount(self.shared.frame_drop_count.load(Ordering::SeqCst))
+            }
+            Property::DelayedFrameCount => PropertyChange::DelayedFrameCount(
+                self.shared.delayed_frame_count.load(Ordering::SeqCst),
+            ),
+            Property::EstimatedVfFps => PropertyChange::EstimatedVfFps(
+                *self
+                    .shared
+                    .estimated_vf_fps
+                    .lock()
+                    .expect("estimated fps lock"),
+            ),
+            Property::DemuxerCacheDuration => {
+                PropertyChange::DemuxerCacheDuration(self.shared.demuxer_cache_duration(progress))
             }
             Property::VideoParams => PropertyChange::VideoParams(
                 *self.shared.video_params.lock().expect("video params lock"),
@@ -911,7 +988,7 @@ fn is_video_decoder(graph: &Graph<GraphNode>, node: NodeId) -> bool {
     )
 }
 
-fn insert_demux_size_probe(graph: &mut Graph<GraphNode>, sink: NodeId, shared: &Arc<Shared>) {
+fn insert_demux_probe(graph: &mut Graph<GraphNode>, sink: NodeId, shared: &Arc<Shared>) {
     let edge_into = |graph: &Graph<GraphNode>, node: NodeId| {
         graph.edges().iter().position(|edge| edge.dst.node == node)
     };
@@ -925,21 +1002,10 @@ fn insert_demux_size_probe(graph: &mut Graph<GraphNode>, sink: NodeId, shared: &
             break edge_into(graph, node).expect("decoders have an input");
         }
     };
-    let shared = shared.clone();
-    let probe = CapsProbe::new(
-        g2g_core::ElementMetadata::new(
-            "Player demux size probe",
-            "Filter/Video",
-            "Reports the picture size the container declares to the g2g-player run",
-            "Aaron Boxer <boxerab@protonmail.com>",
-        ),
-        move |caps| {
-            if let Some(size) = video_size_of(caps) {
-                shared.set_demux_size(Some(size));
-            }
-        },
+    graph.insert_on_edge(
+        into_decoder,
+        GraphNodeRef::element(DemuxProbe::new(shared.clone())),
     );
-    graph.insert_on_edge(into_decoder, GraphNodeRef::element(probe));
 }
 
 struct PlaybackRun {

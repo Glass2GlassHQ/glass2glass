@@ -12,10 +12,48 @@ use g2g_core::{
 
 type CapsReport = Box<dyn FnMut(&Caps) + Send>;
 
-pub(crate) struct CapsProbe {
-    metadata: ElementMetadata,
+pub(crate) struct CapsReporter {
     report: CapsReport,
     unreported: Option<Caps>,
+}
+
+impl CapsReporter {
+    pub(crate) fn new(report: impl FnMut(&Caps) + Send + 'static) -> Self {
+        CapsReporter {
+            report: Box::new(report),
+            unreported: None,
+        }
+    }
+
+    pub(crate) fn configure(&mut self, caps: &Caps) {
+        self.unreported = Some(caps.clone());
+    }
+
+    pub(crate) fn observe(&mut self, packet: &PipelinePacket) {
+        match packet {
+            PipelinePacket::CapsChanged(caps) => self.unreported = Some(caps.clone()),
+            // demuxers replace the placeholder caps negotiation fixed before their first frame
+            PipelinePacket::DataFrame(_) => {
+                if let Some(caps) = self.unreported.take() {
+                    (self.report)(&caps);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+pub(crate) struct CapsProbe {
+    metadata: ElementMetadata,
+    caps: CapsReporter,
+}
+
+impl fmt::Debug for CapsReporter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CapsReporter")
+            .field("unreported", &self.unreported)
+            .finish_non_exhaustive()
+    }
 }
 
 impl fmt::Debug for CapsProbe {
@@ -33,8 +71,7 @@ impl CapsProbe {
     ) -> Self {
         CapsProbe {
             metadata,
-            report: Box::new(report),
-            unreported: None,
+            caps: CapsReporter::new(report),
         }
     }
 }
@@ -54,7 +91,7 @@ impl AsyncElement for CapsProbe {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        self.unreported = Some(absolute_caps.clone());
+        self.caps.configure(absolute_caps);
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -64,16 +101,7 @@ impl AsyncElement for CapsProbe {
         out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
-            match &packet {
-                PipelinePacket::CapsChanged(caps) => self.unreported = Some(caps.clone()),
-                // demuxers replace the placeholder caps negotiation fixed before their first frame
-                PipelinePacket::DataFrame(_) => {
-                    if let Some(caps) = self.unreported.take() {
-                        (self.report)(&caps);
-                    }
-                }
-                _ => {}
-            }
+            self.caps.observe(&packet);
             out.push(packet).await?;
             Ok(())
         })

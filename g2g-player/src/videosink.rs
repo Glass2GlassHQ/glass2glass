@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
+use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,7 +11,7 @@ use std::time::Instant;
 
 use g2g_core::clock::MonotonicClock;
 use g2g_core::element::{PresentationStats, QosMessage};
-use g2g_core::frame::Frame;
+use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::{DomainSet, MemoryDomainKind, SystemSlice};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ClockCandidate, ClockPriority, ClockSync, ConfigureOutcome,
@@ -61,9 +62,16 @@ impl FrameSlot {
         }
     }
 
-    fn put(&self, frame: DueFrame) {
-        *self.due.lock().expect("frame slot lock") = Some(frame);
+    // true when it replaces a frame the host never rendered
+    fn put(&self, frame: DueFrame) -> bool {
+        let replaced = self
+            .due
+            .lock()
+            .expect("frame slot lock")
+            .replace(frame)
+            .is_some();
         self.notify_host();
+        replaced
     }
 
     pub(crate) fn request_redraw(&self) {
@@ -94,7 +102,13 @@ pub(crate) struct PlayerVideoSink {
     pacer: PresentationPacer,
     awaiting_frame_after_flush: bool,
     caps_reported: bool,
+    replaced_unrendered: u64,
+    delayed: u64,
+    recent_pts_ns: VecDeque<u64>,
 }
+
+// mpv's estimated-vf-fps averages the last 10 frame durations
+const ESTIMATED_FPS_FRAME_DURATIONS: usize = 10;
 
 impl PlayerVideoSink {
     pub(crate) fn new(shared: Arc<Shared>) -> Self {
@@ -105,7 +119,38 @@ impl PlayerVideoSink {
             pacer: PresentationPacer::for_video_sink(),
             awaiting_frame_after_flush: false,
             caps_reported: false,
+            replaced_unrendered: 0,
+            delayed: 0,
+            recent_pts_ns: VecDeque::new(),
         }
+    }
+
+    fn estimate_fps(&mut self, pts_ns: u64) {
+        let follows = self.recent_pts_ns.back().is_none_or(|&last| pts_ns > last);
+        if pts_ns == FrameTiming::PTS_NONE || !follows {
+            return;
+        }
+        if self.recent_pts_ns.len() > ESTIMATED_FPS_FRAME_DURATIONS {
+            self.recent_pts_ns.pop_front();
+        }
+        self.recent_pts_ns.push_back(pts_ns);
+        let (Some(&first), Some(&last)) = (self.recent_pts_ns.front(), self.recent_pts_ns.back())
+        else {
+            return;
+        };
+        let durations = self.recent_pts_ns.len() - 1;
+        if durations == 0 {
+            return;
+        }
+        let nanoseconds_per_second = 1e9;
+        self.shared.set_estimated_vf_fps(Some(
+            durations as f64 * nanoseconds_per_second / (last - first) as f64,
+        ));
+    }
+
+    fn report_drops(&self) {
+        self.shared
+            .set_frame_drop_count(self.pacer.late_dropped() + self.replaced_unrendered);
     }
 
     fn adopt_caps(&mut self, caps: Caps) {
@@ -195,6 +240,7 @@ impl AsyncElement for PlayerVideoSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(mut frame) => {
+                    self.estimate_fps(frame.timing.pts_ns);
                     let caps = self.caps.as_ref().ok_or(G2gError::NotConfigured)?;
                     // demuxers replace the placeholder caps negotiation fixed before their first frame
                     if !self.caps_reported {
@@ -209,7 +255,13 @@ impl AsyncElement for PlayerVideoSink {
                     }
                     let paced = self.pacer.judge(frame.timing.pts_ns, self.presented);
                     if paced == Pace::Drop {
+                        self.report_drops();
                         return Ok(());
+                    }
+                    // the pacer answers Now with a deadline only once that deadline has passed
+                    if paced == Pace::Now && self.pacer.last_deadline_ns().is_some() {
+                        self.delayed += 1;
+                        self.shared.set_delayed_frame_count(self.delayed);
                     }
                     let converting = Instant::now();
                     // the render contexts run on the host's UI thread, so they only upload
@@ -226,7 +278,10 @@ impl AsyncElement for PlayerVideoSink {
                     };
                     wait_to_present(paced).await;
                     self.presented += 1;
-                    self.shared.frames.put(DueFrame { caps, frame });
+                    if self.shared.frames.put(DueFrame { caps, frame }) {
+                        self.replaced_unrendered += 1;
+                        self.report_drops();
+                    }
                     if self.awaiting_frame_after_flush {
                         self.awaiting_frame_after_flush = false;
                         self.shared.seek_landed();
@@ -236,6 +291,7 @@ impl AsyncElement for PlayerVideoSink {
                 PipelinePacket::Segment(segment) => self.pacer.set_segment(segment),
                 PipelinePacket::Flush => {
                     self.pacer.flush();
+                    self.recent_pts_ns.clear();
                     if self.shared.take_seek_flush() {
                         self.awaiting_frame_after_flush = true;
                     }

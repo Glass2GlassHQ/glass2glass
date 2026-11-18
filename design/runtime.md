@@ -1044,9 +1044,15 @@ into a table.
 
 The probe also sets `video-params`, the decoded size, and `playervideosink` sets
 `video-out-params`, the size after the filters, and `container-fps`, the frame
-rate of its fixed-rate caps. A second `CapsProbe`, on the edge into the first
+rate of its fixed-rate caps. A `DemuxProbe`, on the edge into the first
 `Codec/Decoder/Video` element upstream of the video sink, sets `demux-size` from
-the compressed caps, mpv's `demux-w` / `demux-h`. All four clear on `stop`.
+the compressed caps, mpv's `demux-w` / `demux-h`, and records the stream time of
+the furthest frame it passed. `demuxer-cache-duration` is that stream time minus
+`time-pos`. `playervideosink` sets mpv's three other HUD counters:
+`frame-drop-count`, the pacer's late drops plus frames replaced in the slot before
+the host rendered them, `vo-delayed-frame-count`, frames that reached it past
+their deadline and inside `max-lateness`, and `estimated-vf-fps`, from the last 10
+frame durations as mpv's is. All of them clear on `stop`.
 `set_lowres` (feature `ffmpeg`), mpv's `vd-lavc-o=lowres`, sets `lowres` on every
 node that declares it when the next file loads. `ffmpegdec` caps it at the codec's
 `max_lowres`, so JPEG 2000, MPEG-1/2, MPEG-4 Part 2 and H.263 decode smaller while
