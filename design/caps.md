@@ -210,8 +210,11 @@ Caps packets set the output caps, time-format segment events become
 timestamps, stopping at zero as GStreamer's does. Negotiation needs the payload
 caps before the first packet is read, so `typefind::sniff_caps` reads them from
 the first caps packet in a file's head, and `filesrc location=x.gdp ! gdpdepay`
-negotiates without a filter. Other sources need a filter that states
-`original-caps`. `CapsSet::from_gst_string` strips GStreamer's `(type)` casts,
+negotiates without a filter. Socket sources cannot read ahead, so
+`tcpclientsrc`, `tcpserversrc` and `shmsrc` take GStreamer's `caps` property,
+which replaces the container `bytestream-format` declares, as in
+`tcpclientsrc caps=application/x-gdp,original-caps=(caps)[...]`. The three
+share that state as `bytestream::DeclaredSourceCaps`. `CapsSet::from_gst_string` strips GStreamer's `(type)` casts,
 so caps strings that `gst_caps_to_string` wrote parse, and
 `Caps::to_gst_string` adds `layout=interleaved` to raw audio, which GStreamer
 requires. `tools/gdp-gst-check.sh` checks both directions against the local

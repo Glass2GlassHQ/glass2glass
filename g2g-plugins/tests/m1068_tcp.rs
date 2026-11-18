@@ -193,6 +193,45 @@ async fn tcpserversink_reaches_tcpclientsrc() {
     assert_identical(&fixture, &out);
 }
 
+// tools/gdp-fixtures.sh writes the GStreamer gdppay stream and its frames
+#[tokio::test]
+async fn tcpclientsrc_caps_types_a_gdp_stream_for_gdpdepay() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let out = output_path("g2g_m1068_gdp_frames.raw");
+
+    let mut server = TcpServerSink::new("127.0.0.1", 0);
+    let port = server.bind().expect("bind an ephemeral port");
+    let mut player = FileSrc::new(fixtures.join("gdp_nv12_64x48.gdp"), ts_bytestream());
+    let send = tokio::time::timeout(
+        LOOPBACK_DEADLINE,
+        run_simple_pipeline(
+            &mut player,
+            &mut server,
+            &ZeroClock,
+            LatencyProfile::Live.link_capacity(),
+        ),
+    );
+
+    let receive = async {
+        let registry = default_registry();
+        let graph = parse_launch(
+            &registry,
+            &format!(
+                "tcpclientsrc host=127.0.0.1 port={port} caps=application/x-gdp,original-caps=(caps)[video/x-raw,format=NV12,width=64,height=48,framerate=30/1] ! gdpdepay ! filesink location={}",
+                out.display()
+            ),
+        )
+        .expect("the receiver pipeline parses");
+        run_graph(graph, &ZeroClock, 4).await
+    };
+
+    let (sent, received) = tokio::join!(send, receive);
+    sent.expect("the sender finishes")
+        .expect("the send pipeline runs");
+    received.expect("the receive pipeline runs");
+    assert_identical(&fixtures.join("gdp_nv12_64x48.raw"), &out);
+}
+
 /// Every one of the four names resolves in the default registry and takes its
 /// `host` / `port` from a launch line. `port=0` keeps the parse from touching a
 /// port a parallel test might want.

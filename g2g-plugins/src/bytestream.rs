@@ -9,6 +9,87 @@
 use alloc::vec::Vec;
 
 use g2g_core::{ByteStreamEncoding, Caps};
+#[cfg(any(feature = "tcp", all(target_os = "linux", feature = "shm")))]
+use g2g_core::{PropError, PropKind, PropValue, PropertySpec};
+
+#[cfg(any(feature = "tcp", all(target_os = "linux", feature = "shm")))]
+pub(crate) const BYTESTREAM_FORMAT_PROPERTY: PropertySpec = PropertySpec::new(
+    "bytestream-format",
+    PropKind::Str,
+    "container of the byte stream: mpegts | matroska | ogg | flv | mp4",
+)
+.with_default("mpegts");
+
+#[cfg(any(feature = "tcp", all(target_os = "linux", feature = "shm")))]
+pub(crate) const CAPS_PROPERTY: PropertySpec = PropertySpec::new(
+    "caps",
+    PropKind::Str,
+    "caps to declare instead, gst-launch syntax: e.g. video/x-raw,format=I420,width=320,height=240",
+);
+
+#[cfg(any(feature = "tcp", all(target_os = "linux", feature = "shm")))]
+#[derive(Debug, Clone)]
+pub(crate) struct DeclaredSourceCaps {
+    caps: Caps,
+    // the `caps` property as written, so it reads back unchanged
+    caps_text: Option<alloc::string::String>,
+}
+
+#[cfg(any(feature = "tcp", all(target_os = "linux", feature = "shm")))]
+impl Default for DeclaredSourceCaps {
+    fn default() -> Self {
+        Self::of(Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegTs,
+        })
+    }
+}
+
+#[cfg(any(feature = "tcp", all(target_os = "linux", feature = "shm")))]
+impl DeclaredSourceCaps {
+    pub(crate) fn of(caps: Caps) -> Self {
+        Self {
+            caps,
+            caps_text: None,
+        }
+    }
+
+    pub(crate) fn caps(&self) -> &Caps {
+        &self.caps
+    }
+
+    pub(crate) fn set_property(
+        &mut self,
+        name: &str,
+        value: &PropValue,
+    ) -> Option<Result<(), PropError>> {
+        let text = || value.as_str().ok_or(PropError::Type);
+        let parsed = match name {
+            "bytestream-format" => text().and_then(|text| {
+                let encoding = crate::filesrc::encoding_from_str(text).ok_or(PropError::Value)?;
+                Ok((Caps::ByteStream { encoding }, None))
+            }),
+            "caps" => text().and_then(|text| {
+                let caps = crate::capsfilter::parse_caps(text).ok_or(PropError::Value)?;
+                Ok((caps, Some(text.into())))
+            }),
+            _ => return None,
+        };
+        Some(parsed.map(|(caps, caps_text)| {
+            self.caps = caps;
+            self.caps_text = caps_text;
+        }))
+    }
+
+    pub(crate) fn get_property(&self, name: &str) -> Option<PropValue> {
+        match (name, &self.caps) {
+            ("bytestream-format", Caps::ByteStream { encoding }) => Some(PropValue::Str(
+                crate::filesrc::encoding_to_str(*encoding).into(),
+            )),
+            ("caps", _) => self.caps_text.clone().map(PropValue::Str),
+            _ => None,
+        }
+    }
+}
 
 /// MPEG-TS packet size (ISO/IEC 13818-1).
 pub const TS_PACKET_SIZE: usize = 188;
@@ -102,6 +183,38 @@ pub(crate) fn byte_frame(bytes: Vec<u8>, sequence: u64) -> g2g_core::frame::Fram
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(feature = "tcp", all(target_os = "linux", feature = "shm")))]
+    #[test]
+    fn caps_and_bytestream_format_each_replace_the_declared_caps() {
+        let gdp = "application/x-gdp,original-caps=(caps)[meta/x-klv]";
+        let mut declared = DeclaredSourceCaps::default();
+        let set = |declared: &mut DeclaredSourceCaps, name: &str, text: &str| {
+            declared
+                .set_property(name, &PropValue::Str(text.into()))
+                .expect("a declared-caps property")
+        };
+        set(&mut declared, "caps", gdp).expect("gdp caps parse");
+        assert!(matches!(declared.caps(), Caps::Gdp { original: Some(_) }));
+        assert_eq!(
+            declared.get_property("caps"),
+            Some(PropValue::Str(gdp.into()))
+        );
+        assert_eq!(declared.get_property("bytestream-format"), None);
+        assert_eq!(
+            set(&mut declared, "caps", "video/x-raw,format={NV12,I420}"),
+            Err(PropError::Value)
+        );
+        set(&mut declared, "bytestream-format", "matroska").expect("a container");
+        assert_eq!(
+            *declared.caps(),
+            Caps::ByteStream {
+                encoding: ByteStreamEncoding::Matroska
+            }
+        );
+        assert_eq!(declared.get_property("caps"), None);
+        assert_eq!(declared.set_property("port", &PropValue::Uint(1)), None);
+    }
 
     #[test]
     fn ts_datagrams_hold_whole_packets() {

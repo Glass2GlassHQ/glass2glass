@@ -50,14 +50,13 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome,
-    ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome, ElementMetadata,
+    FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::arrivalstamp::ArrivalStamp;
-use crate::capsfilter::parse_caps;
-use crate::filesrc::{encoding_from_str, encoding_to_str};
+use crate::bytestream::{DeclaredSourceCaps, BYTESTREAM_FORMAT_PROPERTY, CAPS_PROPERTY};
 use crate::shmpipe::{
     buffer_range, AreaAllocator, Command, MappedArea, COMMAND_BYTES, MAX_AREA_BYTES,
     MAX_AREA_NAME_BYTES,
@@ -69,9 +68,6 @@ const DEFAULT_SHM_SIZE: usize = 67_108_864;
 const DEFAULT_PERMS: u32 = 0o640;
 /// The id of the one area a sink creates. gst counts from 1 as well.
 const FIRST_AREA_ID: i32 = 1;
-/// The container a source declares when neither `caps` nor `bytestream-format`
-/// is set, matching the other byte-stream sources that cannot know their type.
-const DEFAULT_ENCODING: ByteStreamEncoding = ByteStreamEncoding::MpegTs;
 /// Areas a source will hold mapped at once. A sink announces a second one only
 /// while resizing, so this is only a bound on a peer that keeps announcing.
 const MAX_MAPPED_AREAS: usize = 8;
@@ -724,9 +720,7 @@ impl PadTemplates for ShmSink {
 #[derive(Debug)]
 pub struct ShmSrc {
     socket_path: PathBuf,
-    caps: Caps,
-    /// The `caps` property text, kept so `get_property` round-trips it.
-    caps_text: String,
+    declared: DeclaredSourceCaps,
     frame_limit: u64,
     area_name: Option<String>,
     configured: bool,
@@ -738,10 +732,7 @@ impl Default for ShmSrc {
     fn default() -> Self {
         Self {
             socket_path: PathBuf::new(),
-            caps: Caps::ByteStream {
-                encoding: DEFAULT_ENCODING,
-            },
-            caps_text: String::new(),
+            declared: DeclaredSourceCaps::default(),
             frame_limit: u64::MAX,
             area_name: None,
             configured: false,
@@ -763,7 +754,7 @@ impl ShmSrc {
     /// Declare what the bytes are, for the receiver of a producer that cannot
     /// say so on the wire.
     pub fn with_caps(mut self, caps: Caps) -> Self {
-        self.caps = caps;
+        self.declared = DeclaredSourceCaps::of(caps);
         self
     }
 
@@ -831,19 +822,19 @@ impl SourceLoop for ShmSrc {
     }
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
-        core::future::ready(Ok(self.caps.clone()))
+        core::future::ready(Ok(self.declared.caps().clone()))
     }
 
     fn caps_constraint<'a>(
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
         core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(
-            self.caps.clone(),
+            self.declared.caps().clone(),
         ))))
     }
 
     fn configured_output_caps(&self) -> Option<Caps> {
-        Some(self.caps.clone())
+        Some(self.declared.caps().clone())
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -940,22 +931,12 @@ impl SourceLoop for ShmSrc {
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        if let Some(result) = self.declared.set_property(name, &value) {
+            return result;
+        }
         match name {
             "socket-path" => {
                 self.socket_path = PathBuf::from(value.as_str().ok_or(PropError::Type)?);
-                Ok(())
-            }
-            "bytestream-format" => {
-                let text = value.as_str().ok_or(PropError::Type)?;
-                let encoding = encoding_from_str(text).ok_or(PropError::Value)?;
-                self.caps = Caps::ByteStream { encoding };
-                self.caps_text = String::new();
-                Ok(())
-            }
-            "caps" => {
-                let text = value.as_str().ok_or(PropError::Type)?;
-                self.caps = parse_caps(text).ok_or(PropError::Value)?;
-                self.caps_text = text.to_string();
                 Ok(())
             }
             "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.frame_limit, &value),
@@ -968,17 +949,13 @@ impl SourceLoop for ShmSrc {
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
+        if let Some(value) = self.declared.get_property(name) {
+            return Some(value);
+        }
         match name {
             "socket-path" => Some(PropValue::Str(
                 self.socket_path.to_string_lossy().into_owned(),
             )),
-            "bytestream-format" => match &self.caps {
-                Caps::ByteStream { encoding } => {
-                    Some(PropValue::Str(encoding_to_str(*encoding).to_string()))
-                }
-                _ => None,
-            },
-            "caps" if !self.caps_text.is_empty() => Some(PropValue::Str(self.caps_text.clone())),
             "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
             "is-live" => Some(PropValue::Bool(self.is_live)),
             "shm-area-name" => Some(PropValue::Str(
@@ -996,17 +973,8 @@ static SRC_PROPS: &[PropertySpec] = &[
         PropKind::Str,
         "path of the unix control socket the sink serves on",
     ),
-    PropertySpec::new(
-        "bytestream-format",
-        PropKind::Str,
-        "container of the byte stream: mpegts | matroska | ogg | flv | mp4",
-    )
-    .with_default("mpegts"),
-    PropertySpec::new(
-        "caps",
-        PropKind::Str,
-        "caps to declare instead, gst-launch syntax: e.g. video/x-raw,format=i420,width=320,height=240",
-    ),
+    BYTESTREAM_FORMAT_PROPERTY,
+    CAPS_PROPERTY,
     PropertySpec::new(
         "num-buffers",
         PropKind::Int,

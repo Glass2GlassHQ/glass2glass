@@ -39,14 +39,15 @@ use tokio::net::{TcpListener, TcpStream};
 
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec,
 };
 
-use crate::bytestream::byte_frame;
+use crate::bytestream::{
+    byte_frame, DeclaredSourceCaps, BYTESTREAM_FORMAT_PROPERTY, CAPS_PROPERTY,
+};
 use crate::filesink::io_err;
-use crate::filesrc::{encoding_from_str, encoding_to_str};
 
 /// The `port` every element of the GStreamer `tcp` plugin defaults to.
 const DEFAULT_PORT: u16 = 4953;
@@ -58,9 +59,6 @@ const DEFAULT_BLOCKSIZE: usize = 4096;
 /// Largest `blocksize` a property may ask for, so a bad value cannot demand a
 /// huge per-read allocation.
 const MAX_BLOCKSIZE: u64 = 1 << 30;
-/// The container a source declares when `bytestream-format` is not set, matching
-/// `srtsrc` (the other byte-stream network source that cannot know its type).
-const DEFAULT_ENCODING: ByteStreamEncoding = ByteStreamEncoding::MpegTs;
 
 /// [`DEFAULT_PORT`] as text, since a property spec takes a `&'static str`.
 const DEFAULT_PORT_TEXT: &str = "4953";
@@ -114,14 +112,6 @@ const NUM_BUFFERS_SPEC: PropertySpec = PropertySpec::new(
 )
 .with_default(UNLIMITED_BUFFERS_TEXT)
 .with_range(UNLIMITED_BUFFERS_TEXT, MAX_BUFFERS_TEXT);
-
-/// The container both sources declare for the bytes they carry.
-const FORMAT_SPEC: PropertySpec = PropertySpec::new(
-    "bytestream-format",
-    PropKind::Str,
-    "container of the byte stream: mpegts | matroska | ogg | flv | mp4",
-)
-.with_default("mpegts");
 
 /// Where an element reaches its peer. `host` is a name or a literal address (gst
 /// defaults it to `localhost`), so it is resolved at bind / connect time instead
@@ -262,12 +252,12 @@ async fn read_until_close(
     Ok(sequence)
 }
 
-/// What both TCP sources hold: the peer, the container they declare for the
+/// What both TCP sources hold: the peer, the caps they declare for the
 /// otherwise untyped byte stream, and the read / emit limits.
 #[derive(Debug)]
 struct SourceSettings {
     endpoint: Endpoint,
-    caps: Caps,
+    declared: DeclaredSourceCaps,
     blocksize: usize,
     frame_limit: u64,
     configured: bool,
@@ -277,9 +267,7 @@ impl Default for SourceSettings {
     fn default() -> Self {
         Self {
             endpoint: Endpoint::default(),
-            caps: Caps::ByteStream {
-                encoding: DEFAULT_ENCODING,
-            },
+            declared: DeclaredSourceCaps::default(),
             blocksize: DEFAULT_BLOCKSIZE,
             frame_limit: u64::MAX,
             configured: false,
@@ -299,6 +287,9 @@ impl SourceSettings {
         if let Some(result) = self.endpoint.set_property(name, value) {
             return Some(result);
         }
+        if let Some(result) = self.declared.set_property(name, value) {
+            return Some(result);
+        }
         match name {
             "blocksize" => Some(match value.as_uint() {
                 None => Err(PropError::Type),
@@ -312,16 +303,6 @@ impl SourceSettings {
                 &mut self.frame_limit,
                 value,
             )),
-            "bytestream-format" => Some(match value.as_str() {
-                Some(text) => match encoding_from_str(text) {
-                    Some(encoding) => {
-                        self.caps = Caps::ByteStream { encoding };
-                        Ok(())
-                    }
-                    None => Err(PropError::Value),
-                },
-                None => Err(PropError::Type),
-            }),
             _ => None,
         }
     }
@@ -333,13 +314,7 @@ impl SourceSettings {
         match name {
             "blocksize" => Some(PropValue::Uint(self.blocksize as u64)),
             "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
-            "bytestream-format" => match &self.caps {
-                Caps::ByteStream { encoding } => {
-                    Some(PropValue::Str(encoding_to_str(*encoding).to_string()))
-                }
-                _ => None,
-            },
-            _ => None,
+            _ => self.declared.get_property(name),
         }
     }
 }
@@ -392,19 +367,19 @@ impl SourceLoop for TcpServerSrc {
         Self: 'a;
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
-        core::future::ready(Ok(self.settings.caps.clone()))
+        core::future::ready(Ok(self.settings.declared.caps().clone()))
     }
 
     fn caps_constraint<'a>(
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
         core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(
-            self.settings.caps.clone(),
+            self.settings.declared.caps().clone(),
         ))))
     }
 
     fn configured_output_caps(&self) -> Option<Caps> {
-        Some(self.settings.caps.clone())
+        Some(self.settings.declared.caps().clone())
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -466,7 +441,8 @@ static SERVER_SRC_PROPS: &[PropertySpec] = &[
     CURRENT_PORT_SPEC,
     BLOCKSIZE_SPEC,
     NUM_BUFFERS_SPEC,
-    FORMAT_SPEC,
+    BYTESTREAM_FORMAT_PROPERTY,
+    CAPS_PROPERTY,
 ];
 
 /// # Example
@@ -503,19 +479,19 @@ impl SourceLoop for TcpClientSrc {
         Self: 'a;
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
-        core::future::ready(Ok(self.settings.caps.clone()))
+        core::future::ready(Ok(self.settings.declared.caps().clone()))
     }
 
     fn caps_constraint<'a>(
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
         core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(
-            self.settings.caps.clone(),
+            self.settings.declared.caps().clone(),
         ))))
     }
 
     fn configured_output_caps(&self) -> Option<Caps> {
-        Some(self.settings.caps.clone())
+        Some(self.settings.declared.caps().clone())
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -575,7 +551,8 @@ static CLIENT_SRC_PROPS: &[PropertySpec] = &[
     port_spec("port of the server to read from"),
     BLOCKSIZE_SPEC,
     NUM_BUFFERS_SPEC,
-    FORMAT_SPEC,
+    BYTESTREAM_FORMAT_PROPERTY,
+    CAPS_PROPERTY,
 ];
 
 /// # Example

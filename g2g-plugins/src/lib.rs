@@ -1343,13 +1343,14 @@ mod rtpcapturetime;
 
 // Shared byte-stream carrier pieces (M1068, M1079): the frame shape a received
 // chunk takes, the MPEG-TS packet geometry a datagram is cut on, and the
-// container list a raw wire sink advertises.
+// container list a raw wire sink advertises, and the caps a byte source declares.
 #[cfg(any(
     feature = "tcp",
     feature = "srt",
     feature = "rist",
     feature = "udp-ingress",
     feature = "udp-egress",
+    all(target_os = "linux", feature = "shm"),
 ))]
 pub mod bytestream;
 
