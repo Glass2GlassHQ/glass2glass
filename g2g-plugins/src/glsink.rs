@@ -882,6 +882,61 @@ mod tests {
         );
     }
 
+    #[test]
+    fn planar_deep_yuv_draws_like_its_eight_bit_codes() {
+        let _egl = crate::EGL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (headless, gl) = match headless_context(HeadlessApi::DesktopCore32) {
+            Ok(pair) => pair,
+            Err(why) => {
+                std::println!("skipping: no headless desktop GL context ({why})");
+                return;
+            }
+        };
+        let (w, h) = (64usize, 32usize);
+        let (u, v) = (90u8, 200u8);
+        let nv12 = nv12_ramp(w, h, u, v);
+        let reference = nv12_to_rgb_reference(&nv12, w, h, Colorimetry::BT709);
+        let mut gl = Some(gl);
+        for format in [
+            RawVideoFormat::I420p10,
+            RawVideoFormat::I422p10,
+            RawVideoFormat::I444p12,
+        ] {
+            let shift = format.bit_depth() - 8;
+            let [_, (_, chroma_width, chroma_height), _] =
+                crate::pixel::planar_planes(format, w, h);
+            let chroma_samples = chroma_width * chroma_height;
+            let frame: Vec<u8> = nv12[..w * h]
+                .iter()
+                .copied()
+                .chain(core::iter::repeat_n(u, chroma_samples))
+                .chain(core::iter::repeat_n(v, chroma_samples))
+                .flat_map(|code| (u16::from(code) << shift).to_le_bytes())
+                .collect();
+            let gl = gl.take().unwrap_or_else(|| headless.gl());
+            let rgba = render_to_rgba(
+                gl,
+                w as u32,
+                h as u32,
+                GlMode::Planar16(format),
+                Colorimetry::BT709,
+                &frame,
+            )
+            .expect("headless planar render");
+            let max_delta = (0..w * h)
+                .flat_map(|px| (0..3).map(move |ch| (px, ch)))
+                .map(|(px, ch)| (rgba[px * 4 + ch] as i32 - reference[px * 3 + ch] as i32).abs())
+                .max()
+                .unwrap_or(0);
+            assert!(
+                max_delta <= 2,
+                "GPU {format:?} convert is off the CPU reference by {max_delta}"
+            );
+        }
+    }
+
     /// The RGBA path is a straight texture fetch, so the readback must be the
     /// uploaded frame byte for byte.
     #[test]

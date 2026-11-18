@@ -601,13 +601,6 @@ pub(crate) mod display {
     pub(crate) const NV12_AND_RGBA: &[RawVideoFormat] =
         &[RawVideoFormat::Nv12, RawVideoFormat::Rgba8];
 
-    #[cfg(any(test, feature = "gl-render"))]
-    pub(crate) const NV12_RGBA_AND_P010: &[RawVideoFormat] = &[
-        RawVideoFormat::Nv12,
-        RawVideoFormat::Rgba8,
-        RawVideoFormat::P010,
-    ];
-
     pub(crate) fn display_sink_caps(native: &[RawVideoFormat]) -> CapsSet {
         let converted = FORMATS
             .iter()
@@ -750,6 +743,12 @@ pub(crate) mod display {
             assert_eq!(presented(NV12_AND_RGBA), RawVideoFormat::Rgba8);
             assert_eq!(presented(NV12_ONLY), RawVideoFormat::Nv12);
         }
+
+        const NV12_RGBA_AND_P010: &[RawVideoFormat] = &[
+            RawVideoFormat::Nv12,
+            RawVideoFormat::Rgba8,
+            RawVideoFormat::P010,
+        ];
 
         #[test]
         fn deep_yuv_keeps_its_depth_only_where_the_sink_takes_p010() {

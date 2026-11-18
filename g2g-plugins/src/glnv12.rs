@@ -7,8 +7,9 @@
 //! Builds a GL ES 3 program plus the textures for one pixel layout (`GlMode`)
 //! and a fullscreen quad, then per frame gets the pixels into those textures and
 //! draws. NV12 uses the Y (`R8`) + interleaved UV (`RG8`) pair and a convert
-//! shader carrying the caps colorimetry's weights; RGBA uses one `RGBA8` texture
-//! and a passthrough shader.
+//! shader carrying the caps colorimetry's weights; planar 10 and 12 bit YUV
+//! uses one `R16` texture per plane and the same convert; RGBA uses one `RGBA8`
+//! texture and a passthrough shader.
 //! Pixels arrive either from CUDA device memory (`upload_and_draw`, the CUDA-GL
 //! interop registered lazily on the first frame) or from a system-memory slice
 //! (`upload_system_and_draw`).
@@ -32,7 +33,7 @@ use g2g_core::{Colorimetry, G2gError, MemoryDomain, RawVideoFormat};
 use crate::display_aspect::{letterbox, ViewportRectangle};
 use crate::filled_rectangles::{rectangle_vertices, FilledRectangle};
 use crate::overlay_image::OverlayImage;
-use crate::videoconvert::display::{display_sink_caps, DisplayInput, NV12_RGBA_AND_P010};
+use crate::videoconvert::display::{display_sink_caps, DisplayInput};
 use crate::yuvmatrix::{dither_step, YuvToRgbWeights, DITHER_NOISE_SCALE, DITHER_NOISE_WEIGHTS};
 
 #[cfg(any(feature = "cuda-gl", feature = "cuda-kms"))]
@@ -66,18 +67,29 @@ out vec4 g2g_frag_color;
 ";
 
 /// GLSL ES 1.00 fragment shader: sample the luma (`R8`, or `R16` for P010) and
-/// interleaved chroma (`RG8` / `RG16`) textures and convert YCbCr -> RGB with
-/// `colorimetry`'s matrix and range. The sampler pair is verbatim from
-/// DESIGN-C3-cuda.md Appendix A; the weights are compiled in, so a mid-stream
-/// colorimetry change rebuilds the program.
-pub(crate) fn fragment_shader_semi_planar(
-    colorimetry: Colorimetry,
-    format: RawVideoFormat,
-) -> String {
-    // P010 keeps each 10-bit code in the top bits of a 16-bit word, so it samples as code * 64 / 65535, not the code / 255 the weights take
+/// interleaved chroma (`RG8` / `RG16`) textures, or the three `R16` planes of a
+/// planar 10 or 12 bit format, and convert YCbCr -> RGB with `colorimetry`'s
+/// matrix and range. The weights are compiled in, so a mid-stream colorimetry
+/// change rebuilds the program.
+pub(crate) fn fragment_shader_yuv(colorimetry: Colorimetry, format: RawVideoFormat) -> String {
     let (precision, sample_scale) = match format {
-        RawVideoFormat::P010 => ("highp", 65535.0f32 / 65280.0),
-        _ => ("mediump", 1.0f32),
+        RawVideoFormat::Nv12 => ("mediump", 1.0f32),
+        // P010 keeps each 10-bit code in the top bits of a 16-bit word, so it samples as code * 64 / 65535, not the code / 255 the weights take
+        RawVideoFormat::P010 => ("highp", 65535.0 / 65280.0),
+        // planar 10 and 12 bit formats keep each code in the low bits of a 16-bit word
+        planar => (
+            "highp",
+            65535.0 / (255u32 << (planar.bit_depth() - 8)) as f32,
+        ),
+    };
+    let (samplers, chroma) = match format {
+        RawVideoFormat::Nv12 | RawVideoFormat::P010 => {
+            ("uniform sampler2D uv_tex;", "texture2D(uv_tex, v_uv).rg")
+        }
+        _ => (
+            "uniform sampler2D u_tex;\nuniform sampler2D v_tex;",
+            "vec2(texture2D(u_tex, v_uv).r, texture2D(v_tex, v_uv).r)",
+        ),
     };
     let w = YuvToRgbWeights::new(colorimetry);
     format!(
@@ -85,11 +97,11 @@ pub(crate) fn fragment_shader_semi_planar(
 precision {precision} float;
 varying vec2 v_uv;
 uniform sampler2D y_tex;
-uniform sampler2D uv_tex;
+{samplers}
 uniform float u_dither_step;
 void main() {{
     float y = texture2D(y_tex, v_uv).r * {sample_scale:?};
-    vec2  c = texture2D(uv_tex, v_uv).rg * {sample_scale:?};
+    vec2  c = {chroma} * {sample_scale:?};
     y = {luma_gain:?} * (y - {luma_floor:?});
     float cb = c.x - {chroma_neutral:?};
     float cr = c.y - {chroma_neutral:?};
@@ -149,6 +161,7 @@ void main() {
 pub(crate) enum GlMode {
     Nv12,
     P010,
+    Planar16(RawVideoFormat),
     /// Only the system-memory sink negotiates RGBA; the CUDA sinks are NV12-only.
     Rgba,
 }
@@ -163,11 +176,18 @@ enum Textures {
         uv_loc: Option<glow::UniformLocation>,
         planes: SemiPlanarPlanes,
     },
+    Planar16 {
+        planes: [glow::Texture; 3],
+        locations: [Option<glow::UniformLocation>; 3],
+        format: RawVideoFormat,
+    },
     Rgba {
         tex: glow::Texture,
         loc: Option<glow::UniformLocation>,
     },
 }
+
+const PLANAR_SAMPLERS: [&str; 3] = ["y_tex", "u_tex", "v_tex"];
 
 #[derive(Debug, Clone, Copy)]
 struct SemiPlanarPlanes {
@@ -192,7 +212,7 @@ impl SemiPlanarPlanes {
                 glow::RG16,
                 glow::UNSIGNED_SHORT,
             ),
-            GlMode::Rgba => return None,
+            GlMode::Planar16(_) | GlMode::Rgba => return None,
         };
         Some(Self {
             format,
@@ -308,9 +328,11 @@ impl GlState {
     ) -> Result<GlState, alloc::boxed::Box<dyn std::error::Error>> {
         // SAFETY: the caller guarantees a current GL ES 3 context.
         unsafe {
-            let fragment = match SemiPlanarPlanes::of(mode) {
-                Some(planes) => fragment_shader_semi_planar(colorimetry, planes.format),
-                None => String::from(FRAGMENT_SHADER_RGBA),
+            let fragment = match mode {
+                GlMode::Nv12 => fragment_shader_yuv(colorimetry, RawVideoFormat::Nv12),
+                GlMode::P010 => fragment_shader_yuv(colorimetry, RawVideoFormat::P010),
+                GlMode::Planar16(format) => fragment_shader_yuv(colorimetry, format),
+                GlMode::Rgba => String::from(FRAGMENT_SHADER_RGBA),
             };
             let program = link_for(&gl, VERTEX_SHADER, &fragment)?;
             let overlay_program = link_for(&gl, OVERLAY_VERTEX_SHADER, OVERLAY_FRAGMENT_SHADER)?;
@@ -355,8 +377,28 @@ impl GlState {
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
             gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytemuck_cast(&verts), glow::STATIC_DRAW);
 
-            let textures = match SemiPlanarPlanes::of(mode) {
-                Some(planes) => {
+            let textures = match (SemiPlanarPlanes::of(mode), mode) {
+                (_, GlMode::Planar16(format)) => {
+                    let plane_texture = |(_, plane_width, plane_height): (usize, usize, usize)| {
+                        make_texture(
+                            &gl,
+                            glow::R16,
+                            glow::RED,
+                            glow::UNSIGNED_SHORT,
+                            plane_width as u32,
+                            plane_height as u32,
+                        )
+                    };
+                    let [y, u, v] =
+                        crate::pixel::planar_planes(format, width as usize, height as usize);
+                    Textures::Planar16 {
+                        planes: [plane_texture(y)?, plane_texture(u)?, plane_texture(v)?],
+                        locations: PLANAR_SAMPLERS
+                            .map(|sampler| gl.get_uniform_location(program, sampler)),
+                        format,
+                    }
+                }
+                (Some(planes), _) => {
                     let cw = width.div_ceil(2);
                     let ch = height.div_ceil(2);
                     let SemiPlanarPlanes {
@@ -380,7 +422,7 @@ impl GlState {
                         planes,
                     }
                 }
-                None => Textures::Rgba {
+                (None, _) => Textures::Rgba {
                     tex: make_texture(
                         &gl,
                         glow::RGBA8,
@@ -423,7 +465,9 @@ impl GlState {
     pub(crate) fn upload_and_draw(&mut self, buf: &OwnedCudaBuffer) -> Result<(), G2gError> {
         let (y_tex, uv_tex) = match &self.textures {
             Textures::SemiPlanar { y_tex, uv_tex, .. } => (*y_tex, *uv_tex),
-            Textures::Rgba { .. } => return Err(G2gError::CapsMismatch),
+            Textures::Planar16 { .. } | Textures::Rgba { .. } => {
+                return Err(G2gError::CapsMismatch)
+            }
         };
         // Lazily make the decoder's CUDA context current on this thread and
         // register the textures with CUDA, now that the context is known.
@@ -510,6 +554,27 @@ impl GlState {
                         &bytes[uv_at..frame_bytes],
                     );
                 }
+                Textures::Planar16 { planes, format, .. } => {
+                    let frame_bytes =
+                        crate::pixel::frame_byte_size(*format, self.width, self.height);
+                    if bytes.len() < frame_bytes {
+                        return Err(G2gError::CapsMismatch);
+                    }
+                    let layout = crate::pixel::planar_planes(*format, w, h);
+                    for (texture, (offset, plane_width, plane_height)) in planes.iter().zip(layout)
+                    {
+                        let plane_bytes = plane_width * plane_height * format.bytes_per_sample();
+                        sub_image(
+                            gl,
+                            *texture,
+                            glow::RED,
+                            glow::UNSIGNED_SHORT,
+                            plane_width,
+                            plane_height,
+                            &bytes[offset..offset + plane_bytes],
+                        );
+                    }
+                }
                 Textures::Rgba { tex, .. } => {
                     let size = w.saturating_mul(h).saturating_mul(4);
                     if bytes.len() < size {
@@ -552,6 +617,15 @@ impl GlState {
                     gl.active_texture(glow::TEXTURE1);
                     gl.bind_texture(glow::TEXTURE_2D, Some(*uv_tex));
                     gl.uniform_1_i32(uv_loc.as_ref(), 1);
+                }
+                Textures::Planar16 {
+                    planes, locations, ..
+                } => {
+                    for (unit, (texture, location)) in planes.iter().zip(locations).enumerate() {
+                        gl.active_texture(glow::TEXTURE0 + unit as u32);
+                        gl.bind_texture(glow::TEXTURE_2D, Some(*texture));
+                        gl.uniform_1_i32(location.as_ref(), unit as i32);
+                    }
                 }
                 Textures::Rgba { tex, loc } => {
                     gl.active_texture(glow::TEXTURE0);
@@ -741,6 +815,11 @@ impl GlState {
                     gl.delete_texture(y_tex);
                     gl.delete_texture(uv_tex);
                 }
+                Textures::Planar16 { planes, .. } => {
+                    for texture in planes {
+                        gl.delete_texture(texture);
+                    }
+                }
                 Textures::Rgba { tex, .. } => gl.delete_texture(tex),
             }
         }
@@ -751,8 +830,20 @@ impl GlState {
 #[cfg(any(feature = "gl-sink", feature = "cuda-gl", feature = "cuda-kms"))]
 const UPRIGHT_ON_DEFAULT_FRAMEBUFFER: bool = true;
 
+const GL_NATIVE_FORMATS: &[RawVideoFormat] = &[
+    RawVideoFormat::Nv12,
+    RawVideoFormat::Rgba8,
+    RawVideoFormat::P010,
+    RawVideoFormat::I420p10,
+    RawVideoFormat::I422p10,
+    RawVideoFormat::I444p10,
+    RawVideoFormat::I420p12,
+    RawVideoFormat::I422p12,
+    RawVideoFormat::I444p12,
+];
+
 pub fn accepted_caps() -> g2g_core::CapsSet {
-    display_sink_caps(NV12_RGBA_AND_P010)
+    display_sink_caps(GL_NATIVE_FORMATS)
 }
 
 #[derive(Debug)]
@@ -763,7 +854,7 @@ pub struct DisplayFrame {
 }
 
 pub fn convert_for_display(caps: &g2g_core::Caps, bytes: &[u8]) -> Result<DisplayFrame, G2gError> {
-    let input = DisplayInput::from_caps(caps, NV12_RGBA_AND_P010)?;
+    let input = DisplayInput::from_caps(caps, GL_NATIVE_FORMATS)?;
     let converted = input.convert_frame(bytes)?;
     let g2g_core::Caps::RawVideo {
         width,
@@ -841,7 +932,7 @@ impl GlVideoRenderer {
     }
 
     pub fn configure(&mut self, absolute_caps: &g2g_core::Caps) -> Result<(), G2gError> {
-        self.input = Some(DisplayInput::from_caps(absolute_caps, NV12_RGBA_AND_P010)?);
+        self.input = Some(DisplayInput::from_caps(absolute_caps, GL_NATIVE_FORMATS)?);
         Ok(())
     }
 
@@ -860,16 +951,15 @@ impl GlVideoRenderer {
             unsafe { self.destroy_state() };
             // SAFETY: the caller guarantees the context `loader` resolves for is current.
             let gl = unsafe { glow::Context::from_loader_function(|name| (self.loader)(name)) };
-            let drawn = match input.presented {
-                RawVideoFormat::P010 if !has_16_bit_textures(&gl) => {
-                    input.presented_as(RawVideoFormat::Nv12)
-                }
+            let drawn = match input.presented.bytes_per_sample() {
+                2 if !has_16_bit_textures(&gl) => input.presented_as(RawVideoFormat::Nv12),
                 _ => input,
             };
             let mode = match drawn.presented {
                 RawVideoFormat::Nv12 => GlMode::Nv12,
                 RawVideoFormat::P010 => GlMode::P010,
-                _ => GlMode::Rgba,
+                RawVideoFormat::Rgba8 => GlMode::Rgba,
+                planar => GlMode::Planar16(planar),
             };
             // SAFETY: the caller guarantees the context `loader` resolves for is current.
             let state =
@@ -1145,7 +1235,7 @@ mod tests {
     fn shaders_declare_the_nv12_sampler_pair() {
         // Lock the Appendix A contract the CUDA upload side relies on: a
         // full-res luma sampler and a half-res interleaved chroma sampler.
-        let shader = fragment_shader_semi_planar(Colorimetry::UNKNOWN, RawVideoFormat::Nv12);
+        let shader = fragment_shader_yuv(Colorimetry::UNKNOWN, RawVideoFormat::Nv12);
         assert!(shader.contains("uniform sampler2D y_tex"));
         assert!(shader.contains("uniform sampler2D uv_tex"));
         // Vertex shader feeds the fragment shader's texcoord varying.
@@ -1158,7 +1248,7 @@ mod tests {
     /// what a full-range stream's zero luma floor would print as.
     #[test]
     fn full_range_weights_stay_float_literals() {
-        let shader = fragment_shader_semi_planar(
+        let shader = fragment_shader_yuv(
             Colorimetry {
                 range: g2g_core::ColorRange::Full,
                 ..Colorimetry::BT709
@@ -1169,8 +1259,8 @@ mod tests {
         assert!(shader.contains("y = 1.0 *"), "{shader}");
         // At the same range, the matrix still reaches the shader.
         assert_ne!(
-            fragment_shader_semi_planar(Colorimetry::BT709, RawVideoFormat::Nv12),
-            fragment_shader_semi_planar(Colorimetry::BT601, RawVideoFormat::Nv12)
+            fragment_shader_yuv(Colorimetry::BT709, RawVideoFormat::Nv12),
+            fragment_shader_yuv(Colorimetry::BT601, RawVideoFormat::Nv12)
         );
     }
 }

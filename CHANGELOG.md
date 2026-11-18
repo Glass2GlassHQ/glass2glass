@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2414: the GL video renderer draws planar 10 and 12 bit YUV on the GPU instead of converting it to P010 on the CPU.
 - M2413: player render contexts clear the target to black until the first frame arrives.
 - M2412: audio sinks play again after a seek made while paused.
 - M2411: the GL video renderer turns off Apple client storage a host left on, so its textures allocate on macOS.
