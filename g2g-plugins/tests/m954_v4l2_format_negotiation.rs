@@ -76,9 +76,18 @@ fn fourccs_map_to_the_caps_they_produce() {
             ..
         }
     ));
-    // greyscale and bayer have no g2g caps, so they are skipped, not mapped.
+    // greyscale has no g2g caps, so it is skipped, not mapped.
     assert_eq!(format_for_fourcc(b"GREY"), None);
-    assert_eq!(format_for_fourcc(b"BA81"), None);
+    assert!(matches!(
+        format_for_fourcc(b"BA81").expect("ba81").caps(640, 480, 30),
+        Caps::RawVideo {
+            format: RawVideoFormat::Bayer(g2g_core::BayerFormat {
+                pattern: g2g_core::BayerPattern::Bggr,
+                ..
+            }),
+            ..
+        }
+    ));
 }
 
 /// Sink that keeps the first frame's bytes and the caps it was told about, so a
