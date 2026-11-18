@@ -807,6 +807,48 @@ fn container_fps_is_the_video_frame_rate() {
     );
 }
 
+#[test]
+fn video_params_first_reports_the_decoded_size() {
+    // the matroska demuxer opens its port at a placeholder size, the mp4 one at the stored size
+    const MKV_CLIP: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../g2g-plugins/tests/fixtures/h264_64x48_25fps_gop10.mkv"
+    );
+    for clip in [CLIP, MKV_CLIP] {
+        let player = Player::new();
+        player.observe(Property::VideoParams);
+        player
+            .load(
+                Media::Uri(&format!("file://{clip}")),
+                LoadOptions {
+                    start: None,
+                    pause: Some(true),
+                },
+            )
+            .unwrap();
+        let deadline = Instant::now() + EVENT_TIMEOUT;
+        let first_reported = loop {
+            assert!(
+                Instant::now() < deadline,
+                "{clip}: no video size within {EVENT_TIMEOUT:?}"
+            );
+            if let Some(Event::PropertyChange(PropertyChange::VideoParams(Some(size)))) =
+                player.wait_event(deadline - Instant::now())
+            {
+                break size;
+            }
+        };
+        assert_eq!(
+            first_reported,
+            VideoSize {
+                width: CLIP_WIDTH,
+                height: CLIP_HEIGHT,
+            },
+            "{clip}"
+        );
+    }
+}
+
 #[cfg(feature = "ffmpeg")]
 #[test]
 fn a_jpeg_2000_picture_with_no_matching_raw_format_plays() {
