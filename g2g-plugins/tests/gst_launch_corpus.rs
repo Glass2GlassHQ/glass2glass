@@ -240,6 +240,8 @@ fn new_elements_are_available_under_their_gst_names() {
         "hsvfilter",
         "hsvdetector",
         "roundedcorners",
+        "bayer2rgb",
+        "rgb2bayer",
         "rsaudioecho",
         "fallbackswitch",
         "livesync",

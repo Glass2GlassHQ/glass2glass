@@ -402,6 +402,7 @@ pub fn raw_format_to_u8(f: RawVideoFormat) -> u8 {
         RawVideoFormat::RgbF32 => 30,
         RawVideoFormat::RgbpF16 => 31,
         RawVideoFormat::RgbpF32 => 32,
+        RawVideoFormat::Rgba64Le => 33,
         RawVideoFormat::Bayer(bayer) => {
             let index = ALL_BAYER_FORMATS
                 .iter()
@@ -448,6 +449,7 @@ pub fn raw_format_from_u8(v: u8) -> Result<RawVideoFormat, WireError> {
         30 => RawVideoFormat::RgbF32,
         31 => RawVideoFormat::RgbpF16,
         32 => RawVideoFormat::RgbpF32,
+        33 => RawVideoFormat::Rgba64Le,
         code @ FIRST_BAYER_WIRE_CODE.. => RawVideoFormat::Bayer(
             *ALL_BAYER_FORMATS
                 .get(usize::from(code - FIRST_BAYER_WIRE_CODE))

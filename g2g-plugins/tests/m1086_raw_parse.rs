@@ -341,7 +341,8 @@ async fn a_bayer_dump_frames_at_two_bytes_per_sample() {
             encoding: ByteStreamEncoding::Raw,
         })
         .expect("a raw byte stream");
-    let frame_len = (width * height * 2) as usize;
+    // Bayer rows are stored at the width rounded up to four pixels
+    let frame_len = (8 * height * 2) as usize;
     let dump: Vec<u8> = (0..frame_len * frames).map(|index| index as u8).collect();
     let out = drive(&mut parser, &dump).await;
 

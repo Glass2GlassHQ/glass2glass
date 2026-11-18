@@ -240,7 +240,7 @@ fn node_path(device: &Device) -> Option<&str> {
 
 /// The advertised fourccs `v4l2src` can carry, in that element's preference
 /// order rather than the driver's. A fourcc no [`Caps`] covers (greyscale,
-/// bayer, a vendor format) is left out here and survives only in the node's
+/// packed Bayer, a vendor format) is left out here and survives only in the node's
 /// `formats` detail.
 fn carried_formats(formats: &[v4l::format::Description]) -> Vec<(FourCC, CapturePixelFormat)> {
     FOURCCS

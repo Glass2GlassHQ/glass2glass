@@ -2638,8 +2638,10 @@ pub enum RawVideoFormat {
     RgbpF16,
     // planar R, G, B of little-endian 32-bit floats, each channel 0.0 to 1.0, the CHW layout models read
     RgbpF32,
-    // one plane of sensor samples behind a colour filter array, gst `video/x-bayer`
+    // one plane of sensor samples behind a colour filter array, the GStreamer `video/x-bayer`
     Bayer(BayerFormat),
+    // packed RGBA of little-endian 16-bit words
+    Rgba64Le,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -2659,7 +2661,7 @@ pub enum BayerPattern {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BayerSampleFormat {
     Bits8,
-    // gst and V4L2 store the 10- to 14-bit samples in the low bits of a 16-bit word
+    // GStreamer and V4L2 store the 10- to 14-bit samples in the low bits of a 16-bit word
     Bits10Le,
     Bits10Be,
     Bits12Le,
@@ -2774,6 +2776,7 @@ impl RawVideoFormat {
             RawVideoFormat::RgbpF16 => "RGBP_F16LE",
             RawVideoFormat::RgbpF32 => "RGBP_F32LE",
             RawVideoFormat::Bayer(bayer) => bayer.gst_name(),
+            RawVideoFormat::Rgba64Le => "RGBA64_LE",
         }
     }
 
@@ -2798,6 +2801,7 @@ impl RawVideoFormat {
             RawVideoFormat::RgbaF16 | RawVideoFormat::RgbF16 | RawVideoFormat::RgbpF16 => 16,
             RawVideoFormat::RgbaF32 | RawVideoFormat::RgbF32 | RawVideoFormat::RgbpF32 => 32,
             RawVideoFormat::Bayer(bayer) => bayer.sample.bit_depth(),
+            RawVideoFormat::Rgba64Le => 16,
             _ => 8,
         }
     }
@@ -2887,7 +2891,8 @@ impl RawVideoFormat {
             | RawVideoFormat::RgbaF32
             | RawVideoFormat::RgbF16
             | RawVideoFormat::RgbF32
-            | RawVideoFormat::Bayer(_) => self.plane_stride(0, width),
+            | RawVideoFormat::Bayer(_)
+            | RawVideoFormat::Rgba64Le => self.plane_stride(0, width),
             RawVideoFormat::Nv12 | RawVideoFormat::I420 => width.div_ceil(2).checked_mul(2),
             _ => None,
         }
@@ -2917,7 +2922,8 @@ impl RawVideoFormat {
             | RawVideoFormat::RgbaF32
             | RawVideoFormat::RgbF16
             | RawVideoFormat::RgbF32
-            | RawVideoFormat::Bayer(_) => Some(luma),
+            | RawVideoFormat::Bayer(_)
+            | RawVideoFormat::Rgba64Le => Some(luma),
             RawVideoFormat::Nv12 | RawVideoFormat::I420 => {
                 luma.checked_add(stride.checked_mul(height.div_ceil(2))?)
             }
@@ -2947,7 +2953,8 @@ impl RawVideoFormat {
             | RawVideoFormat::RgbaF32
             | RawVideoFormat::RgbF16
             | RawVideoFormat::RgbF32
-            | RawVideoFormat::Bayer(_) => 1,
+            | RawVideoFormat::Bayer(_)
+            | RawVideoFormat::Rgba64Le => 1,
             RawVideoFormat::Nv12 | RawVideoFormat::P010 => 2,
             RawVideoFormat::I420
             | RawVideoFormat::I420p10
@@ -2982,7 +2989,7 @@ impl RawVideoFormat {
             RawVideoFormat::Rgb8 | RawVideoFormat::Bgr8 => Some(3),
             RawVideoFormat::RgbaF32 => Some(16),
             RawVideoFormat::RgbF32 => Some(12),
-            RawVideoFormat::RgbaF16 => Some(8),
+            RawVideoFormat::RgbaF16 | RawVideoFormat::Rgba64Le => Some(8),
             RawVideoFormat::RgbF16 => Some(6),
             RawVideoFormat::Yuyv | RawVideoFormat::Uyvy => Some(2),
             RawVideoFormat::Gray8 => Some(1),
@@ -3002,6 +3009,11 @@ impl RawVideoFormat {
         }
         if matches!(self, RawVideoFormat::Yuyv | RawVideoFormat::Uyvy) {
             return width.div_ceil(2).checked_mul(4);
+        }
+        // GStreamer lays Bayer rows out at the width rounded up to four pixels
+        if let RawVideoFormat::Bayer(bayer) = self {
+            let sample_bytes = u32::from(bayer.sample.bit_depth().div_ceil(8));
+            return width.checked_next_multiple_of(4)?.checked_mul(sample_bytes);
         }
         if self == RawVideoFormat::V210 {
             const V210_ROW_BLOCK_PIXELS: u32 = 48;
@@ -3296,7 +3308,7 @@ pub enum TensorLayout {
     Nhwc,
 }
 
-const NON_BAYER_RAW_VIDEO_FORMATS: [RawVideoFormat; 33] = [
+const NON_BAYER_RAW_VIDEO_FORMATS: [RawVideoFormat; 34] = [
     RawVideoFormat::Nv12,
     RawVideoFormat::I420,
     RawVideoFormat::Rgba8,
@@ -3330,6 +3342,7 @@ const NON_BAYER_RAW_VIDEO_FORMATS: [RawVideoFormat; 33] = [
     RawVideoFormat::RgbF32,
     RawVideoFormat::RgbpF16,
     RawVideoFormat::RgbpF32,
+    RawVideoFormat::Rgba64Le,
 ];
 
 pub const ALL_BAYER_FORMATS: [BayerFormat; 36] = {
@@ -3353,7 +3366,7 @@ pub const ALL_BAYER_FORMATS: [BayerFormat; 36] = {
 };
 
 pub const ALL_RAW_VIDEO_FORMATS: &[RawVideoFormat] = &{
-    let mut all = [RawVideoFormat::Nv12; 33 + 36];
+    let mut all = [RawVideoFormat::Nv12; 34 + 36];
     let mut index = 0;
     while index < NON_BAYER_RAW_VIDEO_FORMATS.len() {
         all[index] = NON_BAYER_RAW_VIDEO_FORMATS[index];
@@ -4418,6 +4431,26 @@ mod tests {
             CapsSet::from_gst_string(&field_pair).map(|set| set.alternatives()[0].clone()),
             Some(h264(crate::BitstreamAlignment::FieldPair)),
             "{field_pair}"
+        );
+    }
+
+    #[test]
+    fn bayer_rows_round_up_to_four_pixels() {
+        let bayer = |sample| {
+            RawVideoFormat::Bayer(BayerFormat {
+                pattern: BayerPattern::Rggb,
+                sample,
+            })
+        };
+        assert_eq!(bayer(BayerSampleFormat::Bits8).plane_stride(0, 6), Some(8));
+        assert_eq!(bayer(BayerSampleFormat::Bits8).plane_stride(0, 8), Some(8));
+        assert_eq!(
+            bayer(BayerSampleFormat::Bits12Le).plane_stride(0, 6),
+            Some(16)
+        );
+        assert_eq!(
+            bayer(BayerSampleFormat::Bits8).unpadded_frame_bytes(6, 3),
+            Some(24)
         );
     }
 

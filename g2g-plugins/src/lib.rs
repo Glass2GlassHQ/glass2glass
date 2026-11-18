@@ -404,6 +404,7 @@ pub mod vellooverlay;
 // blitting onto an offscreen target or a caller-provided wgpu::Surface.
 pub mod alpha;
 pub mod aspectratiocrop;
+pub mod bayer;
 pub mod chromahold;
 #[cfg(feature = "std")]
 pub mod clockoverlay;

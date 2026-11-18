@@ -661,6 +661,7 @@ pub fn parse_raw_format(s: &str) -> Option<RawVideoFormat> {
         "rgb_f32le" => RawVideoFormat::RgbF32,
         "rgbp_f16le" => RawVideoFormat::RgbpF16,
         "rgbp_f32le" => RawVideoFormat::RgbpF32,
+        "rgba64_le" => RawVideoFormat::Rgba64Le,
         name => RawVideoFormat::Bayer(
             *ALL_BAYER_FORMATS
                 .iter()

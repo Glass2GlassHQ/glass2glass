@@ -949,6 +949,14 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<Alpha>("alpha", || {
         Box::new(Alpha::new())
     }));
+    reg.register_launch(LaunchFactory::of::<crate::bayer::Bayer2Rgb>(
+        "bayer2rgb",
+        || Box::new(crate::bayer::Bayer2Rgb::new()),
+    ));
+    reg.register_launch(LaunchFactory::of::<crate::bayer::Rgb2Bayer>(
+        "rgb2bayer",
+        || Box::new(crate::bayer::Rgb2Bayer::new()),
+    ));
     reg.register_launch(LaunchFactory::of::<VideoBox>("videobox", || {
         Box::new(VideoBox::new())
     }));

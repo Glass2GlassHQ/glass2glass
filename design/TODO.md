@@ -486,8 +486,10 @@ unless it says otherwise.
 - **Video codecs:** `openh264enc` / `openh264dec`, `svtav1enc`, `mpeg2enc`,
   `openjpegenc` / `openjpegdec`, `openexrdec`,
   `gdkpixbufdec`, `rsvgdec`, `flxdec`, `vmncdec`,
-  `bayer2rgb` / `rgb2bayer`, `codecalpha` (`alphacombine`, `codecalphademux`,
+  `codecalpha` (`alphacombine`, `codecalphademux`,
   `vp8alphadecodebin`), `jp2kdecimator`.
+- **Bayer:** Bayer formats from `libcamerasrc`, and `v4l2src` Bayer capture
+  when the driver row stride is under the width rounded up to four pixels.
 - **Containers:** `mxfmux`, `asfdemux` / `asfmux` / `asfparse`,
   `rmdemux` / `rademux`, `mpegpsmux`, `mplex`, `atscmux`, `tsparse`,
   `matroskaparse`, `oggparse` / `ogmaudioparse` / `ogmvideoparse` /

@@ -132,9 +132,22 @@ samples. `BayerPattern` names the colours of the top-left 2x2 block, and
 big-endian 16-bit word. The gst caps string is `video/x-bayer,format=rggb12le`,
 and the parser rejects a Bayer name under `video/x-raw` and a non-Bayer name
 under `video/x-bayer`. A `video/x-bayer` with no `format` expands to all 36
-formats. `v4l2src` carries the unpacked V4L2 Bayer fourccs (`BA81` to `RG16`)
-and advertises them after MJPEG. `rawvideoparse` frames a Bayer dump by its gst
+formats. Rows are stored at the width rounded up to four pixels, as GStreamer lays them
+out. `v4l2src` carries the unpacked V4L2 Bayer fourccs (`BA81` to `RG16`) and
+advertises them after MJPEG, and drops frames whose driver row stride is under
+the rounded width. `rawvideoparse` frames a Bayer dump by its gst
 format name.
+
+`bayer2rgb` demosaics into RGBA, BGRA, BGRx, ARGB or RGBA64_LE. Each row is
+split into the colours of its even and odd columns, averaged horizontally, then
+each pixel averages the rows above and below it. Edges mirror, except that the
+second to last column copies its left neighbour and the row below the last row
+is four rows up (two rows up in frames under four rows), both as GStreamer does.
+For 8-bit outputs, samples above 8 bits shift down to 8. RGBA64_LE multiplies
+8-bit samples by 257 and scales wider ones by 65535 over two to the depth,
+alpha included. Any frame of at least 2x2 works. `rgb2bayer` takes ARGB and keeps the one colour each sensor
+site sees, widening 8-bit values by repeating their top bits. Both match
+GStreamer's elements byte for byte on the fixtures from `tools/bayer-fixtures.sh`.
 
 ## The solver
 
