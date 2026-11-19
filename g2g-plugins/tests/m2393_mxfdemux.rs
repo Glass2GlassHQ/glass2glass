@@ -17,6 +17,9 @@ use g2g_plugins::clock::WallClock;
 use g2g_plugins::mxfdemux::{forwardable_tracks, MxfDemuxN};
 use g2g_plugins::registry::default_registry;
 
+#[path = "common/ffmpeg_tool.rs"]
+mod ffmpeg_tool;
+
 // every fixture is ten frames at 25 fps, see tools/mxf-fixtures.sh
 const FRAMES: usize = 10;
 const FRAME_NS: u64 = 40_000_000;
@@ -193,6 +196,10 @@ struct Streaming {
 
 // fed the header, then the tail it seeks to, then back at byte 0
 async fn streaming(file: &[u8]) -> Streaming {
+    streaming_with_probes(file, false).await
+}
+
+async fn streaming_with_probes(file: &[u8], expect_probes: bool) -> Streaming {
     let (mut demux, mut ports) = demuxer(file);
     let app = SeekController::new();
     app.enable_seeks_after_end();
@@ -210,10 +217,37 @@ async fn streaming(file: &[u8]) -> Streaming {
     send(&mut demux, PipelinePacket::Flush, &mut ports).await;
     feed(&mut demux, &file[to_tail..], &mut ports).await;
     send(&mut demux, PipelinePacket::Eos, &mut ports).await;
-    let back = upstream
-        .take_seek(Ok)
-        .expect("the demuxer seeks back to the start");
-    assert_eq!(back.start, 0);
+    let mut probes = 0;
+    let mut probe_bytes = 0;
+    loop {
+        let seek = upstream
+            .take_seek(Ok)
+            .expect("the demuxer seeks for the index or rewinds to play");
+        let start = seek.start as usize;
+        if start == 0 && (!expect_probes || probes > 0) {
+            break;
+        }
+        assert!(expect_probes && start < to_tail);
+        probes += 1;
+        send(&mut demux, PipelinePacket::Flush, &mut ports).await;
+        for chunk in file[start..].chunks(CHUNK_LEN) {
+            feed(&mut demux, chunk, &mut ports).await;
+            probe_bytes += chunk.len();
+            if upstream.has_pending() {
+                break;
+            }
+        }
+        if !upstream.has_pending() {
+            send(&mut demux, PipelinePacket::Eos, &mut ports).await;
+        }
+    }
+    if expect_probes {
+        assert!(probes >= 3, "probe multiple partitions outside the tail");
+        assert!(
+            probe_bytes < file.len() / 4,
+            "skip essence during the probes"
+        );
+    }
     send(&mut demux, PipelinePacket::Flush, &mut ports).await;
     assert!(ports.units.iter().all(Vec::is_empty));
     Streaming {
@@ -299,6 +333,54 @@ fn a_picture_seek_lands_on_the_keyframe_the_index_names() {
         let video = &streaming.ports.units[0];
         assert!(video[0].keyframe);
         assert_eq!(video[..], whole.units[0][SECOND_GOP_FRAME..]);
+    });
+}
+
+#[test]
+fn a_seek_into_an_unplayed_body_partition_uses_the_prefetched_index() {
+    if !ffmpeg_tool::have_ffmpeg() {
+        eprintln!("skipping the multi-partition MXF test without ffmpeg");
+        return;
+    }
+    let path = format!(
+        "{}/mxf_multiple_partitions.mxf",
+        env!("CARGO_TARGET_TMPDIR")
+    );
+    let status = std::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=96x64:rate=25:duration=34",
+            "-c:v",
+            "mpeg2video",
+            "-g",
+            "25",
+            "-bf",
+            "0",
+            "-q:v",
+            "8",
+            "-f",
+            "mxf",
+            &path,
+        ])
+        .status()
+        .expect("ffmpeg starts");
+    assert!(status.success(), "ffmpeg writes the multi-partition MXF");
+    let file = std::fs::read(&path).expect("the file reads");
+    std::fs::remove_file(&path).expect("the temporary file is removed");
+    block_on(async {
+        let whole = whole_file_units(&file).await;
+        let mut streaming = streaming_with_probes(&file, true).await;
+        let landing = seek_after(&mut streaming, &file, 12_480_000_000).await;
+        assert!(landing > file.len() / 4, "seek into a later body partition");
+        let video = &streaming.ports.units[0];
+        assert!(video[0].keyframe);
+        assert_eq!(video[0].pts_ns, 12_000_000_000);
+        assert_eq!(&video[..], &whole.units[0][300..]);
     });
 }
 

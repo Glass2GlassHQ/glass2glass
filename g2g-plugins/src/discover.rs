@@ -12,7 +12,8 @@
 //! forwarding a payload, so by that point it has posted its
 //! [`StreamCollection`](g2g_core::stream::StreamCollection) and metadata, and
 //! the runner has published the source's duration. Nothing is decoded: the
-//! answer comes from container headers only.
+//! answer comes from container headers and tags. MP4 reads the movie box
+//! directly, and MP3 also checks the tail for an ID3v1 fallback.
 //!
 //! Which demuxer to plug, and which stream it should forward, comes from the
 //! registry's primary-stream hooks
@@ -25,6 +26,7 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::future::Future;
 use core::pin::Pin;
+use std::io::{Read, Seek, SeekFrom};
 
 use g2g_core::element::DynAsyncElement;
 use g2g_core::runtime::{
@@ -33,8 +35,8 @@ use g2g_core::runtime::{
 };
 use g2g_core::stream::StreamType;
 use g2g_core::{
-    AsyncElement, Bus, BusMessage, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata,
-    G2gError, Graph, OutputSink, PipelinePacket, TagList,
+    AsyncElement, AudioFormat, Bus, BusMessage, Caps, CapsConstraint, ConfigureOutcome,
+    ElementMetadata, G2gError, Graph, OutputSink, PipelinePacket, TagList,
 };
 
 use crate::clock::WallClock;
@@ -238,6 +240,13 @@ pub async fn discover(reg: &Registry, uri: &str) -> Result<Discovery, DiscoverEr
     let header = read_header(&path)?;
     let sniffed = sniff_caps(&header).ok_or(DiscoverError::UnknownType)?;
     let container = sniffed.to_gst_string();
+    if is_mp4(&sniffed) {
+        return discover_mp4(uri, &path, container);
+    }
+    let audio_format = match sniffed {
+        Caps::Audio { format, .. } => Some(format),
+        _ => None,
+    };
 
     // Which demuxer parses this container, and which of its streams it should
     // forward: the same probe `decodebin` runs, so an audio-only file plugs an
@@ -251,19 +260,12 @@ pub async fn discover(reg: &Registry, uri: &str) -> Result<Discovery, DiscoverEr
         .or_else(|| demux_name_for(&sniffed));
 
     let (bus, bus_handle) = Bus::new(PROBE_BUS_CAPACITY);
-    let progress = PipelineProgress::new();
 
-    // `Mp4Src` is the one source that answers a duration query (from the movie
-    // header) and it demuxes the file itself, so the MP4 probe plugs no demuxer.
-    let self_demuxing = is_mp4(&sniffed);
-    let source: Box<dyn DynSourceLoop> = if self_demuxing {
-        Box::new(crate::mp4src::Mp4Src::new(&path).with_bus(bus_handle.clone()))
-    } else {
-        Box::new(crate::filesrc::FileSrc::new(&path, sniffed.clone()))
-    };
+    let source: Box<dyn DynSourceLoop> =
+        Box::new(crate::filesrc::FileSrc::new(&path, sniffed.clone()));
 
-    // A bare elementary stream (`.264`, `.aac`, a PNG) needs no demuxer: the
-    // sniff already named the codec, so the file source alone is the probe.
+    // FLAC and MPEG audio carry tags the sniff does not read. Other bare
+    // elementary streams use the caps from the sniff alone.
     let demux = if is_mxf(&sniffed) {
         let prefix = crate::uridecodebin::read_prefix(&path)
             .ok_or_else(|| DiscoverError::Io(format!("{path}: cannot read the MXF header")))?;
@@ -275,7 +277,7 @@ pub async fn discover(reg: &Registry, uri: &str) -> Result<Discovery, DiscoverEr
             outputs: tracks.len(),
             element: Box::new(crate::mxfdemux::MxfDemuxN::new(tracks)),
         })
-    } else if matches!(sniffed, Caps::ByteStream { .. }) && !self_demuxing {
+    } else if matches!(sniffed, Caps::ByteStream { .. }) {
         let name = demux_name.ok_or_else(|| DiscoverError::NoParser(container.clone()))?;
         let mut element = demux_with_bus(name, bus_handle.clone())
             .ok_or_else(|| DiscoverError::NoParser(container.clone()))?;
@@ -286,9 +288,18 @@ pub async fn discover(reg: &Registry, uri: &str) -> Result<Discovery, DiscoverEr
         }
         Some(ProbeDemux::Single(element))
     } else {
-        None
+        let element: Option<Box<dyn DynAsyncElement>> = match audio_format {
+            Some(AudioFormat::Flac) => Some(Box::new(
+                crate::flacparse::FlacParse::new().with_bus(bus_handle.clone()),
+            )),
+            Some(AudioFormat::Mp3 | AudioFormat::Mp2) => Some(Box::new(
+                crate::mpegaudioparse::MpegAudioParse::new().with_bus(bus_handle.clone()),
+            )),
+            _ => None,
+        };
+        element.map(ProbeDemux::Single)
     };
-
+    let progress = PipelineProgress::new();
     let sink_count = match &demux {
         Some(ProbeDemux::Fanout { outputs, .. }) => *outputs,
         Some(ProbeDemux::Single(_)) | None => 1,
@@ -328,6 +339,11 @@ pub async fn discover(reg: &Registry, uri: &str) -> Result<Discovery, DiscoverEr
     drop(bus_handle);
 
     let mut info = harvest(uri, container, &bus, &progress);
+    if audio_format == Some(AudioFormat::Mp3) && info.tags.is_empty() {
+        if let Some(tags) = trailing_id3_tags(&path) {
+            info.tags = tags;
+        }
+    }
     if info.streams.is_empty() {
         // No demuxer announced a collection (a single-stream container like WAV,
         // or a bare elementary stream). The caps the probe negotiated describe
@@ -351,7 +367,44 @@ pub async fn discover(reg: &Registry, uri: &str) -> Result<Discovery, DiscoverEr
     }
 }
 
-/// The ISO base media family, which `Mp4Src` reads on its own.
+fn trailing_id3_tags(path: &str) -> Option<TagList> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut block = [0; crate::id3::ID3V1_LEN];
+    file.seek(SeekFrom::End(-(block.len() as i64))).ok()?;
+    file.read_exact(&mut block).ok()?;
+    crate::id3::parse_id3v1(&block)
+}
+
+fn discover_mp4(uri: &str, path: &str, container: String) -> Result<Discovery, DiscoverError> {
+    let data = crate::uridecodebin::read_mp4_top_level_box(path, b"moov")
+        .ok_or_else(|| DiscoverError::Probe(format!("{path}: cannot read the MP4 movie box")))?;
+    let tracks = crate::fmp4::parse_all_tracks(&data)
+        .map_err(|error| DiscoverError::Probe(format!("{path}: invalid MP4 tracks: {error:?}")))?;
+    let moov = crate::mp4box::find_box(&data, b"moov").expect("read_mp4_top_level_box found moov");
+    let streams = tracks
+        .into_iter()
+        .map(|track| {
+            let caps = crate::mp4demuxn::real_caps(&track.kind);
+            DiscoveredStream {
+                id: crate::mp4demuxn::stream_id(track.track_id),
+                stream_type: StreamType::of(&caps),
+                caps,
+                tags: track.tags,
+            }
+        })
+        .collect();
+    let duration_ns = crate::fmp4::movie_duration_ns(moov)
+        .or_else(|| crate::fmp4::parse_header(&data).ok()?.duration_ns);
+    Ok(Discovery {
+        uri: uri.to_string(),
+        container,
+        duration_ns,
+        streams,
+        tags: crate::mp4box::parse_ilst_tags(moov),
+    })
+}
+
+/// The ISO base media family.
 fn is_mp4(caps: &Caps) -> bool {
     matches!(
         caps,

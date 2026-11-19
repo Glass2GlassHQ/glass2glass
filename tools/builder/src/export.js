@@ -11,16 +11,17 @@
 // importers (import.js), so the two build identical node data.
 export const isSink = (doc) => /Sink/i.test(doc.classification || "");
 export const roleClass = (role) =>
-  role === "source" ? "source" : role.startsWith("muxer") ? "muxer" : "element";
+  role.startsWith("source") ? "source" : role.startsWith("muxer") ? "muxer" : "element";
 export function nodeData(id, element, doc, props = {}) {
+  const kind = roleClass(doc.role);
   return {
     name: id,
     element,
     role: doc.role,
-    roleClass: roleClass(doc.role),
+    roleClass: kind,
     doc,
     props,
-    hasIn: doc.role !== "source",
+    hasIn: kind !== "source",
     hasOut: !isSink(doc),
   };
 }

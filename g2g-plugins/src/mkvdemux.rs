@@ -563,7 +563,7 @@ impl MkvDemux {
     /// Map one parsed Matroska track to a [`Stream`] for the collection: its kind
     /// (video / audio) and the [`Caps`] it carries, with concrete geometry / audio
     /// parameters when the track declared them. `None` for an unmappable codec.
-    fn track_to_stream(track: &crate::matroska::MkvTrack) -> Option<Stream> {
+    pub(crate) fn track_to_stream(track: &crate::matroska::MkvTrack) -> Option<Stream> {
         let id = stream_id(track.number);
         let dim = |pixels| match pixels {
             0 => Dim::Any,

@@ -6,6 +6,10 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2435: `g2g-discover` reads tags from audio-only MP4, FLAC and MP3.
+- M2434: `g2g-player` lists and switches tracks in local media files.
+- M2433: `g2g-inspect` and the element reference list fan-out sources and `uridecodebin`.
+- M2432: `mxfdemux` prefetches partition indexes for seeking in long files.
 - M2431: `matroskamux` writes QuickTime DV as a VFW track.
 - M2430: write cover art in MP4, FLAC, VorbisComment and ID3.
 - M2429: `flvdemux` falls back to the last media tag for file duration.

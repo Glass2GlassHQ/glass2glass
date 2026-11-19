@@ -3468,10 +3468,17 @@ fn register_feature_gated(reg: &mut Registry) {
     // first linked pad and the SDP's audio on the second
     // (`rtspsrcn name=s location=...  s. ! ...  s. ! ...`).
     #[cfg(feature = "rtsp")]
-    reg.register_fanout_src(g2g_core::runtime::FanoutSrcFactory::new(
-        "rtspsrcn",
-        |outputs| Box::new(crate::rtspsrcn::RtspSrcN::new("").with_outputs(outputs)),
-    ));
+    reg.register_fanout_src(
+        g2g_core::runtime::FanoutSrcFactory::new("rtspsrcn", |outputs| {
+            Box::new(crate::rtspsrcn::RtspSrcN::new("").with_outputs(outputs))
+        })
+        .with_metadata(g2g_core::ElementMetadata::new(
+            "Multi-track RTSP source",
+            "Source/Network",
+            "Receives video and audio from one RTSP session",
+            crate::AARON_BOXER,
+        )),
+    );
     // gst's `rtspsrc` has a pad per stream, video and audio, the parser builds this
     // form when several are linked or the one linked branch does not take video
     #[cfg(feature = "rtsp")]
@@ -3684,15 +3691,20 @@ fn register_feature_gated(reg: &mut Registry) {
     // publisher per linked pad, or per two with `audio=true`
     // (`rtspserversrcn name=s  s. ! ...  s. ! ...`).
     #[cfg(feature = "rtsp-server")]
-    reg.register_fanout_src(g2g_core::runtime::FanoutSrcFactory::new(
-        "rtspserversrcn",
-        |n| {
+    reg.register_fanout_src(
+        g2g_core::runtime::FanoutSrcFactory::new("rtspserversrcn", |n| {
             Box::new(crate::rtspserversrcn::RtspServerSrcN::new(
                 "0.0.0.0:8554".parse().unwrap(),
                 n,
             ))
-        },
-    ));
+        })
+        .with_metadata(g2g_core::ElementMetadata::new(
+            "Multi-publisher RTSP server source",
+            "Source/Network",
+            "Receives media from concurrent RTSP publishers on one endpoint",
+            crate::AARON_BOXER,
+        )),
+    );
     #[cfg(feature = "srt")]
     reg.register_source(SourceFactory::new(
         "srtsrc",
@@ -3802,15 +3814,20 @@ fn register_feature_gated(reg: &mut Registry) {
     // The multi-track shape of the same subscriber: one session, one pad per
     // track (`moqtsessionsrc name=s tracks=1.m4s,2.m4s  s. ! ...  s. ! ...`).
     #[cfg(feature = "moqt")]
-    reg.register_fanout_src(g2g_core::runtime::FanoutSrcFactory::new(
-        "moqtsessionsrc",
-        |outputs| {
+    reg.register_fanout_src(
+        g2g_core::runtime::FanoutSrcFactory::new("moqtsessionsrc", |outputs| {
             Box::new(
                 crate::moqtsessionsrc::MoqtSessionSrc::new("https://127.0.0.1:4443/", "g2g")
                     .with_outputs(outputs),
             )
-        },
-    ));
+        })
+        .with_metadata(g2g_core::ElementMetadata::new(
+            "Multi-track MoQ source",
+            "Source/Network",
+            "Subscribes to several tracks over one MoQ session",
+            crate::AARON_BOXER,
+        )),
+    );
     #[cfg(feature = "moqt")]
     reg.register_source(SourceFactory::new(
         "moqtsrc",
@@ -4248,10 +4265,17 @@ fn register_feature_gated(reg: &mut Registry) {
     // Terminal fan-out session sources (M727): output 0 = H.264 video, output
     // 1 = Opus audio (`livekitsrc name=s url=...  s. ! ...  s. ! ...`).
     #[cfg(feature = "webrtc-livekit")]
-    reg.register_fanout_src(g2g_core::runtime::FanoutSrcFactory::new(
-        "livekitsrc",
-        |_n| Box::new(crate::livekitsrc::LiveKitSrc::new("", "", "g2g-sub")),
-    ));
+    reg.register_fanout_src(
+        g2g_core::runtime::FanoutSrcFactory::new("livekitsrc", |_n| {
+            Box::new(crate::livekitsrc::LiveKitSrc::new("", "", "g2g-sub"))
+        })
+        .with_metadata(g2g_core::ElementMetadata::new(
+            "LiveKit media source",
+            "Source/Network",
+            "Receives video and audio from a LiveKit room",
+            crate::AARON_BOXER,
+        )),
+    );
     // LiveKit user data packets, one per frame each way, from data-only
     // participants (`livekitdatasrc url=... room=... topic=input ! ...`).
     #[cfg(feature = "webrtc-livekit")]
@@ -4277,36 +4301,60 @@ fn register_feature_gated(reg: &mut Registry) {
     // Same shape for the multi-track WHEP subscriber; `location` targets the
     // endpoint (`webrtcwhepsessionsrc name=s location=...`).
     #[cfg(feature = "webrtc")]
-    reg.register_fanout_src(g2g_core::runtime::FanoutSrcFactory::new(
-        "webrtcwhepsessionsrc",
-        |_n| Box::new(crate::webrtcwhepsession::WebRtcWhepSessionSrc::new("")),
-    ));
+    reg.register_fanout_src(
+        g2g_core::runtime::FanoutSrcFactory::new("webrtcwhepsessionsrc", |_n| {
+            Box::new(crate::webrtcwhepsession::WebRtcWhepSessionSrc::new(""))
+        })
+        .with_metadata(g2g_core::ElementMetadata::new(
+            "WebRTC WHEP session source",
+            "Source/Network",
+            "Receives video and audio from a WHEP endpoint",
+            crate::AARON_BOXER,
+        )),
+    );
     // Janus VideoRoom subscriber, same two outputs.
     #[cfg(feature = "webrtc-janus")]
-    reg.register_fanout_src(g2g_core::runtime::FanoutSrcFactory::new(
-        "janusvrsrc",
-        |_n| {
+    reg.register_fanout_src(
+        g2g_core::runtime::FanoutSrcFactory::new("janusvrsrc", |_n| {
             Box::new(crate::janusvrsrc::JanusVrSrc::new(
                 crate::janusvrsrc::DEFAULT_ENDPOINT,
             ))
-        },
-    ));
+        })
+        .with_metadata(g2g_core::ElementMetadata::new(
+            "Janus VideoRoom source",
+            "Source/Network",
+            "Receives video and audio from a Janus VideoRoom publisher",
+            crate::AARON_BOXER,
+        )),
+    );
     // Kinesis Video Streams viewer, same two outputs.
     #[cfg(feature = "webrtc-kvs")]
-    reg.register_fanout_src(g2g_core::runtime::FanoutSrcFactory::new(
-        "kvswebrtcsrc",
-        |_n| Box::new(crate::kvswebrtcsrc::KvsWebRtcSrc::new()),
-    ));
+    reg.register_fanout_src(
+        g2g_core::runtime::FanoutSrcFactory::new("kvswebrtcsrc", |_n| {
+            Box::new(crate::kvswebrtcsrc::KvsWebRtcSrc::new())
+        })
+        .with_metadata(g2g_core::ElementMetadata::new(
+            "Kinesis WebRTC source",
+            "Source/Network",
+            "Receives video and audio from a Kinesis Video Streams signaling channel",
+            crate::AARON_BOXER,
+        )),
+    );
     // WHIP server ingest: a publisher POSTs to `host-addr`, same two outputs.
     #[cfg(feature = "webrtc")]
-    reg.register_fanout_src(g2g_core::runtime::FanoutSrcFactory::new(
-        "whipserversrc",
-        |_n| {
+    reg.register_fanout_src(
+        g2g_core::runtime::FanoutSrcFactory::new("whipserversrc", |_n| {
             Box::new(crate::whipserversrc::WhipServerSrc::new(
                 crate::whipserversrc::DEFAULT_HOST_ADDR,
             ))
-        },
-    ));
+        })
+        .with_metadata(g2g_core::ElementMetadata::new(
+            "WebRTC WHIP server source",
+            "Source/Network",
+            "Receives video and audio from a publisher on a WHIP endpoint",
+            crate::AARON_BOXER,
+        )),
+    );
     #[cfg(all(target_os = "linux", feature = "kms-sink"))]
     reg.register_launch(
         LaunchFactory::of::<KmsSink>("kmssink", || Box::new(KmsSink::new()))

@@ -49,10 +49,6 @@ The plan is [remote.md](remote.md).
 
 ## Embeddable player (`g2g-player`)
 
-- Track selection and the `track-list` property.
-- Read the index segments of every partition the MXF random index pack lists
-  before playback, so a seek in a long MXF file with a body partition every
-  10 s, as ffmpeg writes, lands by index instead of reading from byte 0.
 - D-10 AES3 sound in MXF (SMPTE ST 331).
 - Take GPU frames in `playervideosink` once decoders open on the host's device.
 - An option that hands PCM to the host.
@@ -450,14 +446,9 @@ libraries installed.
 ## Properties / introspection / DSL
 
 - A GUI / tooling introspection surface beyond the text dump.
-- `g2g-inspect` and `docs/elements.html` leave out the elements registered only
-  as fan-out sources (`rtspsrcn`, `rtspserversrcn`, `uridecodebin`):
-  `g2g-inspect rtspserversrcn` answers "No such element".
 - Register URI schemes for bare `scheme://` launch stages beyond `ice+http(s)`:
   `udp`, `srt`, `rtsp`, `rtmp`, `http(s)`, and `file` (as a path for `filesrc` /
   `filesink`), each with the property its element takes the URI in.
-- `g2g-discover`: read audio-only MP4 and native FLAC / MP3 files, which it
-  cannot probe, so their tags show.
 
 ## GStreamer element coverage
 

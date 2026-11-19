@@ -17,16 +17,17 @@ use g2g_core::graph::{Graph, NodeId};
 use g2g_core::log::Target;
 use g2g_core::runtime::{
     attach_seek, attach_seek_controller, launch_quote, parse_chain, parse_launch, GraphMutator,
-    GraphNode, GraphNodeRef, LaunchFactory, ParseError, PipelineProgress, Registry, RunBuilder,
-    SeekController, SeekOutcome, SeekTicket, StateController,
+    GraphNode, GraphNodeRef, LaunchFactory, ParseError, PipelineProgress, PlaybinSinks, Registry,
+    RunBuilder, SeekController, SeekOutcome, SeekTicket, StateController,
 };
 use g2g_core::segment::Seek;
 use g2g_core::state::PipelineState;
-use g2g_core::{Bus, BusMessage};
+use g2g_core::{Bus, BusMessage, Caps, TagList};
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::edl::{parse_edl_uri, EdlError};
 use g2g_plugins::launched::RunFailure;
 use g2g_plugins::registry::default_registry;
+use g2g_plugins::uridecodebin::{file_track_playbin, PlaybinTrackSelection};
 
 mod caps_probe;
 mod demux_probe;
@@ -36,10 +37,11 @@ mod render;
 mod subtitles;
 mod videosink;
 
-pub use g2g_core::{ChannelLayout, ChannelPosition};
+pub use g2g_core::{ChannelLayout, ChannelPosition, StreamType};
 #[cfg(feature = "ffmpeg")]
 pub use g2g_plugins::ffmpegdec::Lowres;
 pub use g2g_plugins::glnv12::GlTarget;
+pub use g2g_plugins::uridecodebin::{PlaybinTrack as Track, PlaybinTrackChoice as TrackChoice};
 pub use level_meter::AudioLevels;
 pub use picture_filters::VideoFilterError;
 pub use render::GlRenderContext;
@@ -152,9 +154,10 @@ pub enum Property {
     EstimatedVfFps,
     // how far the demuxer has read past time-pos
     DemuxerCacheDuration,
+    TrackList,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum PropertyChange {
     Pause(bool),
     TimePos(Option<Duration>),
@@ -170,10 +173,11 @@ pub enum PropertyChange {
     DelayedFrameCount(u64),
     EstimatedVfFps(Option<f64>),
     DemuxerCacheDuration(Option<Duration>),
+    TrackList(Arc<[Track]>),
 }
 
 impl PropertyChange {
-    fn property(self) -> Property {
+    fn property(&self) -> Property {
         match self {
             PropertyChange::Pause(_) => Property::Pause,
             PropertyChange::TimePos(_) => Property::TimePos,
@@ -189,6 +193,7 @@ impl PropertyChange {
             PropertyChange::OsdDimensions(_) => Property::OsdDimensions,
             PropertyChange::AudioParams(_) => Property::AudioParams,
             PropertyChange::ContainerFps(_) => Property::ContainerFps,
+            PropertyChange::TrackList(_) => Property::TrackList,
         }
     }
 }
@@ -258,6 +263,27 @@ impl fmt::Display for SeekError {
 
 impl std::error::Error for SeekError {}
 
+#[derive(Debug)]
+pub enum SelectTrackError {
+    NoMedia,
+    Unsupported,
+    Load(LoadError),
+}
+
+impl fmt::Display for SelectTrackError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoMedia => f.write_str("nothing is loaded"),
+            Self::Unsupported => f.write_str(
+                "selection needs a seekable file with a selectable track or subtitle kind",
+            ),
+            Self::Load(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for SelectTrackError {}
+
 type WakeupCallback = Arc<dyn Fn() + Send + Sync>;
 
 #[derive(Default)]
@@ -302,6 +328,12 @@ fn fps_of(framerate_q16: u32) -> f64 {
 }
 
 #[derive(Debug, Default)]
+struct TrackCatalog {
+    entries: Arc<[Track]>,
+    from_container: bool,
+}
+
+#[derive(Debug, Default)]
 pub(crate) struct Shared {
     events: EventQueue,
     frames: FrameSlot,
@@ -319,6 +351,8 @@ pub(crate) struct Shared {
     osd_dimensions: Mutex<Option<OsdDimensions>>,
     audio_params: Mutex<Option<AudioParams>>,
     audio_levels: Mutex<Option<AudioLevels>>,
+    tracks: Mutex<TrackCatalog>,
+    hide_video: AtomicBool,
     // what time-pos shows from a seek request until its first frame is presented, as mpv's does
     seek_target: Mutex<Option<Duration>>,
     // set by a seek request, taken by the flush that seek sends through playervideosink
@@ -341,9 +375,47 @@ impl Shared {
         if *last == value {
             return;
         }
-        *last = value;
+        *last = value.clone();
         drop(observed);
         self.events.push(Event::PropertyChange(value));
+    }
+
+    fn set_track_list(&self, tracks: Vec<Track>) {
+        let tracks: Arc<[Track]> = tracks.into();
+        *self.tracks.lock().expect("track list lock") = TrackCatalog {
+            from_container: !tracks.is_empty(),
+            entries: tracks.clone(),
+        };
+        self.report(PropertyChange::TrackList(tracks));
+    }
+
+    // A single-stream source or an explicit graph can describe the branches
+    // reaching the player even when no container catalog was available.
+    pub(crate) fn note_playing_caps(&self, caps: &Caps) {
+        let kind = StreamType::of(caps);
+        let mut tracks = self.tracks.lock().expect("track list lock");
+        if tracks.from_container {
+            return;
+        }
+        let existing = tracks.entries.iter().position(|entry| entry.kind == kind);
+        if existing.is_some_and(|index| tracks.entries[index].caps == *caps) {
+            return;
+        }
+        let mut next = tracks.entries.to_vec();
+        match existing {
+            Some(index) => next[index].caps = caps.clone(),
+            None => next.push(Track {
+                kind,
+                index: 0,
+                caps: caps.clone(),
+                tags: TagList::new(),
+                selected: true,
+            }),
+        }
+        tracks.entries = next.into();
+        let next = tracks.entries.clone();
+        drop(tracks);
+        self.report(PropertyChange::TrackList(next));
     }
 
     fn set_paused(&self, paused: bool, state: Option<&StateController>) {
@@ -443,6 +515,11 @@ impl Shared {
         })
     }
 
+    fn show_seek_target(&self, shown: Duration) {
+        *self.seek_target.lock().expect("seek target lock") = Some(shown);
+        self.seek_flush_pending.store(true, Ordering::SeqCst);
+    }
+
     pub(crate) fn seek_landed(&self) {
         *self.seek_target.lock().expect("seek target lock") = None;
         self.seek_flush_pending.store(false, Ordering::SeqCst);
@@ -463,14 +540,55 @@ impl Shared {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlaybackStop {
+    Active,
+    Stop,
+    Replace,
+}
+
+#[derive(Debug, Clone)]
+struct SelectedFile {
+    uri: String,
+    selection: PlaybinTrackSelection,
+    sound_output: SoundOutput,
+    #[cfg(feature = "ffmpeg")]
+    lowres: Lowres,
+}
+
+impl SelectedFile {
+    fn sinks(&self) -> PlaybinSinks<'_> {
+        PlaybinSinks {
+            video: PLAYER_VIDEO_SINK,
+            audio: self.sound_output.sink(),
+        }
+    }
+}
+
+struct OpenedMedia {
+    graph: Graph<GraphNode>,
+    selected_file: Option<SelectedFile>,
+    tracks: Vec<Track>,
+    needs_video_sink: bool,
+    #[cfg(feature = "ffmpeg")]
+    lowres: Lowres,
+}
+
 #[derive(Debug)]
 struct Playback {
     state: StateController,
     progress: PipelineProgress,
     seek: Option<SeekController>,
     seeks: tokio::sync::mpsc::UnboundedSender<Duration>,
-    stopping: Arc<AtomicBool>,
+    stopping: Arc<Mutex<PlaybackStop>>,
+    selected_file: Option<SelectedFile>,
     thread: JoinHandle<()>,
+}
+
+struct Replacement {
+    previous: Playback,
+    seek: SeekController,
+    ticket: SeekTicket,
 }
 
 #[derive(Debug)]
@@ -533,6 +651,34 @@ impl Player {
     pub fn load(&self, media: Media<'_>, options: LoadOptions) -> Result<(), LoadError> {
         self.stop();
         let sound_output = *self.sound_output.lock().expect("sound output lock");
+        #[cfg(feature = "ffmpeg")]
+        let lowres = *self.lowres.lock().expect("lowres lock");
+        if let Media::Uri(uri) = media {
+            let file = SelectedFile {
+                uri: uri.to_string(),
+                selection: PlaybinTrackSelection::default(),
+                sound_output,
+                #[cfg(feature = "ffmpeg")]
+                lowres,
+            };
+            if let Some((graph, tracks)) =
+                file_track_playbin(&self.registry, &file.sinks(), uri, file.selection)
+                    .map_err(LoadError::Parse)?
+            {
+                return self.start_playback(
+                    OpenedMedia {
+                        graph,
+                        selected_file: Some(file),
+                        tracks,
+                        needs_video_sink: false,
+                        #[cfg(feature = "ffmpeg")]
+                        lowres,
+                    },
+                    options,
+                    None,
+                );
+            }
+        }
         let line = match media {
             Media::Uri(uri) if uri.starts_with("edl://") => edl_launch_line(uri, sound_output)?,
             Media::Uri(uri) => format!(
@@ -542,17 +688,37 @@ impl Player {
             ),
             Media::LaunchLine(line) => line.to_string(),
         };
-        let mut graph = parse_launch(&self.registry, &line).map_err(LoadError::Parse)?;
+        let graph = parse_launch(&self.registry, &line).map_err(LoadError::Parse)?;
+        self.start_playback(
+            OpenedMedia {
+                graph,
+                selected_file: None,
+                tracks: Vec::new(),
+                needs_video_sink: matches!(media, Media::LaunchLine(_)),
+                #[cfg(feature = "ffmpeg")]
+                lowres,
+            },
+            options,
+            None,
+        )
+    }
+
+    fn start_playback(
+        &self,
+        opened: OpenedMedia,
+        options: LoadOptions,
+        replacement: Option<Replacement>,
+    ) -> Result<(), LoadError> {
+        let mut graph = opened.graph;
         #[cfg(feature = "ffmpeg")]
         let lowres = {
-            let lowres = *self.lowres.lock().expect("lowres lock");
-            set_lowres_on_decoders(&mut graph, lowres);
-            lowres != Lowres::Full
+            set_lowres_on_decoders(&mut graph, opened.lowres);
+            opened.lowres != Lowres::Full
         };
         #[cfg(not(feature = "ffmpeg"))]
         let lowres = false;
         let video_sinks = connect_video_sinks(&mut graph, &self.shared);
-        if video_sinks.is_empty() && matches!(media, Media::LaunchLine(_)) {
+        if video_sinks.is_empty() && opened.needs_video_sink {
             return Err(LoadError::NoVideoSink);
         }
         let (decoded_size, decoded) = tokio::sync::watch::channel(None);
@@ -566,34 +732,40 @@ impl Player {
             *level_meter_window.borrow_and_update(),
             &self.shared,
         );
-        let seek = match options.start {
-            // a source that cannot seek still plays, seek() refuses it
-            None => attach_seek_controller(&mut graph).ok(),
-            Some(start) => {
-                let (seek, _ticket) = attach_seek(&mut graph, Seek::flush_to(nanoseconds(start)))
-                    .map_err(|_| LoadError::StartNotSeekable)?;
-                Some(seek)
-            }
+        let (seek, initial_seek, previous) = if let Some(replacement) = replacement {
+            (
+                Some(replacement.seek),
+                Some(replacement.ticket),
+                Some(replacement.previous),
+            )
+        } else {
+            let seek = match options.start {
+                // a source that cannot seek still plays, seek() refuses it
+                None => attach_seek_controller(&mut graph).ok(),
+                Some(start) => {
+                    let (seek, _ticket) =
+                        attach_seek(&mut graph, Seek::flush_to(nanoseconds(start)))
+                            .map_err(|_| LoadError::StartNotSeekable)?;
+                    Some(seek)
+                }
+            };
+            (seek, None, None)
         };
         if let Some(seek) = &seek {
             seek.keep_run_open();
         }
-        self.shared.set_eof_reached(false);
-        self.shared.set_framerate_q16(None);
-        if let Some(pause) = options.pause {
-            self.shared.set_paused(pause, None);
-        }
         // audio and video start together only once every sink has prerolled
         let state = StateController::new(PipelineState::Paused);
-        self.shared.seek_landed();
+        let replacing = previous.is_some();
         let progress = PipelineProgress::new();
         let (seeks, seek_requests) = tokio::sync::mpsc::unbounded_channel();
-        let stopping = Arc::new(AtomicBool::new(false));
+        let stopping = Arc::new(Mutex::new(PlaybackStop::Active));
         let run = PlaybackRun {
             graph,
             state: state.clone(),
             progress: progress.clone(),
             seek: seek.clone(),
+            initial_seek,
             seek_requests,
             stopping: stopping.clone(),
             shared: self.shared.clone(),
@@ -603,27 +775,153 @@ impl Player {
             level_meter_window: has_level_meter.then_some(level_meter_window),
             has_video_sink: !video_sinks.is_empty(),
         };
-        let thread = std::thread::Builder::new()
+        // A replacement holds its predecessor until its worker exists. The
+        // gate keeps the new worker from publishing anything until installed.
+        let (start, ready) = std::sync::mpsc::channel();
+        let thread = match std::thread::Builder::new()
             .name("g2g-player".into())
-            .spawn(move || run.run())
-            .map_err(LoadError::Spawn)?;
+            .spawn(move || {
+                if ready.recv().is_ok() {
+                    run.run();
+                }
+            }) {
+            Ok(thread) => thread,
+            Err(error) => {
+                if let Some(previous) = previous {
+                    *self.playback.lock().expect("playback lock") = Some(previous);
+                }
+                return Err(LoadError::Spawn(error));
+            }
+        };
+        if let Some(previous) = previous {
+            self.retire_playback(previous, PlaybackStop::Replace);
+        }
+        self.shared.set_eof_reached(false);
+        self.shared.set_framerate_q16(None);
+        if let Some(pause) = options.pause {
+            self.shared.set_paused(pause, None);
+        }
+        self.shared.seek_landed();
+        if replacing {
+            if let Some(position) = options.start {
+                self.shared.show_seek_target(position);
+            }
+        }
+        self.shared
+            .hide_video
+            .store(video_sinks.is_empty(), Ordering::SeqCst);
+        self.shared.set_track_list(opened.tracks);
+        self.shared.frames.request_redraw();
         *self.playback.lock().expect("playback lock") = Some(Playback {
             state,
             progress,
             seek,
             seeks,
             stopping,
+            selected_file: opened.selected_file,
             thread,
         });
-        self.shared.events.push(Event::FileLoaded);
+        start.send(()).expect("new playback worker waits for start");
+        if !replacing {
+            self.shared.events.push(Event::FileLoaded);
+        }
         Ok(())
+    }
+
+    /// Replace the active audio, video or subtitle track of a local file.
+    /// The selected decode graph opens at the current position and keeps the
+    /// pause state. Indices are per kind, as reported by `Property::TrackList`.
+    pub fn select_track(
+        &self,
+        kind: StreamType,
+        choice: TrackChoice,
+    ) -> Result<(), SelectTrackError> {
+        let (mut file, current) = {
+            let playback = self.playback.lock().expect("playback lock");
+            let playback = playback.as_ref().ok_or(SelectTrackError::NoMedia)?;
+            if playback.thread.thread().id() == std::thread::current().id() {
+                return Err(SelectTrackError::Unsupported);
+            }
+            let file = playback
+                .selected_file
+                .clone()
+                .filter(|_| playback.seek.is_some())
+                .ok_or(SelectTrackError::Unsupported)?;
+            (file, playback.stopping.clone())
+        };
+        let selected = match kind {
+            StreamType::Video => &mut file.selection.video,
+            StreamType::Audio => &mut file.selection.audio,
+            StreamType::Text => &mut file.selection.subtitle,
+            _ => return Err(SelectTrackError::Unsupported),
+        };
+        if *selected == choice {
+            return Ok(());
+        }
+        *selected = choice;
+        let (graph, tracks) =
+            file_track_playbin(&self.registry, &file.sinks(), &file.uri, file.selection)
+                .map_err(|error| SelectTrackError::Load(LoadError::Parse(error)))?
+                .ok_or(SelectTrackError::Unsupported)?;
+        let mut graph = graph;
+        let (position, replacement) = {
+            let mut playback = self.playback.lock().expect("playback lock");
+            let old = playback
+                .as_ref()
+                .filter(|old| Arc::ptr_eq(&old.stopping, &current))
+                .ok_or(SelectTrackError::NoMedia)?;
+            let position = self
+                .shared
+                .time_pos(Some(&old.progress))
+                .unwrap_or_default();
+            let (seek, ticket) = attach_seek(&mut graph, Seek::flush_to(nanoseconds(position)))
+                .map_err(|_| SelectTrackError::Unsupported)?;
+            (
+                position,
+                Replacement {
+                    previous: playback.take().expect("checked above"),
+                    seek,
+                    ticket,
+                },
+            )
+        };
+        #[cfg(feature = "ffmpeg")]
+        let lowres = file.lowres;
+        self.start_playback(
+            OpenedMedia {
+                graph,
+                selected_file: Some(file),
+                tracks,
+                needs_video_sink: false,
+                #[cfg(feature = "ffmpeg")]
+                lowres,
+            },
+            LoadOptions {
+                start: Some(position),
+                pause: None,
+            },
+            Some(replacement),
+        )
+        .map_err(SelectTrackError::Load)
     }
 
     pub fn stop(&self) {
         let Some(playback) = self.playback.lock().expect("playback lock").take() else {
             return;
         };
-        playback.stopping.store(true, Ordering::SeqCst);
+        self.retire_playback(playback, PlaybackStop::Stop);
+        self.shared.set_track_list(Vec::new());
+        // mpv drops the tracks of sub-add on every load
+        self.shared
+            .subtitles
+            .lock()
+            .expect("subtitles lock")
+            .drop_files();
+        self.shared.frames.request_redraw();
+    }
+
+    fn retire_playback(&self, playback: Playback, stop: PlaybackStop) {
+        *playback.stopping.lock().expect("playback stop lock") = stop;
         // g2g-core ends a run held open at the end of the stream only on shutdown
         if let Some(seek) = &playback.seek {
             seek.shutdown();
@@ -644,13 +942,6 @@ impl Player {
         self.shared.set_framerate_q16(None);
         self.shared.set_audio_params(None);
         self.shared.set_audio_levels(None);
-        // mpv drops the tracks of sub-add on every load
-        self.shared
-            .subtitles
-            .lock()
-            .expect("subtitles lock")
-            .drop_files();
-        self.shared.frames.request_redraw();
     }
 
     pub fn pause(&self) {
@@ -677,8 +968,7 @@ impl Player {
         if playback.seek.is_none() {
             return Err(SeekError::NotSeekable);
         }
-        *self.shared.seek_target.lock().expect("seek target lock") = Some(shown);
-        self.shared.seek_flush_pending.store(true, Ordering::SeqCst);
+        self.shared.show_seek_target(shown);
         // the playback thread is gone once the file ended, nothing is loaded then
         playback.seeks.send(target).map_err(|_| {
             self.shared.seek_landed();
@@ -808,6 +1098,7 @@ impl Player {
                     .expect("frame rate lock")
                     .map(fps_of),
             ),
+            Property::TrackList => PropertyChange::TrackList(self.track_list()),
         }
     }
 
@@ -821,13 +1112,23 @@ impl Player {
         if observed.iter().any(|last| last.property() == property) {
             return;
         }
-        observed.push(current);
+        observed.push(current.clone());
         drop(observed);
         self.shared.events.push(Event::PropertyChange(current));
     }
 
     pub fn wait_event(&self, timeout: Duration) -> Option<Event> {
         self.shared.events.wait(timeout)
+    }
+
+    /// Snapshot of the current file's tracks and their selection.
+    pub fn track_list(&self) -> Arc<[Track]> {
+        self.shared
+            .tracks
+            .lock()
+            .expect("track list lock")
+            .entries
+            .clone()
     }
 
     pub fn set_update_callback(&self, update: impl Fn() + Send + Sync + 'static) {
@@ -952,6 +1253,7 @@ fn insert_video_params_probe(
                 return;
             };
             shared.set_video_params(Some(size));
+            shared.note_playing_caps(caps);
             decoded_size.send_if_modified(|last| {
                 let changed = *last != Some(size);
                 *last = Some(size);
@@ -1019,8 +1321,9 @@ struct PlaybackRun {
     state: StateController,
     progress: PipelineProgress,
     seek: Option<SeekController>,
+    initial_seek: Option<SeekTicket>,
     seek_requests: tokio::sync::mpsc::UnboundedReceiver<Duration>,
-    stopping: Arc<AtomicBool>,
+    stopping: Arc<Mutex<PlaybackStop>>,
     shared: Arc<Shared>,
     picture_filters: tokio::sync::watch::Receiver<Vec<PictureFilter>>,
     decoded: tokio::sync::watch::Receiver<Option<VideoSize>>,
@@ -1092,6 +1395,7 @@ impl PlaybackRun {
             state,
             progress,
             seek,
+            initial_seek,
             mut seek_requests,
             stopping,
             shared,
@@ -1120,7 +1424,8 @@ impl PlaybackRun {
             let mutator = mutator.with_converters(g2g_plugins::registry::converters());
             tokio::pin!(run);
             let mut poll = tokio::time::interval(PROPERTY_POLL_INTERVAL);
-            let mut pending_seek: Option<SeekTicket> = None;
+            let mut awaiting_audio_resume = initial_seek.is_some() && !has_video_sink;
+            let mut pending_seek = initial_seek;
             let mut installed_filters: Vec<String> = Vec::new();
             let mut pending_filters: Option<Pin<Box<dyn Future<Output = Vec<String>> + '_>>> = None;
             picture_filters.mark_changed();
@@ -1214,6 +1519,7 @@ impl PlaybackRun {
                     Some(position) = seek_requests.recv(), if paused_filter_position.is_none() || pending_filters.is_none() => {
                         let controller = seek.as_ref().expect("seek() refuses media that cannot seek");
                         paused_filter_position = None;
+                        awaiting_audio_resume = false;
                         pending_seek = Some(seek_while_paused(&state, controller, position));
                         shared.set_eof_reached(false);
                         shared.events.push(Event::Seek);
@@ -1223,8 +1529,9 @@ impl PlaybackRun {
                         if outcome == SeekOutcome::Served {
                             shared.events.push(Event::PlaybackRestart);
                         }
-                        // playervideosink ends the seek's time-pos with its first frame, nothing does without one
-                        if !has_video_sink || outcome != SeekOutcome::Served {
+                        // A replacement audio sink has no position until it prerolls.
+                        if outcome != SeekOutcome::Served || (!has_video_sink && !awaiting_audio_resume) {
+                            awaiting_audio_resume = false;
                             shared.seek_landed();
                         }
                     }
@@ -1234,6 +1541,10 @@ impl PlaybackRun {
                         }
                     }
                     _ = poll.tick() => {
+                        if awaiting_audio_resume && pending_seek.is_none() && progress.position().is_some() {
+                            awaiting_audio_resume = false;
+                            shared.seek_landed();
+                        }
                         shared.report_progress(&progress);
                         let parked_at_end = seek.as_ref().is_some_and(SeekController::stream_ended);
                         if parked_at_end && paused_filter_position.is_none() && !shared.eof_reached.load(Ordering::SeqCst) {
@@ -1244,8 +1555,12 @@ impl PlaybackRun {
             }
         });
         shared.report_progress(&progress);
+        let stopping = *stopping.lock().expect("playback stop lock");
+        if stopping == PlaybackStop::Replace {
+            return;
+        }
         let end = match outcome {
-            Ok(_) if stopping.load(Ordering::SeqCst) => EndFile::Stop,
+            Ok(_) if stopping == PlaybackStop::Stop => EndFile::Stop,
             // a run with a muxer or a source that cannot seek ends at the end of the stream
             Ok(_) => {
                 shared.reach_end(&state);

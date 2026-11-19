@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use core::future::Future;
+use core::ops::Range;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
@@ -260,16 +261,31 @@ impl MxfIndex {
         }
     }
 
-    // the file byte holding `stream_offset` of the essence container, as ffmpeg's mxf_absolute_bodysid_offset finds it
-    fn file_offset(&self, stream_offset: u64) -> Option<u64> {
-        let place = self
+    // the file byte holding the edit unit, as ffmpeg's mxf_absolute_bodysid_offset finds it
+    fn file_offset(&self, unit: u64) -> Option<u64> {
+        let segment = self.segment_of(unit)?;
+        let stream_offset = if segment.edit_unit_byte_count > 0 {
+            u64::from(segment.edit_unit_byte_count).checked_mul(unit)?
+        } else {
+            self.entry(unit)?.stream_offset
+        };
+        let (slot, place) = self
             .partitions
             .iter()
-            .filter(|place| place.body_sid != 0 && place.body_offset <= stream_offset)
-            .max_by_key(|place| place.body_offset)?;
-        place
+            .enumerate()
+            .filter(|(_, place)| {
+                place.body_sid != 0
+                    && place.body_sid == segment.body_sid
+                    && place.body_offset <= stream_offset
+            })
+            .max_by_key(|(_, place)| place.body_offset)?;
+        let offset = place
             .essence_at?
-            .checked_add(stream_offset - place.body_offset)
+            .checked_add(stream_offset - place.body_offset)?;
+        self.partitions
+            .get(slot + 1)
+            .is_none_or(|next| offset < next.at)
+            .then_some(offset)
     }
 
     fn segment_of(&self, unit: u64) -> Option<&IndexSegment> {
@@ -282,14 +298,6 @@ impl MxfIndex {
         let segment = self.segment_of(unit)?;
         let at = usize::try_from(unit - segment.start).ok()?;
         segment.entries.get(entry_slot(segment, at)?)
-    }
-
-    fn stream_offset(&self, unit: u64) -> Option<u64> {
-        let segment = self.segment_of(unit)?;
-        if segment.edit_unit_byte_count > 0 {
-            return u64::from(segment.edit_unit_byte_count).checked_mul(unit);
-        }
-        Some(self.entry(unit)?.stream_offset)
     }
 
     fn edit_rate(&self) -> Option<Rational> {
@@ -339,7 +347,9 @@ impl Reordering {
     // a segment read after streaming started keeps the delay the first frames went out with
     fn extend(&mut self, segment: &IndexSegment) {
         for (at, entry) in segment.entries.iter().enumerate() {
-            let display = segment.start + at as u64;
+            let Some(display) = segment.start.checked_add(at as u64) else {
+                break;
+            };
             if let Some(stored) = display.checked_add_signed(i64::from(entry.temporal_offset)) {
                 self.display_of_stored.insert(stored, display);
             }
@@ -365,8 +375,12 @@ struct Unit {
 enum MxfRead {
     // until the header partition's metadata arrives
     Head,
-    // the tail is read through a byte seek for the footer's index, then the file again from byte 0
-    Tail,
+    // the tail is read through a byte seek for the random index pack
+    Tail { expanded: bool },
+    // read a partition's index segments and locate its first essence key
+    Index { next: u64, end: u64 },
+    // the seek back to byte 0 is in flight
+    Rewind,
     // each klv goes out as it arrives, the next key at `next`
     Klvs { next: u64 },
     // the file is held whole and read at Eos
@@ -428,7 +442,7 @@ fn landing(
     if tracks.iter().any(is_video) {
         let rate = index.edit_rate()?;
         let edit_unit = index.keyframe_for(rate.ns_to_units(target_ns))?;
-        let offset = index.file_offset(index.stream_offset(edit_unit)?)?;
+        let offset = index.file_offset(edit_unit)?;
         return Some(Landing {
             offset,
             edit_unit,
@@ -460,6 +474,7 @@ pub struct MxfDemuxN {
     emitted: u64,
     seek: DemuxSeek<Unit>,
     tail: TailRead,
+    index_probes: Vec<Range<u64>>,
     read: MxfRead,
     index: MxfIndex,
     reordering: Reordering,
@@ -513,6 +528,7 @@ impl MxfDemuxN {
             emitted: 0,
             seek: DemuxSeek::default(),
             tail: TailRead::default(),
+            index_probes: Vec::new(),
             read: MxfRead::Head,
             index: MxfIndex::default(),
             reordering: Reordering::default(),
@@ -605,7 +621,10 @@ impl MxfDemuxN {
     }
 
     fn poll_seek(&mut self) {
-        if self.own_seek_landing.is_some() || self.tail.in_flight() {
+        if matches!(
+            self.read,
+            MxfRead::Tail { .. } | MxfRead::Index { .. } | MxfRead::Rewind
+        ) {
             return;
         }
         if !matches!(self.read, MxfRead::Klvs { .. }) {
@@ -613,6 +632,7 @@ impl MxfDemuxN {
             return;
         }
         let delay_ns = self.delay_ns();
+        let stream_len = self.seek.upstream_len();
         let (tracks, index, clip_value) = (&self.tracks, &self.index, self.clip_value);
         let mut found = None;
         let taken = self.seek.poll_request_indexed(|target_ns| {
@@ -621,7 +641,8 @@ impl MxfDemuxN {
                 index,
                 clip_value,
                 target_ns.saturating_sub(delay_ns),
-            );
+            )
+            .filter(|landing| stream_len.is_none_or(|len| landing.offset < len));
             found.map(|landing| landing.offset)
         });
         if taken {
@@ -644,34 +665,113 @@ impl MxfDemuxN {
             self.announce(&metadata.tracks, out).await?;
             let seekable = self.seek.upstream_len().is_some() && self.seek.takes_seeks_after_end();
             self.read = match seekable {
-                true => MxfRead::Tail,
+                true => MxfRead::Tail { expanded: false },
                 false => MxfRead::Whole,
             };
-            if self.read == MxfRead::Tail {
+            if seekable {
                 self.tail.takes_bytes(&self.seek, &[]);
                 return Ok(());
             }
         }
         match self.read {
-            MxfRead::Head | MxfRead::Tail | MxfRead::Whole => Ok(()),
+            MxfRead::Index { next, end } => {
+                if self.probe_partition(next, end) {
+                    self.next_index_probe();
+                }
+                Ok(())
+            }
+            MxfRead::Head | MxfRead::Tail { .. } | MxfRead::Rewind | MxfRead::Whole => Ok(()),
             MxfRead::Klvs { next } => self.emit_klvs(next, stream_ended, out).await,
         }
     }
 
-    // the partitions and index segments of the file's last bytes, which start at `tail_at`
-    fn read_tail(&mut self, tail: &[u8], tail_at: u64) {
-        let partitions = random_index_pack_len(tail)
-            .and_then(|len| usize::try_from(len).ok())
-            .and_then(|len| tail.len().checked_sub(len))
-            .and_then(|rip_at| whole_klv(&tail[rip_at..]).ok())
-            .filter(|(klv, _)| key_kind(&klv.key) == KeyKind::RandomIndexPack)
-            .and_then(|(_, value)| random_index_pack(value))
-            .unwrap_or_default();
-        let first_in_tail = partitions.iter().filter(|at| **at >= tail_at).min();
-        if let Some(first) = first_in_tail {
-            let start = (first - tail_at) as usize;
-            self.observe(&tail[start..], *first);
+    // Record the partitions already buffered with the tail and queue the ones before it.
+    fn read_tail(&mut self, tail: &[u8], tail_at: u64, rip_len: u64) -> Option<()> {
+        let start = tail.len().checked_sub(usize::try_from(rip_len).ok()?)?;
+        let rip_at = tail_at.checked_add(start as u64)?;
+        let (klv, value) = whole_klv(&tail[start..]).ok()?;
+        if key_kind(&klv.key) != KeyKind::RandomIndexPack || klv.total_len()? != rip_len {
+            return None;
         }
+        let mut partitions = random_index_pack(value)?;
+        partitions.retain(|at| *at < rip_at);
+        partitions.sort_unstable();
+        partitions.dedup();
+        let before_tail = partitions.partition_point(|at| *at < tail_at);
+        partitions.push(rip_at);
+        for pair in partitions.windows(2).skip(before_tail) {
+            let bytes = &tail[(pair[0] - tail_at) as usize..(pair[1] - tail_at) as usize];
+            self.partition_at = None;
+            if read_klv(bytes).is_ok_and(|klv| matches!(key_kind(&klv.key), KeyKind::Partition(_)))
+            {
+                self.observe(bytes, pair[0]);
+            }
+        }
+        self.index_probes = partitions
+            .windows(2)
+            .take(before_tail)
+            .map(|pair| pair[0]..pair[1])
+            .rev()
+            .collect();
+        Some(())
+    }
+
+    fn next_index_probe(&mut self) {
+        self.partition_at = None;
+        let offset = if let Some(range) = self.index_probes.pop() {
+            self.read = MxfRead::Index {
+                next: range.start,
+                end: range.end,
+            };
+            range.start
+        } else {
+            self.read = MxfRead::Rewind;
+            0
+        };
+        self.own_seek_landing = Some(offset);
+        self.seek.seek_upstream(offset);
+    }
+
+    // Probe until the first essence key or the end of the partition. Only
+    // partition packs and index segments need their whole KLV values.
+    fn probe_partition(&mut self, mut next: u64, end: u64) -> bool {
+        while next < end && self.skip_to(next) {
+            let klv = match read_klv(&self.buf) {
+                Ok(klv) => klv,
+                Err(KlvError::Truncated) => break,
+                Err(KlvError::Malformed) => return true,
+            };
+            let Some(after) = klv.total_len().and_then(|len| next.checked_add(len)) else {
+                return true;
+            };
+            if after > end {
+                return true;
+            }
+            let kind = key_kind(&klv.key);
+            if self.partition_at.is_none() && !matches!(kind, KeyKind::Partition(_)) {
+                return true;
+            }
+            match kind {
+                KeyKind::Essence { track_number } => {
+                    self.place_essence(track_number, &klv, next);
+                    return true;
+                }
+                KeyKind::Partition(_) if self.partition_at.is_some() => return true,
+                KeyKind::Partition(_) | KeyKind::IndexSegment => {
+                    if klv.value_len > MAX_PICTURE_BYTES {
+                        return true;
+                    }
+                    if !self.note_buffered_klv(next) {
+                        break;
+                    }
+                }
+                KeyKind::EncryptedEssence | KeyKind::RandomIndexPack => return true,
+                _ => {}
+            }
+            next = after;
+        }
+        self.read = MxfRead::Index { next, end };
+        next == end
     }
 
     // records the partitions, index segments and essence starts of whole klvs in `bytes`, which begin at file byte `at`
@@ -681,8 +781,23 @@ impl MxfDemuxN {
             self.note_klv(&klv, value, at);
             let total = klv.header_len + value.len();
             rest = &rest[total..];
-            at += total as u64;
+            let Some(next) = at.checked_add(total as u64) else {
+                break;
+            };
+            at = next;
         }
+    }
+
+    fn note_buffered_klv(&mut self, at: u64) -> bool {
+        let buf = core::mem::take(&mut self.buf);
+        let complete = if let Ok((klv, value)) = whole_klv(&buf) {
+            self.note_klv(&klv, value, at);
+            true
+        } else {
+            false
+        };
+        self.buf = buf;
+        complete
     }
 
     fn note_klv(&mut self, klv: &Klv, value: &[u8], at: u64) {
@@ -695,7 +810,9 @@ impl MxfDemuxN {
             }
             KeyKind::IndexSegment => {
                 if let Some(segment) = index_segment(value) {
-                    self.reordering.extend(&segment);
+                    if matches!(self.read, MxfRead::Klvs { .. }) {
+                        self.reordering.extend(&segment);
+                    }
                     self.index.add_segment(segment);
                 }
             }
@@ -725,6 +842,15 @@ impl MxfDemuxN {
         self.buf_at = 0;
     }
 
+    fn skip_to(&mut self, next: u64) -> bool {
+        let passed = usize::try_from(next.saturating_sub(self.buf_at))
+            .unwrap_or(usize::MAX)
+            .min(self.buf.len());
+        self.buf.drain(..passed);
+        self.buf_at += passed as u64;
+        self.buf_at >= next
+    }
+
     async fn emit_klvs(
         &mut self,
         mut next: u64,
@@ -733,12 +859,7 @@ impl MxfDemuxN {
     ) -> Result<(), G2gError> {
         // the seek is taken at the next packet, and the klvs after it come from where it lands
         while !(self.seek.app_seek_pending() && !self.seek.is_seeking()) {
-            let passed = usize::try_from(next.saturating_sub(self.buf_at))
-                .unwrap_or(usize::MAX)
-                .min(self.buf.len());
-            self.buf.drain(..passed);
-            self.buf_at += passed as u64;
-            if next > self.buf_at {
+            if !self.skip_to(next) {
                 break;
             }
             if let Some(split) = self.split {
@@ -759,15 +880,16 @@ impl MxfDemuxN {
                     return Err(malformed("mxf: no klv key where one starts"))
                 }
             };
-            let total = klv
+            let after = klv
                 .total_len()
+                .and_then(|len| next.checked_add(len))
                 .ok_or_else(|| malformed("mxf: klv length overflows"))?;
             match key_kind(&klv.key) {
                 KeyKind::EncryptedEssence => return Err(malformed("mxf: encrypted essence")),
                 KeyKind::Essence { track_number } => {
                     self.place_essence(track_number, &klv, next);
                     let Some(port) = self.port_of(track_number) else {
-                        next += total;
+                        next = after;
                         continue;
                     };
                     let track = self.tracks[port];
@@ -776,7 +898,7 @@ impl MxfDemuxN {
                         let split = SplitValue {
                             port,
                             at,
-                            end: at + klv.value_len,
+                            end: after,
                         };
                         if track.clip_wrapped && self.clip_value.is_none() {
                             self.clip_value = Some(split);
@@ -793,20 +915,18 @@ impl MxfDemuxN {
                     };
                     let data = Vec::from(value);
                     self.send_picture(port, data, out).await?;
-                    next += total;
+                    next = after;
                 }
                 KeyKind::Partition(_) | KeyKind::IndexSegment => {
                     if klv.value_len > MAX_PICTURE_BYTES {
                         return Err(malformed("mxf: index klv too large"));
                     }
-                    let Ok((klv, value)) = whole_klv(&self.buf) else {
+                    if !self.note_buffered_klv(next) {
                         break;
-                    };
-                    let value = Vec::from(value);
-                    self.note_klv(&klv, &value, next);
-                    next += total;
+                    }
+                    next = after;
                 }
-                _ => next += total,
+                _ => next = after,
             }
         }
         self.read = MxfRead::Klvs { next };
@@ -854,8 +974,7 @@ impl MxfDemuxN {
         let following = self.positions[split.port] + 1;
         let end = self
             .index
-            .stream_offset(following)
-            .and_then(|offset| self.index.file_offset(offset))
+            .file_offset(following)
             .filter(|end| *end < split.end)
             .unwrap_or(split.end);
         let len = end
@@ -1005,13 +1124,25 @@ impl MxfDemuxN {
         }
     }
 
-    fn end_tail_read(&mut self) {
-        let stream_len = self.seek.upstream_len();
-        let Some(tail) = self.tail.take_tail(&self.seek) else {
+    fn end_tail_read(&mut self, expanded: bool) {
+        let Some(tail) = self.tail.finish_read() else {
             return;
         };
-        let tail_at = stream_len.map_or(0, |len| len.saturating_sub(tail.len() as u64));
-        self.read_tail(&tail, tail_at);
+        if let (Some(stream_len), Some(rip_len)) =
+            (self.seek.upstream_len(), random_index_pack_len(&tail))
+        {
+            if let Some(rip_at) = stream_len.checked_sub(rip_len) {
+                if rip_len <= tail.len() as u64 {
+                    let tail_at = stream_len.saturating_sub(tail.len() as u64);
+                    let _ = self.read_tail(&tail, tail_at, rip_len);
+                } else if !expanded && rip_len <= MAX_HEADER_BYTES as u64 {
+                    self.read = MxfRead::Tail { expanded: true };
+                    self.tail.seek_from(&self.seek, rip_at);
+                    return;
+                }
+            }
+        }
+        self.next_index_probe();
     }
 
     // the file held whole when its source cannot seek, read once for its index then sent
@@ -1148,7 +1279,9 @@ impl MultiOutputElement for MxfDemuxN {
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    if self.read == MxfRead::Tail && self.tail.takes_bytes(&self.seek, slice) {
+                    if matches!(self.read, MxfRead::Tail { .. })
+                        && self.tail.takes_bytes(&self.seek, slice)
+                    {
                         return Ok(());
                     }
                     if self.seek.dropping_input() || self.own_seek_landing.is_some() {
@@ -1158,9 +1291,19 @@ impl MultiOutputElement for MxfDemuxN {
                     self.advance(false, out).await?;
                 }
                 PipelinePacket::Eos => {
-                    if self.read == MxfRead::Tail {
-                        self.end_tail_read();
-                        return Ok(());
+                    match self.read {
+                        MxfRead::Tail { expanded } => {
+                            self.end_tail_read(expanded);
+                            return Ok(());
+                        }
+                        MxfRead::Index { .. } => {
+                            if self.own_seek_landing.is_none() {
+                                self.next_index_probe();
+                            }
+                            return Ok(());
+                        }
+                        MxfRead::Rewind => return Ok(()),
+                        _ => {}
                     }
                     let awaiting_flush =
                         self.seek.dropping_input() || self.own_seek_landing.is_some();
@@ -1180,14 +1323,15 @@ impl MultiOutputElement for MxfDemuxN {
                 }
                 PipelinePacket::Flush => {
                     if self.tail.takes_flush() {
-                        if !self.tail.in_flight() {
-                            self.start_streaming();
-                        }
                         return Ok(());
                     }
                     if let Some(landing) = self.own_seek_landing.take() {
-                        self.buf.clear();
-                        self.buf_at = landing;
+                        if self.read == MxfRead::Rewind {
+                            self.start_streaming();
+                        } else {
+                            self.buf.clear();
+                            self.buf_at = landing;
+                        }
                         return Ok(());
                     }
                     let landing = self

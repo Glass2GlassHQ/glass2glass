@@ -1559,13 +1559,16 @@ file's first 4 MiB, video first. Since a one-port element is never queried for
 its duration, `MxfDemux` posts `DurationChanged` on the bus itself.
 
 When the run parks its source, the demuxer reads the last 250 kB through a byte
-seek (`TailRead`), walks the partitions the random index pack lists in that
-range for their index segments, then reads from byte 0 and sends each essence
-KLV as it arrives. Without a parked source the file is held whole and read once
-for its index at `Eos`. Index stream offsets map to file bytes as ffmpeg's
-`mxf_absolute_bodysid_offset` does: from the partition with the largest
-`BodyOffset` at or below the offset, counted from its first essence key, or from
-just past that key and length for clip-wrapped and OP-Atom essence.
+seek (`TailRead`) to find the random index pack. It collects the index segments
+and first essence positions from the listed partitions in the tail, then probes
+the earlier partitions by byte offset. Each probe stops at the first essence
+key or the end of the partition. An index pack larger than the initial tail
+gets a second read from its start, up to 64 MiB. Once the index is loaded,
+the demuxer rewinds and emits each essence KLV as it arrives. Without a parked
+source it holds the file for an index pass at `Eos`. An index stream offset
+maps to the partition with the matching `BodySID` and the largest
+`BodyOffset` at or below the offset. The byte count begins at the first essence
+key, or after that key and length for clip-wrapped and OP-Atom essence.
 
 Pictures go out in stored order, with the stored position as the dts. The pts
 comes from the index: the temporal offset of display position `n` names the

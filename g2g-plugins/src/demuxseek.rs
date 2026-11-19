@@ -891,8 +891,7 @@ impl TailRead {
                     *self = Self::Done;
                     return false;
                 };
-                seek.seek_upstream(stream_len.saturating_sub(TAIL_READ_LEN));
-                *self = Self::Seeking;
+                self.seek_from(seek, stream_len.saturating_sub(TAIL_READ_LEN));
                 true
             }
             Self::Seeking | Self::Returning => true,
@@ -902,6 +901,11 @@ impl TailRead {
             }
             Self::Done => false,
         }
+    }
+
+    pub(crate) fn seek_from<U>(&mut self, seek: &DemuxSeek<U>, offset: u64) {
+        seek.seek_upstream(offset);
+        *self = Self::Seeking;
     }
 
     // true for the Flush that answers one of this read's seeks
@@ -916,17 +920,20 @@ impl TailRead {
 
     // the tail, at the Eos that ends its read, once the source is asked to seek back to byte 0
     pub(crate) fn take_tail<U>(&mut self, seek: &DemuxSeek<U>) -> Option<Vec<u8>> {
-        match core::mem::take(self) {
-            Self::Reading(tail) => {
-                seek.seek_upstream(0);
-                *self = Self::Returning;
-                Some(tail)
-            }
-            other => {
-                *self = other;
-                None
-            }
-        }
+        let tail = self.finish_read()?;
+        seek.seek_upstream(0);
+        *self = Self::Returning;
+        Some(tail)
+    }
+
+    // finish the read without repositioning, for a caller that will consult the tail first
+    pub(crate) fn finish_read(&mut self) -> Option<Vec<u8>> {
+        let Self::Reading(tail) = self else {
+            return None;
+        };
+        let tail = core::mem::take(tail);
+        *self = Self::Done;
+        Some(tail)
     }
 
     pub(crate) fn in_flight(&self) -> bool {

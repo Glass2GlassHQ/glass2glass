@@ -70,6 +70,7 @@ fn audio_params_probe(shared: &Arc<Shared>) -> CapsProbe {
         move |caps| {
             if let Some(params) = audio_params_of(caps) {
                 shared.set_audio_params(Some(params));
+                shared.note_playing_caps(caps);
             }
         },
     )

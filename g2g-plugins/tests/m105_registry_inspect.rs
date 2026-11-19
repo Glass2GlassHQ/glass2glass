@@ -49,6 +49,44 @@ fn lists_registered_element_names() {
     assert!(names.contains(&"fakesink"));
 }
 
+#[cfg(feature = "std")]
+#[test]
+fn inspection_and_the_catalog_include_fanout_sources() {
+    let reg = g2g_plugins::registry::default_registry();
+    let catalog = reg.describe_all();
+    let listing = reg.element_listing();
+    for (name, role, property) in [
+        ("uridecodebin", "source (bin)", "uri"),
+        #[cfg(feature = "rtsp")]
+        ("rtspsrcn", "source (fan-out)", "location"),
+        #[cfg(feature = "rtsp-server")]
+        ("rtspserversrcn", "source (fan-out)", "address"),
+    ] {
+        let doc = catalog.iter().find(|doc| doc.name == name).unwrap();
+        assert_eq!(doc.role, role);
+        assert!(doc.properties.iter().any(|spec| spec.name == property));
+        assert!(listing
+            .iter()
+            .any(|line| line == &format!("{name}: {}", doc.long_name)));
+        let inspect = reg.inspect(name).expect("the source is inspectable");
+        assert!(inspect.contains(&format!("Role           {role}")));
+        assert!(inspect.contains(property));
+    }
+    #[cfg(feature = "rtsp")]
+    assert_eq!(
+        catalog.iter().filter(|doc| doc.name == "rtspsrc").count(),
+        1
+    );
+    #[cfg(feature = "rtsp-server")]
+    assert_eq!(
+        catalog
+            .iter()
+            .filter(|doc| doc.name == "rtspserversrc")
+            .count(),
+        1
+    );
+}
+
 #[test]
 fn inspect_dumps_properties_and_templates() {
     let reg = registry();

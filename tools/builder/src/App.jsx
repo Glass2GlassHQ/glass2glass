@@ -14,17 +14,15 @@ import {
   useEdgesState,
 } from "@xyflow/react";
 import { G2gNode } from "./nodes.jsx";
-import { toLaunch, toJSON, toYAML, isSink, nodeData } from "./export.js";
+import { toLaunch, toJSON, toYAML, isSink, nodeData, roleClass } from "./export.js";
 import { fromLaunch, fromJSON, seedCounters, decorateEdge, CAPS_WARN_TITLE } from "./import.js";
 import { applyValidation } from "./solve.js";
 import { loadSolver } from "./solver-load.js";
 
 const nodeTypes = { g2g: G2gNode };
 
-// Parse-time autoplug macros (uridecodebin/decodebin), not registered elements,
-// so g2g-inspect omits them. Shaped like a registry ElementDoc so the palette,
-// node handles, and property panel treat them uniformly. They only round-trip
-// through the gst-launch export, not the declarative JSON loader.
+// Fallback docs for launch macros absent from the loaded catalog. These nodes
+// only round-trip through the gst-launch export.
 const DYNAMIC = [
   {
     name: "uridecodebin",
@@ -60,8 +58,6 @@ const DYNAMIC = [
     properties: [],
   },
 ];
-const dynamicMap = Object.fromEntries(DYNAMIC.map((e) => [e.name, e]));
-
 export default function App() {
   const [registry, setRegistry] = useState({});
   const [error, setError] = useState("");
@@ -88,8 +84,14 @@ export default function App() {
       );
   }, []);
 
-  // Registered elements plus the dynamic autoplug macros, keyed by name.
-  const elements = useMemo(() => ({ ...dynamicMap, ...registry }), [registry]);
+  // Use the catalog's docs for a macro when present, keeping its launch-only flag.
+  const elements = useMemo(() => {
+    const elements = { ...registry };
+    for (const fallback of DYNAMIC) {
+      elements[fallback.name] = { ...(registry[fallback.name] ?? fallback), dynamic: true };
+    }
+    return elements;
+  }, [registry]);
 
   const addNode = useCallback(
     (element) => {
@@ -226,7 +228,10 @@ export default function App() {
     Object.values(elements)
       .filter((e) => e.name.includes(filter))
       .sort((a, b) => a.name.localeCompare(b.name))
-      .forEach((e) => (e.dynamic ? g.dynamic : g[e.role] || g.element).push(e));
+      .forEach((e) => {
+        const group = roleClass(e.role) === "source" ? "source" : e.role;
+        (e.dynamic ? g.dynamic : g[group] || g.element).push(e);
+      });
     return g;
   }, [elements, filter]);
 

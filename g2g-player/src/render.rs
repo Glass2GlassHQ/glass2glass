@@ -41,7 +41,16 @@ impl FrameFeed {
     }
 
     fn latest(&mut self) -> Option<(&DueFrame, Option<&Caps>)> {
-        if let Some(frame) = self.shared.frames.take_for_render() {
+        let pending = self.shared.frames.take_for_render();
+        if self
+            .shared
+            .hide_video
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            self.current = None;
+            return None;
+        }
+        if let Some(frame) = pending {
             self.current = Some(frame);
         }
         let current = self.current.as_ref()?;

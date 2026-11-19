@@ -978,6 +978,16 @@ loads a URI or a launch line and runs it on a `g2g-player` thread under a
 callback) and the `pause`, `time-pos`, `duration` and `eof-reached` properties,
 read from `PipelineProgress` every 50 ms and posted to observers on change.
 
+`track-list` reports each selectable local container track's kind, index
+within that kind, caps, available tags and selection. A URI load uses the first
+video, audio and embedded subtitle tracks by default. `select_track` picks a
+track, restores automatic selection, or disables that kind. Embedded subtitles
+need a video branch. The player builds the replacement graph from the selected
+demux ports, then starts it with a flushing seek to the current position and
+the same pause state. This lets a switch replace the decoder when the new track
+uses a different codec. Single-stream sources and explicit launch graphs
+report the audio and video branches reaching the player.
+
 `load` takes `LoadOptions`, mpv's `start=` and `pause=` per-file options. A start
 position goes to `attach_seek`, which queues the seek before the run starts, so the
 first frame shown is the first at or after it. On media that cannot seek, a start

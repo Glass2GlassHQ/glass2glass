@@ -357,6 +357,64 @@ fn wav_reports_channels_rate_and_duration_without_a_track_list() {
 }
 
 #[test]
+fn tagged_audio_only_files_report_their_caps_and_tags() {
+    if !tool_present("ffmpeg") {
+        eprintln!("skipping: ffmpeg not on PATH");
+        return;
+    }
+    let dir = fixture_dir();
+    for (file, codec, media_type) in [
+        ("tags.m4a", "aac", "audio/mpeg"),
+        ("tags.flac", "flac", "audio/x-flac"),
+        ("tags-v2.mp3", "libmp3lame", "audio/mpeg"),
+    ] {
+        let path = dir.join(file);
+        let mut args = vec!["-f".to_string(), "lavfi".to_string()];
+        args.extend(audio_input());
+        args.extend(["-c:a", codec, "-metadata", "title=Discovery audio"].map(String::from));
+        run_ffmpeg(&args, &path);
+        let info = discover(&path);
+        let audio = audio_stream(&info);
+        assert_eq!(info["streams"].as_array().unwrap().len(), 1, "{file}");
+        assert!(
+            audio["caps"].as_str().unwrap().starts_with(media_type),
+            "{file}"
+        );
+        assert_eq!(audio["sample_rate"], AUDIO_SAMPLE_RATE, "{file}");
+        assert!(
+            info["tags"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tag| { tag["key"] == "title" && tag["value"] == "Discovery audio" }),
+            "{file}: {info}"
+        );
+        if codec == "aac" {
+            assert_fixture_duration(&info);
+        }
+        std::fs::remove_file(path).expect("remove test file");
+    }
+}
+
+#[test]
+fn mp3_discovery_falls_back_to_the_id3v1_trailer() {
+    let fixture = include_bytes!("fixtures/mp3_mono_44100_id3v1.mp3");
+    assert_eq!(&fixture[..3], b"ID3");
+    let id3v2_size = fixture[6..10]
+        .iter()
+        .fold(0usize, |size, byte| (size << 7) | usize::from(*byte));
+    let path = fixture_dir().join("tags-only-id3v1.mp3");
+    std::fs::write(&path, &fixture[10 + id3v2_size..]).expect("write audio with only its trailer");
+    let info = discover(&path);
+    assert!(info["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tag| { tag["key"] == "title" && tag["value"] == "g2g mono" }));
+    std::fs::remove_file(path).expect("remove test file");
+}
+
+#[test]
 fn a_network_uri_is_refused_rather_than_fetched() {
     let out = Command::new(env!("CARGO_BIN_EXE_g2g-discover"))
         .arg("rtsp://camera.invalid/stream")

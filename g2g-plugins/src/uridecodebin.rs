@@ -31,6 +31,12 @@ use g2g_core::runtime::{DynMultiOutputElement, PadKind, PadRequest};
 use g2g_core::runtime::{DynSourceLoop, Uri, UriError, UriSource, UriSourceFactory};
 use g2g_core::Caps;
 
+#[cfg(feature = "std")]
+#[path = "playbin_tracks.rs"]
+mod tracks;
+#[cfg(feature = "std")]
+pub use tracks::{file_track_playbin, PlaybinTrack, PlaybinTrackChoice, PlaybinTrackSelection};
+
 /// H.264 at any geometry: the media type the H.264 sources declare. Real
 /// dimensions ride in-band in the SPS and are resolved at negotiation.
 #[cfg(any(feature = "udp-ingress", feature = "rtsp"))]
@@ -597,10 +603,40 @@ pub fn mkv_playbin(
     sinks: &PlaybinSinks<'_>,
     uri: &str,
 ) -> Result<Option<Graph<GraphNode>>, ParseError> {
+    mkv_playbin_tracks(reg, sinks, uri, None)
+}
+
+#[cfg(feature = "std")]
+fn mkv_playbin_tracks(
+    reg: &Registry,
+    sinks: &PlaybinSinks<'_>,
+    uri: &str,
+    picker: Option<&mut tracks::TrackPicker>,
+) -> Result<Option<Graph<GraphNode>>, ParseError> {
     let (uri, cc) = cc_request(uri);
-    let Some(probe) = mkv_probe(&uri) else {
+    let Some(mut probe) = mkv_probe(&uri) else {
         return Ok(None);
     };
+    let mut subtitles = crate::mkvdemux::subtitle_streams(&probe.header);
+    let mut cc = cc;
+    if let Some(picker) = picker {
+        cc = cc.filter(|_| picker.uses_uri_captions());
+        let select =
+            |info: &crate::mkvdemux::MkvStreamInfo, picker: &mut tracks::TrackPicker, eligible| {
+                let track = probe
+                    .header
+                    .tracks()
+                    .iter()
+                    .find(|track| track.number == info.track_number);
+                let stream = track.and_then(crate::mkvdemux::MkvDemux::track_to_stream);
+                let caps = stream.as_ref().map_or(&info.caps, |stream| &stream.caps);
+                let tags = tracks::matroska_tags(&probe.header, info.track_number);
+                picker.push(caps, tags, eligible)
+            };
+        probe.infos.retain(|info| select(info, picker, true));
+        subtitles.retain(|info| select(info, picker, cc.is_none()));
+        picker.validate(&uri)?;
+    }
     let av = probe.av();
     if let Some(video_idx) = probe.infos.iter().position(|i| i.video) {
         // An explicit `#closed-captions=` request overlays the in-SEI captions
@@ -618,7 +654,7 @@ pub fn mkv_playbin(
             )
             .map(Some);
         }
-        if let Some(text) = crate::mkvdemux::subtitle_streams(&probe.header).first() {
+        if let Some(text) = subtitles.first() {
             return build_mkv_subtitle_overlay(reg, sinks, &probe.path, &probe.infos, text)
                 .map(Some);
         }
@@ -708,10 +744,28 @@ pub fn ts_playbin(
     sinks: &PlaybinSinks<'_>,
     uri: &str,
 ) -> Result<Option<Graph<GraphNode>>, ParseError> {
+    ts_playbin_tracks(reg, sinks, uri, None)
+}
+
+#[cfg(feature = "std")]
+fn ts_playbin_tracks(
+    reg: &Registry,
+    sinks: &PlaybinSinks<'_>,
+    uri: &str,
+    picker: Option<&mut tracks::TrackPicker>,
+) -> Result<Option<Graph<GraphNode>>, ParseError> {
     let (uri, cc) = cc_request(uri);
-    let Some(probe) = ts_probe(&uri) else {
+    let Some(mut probe) = ts_probe(&uri) else {
         return Ok(None);
     };
+    let mut cc = cc;
+    if let Some(picker) = picker {
+        cc = cc.filter(|_| picker.uses_uri_captions());
+        probe
+            .infos
+            .retain(|info| picker.push(&info.caps, g2g_core::TagList::new(), true));
+        picker.validate(&uri)?;
+    }
     let av = probe.av();
     // An explicit `#closed-captions=` request overlays the in-SEI captions (M430);
     // MPEG-TS broadcast is the most common CEA-608 / 708 carrier.
@@ -824,10 +878,40 @@ pub fn ps_playbin(
     sinks: &PlaybinSinks<'_>,
     uri: &str,
 ) -> Result<Option<Graph<GraphNode>>, ParseError> {
+    ps_playbin_tracks(reg, sinks, uri, None)
+}
+
+#[cfg(feature = "std")]
+fn ps_playbin_tracks(
+    reg: &Registry,
+    sinks: &PlaybinSinks<'_>,
+    uri: &str,
+    picker: Option<&mut tracks::TrackPicker>,
+) -> Result<Option<Graph<GraphNode>>, ParseError> {
     let (uri, cc) = cc_request(uri);
-    let Some(probe) = ps_probe(&uri) else {
+    let Some(mut probe) = ps_probe(&uri) else {
         return Ok(None);
     };
+    let mut subtitles = crate::psdemux::subpicture_streams(&probe.header);
+    let geometry = probe.header.sequence();
+    let mut cc = cc;
+    if let Some(picker) = picker {
+        cc = cc.filter(|_| picker.uses_uri_captions());
+        probe
+            .infos
+            .retain(|info| picker.push(&info.caps, g2g_core::TagList::new(), true));
+        let caps = Caps::SubPicture {
+            format: g2g_core::SubPictureFormat::VobSub,
+        };
+        subtitles.retain(|_| {
+            picker.push(
+                &caps,
+                g2g_core::TagList::new(),
+                cc.is_none() && geometry.is_some(),
+            )
+        });
+        picker.validate(&uri)?;
+    }
     let av = probe.av();
     if let (Some(cc), Some(video_idx)) = (cc, probe.infos.iter().position(|i| i.video)) {
         return build_cc_overlay(
@@ -845,12 +929,17 @@ pub fn ps_playbin(
     // The canvas needs the video's geometry, which the sequence header gives once
     // a video access unit has parsed; without it (or without a video track) the
     // plain A/V fan-out below plays the disc unsubtitled.
-    if !crate::psdemux::subpicture_streams(&probe.header).is_empty()
-        && probe.infos.iter().any(|i| i.video)
-    {
-        if let Some(geometry) = probe.header.sequence() {
-            return build_ps_subpicture_overlay(reg, sinks, &probe.path, &probe.infos, geometry)
-                .map(Some);
+    if probe.infos.iter().any(|i| i.video) {
+        if let Some((&subtitle, geometry)) = subtitles.first().zip(geometry) {
+            return build_ps_subpicture_overlay(
+                reg,
+                sinks,
+                &probe.path,
+                &probe.infos,
+                geometry,
+                subtitle,
+            )
+            .map(Some);
         }
     }
     // Every video branch carries a `deinterlace mode=auto` (M935), so an
@@ -893,6 +982,7 @@ fn build_ps_subpicture_overlay(
     path: &str,
     infos: &[crate::psdemux::PsStreamInfo],
     geometry: crate::psdemux::SequenceHeader,
+    subtitle: crate::psdemux::PsElementaryStream,
 ) -> Result<Graph<GraphNode>, ParseError> {
     use crate::compositor::{Compositor, CompositorPad};
     use crate::psdemux::{PsDemuxN, PsStream};
@@ -907,7 +997,7 @@ fn build_ps_subpicture_overlay(
     let mut ports: Vec<PsStream> = infos.iter().map(|i| i.stream).collect();
     ports.push(PsStream::SubPicture);
     let mut selected: Vec<_> = infos.iter().map(|i| Some(i.elementary)).collect();
-    selected.push(None);
+    selected.push(Some(subtitle));
     let text_port = (ports.len() - 1) as u8;
     let port_count = ports.len() as u8;
 
@@ -1912,10 +2002,38 @@ pub fn mp4_playbin(
     sinks: &PlaybinSinks<'_>,
     uri: &str,
 ) -> Result<Option<Graph<GraphNode>>, ParseError> {
+    mp4_playbin_tracks(reg, sinks, uri, None)
+}
+
+#[cfg(feature = "std")]
+fn mp4_playbin_tracks(
+    reg: &Registry,
+    sinks: &PlaybinSinks<'_>,
+    uri: &str,
+    picker: Option<&mut tracks::TrackPicker>,
+) -> Result<Option<Graph<GraphNode>>, ParseError> {
     let (uri, cc) = cc_request(uri);
-    let Some(probe) = mp4_probe(&uri) else {
+    let Some(mut probe) = mp4_probe(&uri) else {
         return Ok(None);
     };
+    let mut subtitles = crate::mp4demuxn::subtitle_streams(&probe.moov);
+    let mut cc = cc;
+    if let Some(picker) = picker {
+        cc = cc.filter(|_| picker.uses_uri_captions());
+        let tracks = crate::fmp4::parse_all_tracks(&probe.moov).unwrap_or_default();
+        let select =
+            |info: &crate::mp4demuxn::Mp4StreamInfo, picker: &mut tracks::TrackPicker, eligible| {
+                let track = tracks.iter().find(|track| track.track_id == info.track_id);
+                let (caps, tags) = track.map_or_else(
+                    || (info.caps.clone(), g2g_core::TagList::new()),
+                    |track| (crate::mp4demuxn::real_caps(&track.kind), track.tags.clone()),
+                );
+                picker.push(&caps, tags, eligible)
+            };
+        probe.infos.retain(|info| select(info, picker, true));
+        subtitles.retain(|info| select(info, picker, cc.is_none()));
+        picker.validate(&uri)?;
+    }
     let av = probe.av();
     if let Some(video_idx) = probe.infos.iter().position(|i| i.video) {
         // An explicit `#closed-captions=` request overlays the in-SEI captions
@@ -1933,7 +2051,7 @@ pub fn mp4_playbin(
             )
             .map(Some);
         }
-        if let Some(text) = crate::mp4demuxn::subtitle_streams(&probe.moov).first() {
+        if let Some(text) = subtitles.first() {
             return build_mp4_subtitle_overlay(reg, sinks, &probe, text).map(Some);
         }
     }
@@ -1989,7 +2107,7 @@ const MP4_MAX_TOP_LEVEL_BOXES: usize = 1024;
 
 // Seeks box to box so a `moov` after a large `mdat` is found without reading the `mdat`.
 #[cfg(feature = "std")]
-fn read_mp4_top_level_box(path: &str, wanted: &[u8; 4]) -> Option<Vec<u8>> {
+pub(crate) fn read_mp4_top_level_box(path: &str, wanted: &[u8; 4]) -> Option<Vec<u8>> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = std::fs::File::open(path).ok()?;
     let file_len = file.metadata().ok()?.len();

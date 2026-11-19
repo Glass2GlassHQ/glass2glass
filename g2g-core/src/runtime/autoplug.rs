@@ -631,7 +631,9 @@ mod factory {
     use crate::graph::{Graph, GraphError, NodeId, PadId};
     use crate::memory::{DomainSet, GpuDevice};
     use crate::pad_template::{PadCaps, PadDirection, PadTemplate, PadTemplates};
-    use crate::property::{format_specs, PropError, PropValue};
+    use crate::property::{
+        format_specs, ElementMetadata, PropError, PropKind, PropValue, PropertySpec,
+    };
     use crate::runtime::launch::ParseError;
     use crate::runtime::{
         ConverterFactory, DynMultiInputElement, DynMultiOutputElement, DynSourceLoop, GraphNode,
@@ -658,7 +660,7 @@ mod factory {
         pub description: String,
         /// Author / origin.
         pub author: String,
-        /// `"source"`, `"element"`, `"muxer (fan-in)"`, or `"demuxer (fan-out)"`.
+        /// Role in a launch line, including source variants for fan-out and URI bins.
         pub role: String,
         /// Host- or device-only runtime path: compiled, not promised in CI.
         /// See `STABILITY.md` (Tier 3).
@@ -992,6 +994,7 @@ mod factory {
     pub struct FanoutSrcFactory {
         name: &'static str,
         build: fn(usize) -> Box<dyn crate::fanout::DynMultiOutputSource>,
+        metadata: ElementMetadata,
     }
 
     impl FanoutSrcFactory {
@@ -999,7 +1002,17 @@ mod factory {
             name: &'static str,
             build: fn(usize) -> Box<dyn crate::fanout::DynMultiOutputSource>,
         ) -> Self {
-            Self { name, build }
+            Self {
+                name,
+                build,
+                metadata: ElementMetadata::default(),
+            }
+        }
+
+        /// Factory details for the element catalog and inspection tools.
+        pub fn with_metadata(mut self, metadata: ElementMetadata) -> Self {
+            self.metadata = metadata;
+            self
         }
 
         /// This factory's element name.
@@ -1048,20 +1061,26 @@ mod factory {
     }
 
     const DEMUX_INSPECT_PORTS: usize = 2;
+    const URI_DECODE_BIN: &str = "uridecodebin";
+    const URI_DECODE_BIN_PROPERTIES: &[PropertySpec] = &[PropertySpec::new(
+        "uri",
+        PropKind::Str,
+        "URI of the media to open and decode",
+    )];
 
     /// One registered element's facts, as `Registry::inspect` prints them and
     /// `Registry::describe` returns them.
     struct ElementFacts<'r> {
         role: &'static str,
         experimental: bool,
-        metadata: crate::property::ElementMetadata,
+        metadata: ElementMetadata,
         /// Output caps text, for a source or a muxer.
         output_caps: Option<String>,
         /// Pad templates, for a transform or sink.
         templates: Option<&'r [PadTemplate]>,
         /// How a fan-in or fan-out element gets its pad count.
         link_degree: Option<&'static str>,
-        properties: &'static [crate::property::PropertySpec],
+        properties: &'static [PropertySpec],
     }
 
     /// Format an element's pad templates the way `gst-inspect` lists them: each
@@ -2561,9 +2580,6 @@ mod factory {
             }))
         }
 
-        /// The names of every element registerable by the parser: sources first,
-        /// then transforms / sinks, each in registration order. The `gst-inspect`
-        /// element list.
         /// Whether `name` names something this registry can build: any factory
         /// list, or an alias resolving into one. The launch parser asks this to
         /// tell a new chain's head from a typo'd property, since both are bare
@@ -2578,8 +2594,11 @@ mod factory {
                 || self.factories.iter().any(|f| f.desc.name == name)
         }
 
+        /// The names in the inspection catalog, in registration order within
+        /// each kind of element.
         pub fn element_names(&self) -> Vec<&'static str> {
-            self.sources
+            let mut names: Vec<_> = self
+                .sources
                 .iter()
                 .map(|s| s.name)
                 .chain(self.launch.iter().map(|f| f.name))
@@ -2595,7 +2614,20 @@ mod factory {
                     !self.launch.iter().any(|f| f.name == *name)
                         && !self.muxers.iter().any(|m| m.name == *name)
                 }))
-                .collect()
+                .collect();
+            for source in &self.fanout_srcs {
+                if !names.contains(&source.name) {
+                    names.push(source.name);
+                }
+            }
+            if self.has_uri_decode_bin() && !names.contains(&URI_DECODE_BIN) {
+                names.push(URI_DECODE_BIN);
+            }
+            names
+        }
+
+        fn has_uri_decode_bin(&self) -> bool {
+            !self.uris.is_empty() || !self.uri_fanout.is_empty()
         }
 
         /// One line per registerable element, `name: Long-name` (the long name
@@ -2606,60 +2638,23 @@ mod factory {
         /// [`inspect`](Self::inspect)).
         pub fn element_listing(&self) -> Vec<String> {
             use alloc::string::ToString;
-            let line = |name: &str, long: &str, experimental: bool| {
-                let mut s = if long.is_empty() {
-                    name.to_string()
-                } else {
-                    let mut s = name.to_string();
-                    s.push_str(": ");
-                    s.push_str(long);
-                    s
-                };
-                if experimental {
-                    s.push_str(" [experimental]");
-                }
-                s
-            };
-            let mut lines = Vec::new();
-            for s in &self.sources {
-                lines.push((
-                    s.name,
-                    line(s.name, (s.build)().metadata().long_name, s.experimental),
-                ));
-            }
-            for f in &self.launch {
-                lines.push((
-                    f.name,
-                    line(f.name, (f.build)().metadata().long_name, f.experimental),
-                ));
-            }
-            for m in &self.muxers {
-                // Skip a muxer already listed as a launch element above. A
-                // one-input instance carries the metadata, the way `inspect`
-                // reads a muxer's.
-                if !self.launch.iter().any(|f| f.name == m.name) {
-                    lines.push((
-                        m.name,
-                        line(m.name, (m.build)(1).metadata().long_name, false),
-                    ));
-                }
-            }
-            for d in &self.demuxes {
-                let listed = self.launch.iter().any(|f| f.name == d.name)
-                    || self.muxers.iter().any(|m| m.name == d.name);
-                if !listed {
-                    lines.push((
-                        d.name,
-                        line(
-                            d.name,
-                            (d.build)(DEMUX_INSPECT_PORTS).metadata().long_name,
-                            false,
-                        ),
-                    ));
-                }
-            }
-            lines.sort_unstable_by_key(|(name, _)| *name);
-            lines.into_iter().map(|(_, text)| text).collect()
+            let mut names = self.element_names();
+            names.sort_unstable();
+            names
+                .into_iter()
+                .filter_map(|name| {
+                    let facts = self.element_facts(name)?;
+                    let mut line = name.to_string();
+                    if !facts.metadata.long_name.is_empty() {
+                        line.push_str(": ");
+                        line.push_str(facts.metadata.long_name);
+                    }
+                    if facts.experimental {
+                        line.push_str(" [experimental]");
+                    }
+                    Some(line)
+                })
+                .collect()
         }
 
         /// What [`inspect`](Self::inspect) and [`describe`](Self::describe)
@@ -2706,16 +2701,43 @@ mod factory {
                     properties: mux.properties(),
                 });
             }
-            let d = self.demuxes.iter().find(|d| d.name == name)?;
-            let demux = (d.build)(DEMUX_INSPECT_PORTS);
-            Some(ElementFacts {
-                role: "demuxer (fan-out)",
+            if let Some(d) = self.demuxes.iter().find(|d| d.name == name) {
+                let demux = (d.build)(DEMUX_INSPECT_PORTS);
+                return Some(ElementFacts {
+                    role: "demuxer (fan-out)",
+                    experimental: false,
+                    metadata: demux.metadata(),
+                    output_caps: None,
+                    templates: None,
+                    link_degree: Some("Outputs: derived from link degree"),
+                    properties: demux.properties(),
+                });
+            }
+            if let Some(s) = self.fanout_srcs.iter().find(|s| s.name == name) {
+                let source = (s.build)(1);
+                return Some(ElementFacts {
+                    role: "source (fan-out)",
+                    experimental: false,
+                    metadata: s.metadata,
+                    output_caps: None,
+                    templates: None,
+                    link_degree: Some("Outputs: multiple source pads"),
+                    properties: source.properties(),
+                });
+            }
+            (name == URI_DECODE_BIN && self.has_uri_decode_bin()).then(|| ElementFacts {
+                role: "source (bin)",
                 experimental: false,
-                metadata: demux.metadata(),
+                metadata: ElementMetadata::new(
+                    "URI decode bin",
+                    "Generic/Bin/Decoder",
+                    "Opens a URI and selects demuxers and decoders for its streams",
+                    "",
+                ),
                 output_caps: None,
                 templates: None,
-                link_degree: Some("Outputs: derived from link degree"),
-                properties: demux.properties(),
+                link_degree: Some("Outputs: determined by the URI and linked pads"),
+                properties: URI_DECODE_BIN_PROPERTIES,
             })
         }
 
@@ -2784,8 +2806,8 @@ mod factory {
 
         /// Every registered element as an [`ElementDoc`], in the same order as
         /// [`element_names`](Self::element_names) (sources, transforms / sinks,
-        /// then muxer-only and demux-only names). The structured catalog behind
-        /// `g2g-docgen`.
+        /// then muxer-only, demux-only and fan-out source names). The
+        /// structured catalog behind `g2g-docgen`.
         pub fn describe_all(&self) -> Vec<ElementDoc> {
             self.element_names()
                 .into_iter()

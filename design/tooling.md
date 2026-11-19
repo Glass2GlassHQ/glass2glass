@@ -376,6 +376,16 @@ passes its own registry, the standard one plus `g2g_python::register`, to all
 three behind `--inspect`, `--docgen` and `--mcp`. The committed
 `docs/elements.html` is generated through that path.
 
+The catalog includes fan-out sources such as `rtspsrcn` and `rtspserversrcn`
+with the property tables their launch factories expose. `uridecodebin` has a
+source-bin entry with its `uri` property because the parser expands it into a
+graph whose outputs depend on the URI and linked pads.
+
+`g2g-discover` reads the MP4 movie box by seeking over media data. It reports
+movie and track tags for audio-only files as well as video files. Native FLAC
+and MP3 use their elementary parsers for caps and tags. If MP3 has no leading
+ID3 tags, discovery checks the last 128 bytes for ID3v1.
+
 It feeds two consumers. The visual pipeline builder (`tools/builder/`) is a React
 Flow app (Vite plus pnpm) that loads a `registry.json` snapshot, offers a typed
 drag-drop canvas with pan and zoom and either-direction linking, and imports and
