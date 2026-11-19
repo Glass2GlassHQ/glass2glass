@@ -308,7 +308,7 @@ pub(crate) struct Shared {
     paused: AtomicBool,
     eof_reached: AtomicBool,
     framerate_q16: Mutex<Option<u32>>,
-    demux_size: Mutex<Option<VideoSize>>,
+    demux_size: tokio::sync::watch::Sender<Option<VideoSize>>,
     // stream time of the furthest frame that reached the video decoder
     demuxed_position_ns: Mutex<Option<u64>>,
     frame_drop_count: AtomicU64,
@@ -369,7 +369,8 @@ impl Shared {
     }
 
     pub(crate) fn set_demux_size(&self, size: Option<VideoSize>) {
-        *self.demux_size.lock().expect("demux size lock") = size;
+        self.demux_size
+            .send_if_modified(|last| core::mem::replace(last, size) != size);
         self.report(PropertyChange::DemuxSize(size));
     }
 
@@ -543,7 +544,13 @@ impl Player {
         };
         let mut graph = parse_launch(&self.registry, &line).map_err(LoadError::Parse)?;
         #[cfg(feature = "ffmpeg")]
-        set_lowres_on_decoders(&mut graph, *self.lowres.lock().expect("lowres lock"));
+        let lowres = {
+            let lowres = *self.lowres.lock().expect("lowres lock");
+            set_lowres_on_decoders(&mut graph, lowres);
+            lowres != Lowres::Full
+        };
+        #[cfg(not(feature = "ffmpeg"))]
+        let lowres = false;
         let video_sinks = connect_video_sinks(&mut graph, &self.shared);
         if video_sinks.is_empty() && matches!(media, Media::LaunchLine(_)) {
             return Err(LoadError::NoVideoSink);
@@ -592,6 +599,7 @@ impl Player {
             shared: self.shared.clone(),
             picture_filters: self.picture_filters.subscribe(),
             decoded,
+            source_size: lowres.then(|| self.shared.demux_size.subscribe()),
             level_meter_window: has_level_meter.then_some(level_meter_window),
             has_video_sink: !video_sinks.is_empty(),
         };
@@ -756,9 +764,7 @@ impl Player {
             Property::EofReached => {
                 PropertyChange::EofReached(self.shared.eof_reached.load(Ordering::SeqCst))
             }
-            Property::DemuxSize => {
-                PropertyChange::DemuxSize(*self.shared.demux_size.lock().expect("demux size lock"))
-            }
+            Property::DemuxSize => PropertyChange::DemuxSize(*self.shared.demux_size.borrow()),
             Property::FrameDropCount => {
                 PropertyChange::FrameDropCount(self.shared.frame_drop_count.load(Ordering::SeqCst))
             }
@@ -1018,6 +1024,7 @@ struct PlaybackRun {
     shared: Arc<Shared>,
     picture_filters: tokio::sync::watch::Receiver<Vec<PictureFilter>>,
     decoded: tokio::sync::watch::Receiver<Option<VideoSize>>,
+    source_size: Option<tokio::sync::watch::Receiver<Option<VideoSize>>>,
     // None when the graph has no audio sink to meter
     level_meter_window: Option<tokio::sync::watch::Receiver<Option<Duration>>>,
     has_video_sink: bool,
@@ -1029,6 +1036,7 @@ async fn install_picture_filters(
     installed: Vec<String>,
     filters: Vec<PictureFilter>,
     decoded: Option<VideoSize>,
+    source: Option<VideoSize>,
 ) -> Vec<String> {
     let target = Target::category("g2g-player");
     let mut remaining = installed;
@@ -1043,7 +1051,7 @@ async fn install_picture_filters(
     let Some(decoded) = decoded.filter(|_| !filters.is_empty()) else {
         return Vec::new();
     };
-    let elements = launch_chain(&filters, decoded).and_then(|chain| {
+    let elements = launch_chain(&filters, decoded, source).and_then(|chain| {
         parse_chain(registry, &chain)
             .map_err(|error| VideoFilterError::Malformed(error.to_string()))
     });
@@ -1078,6 +1086,7 @@ impl PlaybackRun {
             shared,
             mut picture_filters,
             mut decoded,
+            mut source_size,
             mut level_meter_window,
             has_video_sink,
         } = self;
@@ -1127,6 +1136,7 @@ impl PlaybackRun {
                         core::mem::take(&mut installed_filters),
                         picture_filters.borrow_and_update().clone(),
                         *decoded.borrow_and_update(),
+                        source_size.as_mut().and_then(|size| *size.borrow_and_update()),
                     )));
                 }
                 tokio::select! {
@@ -1150,6 +1160,9 @@ impl PlaybackRun {
                     }
                     Ok(()) = picture_filters.changed() => filters_changed = true,
                     Ok(()) = decoded.changed() => filters_changed = true,
+                    Ok(()) = async { source_size.as_mut().expect("guarded by is_some").changed().await }, if source_size.is_some() => {
+                        filters_changed = true;
+                    }
                     installed = async { pending_filters.as_mut().expect("guarded by is_some").await }, if pending_filters.is_some() => {
                         installed_filters = installed;
                         pending_filters = None;

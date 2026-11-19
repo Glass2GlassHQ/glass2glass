@@ -1025,19 +1025,20 @@ fn a_jpeg_2000_picture_with_no_matching_raw_format_plays() {
 
 #[cfg(feature = "ffmpeg")]
 #[test]
-fn half_lowres_halves_the_decoded_jpeg_2000_picture_and_keeps_the_demux_size() {
+fn half_lowres_keeps_jpeg_2000_filters_in_source_pixels() {
     const MXF_CLIP: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../g2g-plugins/tests/fixtures/mxf_jpeg2000.mxf"
     );
     let player = Player::new();
     player.set_lowres(g2g_player::Lowres::Half);
+    player.set_video_filters(&["crop=48:36:8:6"]).unwrap();
     player
         .load(
             Media::Uri(&format!("file://{MXF_CLIP}")),
             LoadOptions {
                 start: None,
-                pause: Some(true),
+                pause: Some(false),
             },
         )
         .unwrap();
@@ -1061,6 +1062,13 @@ fn half_lowres_halves_the_decoded_jpeg_2000_picture_and_keeps_the_demux_size() {
             height: CLIP_HEIGHT / 2,
         }))
     );
+    wait_until(|| {
+        player.property(Property::VideoOutParams)
+            == PropertyChange::VideoOutParams(Some(VideoSize {
+                width: 48,
+                height: 36,
+            }))
+    });
     player.stop();
 }
 

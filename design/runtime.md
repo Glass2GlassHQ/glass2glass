@@ -1032,9 +1032,11 @@ when the timeline has a second stream, a second `edlsrc stream=1 media=audio` in
 first `playervideosink` and reports the decoded picture size. The run translates
 the filters into `deinterlace`, `hqdn3d`, `videocrop`, `videoflip`, `videoscale`
 and `videobox` for that size, and splices them in after the probe with a
-`GraphMutator`. It does this again whenever the filters or the decoded size change,
+`GraphMutator`. It rebuilds the chain when the filters or input geometry change,
 removing the old chain from its last element to its first. The filters stay set
-across loads, as mpv's do.
+across loads, as mpv's do. When reduced-resolution decoding is active and
+the demuxed size differs, the chain scales back to that size before applying
+the source-pixel filters.
 
 `hqdn3d` is the element over the clean-room `hqdn3d` crate, with ffmpeg's four
 strengths as properties and its defaults. It filters 8-bit I420, Y42B and Y444,
@@ -1089,8 +1091,10 @@ into a `GlTarget` framebuffer through `g2g-plugins`' `GlVideoRenderer` (feature
 `gl-render`, the NV12 and RGBA shaders `glsink` uses), and `WgpuRenderContext`
 into a wgpu texture through `wgpusink`'s `VideoRenderer`. `GlVideoRenderer` uploads
 P010 to `R16` / `RG16` textures, so a 10-bit picture keeps its depth in a 10-bit
-framebuffer, as mpv's 10-bit render does. A GLES context without
-`GL_EXT_texture_norm16`, and the wgpu renderer, draw it as NV12. Both renderers dither
+framebuffer, as mpv's 10-bit render does. The GL renderer uses NV12 on GLES
+without `GL_EXT_texture_norm16`. The wgpu renderer uploads system-memory P010
+as packed `R16Uint`, with NV12 as the fallback when the packed texture is too
+tall for the device. Both renderers dither
 the YCbCr conversion to the target's depth with interleaved gradient noise, as
 mpv dithers to `dither-depth`: `GlTarget::bits_per_channel` is the host's depth,
 mpv's `MPV_RENDER_PARAM_DEPTH`, and `WgpuRenderContext` takes 8 or 10 bits from a

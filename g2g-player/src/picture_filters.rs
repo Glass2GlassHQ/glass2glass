@@ -323,9 +323,21 @@ fn launch_element_and_output_size(
 pub(crate) fn launch_chain(
     filters: &[PictureFilter],
     decoded: VideoSize,
+    source: Option<VideoSize>,
 ) -> Result<String, VideoFilterError> {
     let mut size = decoded;
     let mut elements = Vec::with_capacity(filters.len());
+    if let Some(source) = source.filter(|source| *source != decoded) {
+        // The preview chain's geometry is in full-resolution source pixels.
+        let scale = PictureFilter::Scale {
+            width: source.width,
+            height: source.height,
+            flags: ScaleFlags::Bilinear,
+        };
+        let (element, output) = launch_element_and_output_size(&scale, size)?;
+        elements.push(element);
+        size = output;
+    }
     for filter in filters {
         let (element, output) = launch_element_and_output_size(filter, size)?;
         elements.push(element);
@@ -363,7 +375,7 @@ mod tests {
     };
 
     fn chain(filters: &[&str]) -> Result<String, VideoFilterError> {
-        launch_chain(&parse_filters(filters)?, DECODED)
+        launch_chain(&parse_filters(filters)?, DECODED, None)
     }
 
     #[test]
