@@ -46,13 +46,15 @@ use g2g_core::{
 };
 
 use crate::dmabufimport::DmaBufImportCache;
+use crate::paddedrows::dmabuf_plane_layout;
+#[cfg(test)]
 use crate::paddedrows::single_stride_layout;
 use crate::wgpubuffer::whole_word_size;
 
 /// Raw formats the import and the export ([`crate::wgpudmabuf::WgpuToDmaBuf`])
 /// accept (the pixel caps pass through unchanged; only the memory domain
 /// changes). Each one's planes follow plane 0's stride the way
-/// [`single_stride_layout`] lays them out.
+/// [`crate::paddedrows::single_stride_layout`] lays them out.
 pub(crate) const DMABUF_FRAME_FORMATS: [RawVideoFormat; 6] = [
     RawVideoFormat::Rgba8,
     RawVideoFormat::Bgra8,
@@ -249,7 +251,7 @@ pub struct DmaBufToWgpu {
     device: Option<wgpu::Device>,
     queue: Option<wgpu::Queue>,
     /// Frame geometry, from the negotiated caps: with the dma-buf's stride and
-    /// offset it gives the imported planes ([`single_stride_layout`]).
+    /// offset it gives the imported planes ([`dmabuf_plane_layout`]).
     width: u32,
     height: u32,
     /// Pixel format, from the negotiated caps (drives the plane-aware size).
@@ -405,14 +407,9 @@ impl AsyncElement for DmaBufToWgpu {
                     let device = self.device.clone().unwrap();
                     let queue = self.queue.clone().unwrap();
 
-                    let (layout, size) = single_stride_layout(
-                        self.format,
-                        self.width,
-                        self.height,
-                        dmabuf.offset,
-                        dmabuf.stride,
-                    )
-                    .ok_or(G2gError::CapsMismatch)?;
+                    let (layout, size) =
+                        dmabuf_plane_layout(dmabuf, self.format, self.width, self.height)
+                            .ok_or(G2gError::CapsMismatch)?;
                     if size == 0 {
                         return Err(G2gError::CapsMismatch);
                     }

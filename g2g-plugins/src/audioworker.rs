@@ -34,11 +34,9 @@ use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
-use core::future::Future;
-use core::pin::Pin;
-use core::task::{Context, Poll};
-
 use g2g_core::{G2gError, HardwareError};
+
+use crate::yieldnow::yield_now;
 
 /// Commands buffered between the element and its device thread. One command is
 /// one buffer of samples, so this is a queue depth in buffers: enough that a
@@ -46,34 +44,6 @@ use g2g_core::{G2gError, HardwareError};
 /// enough that a long file does not accumulate in memory. At the ~21 ms buffers
 /// an AC-3 or AAC stream decodes to, 64 is well over a second of slack.
 const QUEUE_DEPTH: usize = 64;
-
-/// Yield once to the executor. Deliberately not `tokio::task::yield_now`: the
-/// audio sink features do not pull tokio, and this works on the cooperative
-/// runner and a tokio runtime alike.
-///
-/// The waker fires immediately, so a retry loop built on this polls hot rather
-/// than sleeping: waiting on a full queue or on playout costs CPU. That is the
-/// price of a cooperative single-threaded executor with no timer primitive, and
-/// it buys the thing that matters, that no other arm is starved. If the runtime
-/// grows a cooperative sleep, the two wait loops below should back off with it.
-struct YieldNow(bool);
-
-impl Future for YieldNow {
-    type Output = ();
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        if self.0 {
-            return Poll::Ready(());
-        }
-        self.0 = true;
-        cx.waker().wake_by_ref();
-        Poll::Pending
-    }
-}
-
-fn yield_now() -> YieldNow {
-    YieldNow(false)
-}
 
 /// A device worker thread plus the bounded queue feeding it.
 #[derive(Debug)]
@@ -172,6 +142,8 @@ impl<C: Send + 'static> Drop for WorkerLink<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::future::Future;
+    use core::task::Poll;
     use g2g_core::runtime::block_on;
     use std::sync::atomic::AtomicUsize;
     use std::time::Duration;

@@ -646,7 +646,10 @@ impl H264DecodeSession {
         Ok(h264_picture_meta(&picture.header, &slots.order))
     }
 
-    #[cfg(all(target_os = "windows", feature = "d3d12-decode"))]
+    #[cfg(any(
+        all(target_os = "windows", feature = "d3d12-decode"),
+        all(target_os = "linux", feature = "v4l2")
+    ))]
     pub(crate) fn held_slots(&self) -> alloc::vec::Vec<usize> {
         self.references
             .active()

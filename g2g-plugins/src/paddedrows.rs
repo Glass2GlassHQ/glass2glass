@@ -58,7 +58,8 @@ pub(crate) fn plane_shapes_with_stride_shift(
     all(target_os = "linux", feature = "dmabuf-wgpu"),
     all(target_os = "linux", feature = "unixfd"),
     all(target_os = "linux", feature = "kms-sink"),
-    all(target_os = "linux", feature = "hip")
+    all(target_os = "linux", feature = "hip"),
+    all(target_os = "linux", feature = "wayland-sink")
 ))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PaddedPlane {
@@ -80,7 +81,8 @@ pub(crate) struct PaddedPlane {
     all(target_os = "linux", feature = "dmabuf-wgpu"),
     all(target_os = "linux", feature = "unixfd"),
     all(target_os = "linux", feature = "kms-sink"),
-    all(target_os = "linux", feature = "hip")
+    all(target_os = "linux", feature = "hip"),
+    all(target_os = "linux", feature = "wayland-sink")
 ))]
 pub(crate) fn padded_planes(
     format: RawVideoFormat,
@@ -118,7 +120,8 @@ pub(crate) fn padded_planes(
 /// is one byte wider, has no tight single-stride layout.
 #[cfg(any(
     all(target_os = "linux", feature = "dmabuf-wgpu"),
-    all(target_os = "linux", feature = "hip")
+    all(target_os = "linux", feature = "hip"),
+    all(target_os = "linux", feature = "wayland-sink")
 ))]
 pub(crate) fn single_stride_layout(
     format: RawVideoFormat,
@@ -150,6 +153,28 @@ pub(crate) fn single_stride_layout(
         })
         .collect();
     Some((g2g_core::meta::PlaneLayout::new(&planes)?, size as u64))
+}
+
+#[cfg(any(
+    all(target_os = "linux", feature = "dmabuf-wgpu"),
+    all(target_os = "linux", feature = "hip"),
+    all(target_os = "linux", feature = "wayland-sink")
+))]
+pub(crate) fn dmabuf_plane_layout(
+    dmabuf: &g2g_core::memory::OwnedDmaBuf,
+    format: RawVideoFormat,
+    width: u32,
+    height: u32,
+) -> Option<(g2g_core::meta::PlaneLayout, u64)> {
+    // a producer whose planes do not follow plane 0's stride carries their offsets on the dma-buf
+    let Some(layout) = dmabuf.plane_layout() else {
+        return single_stride_layout(format, width, height, dmabuf.offset, dmabuf.stride);
+    };
+    let last = layout.count().checked_sub(1)?;
+    let plane = layout.plane(last)?;
+    let rows = usize::try_from(format.plane_rows(last, height)?).ok()?;
+    let size = plane.offset.checked_add(plane.stride.checked_mul(rows)?)?;
+    Some((*layout, u64::try_from(size).ok()?))
 }
 
 /// How many bytes a padded frame occupies: the end of its last plane's last
@@ -290,6 +315,36 @@ pub(crate) fn declare_padded_rows(
 ))]
 mod tests {
     use super::*;
+
+    #[cfg(any(
+        all(target_os = "linux", feature = "dmabuf-wgpu"),
+        all(target_os = "linux", feature = "hip"),
+        all(target_os = "linux", feature = "wayland-sink")
+    ))]
+    #[test]
+    fn a_carried_layout_spans_to_the_end_of_its_last_plane() {
+        use g2g_core::memory::OwnedDmaBuf;
+        use g2g_core::meta::{Plane, PlaneLayout};
+        let (stride, decoded_rows) = (1920, 1088);
+        let layout = PlaneLayout::new(&[
+            Plane { offset: 0, stride },
+            Plane {
+                offset: stride * decoded_rows,
+                stride,
+            },
+        ])
+        .unwrap();
+        // SAFETY: a fresh memfd with no other owner stands in for a dma-buf.
+        let fd = unsafe { libc::memfd_create(c"frame".as_ptr(), 0) };
+        assert!(fd >= 0, "memfd_create failed");
+        // SAFETY: the fd was just created and nothing else owns it.
+        let dmabuf =
+            unsafe { OwnedDmaBuf::from_raw(fd, stride as u32, 0) }.with_plane_layout(layout);
+        let (carried, size) =
+            dmabuf_plane_layout(&dmabuf, RawVideoFormat::Nv12, 1920, 1080).unwrap();
+        assert_eq!(carried, layout);
+        assert_eq!(size, (stride * decoded_rows + stride * 1080 / 2) as u64);
+    }
 
     #[test]
     fn a_tight_stride_lays_the_planes_back_to_back() {

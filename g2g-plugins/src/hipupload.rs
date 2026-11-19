@@ -28,7 +28,7 @@ use crate::hip::{
     HipEvent, HipExternalBuffer, HipMemoryPool, HipPinnedMemory, HipStream,
 };
 use crate::hipdeviceid::{HipDeviceChoice, HIP_DEVICE_ID_PROP, HIP_VENDOR_PROP};
-use crate::paddedrows::single_stride_layout;
+use crate::paddedrows::{dmabuf_plane_layout, single_stride_layout};
 use crate::pixel::RawVideoGeometry;
 
 type PinnedFrames = crate::pinnedframes::PinnedFrames<HipPinnedMemory>;
@@ -184,8 +184,8 @@ fn upload_dmabuf(
         height,
     } = raw_video;
     let tag = Target::category(short_type_name::<HipUpload>());
-    let (layout, size) = single_stride_layout(format, width, height, dmabuf.offset, dmabuf.stride)
-        .ok_or(G2gError::CapsMismatch)?;
+    let (layout, size) =
+        dmabuf_plane_layout(dmabuf, format, width, height).ok_or(G2gError::CapsMismatch)?;
     // hip imports dma-bufs only on amd
     if gpu.device.vendor() == GpuVendor::Amd && !gpu.dmabuf_import_failed {
         match import_dmabuf(gpu, dmabuf, size) {

@@ -596,7 +596,8 @@ pub mod yuvmatrix;
     feature = "wgpu-sink",
     all(target_os = "linux", feature = "dmabuf-wgpu"),
     all(target_os = "linux", feature = "kms-sink"),
-    all(target_os = "linux", feature = "hip")
+    all(target_os = "linux", feature = "hip"),
+    all(target_os = "linux", feature = "wayland-sink")
 ))]
 mod paddedrows;
 // Sans-IO RFC 4566 SDP: the shared media-section scanner plus the RTP/AVP
@@ -878,6 +879,18 @@ pub mod flactag;
 // MPEG audio parser element (no_std): an `.mp3` / `.mp2` byte stream -> one
 // MPEG audio frame per buffer, the framing ffmpegaudiodec takes.
 pub mod mpegaudioparse;
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(feature = "alsa-sink", feature = "pulse-sink", feature = "pipewire")
+    ),
+    all(target_os = "windows", feature = "wasapi-sink"),
+    all(target_os = "macos", feature = "coreaudio"),
+    all(target_os = "android", feature = "aaudio"),
+    all(target_os = "windows", feature = "d3d12-decode"),
+    all(target_os = "linux", feature = "v4l2")
+))]
+mod yieldnow;
 // Non-blocking link to a blocking audio device worker thread, shared by the
 // audio render sinks.
 #[cfg(any(
@@ -1236,7 +1249,8 @@ pub mod dmabufmap;
 
 #[cfg(any(
     all(target_os = "linux", feature = "dmabuf-wgpu"),
-    all(target_os = "linux", feature = "hip")
+    all(target_os = "linux", feature = "hip"),
+    all(target_os = "linux", feature = "wayland-sink")
 ))]
 mod dmabufimport;
 

@@ -955,7 +955,11 @@ impl H264HardwareDecoder for D3D12Backend {
         })
     }
 
-    fn start_session(&mut self, sps: &H264Sps) -> Result<(), D3D12VideoError> {
+    fn start_session(
+        &mut self,
+        sps: &H264Sps,
+        _reorder_depth: usize,
+    ) -> Result<(), D3D12VideoError> {
         if self.decoder.is_some() {
             return Ok(());
         }
@@ -969,6 +973,11 @@ impl H264HardwareDecoder for D3D12Backend {
 
     fn has_session(&self) -> bool {
         self.decoder.is_some()
+    }
+
+    fn has_free_picture(&self) -> bool {
+        // the texture pool grows on demand
+        true
     }
 
     fn decode_access_unit(

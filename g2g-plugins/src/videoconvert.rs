@@ -675,8 +675,12 @@ pub(crate) mod display {
         }
 
         // `None` when the frame is already in the presented format
+        pub(crate) fn needs_conversion(&self) -> bool {
+            self.negotiated != self.presented
+        }
+
         pub(crate) fn convert_frame(&self, bytes: &[u8]) -> Result<Option<Box<[u8]>>, G2gError> {
-            if self.negotiated == self.presented {
+            if !self.needs_conversion() {
                 return Ok(None);
             }
             if bytes.len() < frame_byte_size(self.negotiated, self.width, self.height) {

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2439: `v4l2slh264dec` hands its pictures to `waylandsink` as dma-bufs with no copy.
 - M2438: `videoconvertscale` preserves display aspect ratio when resizing.
 - M2437: Launch pipelines accept bare RTSP URLs.
 - M2436: `mp4mux` preserves video clean apertures when remuxing MP4.

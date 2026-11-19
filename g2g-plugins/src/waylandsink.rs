@@ -5,10 +5,12 @@
 //! Wayland display sink (desktop dev convenience).
 //!
 //! Opens an `xdg_toplevel` window on the running Wayland compositor and
-//! presents NV12 `DataFrame`s into it. The pixel path is software:
-//! NV12 → XRGB8888 conversion (in the caps colorimetry's matrix and
-//! range) into a `wl_shm` pool, then `attach` + `commit` per frame. Slow
-//! but universal; every Wayland compositor supports `wl_shm`.
+//! presents NV12 `DataFrame`s into it. A system-memory frame takes the
+//! software path: NV12 → XRGB8888 conversion (in the caps colorimetry's
+//! matrix and range) into a `wl_shm` pool, then `attach` + `commit` per
+//! frame. A dma-buf frame is imported through `zwp_linux_dmabuf_v1` as a
+//! linear NV12 buffer with no copy, and the compositor converts it with its
+//! own matrix, since the caps colorimetry has no way to reach it.
 //!
 //! This is the **dev sink**, not the production sink:
 //! - Latency is whatever the compositor's frame callback delivers (one
@@ -16,7 +18,7 @@
 //! - The XRGB8888 conversion runs on the Wayland worker thread, straight
 //!   into the `wl_shm` buffer; at 1080p30 the CPU cost is real (each frame
 //!   is ~2 ms of YUV→RGB on a modern x86 core).
-//! - No GPU upload and no `zwp_linux_dmabuf_v1` zero-copy.
+//! - The software path has no GPU upload.
 //!
 //! The production sink is [`crate::kmssink::KmsSink`], which scans NV12
 //! out directly through KMS without colour conversion. Use the KMS sink
@@ -73,8 +75,9 @@ use alloc::vec::Vec;
 
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
-    delegate_compositor, delegate_output, delegate_registry, delegate_shm, delegate_xdg_shell,
-    delegate_xdg_window,
+    delegate_compositor, delegate_dmabuf, delegate_output, delegate_registry, delegate_shm,
+    delegate_xdg_shell, delegate_xdg_window,
+    dmabuf::{DmabufFeedback, DmabufHandler, DmabufState},
     output::{OutputHandler, OutputState},
     reexports::calloop::{
         channel::{channel, Channel, Event as ChanEvent, Sender as CalloopSender},
@@ -84,8 +87,11 @@ use smithay_client_toolkit::{
     reexports::client::{
         delegate_noop,
         globals::registry_queue_init,
-        protocol::{wl_output, wl_shm, wl_surface},
+        protocol::{wl_buffer, wl_output, wl_shm, wl_surface},
         Connection, QueueHandle,
+    },
+    reexports::protocols::wp::linux_dmabuf::zv1::client::{
+        zwp_linux_buffer_params_v1, zwp_linux_dmabuf_feedback_v1,
     },
     reexports::protocols::wp::viewporter::client::{
         wp_viewport::WpViewport, wp_viewporter::WpViewporter,
@@ -107,6 +113,8 @@ use smithay_client_toolkit::{
 
 use crate::clock::wait_to_present;
 use crate::display_aspect::{display_size, FORCE_ASPECT_RATIO_NAME, FORCE_ASPECT_RATIO_PROPERTY};
+use crate::dmabufimport::DmaBufImportCache;
+use crate::paddedrows::dmabuf_plane_layout;
 use crate::pixel::{frame_byte_size, rgba_rb_offsets};
 use crate::videoconvert::display::{display_sink_caps, DisplayInput};
 use crate::videoconvert::yuv420_to_rgb_into;
@@ -115,7 +123,8 @@ use crate::worker_ready::Handshake;
 use crate::yuvmatrix::YuvRgbMatrix;
 use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::frame::Frame;
-use g2g_core::memory::{DomainSet, MemoryDomain, MemoryDomainKind, SystemSlice};
+use g2g_core::log::{short_type_name, Target};
+use g2g_core::memory::{DomainSet, MemoryDomain, MemoryDomainKind, OwnedDmaBuf, SystemSlice};
 use g2g_core::meta::{Orientation, OrientationSet};
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
@@ -137,10 +146,15 @@ enum WorkerCmd {
     Shutdown,
 }
 
+enum QueuedPixels {
+    // converted into the shm buffer by the worker
+    System(SystemSlice),
+    Imported(OwnedDmaBuf),
+}
+
 /// One converted frame on its way to the surface.
 struct QueuedFrame {
-    /// The NV12 frame, converted into the shm buffer by the worker.
-    pixels: SystemSlice,
+    pixels: QueuedPixels,
     matrix: YuvRgbMatrix,
     /// Source-side wall-clock stamp from `FrameTiming::arrival_ns`.
     /// The worker records `monotonic_ns() - arrival_ns` into the
@@ -499,6 +513,9 @@ impl PipelineClock for WaylandClock {
 }
 
 const NATIVE_FORMATS: &[RawVideoFormat] = &[RawVideoFormat::Nv12];
+// drm_fourcc.h
+const DRM_FORMAT_NV12: u32 = u32::from_le_bytes(*b"NV12");
+const DRM_FORMAT_MOD_LINEAR: u64 = 0;
 
 fn accepted_caps() -> CapsSet {
     display_sink_caps(NATIVE_FORMATS)
@@ -523,10 +540,10 @@ impl AsyncElement for WaylandSink {
         ))
     }
 
-    /// This sink blits from host memory, so it takes system frames only. The
-    /// allocation cascade turns that into a download demand on a GPU producer.
+    /// This sink blits system frames and hands dma-bufs to the compositor. The
+    /// allocation cascade turns that into a download demand on any other GPU producer.
     fn input_domains(&self) -> DomainSet {
-        DomainSet::only(MemoryDomainKind::System)
+        DomainSet::only(MemoryDomainKind::System).with(MemoryDomainKind::DmaBuf)
     }
 
     /// The compositor turns the picture for us through
@@ -726,10 +743,9 @@ impl AsyncElement for WaylandSink {
                 PipelinePacket::DataFrame(frame) => {
                     let orientation = frame_orientation(&frame);
                     let Frame { domain, timing, .. } = frame;
-                    domain.require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    let MemoryDomain::System(pixels) = domain else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    if !matches!(domain, MemoryDomain::DmaBuf(_)) {
+                        domain.require_system_slice(g2g_core::log::short_type_name::<Self>())?;
+                    }
                     // PTS pacing: hold the frame until its running-time deadline
                     // on the elected clock, or drop it if it is already too late
                     // (the QoS bound) or outside the segment. Unpaced without a
@@ -751,15 +767,29 @@ impl AsyncElement for WaylandSink {
                         return Ok(());
                     }
                     let input = self.input.ok_or(G2gError::NotConfigured)?;
-                    let pixels = match input.convert_frame(pixels.as_slice())? {
-                        Some(converted) => SystemSlice::from_boxed(converted),
-                        None => pixels,
+                    let pixels = match domain {
+                        MemoryDomain::DmaBuf(_) if input.needs_conversion() => {
+                            g2g_core::g2g_error!(
+                                self,
+                                "a dma-buf frame must be NV12, the caps name another format"
+                            );
+                            return Err(G2gError::CapsMismatch);
+                        }
+                        MemoryDomain::DmaBuf(dmabuf) => QueuedPixels::Imported(dmabuf),
+                        MemoryDomain::System(pixels) => {
+                            let pixels = match input.convert_frame(pixels.as_slice())? {
+                                Some(converted) => SystemSlice::from_boxed(converted),
+                                None => pixels,
+                            };
+                            if pixels.as_slice().len()
+                                < frame_byte_size(RawVideoFormat::Nv12, self.width, self.height)
+                            {
+                                return Err(G2gError::CapsMismatch);
+                            }
+                            QueuedPixels::System(pixels)
+                        }
+                        _ => return Err(G2gError::UnsupportedDomain),
                     };
-                    if pixels.as_slice().len()
-                        < frame_byte_size(RawVideoFormat::Nv12, self.width, self.height)
-                    {
-                        return Err(G2gError::CapsMismatch);
-                    }
                     let t_ready = monotonic_ns();
 
                     let tx = self.cmd_tx.as_ref().ok_or(G2gError::NotConfigured)?;
@@ -889,6 +919,10 @@ struct WorkerState {
     shm: Shm,
     pool: SlotPool,
     buffer: Option<Buffer>,
+    dmabuf_state: DmabufState,
+    imports: DmaBufImportCache<wl_buffer::WlBuffer>,
+    // held until the compositor sends wl_buffer.release for their buffer
+    on_screen: Vec<(wl_buffer::WlBuffer, OwnedDmaBuf)>,
     window: Window,
     qh: QueueHandle<WorkerState>,
     width: u32,
@@ -949,6 +983,7 @@ fn worker_main(
     let compositor = CompositorState::bind(&globals, &qh)?;
     let xdg_shell = XdgShell::bind(&globals, &qh)?;
     let shm = Shm::bind(&globals, &qh)?;
+    let dmabuf_state = DmabufState::new(&globals, &qh);
 
     let surface = compositor.create_surface(&qh);
     let window = xdg_shell.create_window(surface, WindowDecorations::RequestServer, &qh);
@@ -975,6 +1010,9 @@ fn worker_main(
         shm,
         pool,
         buffer: None,
+        dmabuf_state,
+        imports: DmaBufImportCache::new(),
+        on_screen: Vec::new(),
         window,
         qh: qh.clone(),
         width,
@@ -1018,19 +1056,11 @@ fn worker_main(
 }
 
 impl WorkerState {
-    /// Convert `pixels` into a `SlotPool` buffer, request a `frame` callback
-    /// (so the compositor tells us when it's ready for the next one),
-    /// and commit. The producer's `ack` is stashed in `pending_ack`; we
-    /// signal it when the matching `frame` callback fires in
-    /// `CompositorHandler::frame`.
-    fn draw(&mut self, queued: QueuedFrame) {
-        let QueuedFrame {
-            pixels,
-            matrix,
-            arrival_ns,
-            orientation,
-            ack,
-        } = queued;
+    fn fill_shm_buffer(
+        &mut self,
+        pixels: &SystemSlice,
+        matrix: &YuvRgbMatrix,
+    ) -> Result<(), G2gError> {
         let width = self.width as i32;
         let height = self.height as i32;
         let stride = self.width as i32 * 4;
@@ -1054,14 +1084,83 @@ impl WorkerState {
                 canvas
             }
         };
+        nv12_to_xrgb8888(pixels.as_slice(), self.width, self.height, matrix, canvas)
+    }
 
-        if nv12_to_xrgb8888(pixels.as_slice(), self.width, self.height, &matrix, canvas).is_err() {
-            // Should never happen: the sink checked the frame size, and dims
-            // are fixed at configure time. Drop quietly *and* release the
-            // producer so we don't deadlock the pipeline.
-            let _ = ack.send(());
-            return;
-        }
+    fn import(&mut self, dmabuf: &OwnedDmaBuf) -> Result<wl_buffer::WlBuffer, G2gError> {
+        let (layout, size) =
+            dmabuf_plane_layout(dmabuf, RawVideoFormat::Nv12, self.width, self.height)
+                .ok_or(G2gError::CapsMismatch)?;
+        let (dmabuf_state, qh) = (&self.dmabuf_state, &self.qh);
+        let (width, height) = (self.width as i32, self.height as i32);
+        self.imports.get_or_import(dmabuf, size, || {
+            let params = dmabuf_state
+                .create_params(qh)
+                .map_err(|_| G2gError::UnsupportedDomain)?;
+            // SAFETY: the fd is a live dma-buf owned by `dmabuf` for this call, and
+            // the request that sends it is written before the call returns.
+            let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(dmabuf.as_raw()) };
+            for index in 0..layout.count() {
+                let plane = layout.plane(index).ok_or(G2gError::CapsMismatch)?;
+                let to_u32 =
+                    |value: usize| u32::try_from(value).map_err(|_| G2gError::CapsMismatch);
+                params.add(
+                    fd,
+                    index as u32,
+                    to_u32(plane.offset)?,
+                    to_u32(plane.stride)?,
+                    DRM_FORMAT_MOD_LINEAR,
+                );
+            }
+            let (wl_buffer, _) = params.create_immed(
+                width,
+                height,
+                DRM_FORMAT_NV12,
+                zwp_linux_buffer_params_v1::Flags::empty(),
+                qh,
+            );
+            Ok(wl_buffer)
+        })
+    }
+
+    /// Convert `pixels` into a `SlotPool` buffer, request a `frame` callback
+    /// (so the compositor tells us when it's ready for the next one),
+    /// and commit. The producer's `ack` is stashed in `pending_ack`; we
+    /// signal it when the matching `frame` callback fires in
+    /// `CompositorHandler::frame`.
+    fn draw(&mut self, queued: QueuedFrame) {
+        let QueuedFrame {
+            pixels,
+            matrix,
+            arrival_ns,
+            orientation,
+            ack,
+        } = queued;
+        let width = self.width as i32;
+        let height = self.height as i32;
+        let attach = match pixels {
+            QueuedPixels::System(pixels) => {
+                if self.fill_shm_buffer(&pixels, &matrix).is_err() {
+                    // Should never happen: the sink checked the frame size, and dims
+                    // are fixed at configure time. Drop quietly *and* release the
+                    // producer so we don't deadlock the pipeline.
+                    let _ = ack.send(());
+                    return;
+                }
+                None
+            }
+            QueuedPixels::Imported(dmabuf) => match self.import(&dmabuf) {
+                Ok(wl_buffer) => Some((wl_buffer, dmabuf)),
+                Err(error) => {
+                    g2g_core::g2g_error!(
+                        Target::category(short_type_name::<WaylandSink>()),
+                        "the compositor cannot show this dma-buf as linear NV12: {error:?}"
+                    );
+                    self.exit = true;
+                    return;
+                }
+            },
+        };
 
         let surface = self.window.wl_surface();
         if orientation != self.orientation {
@@ -1084,7 +1183,18 @@ impl WorkerState {
         // so we pass a clone of the surface as the callback's user data.
         surface.frame(&self.qh, surface.clone());
         surface.damage_buffer(0, 0, width, height);
-        buffer.attach_to(surface).expect("attach_to");
+        match attach {
+            Some((wl_buffer, dmabuf)) => {
+                surface.attach(Some(&wl_buffer), 0, 0);
+                self.on_screen.push((wl_buffer, dmabuf));
+            }
+            None => self
+                .buffer
+                .as_ref()
+                .expect("fill_shm_buffer leaves a buffer")
+                .attach_to(surface)
+                .expect("attach_to"),
+        }
         self.window.commit();
         self.orientation = orientation;
         self.presented.fetch_add(1, Ordering::Relaxed);
@@ -1204,7 +1314,52 @@ impl ProvidesRegistryState for WorkerState {
     registry_handlers![OutputState,];
 }
 
+impl DmabufHandler for WorkerState {
+    fn dmabuf_state(&mut self) -> &mut DmabufState {
+        &mut self.dmabuf_state
+    }
+
+    fn dmabuf_feedback(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1,
+        _: DmabufFeedback,
+    ) {
+    }
+
+    fn created(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1,
+        _: wl_buffer::WlBuffer,
+    ) {
+        // buffers come from create_immed, which sends no created event
+    }
+
+    fn failed(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1,
+    ) {
+        g2g_core::g2g_error!(
+            Target::category(short_type_name::<WaylandSink>()),
+            "the compositor refused a linear NV12 dma-buf"
+        );
+        self.exit = true;
+    }
+
+    fn released(&mut self, _: &Connection, _: &QueueHandle<Self>, buffer: &wl_buffer::WlBuffer) {
+        if let Some(index) = self.on_screen.iter().position(|(held, _)| held == buffer) {
+            self.on_screen.swap_remove(index);
+        }
+    }
+}
+
 delegate_compositor!(WorkerState);
+delegate_dmabuf!(WorkerState);
 delegate_output!(WorkerState);
 delegate_shm!(WorkerState);
 delegate_xdg_shell!(WorkerState);
@@ -1325,15 +1480,15 @@ mod tests {
         assert_eq!(WaylandSink::new().absorbed_orientations(), expected);
     }
 
-    /// The sink converts on the CPU into `wl_shm`, so it has to tell a GPU decoder to
-    /// download. The allocation cascade reads this declaration, so getting it
+    /// The sink converts on the CPU into `wl_shm` or imports a dma-buf, so it has to tell
+    /// any other GPU decoder to download. The allocation cascade reads this declaration, so getting it
     /// wrong means `nvdec ! waylandsink` takes a device pointer and dies with
     /// `UnsupportedDomain`.
     #[test]
-    fn declares_system_memory_only() {
+    fn declares_system_memory_and_dmabuf_only() {
         assert_eq!(
             WaylandSink::new().input_domains(),
-            DomainSet::only(MemoryDomainKind::System)
+            DomainSet::only(MemoryDomainKind::System).with(MemoryDomainKind::DmaBuf)
         );
     }
 

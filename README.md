@@ -627,11 +627,11 @@ cargo clippy --workspace --all-targets
 | AVI / QuickTime / Matroska streams g2g has no caps type for (Cinepak, Indeo, Ut Video, QuickTime RLE, ADPCM, MACE, ...), demuxed under their container tag and decoded by `ffmpegdec` / `ffmpegaudiodec` | `ffmpeg-long-tail` | Linux + libavcodec + libavformat |
 | `MfDecode` / `MfEncode` / `MfAacEncode` / `MfAacDecode` | `mf-decode`, `mf-encode`, `mf-aac` | Windows + Media Foundation |
 | `D3D12H264Dec` (`d3d12h264dec`: 8-bit 4:2:0 H.264 on the D3D12 video decode API, zero-copy NV12 wgpu textures or system memory) | `d3d12-decode` | Windows + a GPU with D3D12 video decode |
-| `V4l2SlH264Dec` (`v4l2slh264dec`: 8-bit 4:2:0 H.264 on a V4L2 stateless decoder such as Hantro, NV12 in system memory) | `v4l2` | Linux + a stateless decoder with a media controller |
+| `V4l2SlH264Dec` (`v4l2slh264dec`: 8-bit 4:2:0 H.264 on a V4L2 stateless decoder such as Hantro, zero-copy NV12 dma-bufs or system memory) | `v4l2` | Linux + a stateless decoder with a media controller |
 | `VtDecode` / `VtEncode` (H.264 / H.265, H.265 with alpha from BGRA, zero-copy `CVPixelBuffer` output via `cv-output`) | `vtdecode`, `vtencode` | macOS + VideoToolbox |
 | `AtEnc` (`atenc`: PCM to ADTS AAC-LC, mono or stereo) | `audiotoolbox-aac` | macOS + AudioToolbox |
 | `MediaCodecDec` (H.264 / H.265, zero-copy GPU output via `with_gpu_output`) | `mediacodec`, `mediacodec-wgpu` | Android + NDK MediaCodec (+ wgpu / Vulkan for GPU output) |
-| `WaylandSink` | `wayland-sink` | Linux + Wayland |
+| `WaylandSink` (NV12 from system memory or zero-copy NV12 dma-bufs) | `wayland-sink` | Linux + Wayland |
 | `KmsSink` | `kms-sink` | Linux + libdrm, needs DRM master / tty |
 | `D3D11Sink` (`d3d11videosink`: owns its window, any raw format from system memory or zero-copy NV12 from D3D11 textures) | `d3d11-sink` | Windows |
 | `MetalVideoSink` (zero-copy from `CVPixelBuffer`) | `metal-sink` | macOS + Metal |

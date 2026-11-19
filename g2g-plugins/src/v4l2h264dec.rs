@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::ffi::c_void;
 use core::mem::{offset_of, size_of};
@@ -10,9 +11,9 @@ use std::path::{Path, PathBuf};
 
 use g2g_core::g2g_error;
 use g2g_core::log::Target;
-use g2g_core::memory::{DomainSet, MemoryDomainKind, SystemSlice};
-use g2g_core::meta::CropRectangle;
-use g2g_core::{ElementMetadata, G2gError, MemoryDomain};
+use g2g_core::memory::{DomainSet, MemoryDomainKind, OwnedDmaBuf, SystemSlice};
+use g2g_core::meta::{CropRectangle, Plane, PlaneLayout};
+use g2g_core::{BufferPool, ElementMetadata, G2gError, MemoryDomain};
 use v4l::v4l2::vidioc;
 use v4l::v4l_sys::{
     v4l2_buf_type_V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
@@ -27,7 +28,7 @@ use crate::h264dpb::{
 };
 use crate::h264hardwaredec::{H264HardwareDec, H264HardwareDecoder};
 use crate::h264parse::{H264Pps, H264Sps, H264StreamRefused, MALFORMED_SLICE_HEADER};
-use crate::v4l2ioctl::{v4l2_err, v4l2_ioctl, zeroed_arg};
+use crate::v4l2ioctl::{export_buffer, v4l2_err, v4l2_ioctl, zeroed_arg};
 
 // linux/v4l2-controls.h and linux/videodev2.h from kernel 5.11 on. These are
 // declared here because the v4l2-sys-mit bindings come from the build host's
@@ -227,6 +228,7 @@ pub enum V4l2DecodeError {
     Device(G2gError),
     TimedOut,
     CorruptPicture,
+    NoFreePictureBuffer,
 }
 
 impl From<H264StreamRefused> for V4l2DecodeError {
@@ -615,22 +617,68 @@ struct CaptureLayout {
 }
 
 #[derive(Debug)]
+pub struct CapturePicture {
+    buffer: usize,
+    dmabuf: OwnedDmaBuf,
+}
+
+#[derive(Debug)]
 struct V4l2Session {
     h264: H264DecodeSession,
     request: OwnedFd,
     bitstream: Mapping,
     pictures: Vec<Mapping>,
+    exports: Vec<OwnedDmaBuf>,
+    slot_buffers: Vec<Option<usize>>,
+    // created on the first picture a system-memory consumer takes
+    copies: Option<BufferPool<Box<[u8]>>>,
+    reorder_depth: usize,
     layout: CaptureLayout,
     visible: CropRectangle,
     slot_pictures: Vec<u64>,
     decoded: u64,
 }
 
+// g2g-launch queues four frames per link, and Weston holds two buffers, the one on screen and the next
+const DOWNSTREAM_PICTURES: usize = 6;
+
+fn nv12_plane_layout(layout: &CaptureLayout, visible: CropRectangle) -> Option<PlaneLayout> {
+    let stride = layout.bytes_per_line;
+    let chroma = chroma_rectangle(visible);
+    let luma_offset = stride
+        .checked_mul(visible.top as usize)?
+        .checked_add(visible.left as usize)?;
+    let chroma_offset = stride
+        .checked_mul(layout.luma_rows.checked_add(chroma.top as usize)?)?
+        .checked_add(2 * chroma.left as usize)?;
+    PlaneLayout::new(&[
+        Plane {
+            offset: luma_offset,
+            stride,
+        },
+        Plane {
+            offset: chroma_offset,
+            stride,
+        },
+    ])
+}
+
+fn free_capture_buffer(exports: &[OwnedDmaBuf], slot_buffers: &[Option<usize>]) -> Option<usize> {
+    // the DPB references a buffer through its slot, and a picture still downstream holds a share of its export
+    (0..exports.len())
+        .find(|&buffer| !slot_buffers.contains(&Some(buffer)) && exports[buffer].share_count() == 1)
+}
+
 const OUTPUT_TYPE: u32 = v4l2_buf_type_V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
 const CAPTURE_TYPE: u32 = v4l2_buf_type_V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
 
 impl V4l2Session {
-    fn start(video: &OwnedFd, media: &OwnedFd, sps: &H264Sps) -> Result<Self, V4l2DecodeError> {
+    fn start(
+        video: &OwnedFd,
+        media: &OwnedFd,
+        sps: &H264Sps,
+        reorder_depth: usize,
+    ) -> Result<Self, V4l2DecodeError> {
         // Hantro G1 and the other V4L2 H.264 decoders in mainline Linux output 8-bit 4:2:0 only
         if sps.chroma_format_idc != 1 || sps.bit_depth_luma_minus8 != 0 {
             return Err(V4l2DecodeError::StreamRefused(
@@ -689,13 +737,15 @@ impl V4l2Session {
         let slots = h264_dpb_slots(sps);
         request_buffers(video, OUTPUT_TYPE, 1)?;
         let bitstream = Mapping::of_buffer(video, OUTPUT_TYPE, 0)?;
-        let granted = request_buffers(video, CAPTURE_TYPE, slots as u32)?;
-        if (granted as usize) < slots {
+        let wanted = slots + reorder_depth + DOWNSTREAM_PICTURES;
+        let granted = request_buffers(video, CAPTURE_TYPE, wanted as u32)?;
+        // fewer leaves the decoder waiting forever on a picture the display holds until the next one
+        if (granted as usize) < slots + reorder_depth + 1 {
             return Err(V4l2DecodeError::StreamRefused(
-                "the V4L2 decoder grants fewer picture buffers than the stream's DPB needs",
+                "the V4L2 decoder grants fewer picture buffers than the stream's DPB and reordering need",
             ));
         }
-        let pictures = (0..slots as u32)
+        let pictures = (0..granted)
             .map(|index| Mapping::of_buffer(video, CAPTURE_TYPE, index))
             .collect::<Result<Vec<_>, _>>()?;
         let chroma_end = layout.bytes_per_line * (layout.luma_rows + layout.luma_rows.div_ceil(2));
@@ -704,6 +754,20 @@ impl V4l2Session {
                 "the V4L2 decoder's picture buffers are smaller than an NV12 picture",
             ));
         }
+        let plane_layout = nv12_plane_layout(&layout, visible).ok_or(
+            V4l2DecodeError::StreamRefused("the visible picture lies outside the decoded picture"),
+        )?;
+        let exports = (0..granted)
+            .map(|index| {
+                export_buffer(
+                    video.as_raw_fd(),
+                    CAPTURE_TYPE,
+                    index,
+                    layout.bytes_per_line as u32,
+                )
+                .map(|dmabuf| dmabuf.with_plane_layout(plane_layout))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         set_stream(video, OUTPUT_TYPE, true)?;
         set_stream(video, CAPTURE_TYPE, true)?;
 
@@ -718,6 +782,10 @@ impl V4l2Session {
             request,
             bitstream,
             pictures,
+            exports,
+            slot_buffers: alloc::vec![None; slots],
+            copies: None,
+            reorder_depth,
             layout,
             visible,
             slot_pictures: alloc::vec![0; slots],
@@ -776,12 +844,25 @@ impl V4l2Session {
         Ok(())
     }
 
+    fn release_unreferenced_buffers(&mut self) {
+        let held = self.h264.held_slots();
+        for (slot, buffer) in self.slot_buffers.iter_mut().enumerate() {
+            if !held.contains(&slot) {
+                *buffer = None;
+            }
+        }
+    }
+
     fn decode_picture(
         &mut self,
         video: &OwnedFd,
         picture: &H264Picture<'_>,
-    ) -> Result<(PictureMeta, Vec<u8>), V4l2DecodeError> {
+    ) -> Result<(PictureMeta, CapturePicture), V4l2DecodeError> {
         let slots = self.h264.begin_picture(picture)?;
+        self.release_unreferenced_buffers();
+        let buffer = free_capture_buffer(&self.exports, &self.slot_buffers)
+            .ok_or(V4l2DecodeError::NoFreePictureBuffer)?;
+        self.slot_buffers[slots.target] = Some(buffer);
         self.decoded += 1;
         let picture_number = self.decoded;
         self.slot_pictures[slots.target] = picture_number;
@@ -811,7 +892,7 @@ impl V4l2Session {
             ],
         )?;
 
-        let target = slots.target as u32;
+        let target = buffer as u32;
         let mut capture_plane: v4l2_plane = zeroed_arg();
         let mut capture = buffer_arg(CAPTURE_TYPE, target, &mut capture_plane);
         // SAFETY: `V4l2Buffer` matches the kernel's `v4l2_buffer`, which VIDIOC_QBUF takes.
@@ -843,30 +924,65 @@ impl V4l2Session {
         if done.flags & V4L2_BUF_FLAG_ERROR != 0 {
             return Err(V4l2DecodeError::CorruptPicture);
         }
-        let nv12 = self.read_picture(slots.target);
         let meta = self.h264.end_picture(picture, &slots)?;
-        Ok((meta, nv12))
+        self.release_unreferenced_buffers();
+        Ok((
+            meta,
+            CapturePicture {
+                buffer,
+                dmabuf: self.exports[buffer].clone(),
+            },
+        ))
+    }
+
+    fn copy_picture(&mut self, buffer: usize) -> SystemSlice {
+        let chroma = chroma_rectangle(self.visible);
+        let length =
+            (self.visible.width * self.visible.height + 2 * chroma.width * chroma.height) as usize;
+        // draining the reorder buffer at end of stream copies every picture it holds at once
+        let count = self.reorder_depth + DOWNSTREAM_PICTURES + 1;
+        let pooled = self
+            .copies
+            .get_or_insert_with(|| BufferPool::new_byte_pool(count, length))
+            .try_acquire();
+        match pooled {
+            Some(mut copy) => {
+                self.write_visible_picture(buffer, &mut copy.as_mut()[..length]);
+                SystemSlice::from_pool(copy, length)
+            }
+            // a consumer that keeps frames, such as a test collecting every one, empties the pool
+            None => {
+                let mut copy = alloc::vec![0; length].into_boxed_slice();
+                self.write_visible_picture(buffer, &mut copy);
+                SystemSlice::from_boxed(copy)
+            }
+        }
     }
 
     // tight NV12 of the visible picture, luma rows then interleaved chroma rows
-    fn read_picture(&self, slot: usize) -> Vec<u8> {
-        let bytes = self.pictures[slot].bytes();
+    fn write_visible_picture(&self, buffer: usize, target: &mut [u8]) {
+        let bytes = self.pictures[buffer].bytes();
         let stride = self.layout.bytes_per_line;
         let luma = self.visible;
         let chroma = chroma_rectangle(luma);
         let chroma_offset = stride * self.layout.luma_rows;
-        let mut nv12 = Vec::with_capacity(
-            (luma.width * luma.height + 2 * chroma.width * chroma.height) as usize,
-        );
-        for row in luma.top..luma.top + luma.height {
-            let start = row as usize * stride + luma.left as usize;
-            nv12.extend_from_slice(&bytes[start..start + luma.width as usize]);
+        let luma_rows = (luma.top..luma.top + luma.height).map(|row| {
+            (
+                row as usize * stride + luma.left as usize,
+                luma.width as usize,
+            )
+        });
+        let chroma_rows = (chroma.top..chroma.top + chroma.height).map(|row| {
+            (
+                chroma_offset + row as usize * stride + 2 * chroma.left as usize,
+                2 * chroma.width as usize,
+            )
+        });
+        let mut written = 0;
+        for (start, width) in luma_rows.chain(chroma_rows) {
+            target[written..written + width].copy_from_slice(&bytes[start..start + width]);
+            written += width;
         }
-        for row in chroma.top..chroma.top + chroma.height {
-            let start = chroma_offset + row as usize * stride + 2 * chroma.left as usize;
-            nv12.extend_from_slice(&bytes[start..start + 2 * chroma.width as usize]);
-        }
-        nv12
     }
 }
 
@@ -913,6 +1029,10 @@ fn decode_refused(error: V4l2DecodeError) -> G2gError {
         V4l2DecodeError::CorruptPicture => {
             g2g_error!(target, "the V4L2 decoder reported a corrupt picture")
         }
+        V4l2DecodeError::NoFreePictureBuffer => g2g_error!(
+            target,
+            "every V4L2 picture buffer is referenced or still downstream"
+        ),
         V4l2DecodeError::Device(error) => {
             g2g_error!(target, "the V4L2 decoder refused a request: {error:?}");
             return error;
@@ -922,10 +1042,11 @@ fn decode_refused(error: V4l2DecodeError) -> G2gError {
 }
 
 impl H264HardwareDecoder for V4l2H264Decoder {
-    type Picture = Vec<u8>;
+    type Picture = CapturePicture;
     type Error = V4l2DecodeError;
     const LOG_CATEGORY: &'static str = "V4l2SlH264Dec";
-    const OUTPUT_DOMAINS: DomainSet = DomainSet::only(MemoryDomainKind::System);
+    const OUTPUT_DOMAINS: DomainSet =
+        DomainSet::only(MemoryDomainKind::System).with(MemoryDomainKind::DmaBuf);
 
     fn metadata() -> ElementMetadata {
         ElementMetadata::new(
@@ -945,11 +1066,20 @@ impl H264HardwareDecoder for V4l2H264Decoder {
         Self::open_nodes(&find_v4l2_h264_decoder()?)
     }
 
-    fn start_session(&mut self, sps: &H264Sps) -> Result<(), V4l2DecodeError> {
+    fn start_session(
+        &mut self,
+        sps: &H264Sps,
+        reorder_depth: usize,
+    ) -> Result<(), V4l2DecodeError> {
         if self.session.is_some() {
             return Ok(());
         }
-        self.session = Some(V4l2Session::start(&self.video, &self.media, sps)?);
+        self.session = Some(V4l2Session::start(
+            &self.video,
+            &self.media,
+            sps,
+            reorder_depth,
+        )?);
         Ok(())
     }
 
@@ -957,10 +1087,16 @@ impl H264HardwareDecoder for V4l2H264Decoder {
         self.session.is_some()
     }
 
+    fn has_free_picture(&self) -> bool {
+        self.session.as_ref().is_none_or(|session| {
+            free_capture_buffer(&session.exports, &session.slot_buffers).is_some()
+        })
+    }
+
     fn decode_access_unit(
         &mut self,
         access_unit: &[u8],
-    ) -> Result<Vec<(PictureMeta, Vec<u8>)>, V4l2DecodeError> {
+    ) -> Result<Vec<(PictureMeta, CapturePicture)>, V4l2DecodeError> {
         let video = &self.video;
         let session = self
             .session
@@ -980,6 +1116,7 @@ impl H264HardwareDecoder for V4l2H264Decoder {
     fn reset(&mut self) {
         if let Some(session) = self.session.as_mut() {
             session.h264.reset();
+            session.slot_buffers.fill(None);
         }
     }
 
@@ -994,12 +1131,17 @@ impl H264HardwareDecoder for V4l2H264Decoder {
 
     fn output(
         &mut self,
-        picture: Vec<u8>,
-        _domain: MemoryDomainKind,
+        picture: CapturePicture,
+        domain: MemoryDomainKind,
     ) -> Result<MemoryDomain, V4l2DecodeError> {
-        Ok(MemoryDomain::System(SystemSlice::from_boxed(
-            picture.into_boxed_slice(),
-        )))
+        if domain == MemoryDomainKind::DmaBuf {
+            return Ok(MemoryDomain::DmaBuf(picture.dmabuf));
+        }
+        let session = self
+            .session
+            .as_mut()
+            .expect("H264HardwareDec emits pictures only once a session has started");
+        Ok(MemoryDomain::System(session.copy_picture(picture.buffer)))
     }
 
     fn stream_refusal(error: &V4l2DecodeError) -> Option<&'static str> {
@@ -1015,3 +1157,82 @@ impl H264HardwareDecoder for V4l2H264Decoder {
 }
 
 pub type V4l2SlH264Dec = H264HardwareDec<V4l2H264Decoder>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn exports(count: usize) -> Vec<OwnedDmaBuf> {
+        (0..count)
+            .map(|_| {
+                // SAFETY: a fresh memfd with no other owner stands in for an exported buffer.
+                let fd = unsafe { libc::memfd_create(c"capture".as_ptr(), 0) };
+                assert!(fd >= 0, "memfd_create failed");
+                // SAFETY: the fd was just created and nothing else owns it.
+                unsafe { OwnedDmaBuf::from_raw(fd, 0, 0) }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_buffer_referenced_by_the_dpb_or_held_downstream_is_not_reused() {
+        let exports = exports(3);
+        let slot_buffers = [Some(0), None];
+        let downstream = exports[1].clone();
+        assert_eq!(free_capture_buffer(&exports, &slot_buffers), Some(2));
+        let downstream_too = exports[2].clone();
+        assert_eq!(free_capture_buffer(&exports, &slot_buffers), None);
+        drop(downstream);
+        assert_eq!(free_capture_buffer(&exports, &slot_buffers), Some(1));
+        drop(downstream_too);
+    }
+
+    #[test]
+    fn the_chroma_plane_starts_after_the_decoded_rows_not_the_visible_ones() {
+        let layout = CaptureLayout {
+            bytes_per_line: 1920,
+            luma_rows: 1088,
+        };
+        let visible = CropRectangle {
+            left: 0,
+            top: 0,
+            width: 1920,
+            height: 1080,
+        };
+        let planes = nv12_plane_layout(&layout, visible).expect("the picture fits");
+        assert_eq!(
+            planes.plane(0),
+            Some(Plane {
+                offset: 0,
+                stride: 1920
+            })
+        );
+        assert_eq!(
+            planes.plane(1),
+            Some(Plane {
+                offset: 1920 * 1088,
+                stride: 1920
+            })
+        );
+    }
+
+    #[test]
+    fn a_cropped_picture_starts_at_its_top_left_sample_in_both_planes() {
+        let layout = CaptureLayout {
+            bytes_per_line: 320,
+            luma_rows: 192,
+        };
+        let visible = CropRectangle {
+            left: 8,
+            top: 4,
+            width: 304,
+            height: 180,
+        };
+        let planes = nv12_plane_layout(&layout, visible).expect("the picture fits");
+        assert_eq!(planes.plane(0).map(|plane| plane.offset), Some(4 * 320 + 8));
+        assert_eq!(
+            planes.plane(1).map(|plane| plane.offset),
+            Some((192 + 2) * 320 + 8)
+        );
+    }
+}

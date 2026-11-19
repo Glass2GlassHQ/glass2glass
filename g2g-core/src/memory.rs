@@ -728,6 +728,8 @@ pub struct OwnedDmaBuf {
     /// complete (the producer synchronised itself, e.g. a CPU / capture dma-buf).
     sync: Option<(SyncFd, u64)>,
     sync_file: Option<SyncFile>,
+    // boxed so this payload does not grow every `MemoryDomain`
+    plane_layout: Option<Box<PlaneLayout>>,
 }
 
 /// A shared, reference-counted GPU-completion sync fd: an exported timeline
@@ -811,11 +813,21 @@ impl OwnedDmaBuf {
             offset,
             sync: None,
             sync_file: None,
+            plane_layout: None,
         }
     }
 
     pub fn as_raw(&self) -> i32 {
         self.fd.0
+    }
+
+    pub fn with_plane_layout(mut self, layout: PlaneLayout) -> Self {
+        self.plane_layout = Some(Box::new(layout));
+        self
+    }
+
+    pub fn plane_layout(&self) -> Option<&PlaneLayout> {
+        self.plane_layout.as_deref()
     }
 
     /// How many shares of this buffer are alive, this one counted. A producer

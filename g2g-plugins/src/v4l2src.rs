@@ -46,7 +46,7 @@ use g2g_core::{
 };
 
 use crate::capturepixelformat::CapturePixelFormat;
-use crate::v4l2ioctl::{v4l2_err, v4l2_ioctl, zeroed_arg};
+use crate::v4l2ioctl::{export_buffer, v4l2_err, v4l2_ioctl, zeroed_arg};
 
 use std::sync::Arc;
 
@@ -61,13 +61,13 @@ use v4l::v4l2::vidioc;
 use v4l::v4l_sys::{
     v4l2_buffer, v4l2_ctrl_type_V4L2_CTRL_TYPE_BOOLEAN, v4l2_ctrl_type_V4L2_CTRL_TYPE_INTEGER,
     v4l2_ctrl_type_V4L2_CTRL_TYPE_INTEGER64, v4l2_ctrl_type_V4L2_CTRL_TYPE_INTEGER_MENU,
-    v4l2_ctrl_type_V4L2_CTRL_TYPE_MENU, v4l2_exportbuffer, v4l2_query_ext_ctrl,
-    v4l2_requestbuffers, V4L2_CID_AUTO_WHITE_BALANCE, V4L2_CID_BACKLIGHT_COMPENSATION,
-    V4L2_CID_BRIGHTNESS, V4L2_CID_CONTRAST, V4L2_CID_EXPOSURE_ABSOLUTE, V4L2_CID_EXPOSURE_AUTO,
-    V4L2_CID_FOCUS_ABSOLUTE, V4L2_CID_FOCUS_AUTO, V4L2_CID_GAIN, V4L2_CID_GAMMA, V4L2_CID_HUE,
-    V4L2_CID_PAN_ABSOLUTE, V4L2_CID_POWER_LINE_FREQUENCY, V4L2_CID_SATURATION, V4L2_CID_SHARPNESS,
-    V4L2_CID_TILT_ABSOLUTE, V4L2_CID_WHITE_BALANCE_TEMPERATURE, V4L2_CID_ZOOM_ABSOLUTE,
-    V4L2_CTRL_FLAG_DISABLED, V4L2_CTRL_FLAG_NEXT_CTRL, V4L2_CTRL_FLAG_READ_ONLY,
+    v4l2_ctrl_type_V4L2_CTRL_TYPE_MENU, v4l2_query_ext_ctrl, v4l2_requestbuffers,
+    V4L2_CID_AUTO_WHITE_BALANCE, V4L2_CID_BACKLIGHT_COMPENSATION, V4L2_CID_BRIGHTNESS,
+    V4L2_CID_CONTRAST, V4L2_CID_EXPOSURE_ABSOLUTE, V4L2_CID_EXPOSURE_AUTO, V4L2_CID_FOCUS_ABSOLUTE,
+    V4L2_CID_FOCUS_AUTO, V4L2_CID_GAIN, V4L2_CID_GAMMA, V4L2_CID_HUE, V4L2_CID_PAN_ABSOLUTE,
+    V4L2_CID_POWER_LINE_FREQUENCY, V4L2_CID_SATURATION, V4L2_CID_SHARPNESS, V4L2_CID_TILT_ABSOLUTE,
+    V4L2_CID_WHITE_BALANCE_TEMPERATURE, V4L2_CID_ZOOM_ABSOLUTE, V4L2_CTRL_FLAG_DISABLED,
+    V4L2_CTRL_FLAG_NEXT_CTRL, V4L2_CTRL_FLAG_READ_ONLY,
 };
 use v4l::video::capture::Parameters;
 use v4l::video::Capture;
@@ -943,17 +943,7 @@ impl ExportedQueue {
 
         let mut buffers = Vec::with_capacity(request.count as usize);
         for index in 0..request.count {
-            let mut export: v4l2_exportbuffer = zeroed_arg();
-            export.type_ = Type::VideoCapture as u32;
-            export.index = index;
-            // SAFETY: `v4l2_exportbuffer` is VIDIOC_EXPBUF's argument type.
-            unsafe { v4l2_ioctl(fd, vidioc::VIDIOC_EXPBUF, &mut export) }?;
-            if export.fd < 0 {
-                return Err(G2gError::Hardware(HardwareError::V4l2(-1)));
-            }
-            // SAFETY: VIDIOC_EXPBUF just minted this fd for this process and
-            // nothing else owns it; `OwnedDmaBuf` closes it on the last share.
-            buffers.push(unsafe { OwnedDmaBuf::from_raw(export.fd, stride, 0) });
+            buffers.push(export_buffer(fd, Type::VideoCapture as u32, index, stride)?);
         }
 
         let queued = buffers.iter().map(|_| false).collect();

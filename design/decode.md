@@ -160,11 +160,25 @@ control and request structs are hand-written `#[repr(C)]` with size and offset
 asserts, because the `v4l2-sys-mit` bindings come from the build host's headers
 and those older than 5.11 lack them.
 
-One capture buffer is allocated per DPB slot, and a DPB entry names its reference
-by the timestamp of the bitstream buffer that decoded it. The decoded picture is
-copied out of the capture buffer to tight NV12 in system memory, so the buffer
-is free to reuse once the DPB drops it. Only 8-bit 4:2:0 is accepted, and the
-SPS scaling matrices `h264parse` refuses are never sent.
+The capture queue holds the DPB slots, the SPS reorder depth and six buffers
+for frames downstream (`g2g-launch` queues four per link, and Weston holds the
+buffer on screen and the next one). A session refuses a driver that grants fewer
+than the DPB slots plus the reorder depth plus one. DPB slots map to capture
+buffers the way `d3d12h264dec` maps them to textures, and a DPB entry names its
+reference by the timestamp of the bitstream buffer that decoded it. A buffer is
+reused once no slot references it and no frame downstream holds a share of its
+export. When none is free the element yields to the executor until one comes
+back, so a consumer that keeps every dma-buf frame stalls the decoder.
+
+Each capture buffer is exported once with `VIDIOC_EXPBUF`. A consumer that takes
+`DmaBuf` (`waylandsink`) gets the export with a `PlaneLayout` on the
+`OwnedDmaBuf`, because the chroma plane starts after the decoded rows (1088 at
+1080p), not the visible ones, and a cropped picture starts at its top-left
+sample in both planes. A system-memory consumer gets the visible picture copied
+to tight NV12 in a buffer from a pool sized for the reorder depth and the frames
+downstream. When a consumer keeps every pooled copy, the copy goes to a fresh
+heap buffer. Only 8-bit 4:2:0 is accepted, and the SPS scaling matrices
+`h264parse` refuses are never sent.
 
 ## FfmpegH264Dec (ffmpeg / libavcodec)
 
@@ -481,9 +495,11 @@ Cortex-A35 cores, kernel 6.6): 12.9 ms per frame at 1280x720 and 28.6 ms at
 per megapixel, so its constant is 13900 us per megapixel. About 20 ms of the
 1080p frame is the CPU copy out of the capture buffer, which the kernel maps
 uncached. The Hantro queues lack the V4L2 cache hint flag, and that kernel has
-no dma-heap or udmabuf, so no cached capture memory is reachable. On screen,
-`v4l2slh264dec ! waylandsink` shows 11.8 fps at 1080p, since `waylandsink`
-copies each frame into shared memory for Weston to upload.
+no dma-heap or udmabuf, so no cached capture memory is reachable. The constant
+prices that copy, which a `DmaBuf` consumer skips: `v4l2slh264dec ! waylandsink
+sync=false` shows 57.6 fps at 1080p and 59.1 fps at 720p, the panel's 60 Hz
+refresh. Weston 13 there converts the NV12 with its own matrix, since it offers
+no colour representation protocol.
 
 `dav1ddec`, `rav1ddec`, the VA-API decoders and the other platform decoders are not
 measured. Their cost is unknown, so a chain through one is never priced and the
