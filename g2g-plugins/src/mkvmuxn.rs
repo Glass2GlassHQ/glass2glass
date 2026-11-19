@@ -57,7 +57,7 @@ use g2g_core::frame::Frame;
 use g2g_core::log::short_type_name;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    split_tags, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, Chapter,
+    split_tags, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, Chapter, CodecTag,
     ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, InputAggregator, MemoryDomain,
     MultiInputElement, OutputSink, PipelinePacket, PixelAspect, PropError, PropKind, PropValue,
     PropertySpec, RawVideoFormat, SubPictureFormat, TagList, TagNamespace, TextFormat, VideoCodec,
@@ -871,11 +871,11 @@ fn track_config(init: &TrackInit, subtitle_format: TextFormat) -> MkvTrackConfig
                 VideoCodec::ProRes { variant } => {
                     (MkvCodec::ProRes(*variant), variant.fourcc().to_vec())
                 }
-                VideoCodec::Tagged(tag) => (
-                    MkvCodec::TaggedVideo(*tag),
+                VideoCodec::Tagged(tag) => tagged_video_config(
+                    *tag,
+                    geometry,
                     refs.first()
-                        .expect("capture_init stores the container header")
-                        .to_vec(),
+                        .expect("capture_init stores the container header"),
                 ),
                 VideoCodec::Theora => (
                     MkvCodec::Theora,
@@ -960,6 +960,29 @@ fn track_config(init: &TrackInit, subtitle_format: TextFormat) -> MkvTrackConfig
             codec_private: codec_private.clone(),
         },
     }
+}
+
+fn tagged_video_config(
+    tag: CodecTag,
+    _geometry: &VideoGeometry,
+    header: &[u8],
+) -> (MkvCodec, Vec<u8>) {
+    #[cfg(all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg-long-tail"
+    ))]
+    if let Some(riff) = crate::ffmpegtagged::mov_dv_to_riff(tag) {
+        return (
+            MkvCodec::TaggedVideo(riff),
+            crate::avi::bitmap_info_header(
+                riff.tag.to_le_bytes(),
+                _geometry.width,
+                _geometry.height,
+                &[],
+            ),
+        );
+    }
+    (MkvCodec::TaggedVideo(tag), header.to_vec())
 }
 
 impl MultiInputElement for MkvMuxN {
@@ -1407,6 +1430,62 @@ mod tests {
             "CodecPrivate element present"
         );
         assert!(mux.emitted() >= 4, "all four access units muxed");
+    }
+
+    #[cfg(all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg-long-tail"
+    ))]
+    #[tokio::test]
+    async fn mov_dv_muxes_with_a_vfw_header() {
+        for (mov, riff) in [(b"dvc ", b"dvc "), (b"dvcp", b"dvsd")] {
+            let mut caps = video_caps();
+            let Caps::CompressedVideo { codec, .. } = &mut caps else {
+                unreachable!();
+            };
+            *codec = VideoCodec::Tagged(CodecTag {
+                namespace: TagNamespace::Mov,
+                tag: u32::from_le_bytes(*mov),
+            });
+            let mut mux = MkvMuxN::new(1);
+            mux.configure_pipeline(0, &caps).unwrap();
+            let mut sink = CaptureSink::default();
+            let mut entry = Vec::from(86u32.to_be_bytes());
+            entry.extend_from_slice(mov);
+            entry.resize(86, 0);
+            mux.process(0, frame(entry, 0), &mut sink).await.unwrap();
+            let sample = alloc::vec![0x1f, 0x07, 0x00, 0x3f];
+            mux.process(0, frame(sample.clone(), 0), &mut sink)
+                .await
+                .unwrap();
+            mux.process(0, PipelinePacket::Eos, &mut sink)
+                .await
+                .unwrap();
+
+            let mut demux = MatroskaDemuxer::new();
+            demux.push_data(&sink.bytes);
+            assert_eq!(
+                demux.tracks()[0].codec,
+                MkvCodec::TaggedVideo(CodecTag {
+                    namespace: TagNamespace::Riff,
+                    tag: u32::from_le_bytes(*riff),
+                })
+            );
+            let header = demux.codec_private(1).unwrap();
+            assert_eq!(
+                &header[0..12],
+                &[
+                    40u32.to_le_bytes(),
+                    320u32.to_le_bytes(),
+                    240u32.to_le_bytes()
+                ]
+                .concat()
+            );
+            assert_eq!(&header[16..20], riff);
+            let frames = demux.take_frames();
+            assert_eq!(frames.len(), 1);
+            assert_eq!(frames[0].data, sample);
+        }
     }
 
     /// The `streamable` knob is honored on the fan-in muxer (the `name=m` shape),

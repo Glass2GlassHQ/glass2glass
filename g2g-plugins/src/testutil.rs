@@ -155,20 +155,6 @@ pub(crate) fn roundtrip<M, P>(
     assert_eq!(data_bytes(&parsed.packets), samples);
 }
 
-// a FLAC PICTURE block body holding `picture` as a front cover with an empty description and geometry
-pub(crate) fn flac_picture_body(media_type: &str, picture: &[u8]) -> Vec<u8> {
-    const FRONT_COVER: u32 = 3;
-    const GEOMETRY_LEN: usize = 16;
-    let mut body = FRONT_COVER.to_be_bytes().to_vec();
-    body.extend_from_slice(&(media_type.len() as u32).to_be_bytes());
-    body.extend_from_slice(media_type.as_bytes());
-    body.extend_from_slice(&0u32.to_be_bytes());
-    body.extend_from_slice(&[0; GEOMETRY_LEN]);
-    body.extend_from_slice(&(picture.len() as u32).to_be_bytes());
-    body.extend_from_slice(picture);
-    body
-}
-
 pub(crate) const STREAMINFO_TYPE: u8 = 0;
 pub(crate) const PADDING_TYPE: u8 = 1;
 

@@ -598,8 +598,8 @@ fn itunes_tag(kind: &[u8; 4], value: &str) -> Tag {
 /// [`parse_ilst_tags`]), or `None` when none of them map to an iTunes atom. The
 /// `meta` box names the `mdir` handler; a typed tag writes its `©`-prefixed text
 /// atom, a [`Tag::Number`] its integer atom, and a [`Tag::Freeform`] a `----`
-/// item. `Tag::Language` (an MP4 track field) and `Tag::Other` (no namespace to
-/// write a `----` under) are skipped.
+/// item. JPEG and PNG images share one `covr` item. `Tag::Language` (an MP4
+/// track field) and `Tag::Other` (no namespace to write a `----` under) are skipped.
 /// `chapters` are written alongside as a Nero `chpl` list; pass `&[]`
 /// for a per-track `udta`, which has no chapter slot.
 pub(crate) fn udta_with_tags(tags: &TagList, chapters: &[Chapter]) -> Option<Vec<u8>> {
@@ -709,10 +709,25 @@ fn ilst_items(tags: &TagList) -> Vec<u8> {
             _ => None,
         })
     };
+    let mut cover_art = tags.tags().iter().filter_map(|tag| {
+        let Tag::Image { codec, data } = tag else {
+            return None;
+        };
+        let (data_type, _) = COVER_ART_CODECS.iter().find(|(_, known)| known == codec)?;
+        Some(ilst_data_box(*data_type, data))
+    });
     let mut out = Vec::new();
     let mut pairs_written: Vec<&[u8; 4]> = Vec::new();
     for t in tags.tags() {
         match t {
+            Tag::Image { .. } => {
+                if let Some(mut pictures) = cover_art.next() {
+                    for picture in cover_art.by_ref() {
+                        pictures.extend_from_slice(&picture);
+                    }
+                    out.extend_from_slice(&mp4_box(b"covr", &pictures));
+                }
+            }
             Tag::Freeform {
                 namespace,
                 key,
@@ -753,9 +768,13 @@ fn ilst_text_item(atom: &[u8; 4], value: &str) -> Vec<u8> {
 
 /// A UTF-8 (well-known type 1) `data` box: `[u32 type][u32 locale][value]`.
 fn text_data_box(value: &str) -> Vec<u8> {
-    let mut data = 1u32.to_be_bytes().to_vec();
+    ilst_data_box(1, value.as_bytes())
+}
+
+fn ilst_data_box(data_type: u32, value: &[u8]) -> Vec<u8> {
+    let mut data = data_type.to_be_bytes().to_vec();
     data.extend_from_slice(&0u32.to_be_bytes()); // locale
-    data.extend_from_slice(value.as_bytes());
+    data.extend_from_slice(value);
     mp4_box(b"data", &data)
 }
 

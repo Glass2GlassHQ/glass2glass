@@ -20,7 +20,7 @@ use alloc::vec::Vec;
 use g2g_core::{Tag, TagList};
 
 use crate::bereader::be_u32;
-use crate::textencoding::base64_decode;
+use crate::textencoding::{base64_decode, base64_encode};
 
 /// The vendor string written into a block this crate builds.
 pub(crate) const VENDOR: &[u8] = b"g2g";
@@ -36,6 +36,8 @@ pub(crate) const FLAC_COMMENT_BLOCK_TYPE: u8 = 4;
 pub(crate) const FLAC_PICTURE_BLOCK_TYPE: u8 = 6;
 // the field an Ogg stream carries a base64 FLAC PICTURE block in
 const PICTURE_FIELD_KEY: &str = "METADATA_BLOCK_PICTURE";
+/// Picture type shared by FLAC PICTURE blocks and ID3 APIC frames.
+pub(crate) const FRONT_COVER: u8 = 3;
 /// A FLAC metadata block header: the type byte (top bit = last block) and a
 /// 24-bit big-endian body length.
 pub(crate) const FLAC_BLOCK_HEADER_LEN: usize = 4;
@@ -48,22 +50,48 @@ pub(crate) fn empty_vorbis_comment(magic: &[u8]) -> Vec<u8> {
 
 /// A VorbisComment block behind `magic`: `vendor`, then one `KEY=VALUE` field
 /// per tag. The Vorbis flavour gets the framing bit its own mapping mandates;
-/// `OpusTags` and the FLAC block do not carry one.
+/// `OpusTags` and the FLAC block do not carry one. FLAC writes images in
+/// separate PICTURE blocks.
 pub(crate) fn vorbis_comment(magic: &[u8], vendor: &[u8], tags: &TagList) -> Vec<u8> {
     let mut p = Vec::from(magic);
     p.extend_from_slice(&(vendor.len() as u32).to_le_bytes());
     p.extend_from_slice(vendor);
-    let text_tags: Vec<&Tag> = tags.text_tags().collect();
-    p.extend_from_slice(&(text_tags.len() as u32).to_le_bytes());
-    for tag in text_tags {
-        let field = alloc::format!("{}={}", vorbis_key(tag), tag.value_string());
+    let count_at = p.len();
+    p.extend_from_slice(&0u32.to_le_bytes());
+    let mut count = 0u32;
+    for tag in tags.tags() {
+        let field = match tag {
+            Tag::Image { data, .. } => {
+                let Some(media_type) = tag.image_media_type().filter(|_| !magic.is_empty()) else {
+                    continue;
+                };
+                let picture = base64_encode(&flac_picture_body(media_type, data));
+                alloc::format!("{PICTURE_FIELD_KEY}={picture}")
+            }
+            _ => alloc::format!("{}={}", vorbis_key(tag), tag.value_string()),
+        };
         p.extend_from_slice(&(field.len() as u32).to_le_bytes());
         p.extend_from_slice(field.as_bytes());
+        count += 1;
     }
+    p[count_at..count_at + 4].copy_from_slice(&count.to_le_bytes());
     if magic.starts_with(b"\x03") {
         p.push(1); // framing bit
     }
     p
+}
+
+// A front cover with no description and unknown image geometry (RFC 9639 §8.8).
+pub(crate) fn flac_picture_body(media_type: &str, picture: &[u8]) -> Vec<u8> {
+    const GEOMETRY_LEN: usize = 16;
+    let mut body = u32::from(FRONT_COVER).to_be_bytes().to_vec();
+    body.extend_from_slice(&(media_type.len() as u32).to_be_bytes());
+    body.extend_from_slice(media_type.as_bytes());
+    body.extend_from_slice(&0u32.to_be_bytes());
+    body.extend_from_slice(&[0; GEOMETRY_LEN]);
+    body.extend_from_slice(&(picture.len() as u32).to_be_bytes());
+    body.extend_from_slice(picture);
+    body
 }
 
 /// The field name a tag is written under. VorbisComment spells the common keys
@@ -230,14 +258,11 @@ mod tests {
     }
 
     #[test]
-    fn reads_a_picture_field_and_writes_no_image() {
+    fn round_trips_a_picture_field() {
         let jpeg = [0xFF, 0xD8, 0xFF];
         let picture_field = Tag::Other {
             key: PICTURE_FIELD_KEY.into(),
-            value: crate::textencoding::base64_encode(&crate::testutil::flac_picture_body(
-                "image/jpeg",
-                &jpeg,
-            )),
+            value: base64_encode(&flac_picture_body("image/jpeg", &jpeg)),
         };
         let written: TagList = [picture_field, Tag::Title("Sine".into())]
             .into_iter()
@@ -253,8 +278,10 @@ mod tests {
                 Tag::Title("Sine".into())
             ]
         );
-        let rewritten = parse_vorbis_comment(&vorbis_comment(OPUS_TAGS_MAGIC, VENDOR, &read));
-        assert_eq!(rewritten.tags(), &[Tag::Title("Sine".into())]);
+        for magic in [VORBIS_COMMENT_MAGIC, OPUS_TAGS_MAGIC] {
+            let rewritten = parse_vorbis_comment(&vorbis_comment(magic, VENDOR, &read));
+            assert_eq!(rewritten, read);
+        }
     }
 
     /// Every prefix of a real block: nothing may panic, and no field is reported

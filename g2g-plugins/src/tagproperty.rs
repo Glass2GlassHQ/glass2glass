@@ -15,12 +15,14 @@
 //! it holds a space or a comma:
 //! `tags="title=\"A Title\",artist=Someone"`. Keys map through
 //! [`Tag::from_key_value`], so a key this crate has no typed variant for
-//! survives as [`Tag::Other`].
+//! survives as [`Tag::Other`]. The `image` key accepts a quoted base64 data URI.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use g2g_core::{PropError, PropKind, PropValue, PropertySpec, Tag, TagList};
+
+use crate::textencoding::base64_decode;
 
 /// The `tags` property of an element that reads one: the parsed list plus the
 /// text it was set from, so `get_property` round-trips what was written.
@@ -50,6 +52,12 @@ impl TagsProperty {
         Ok(())
     }
 
+    #[cfg(feature = "std")]
+    pub(crate) fn set_list(&mut self, tags: TagList) {
+        self.tags = tags;
+        self.text.clear();
+    }
+
     /// The property's value as `get_property` reports it, `None` while unset.
     pub fn value(&self) -> Option<PropValue> {
         (!self.text.is_empty()).then(|| PropValue::Str(self.text.clone()))
@@ -63,7 +71,16 @@ pub fn parse_taglist(text: &str) -> Option<TagList> {
     let mut tags = TagList::new();
     for pair in split_unquoted_commas(text) {
         let (key, value) = pair.split_once('=')?;
-        tags.push(Tag::from_key_value(key.trim(), unquote(value.trim())));
+        let key = key.trim();
+        let value = unquote(value.trim());
+        let tag = match value.strip_prefix("data:") {
+            Some(uri) if key.eq_ignore_ascii_case("image") => {
+                let (media_type, encoded) = uri.split_once(";base64,")?;
+                Tag::image(media_type, base64_decode(encoded)?)?
+            }
+            _ => Tag::from_key_value(key, value),
+        };
+        tags.push(tag);
     }
     Some(tags)
 }
@@ -123,5 +140,18 @@ mod tests {
         assert_eq!(prop.value(), Some(PropValue::Str("album=Set".into())));
         assert_eq!(prop.tags().tags(), [Tag::Album("Set".into())]);
         assert_eq!(prop.set("nope"), Err(PropError::Value));
+    }
+
+    #[test]
+    fn parses_an_image_data_uri_in_a_tag_list() {
+        let list = parse_taglist(r#"image="data:image/jpeg;base64,/9j/",title=Sine"#).unwrap();
+        assert_eq!(
+            list.tags(),
+            [
+                Tag::image("image/jpeg", alloc::vec![0xff, 0xd8, 0xff]).unwrap(),
+                Tag::Title("Sine".into())
+            ]
+        );
+        assert!(parse_taglist(r#"image="data:image/jpeg;base64,invalid?""#).is_none());
     }
 }

@@ -627,10 +627,8 @@ impl PadTemplates for FlacParse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{
-        flac_block, flac_picture_body, flac_streaminfo, run, PADDING_TYPE, STREAMINFO_TYPE,
-    };
-    use crate::vorbiscomment::vorbis_comment;
+    use crate::testutil::{flac_block, flac_streaminfo, run, PADDING_TYPE, STREAMINFO_TYPE};
+    use crate::vorbiscomment::{flac_picture_body, vorbis_comment};
 
     // two channels of 192 16-bit samples at 44.1 kHz, each channel one CONSTANT subframe of zero
     fn constant_frame(number: u8) -> Vec<u8> {

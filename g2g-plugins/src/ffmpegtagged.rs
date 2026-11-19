@@ -37,6 +37,27 @@ pub(crate) fn video_codec_id(tag: CodecTag) -> Option<Id> {
         .filter(|id| has_decoder(*id))
 }
 
+/// DV needs no QuickTime sample-entry extensions in a VFW header. Keep the
+/// source fourcc when AVI recognizes it and use AVI's default DV tag otherwise.
+pub(crate) fn mov_dv_to_riff(tag: CodecTag) -> Option<CodecTag> {
+    if tag.namespace != TagNamespace::Mov || video_codec_id(tag) != Some(Id::DVVIDEO) {
+        return None;
+    }
+    // SAFETY: the getter returns a pointer to libavformat's static RIFF table.
+    let riff = unsafe { ffi::avformat_get_riff_video_tags() };
+    let fourcc = if table_codec_id(riff, tag.tag) == Some(Id::DVVIDEO) {
+        tag.tag
+    } else {
+        let tables = [riff, core::ptr::null()];
+        // SAFETY: the list is null-terminated and libavformat only reads it.
+        unsafe { ffi::av_codec_get_tag(tables.as_ptr(), Id::DVVIDEO.into()) }
+    };
+    (fourcc != 0).then_some(CodecTag {
+        namespace: TagNamespace::Riff,
+        tag: fourcc,
+    })
+}
+
 // a QuickTime `ms` / `TS` twocc carries a WAVEFORMATEX tag in its low half, as mov.c reads it
 const MS_TWOCC: u32 = u32::from_le_bytes([b'm', b's', 0, 0]);
 const TS_TWOCC: u32 = u32::from_le_bytes([b'T', b'S', 0, 0]);

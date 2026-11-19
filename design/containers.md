@@ -792,11 +792,11 @@ Tagged long-tail codecs, DV among them, are remux only. Their in-band
 container header becomes the `CodecPrivate` and is dropped from the blocks.
 A RIFF-tagged video stream goes out as `V_MS/VFW/FOURCC` behind its
 BITMAPINFOHEADER and a RIFF-tagged audio stream as `A_MS/ACM` behind its
-WAVEFORMATEX, both byte-identical to ffmpeg's. A MOV-tagged video stream goes
-out as `V_QUICKTIME` behind its sample entry, which ffmpeg decodes but gst's
-`matroskademux` does not read. ffmpeg instead rewrites a MOV tag that has an
-AVI fourcc, such as DV's `dvc `, into a `V_MS/VFW/FOURCC` track. MOV-tagged
-audio is refused.
+WAVEFORMATEX, both byte-identical to ffmpeg's. MOV-tagged DV also goes out as
+`V_MS/VFW/FOURCC`: with `ffmpeg-long-tail`, the muxer builds a BITMAPINFOHEADER
+using the movie's fourcc when it is valid in AVI and AVI's default DV fourcc
+otherwise. Other MOV-tagged video uses `V_QUICKTIME` with its sample entry.
+MOV-tagged audio is refused.
 
 The muxer also has a `seekable` two-pass mode: the element buffers the file
 and finalizes it at EOS with a front `SeekHead`, fixed-layout entries indexing
@@ -916,8 +916,12 @@ image with its still-image codec, the way GStreamer carries it in its `image`
 tag rather than as a stream. MP4 `covr` items, FLAC `PICTURE` blocks, the
 VorbisComment `METADATA_BLOCK_PICTURE` field and ID3 `APIC` frames read into it,
 and a picture whose media type names no still-image codec is dropped. `flacparse`
-posts a native FLAC header's comments and pictures. The tag writers skip images
-through `TagList::text_tags`.
+posts a native FLAC header's comments and pictures. `mp4mux` writes JPEG and PNG
+to `covr`, `flactag` writes native `PICTURE` blocks, `vorbistag` writes
+`METADATA_BLOCK_PICTURE` fields, and `id3v2mux` writes `APIC` frames. The
+`tags` property takes cover art as a quoted base64 data URI, for example
+`image="data:image/jpeg;base64,..."`. Supplying images to `flactag` replaces
+the file's existing picture blocks, while changing text tags alone preserves them.
 
 ### oggmux
 

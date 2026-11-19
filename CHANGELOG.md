@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2431: `matroskamux` writes QuickTime DV as a VFW track.
+- M2430: write cover art in MP4, FLAC, VorbisComment and ID3.
 - M2429: `flvdemux` falls back to the last media tag for file duration.
 - M2428: `oggdemux` reports duration for video-only Theora and VP8 files.
 - M2427: changing picture filters refreshes the paused preview at its current position.

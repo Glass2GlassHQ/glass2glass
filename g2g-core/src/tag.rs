@@ -40,6 +40,12 @@ use alloc::vec::Vec;
 use crate::meta::Orientation;
 use crate::VideoCodec;
 
+const IMAGE_MEDIA_TYPES: [(VideoCodec, &str); 3] = [
+    (VideoCodec::Mjpeg, "image/jpeg"),
+    (VideoCodec::Png, "image/png"),
+    (VideoCodec::WebP, "image/webp"),
+];
+
 /// One stream-metadata tag. The typed variants are the cross-container common
 /// keys (VorbisComment / Matroska / FLV `onMetaData` all define them under the
 /// same names); [`Tag::Number`] carries an integer-valued key (an MP4 `trkn` /
@@ -154,12 +160,20 @@ impl Tag {
         } else {
             media_type
         };
-        let codec = [VideoCodec::Mjpeg, VideoCodec::Png, VideoCodec::WebP]
-            .into_iter()
-            .find(|codec| {
-                crate::caps::codec_gst_media_type(*codec).eq_ignore_ascii_case(media_type)
-            })?;
+        let &(codec, _) = IMAGE_MEDIA_TYPES
+            .iter()
+            .find(|(_, known)| known.eq_ignore_ascii_case(media_type))?;
         Some(Tag::Image { codec, data })
+    }
+
+    /// The MIME type of an embedded image with a supported still-image codec.
+    pub fn image_media_type(&self) -> Option<&'static str> {
+        let Tag::Image { codec, .. } = self else {
+            return None;
+        };
+        IMAGE_MEDIA_TYPES
+            .iter()
+            .find_map(|(known, media_type)| (known == codec).then_some(*media_type))
     }
 
     /// Map a `key`/`value` pair to a typed tag, or [`Tag::Other`] when the key

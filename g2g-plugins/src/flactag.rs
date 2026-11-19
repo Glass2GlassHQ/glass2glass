@@ -3,13 +3,13 @@
 // SPDX-License-Identifier: MPL-2.0
 
 //! FLAC tag writer element (`flactag`): a native `.flac` byte stream in, the
-//! same stream with its VORBIS_COMMENT metadata block rewritten out.
+//! same stream with rewritten comments and optional cover art.
 //!
 //! A FLAC file opens with the `fLaC` marker and a run of metadata blocks, one of
 //! which (type 4) holds the VorbisComment fields. This element replaces that
-//! block and leaves every other one alone: STREAMINFO stays first, as the format
-//! requires, and PADDING / SEEKTABLE / PICTURE keep their order behind it. The
-//! audio frames pass through untouched.
+//! block and replaces PICTURE blocks when the supplied tags include images.
+//! STREAMINFO stays first, as the format requires, and the other blocks keep
+//! their order behind it. The audio frames pass through untouched.
 //!
 //! The tags come from the `tags` property ([`crate::tagproperty`]), not from
 //! upstream: a [`TagList`] travels out of band on the bus and
@@ -42,13 +42,14 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError,
     MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropValue,
-    PropertySpec, TagList,
+    PropertySpec, Tag, TagList,
 };
 
 use crate::flacparse::complete_header_len;
 use crate::tagproperty::TagsProperty;
 use crate::vorbiscomment::{
-    comment_body_vendor, vorbis_comment, FLAC_BLOCK_HEADER_LEN, FLAC_COMMENT_BLOCK_TYPE, VENDOR,
+    comment_body_vendor, flac_picture_body, vorbis_comment, FLAC_BLOCK_HEADER_LEN,
+    FLAC_COMMENT_BLOCK_TYPE, FLAC_PICTURE_BLOCK_TYPE, VENDOR,
 };
 
 /// The 4 bytes a native FLAC stream opens with.
@@ -154,10 +155,9 @@ pub(crate) fn metadata_blocks(header: &[u8]) -> Option<Vec<MetadataBlock<'_>>> {
     }
 }
 
-/// The FLAC header with its VORBIS_COMMENT block replaced: every other block in
-/// its original order, the new comment block behind STREAMINFO, and the
-/// last-block flag on whatever now comes last. `None` when the header is
-/// malformed or the new comment block is longer than a 24-bit length can code.
+/// The FLAC header with comments and supplied pictures behind STREAMINFO.
+/// Other blocks retain their order, including any pictures when none are
+/// supplied. `None` for a malformed header or an oversized metadata block.
 fn rewrite_header(header: &[u8], tags: &TagList) -> Option<Vec<u8>> {
     let blocks = metadata_blocks(header)?;
     let vendor = blocks
@@ -166,17 +166,34 @@ fn rewrite_header(header: &[u8], tags: &TagList) -> Option<Vec<u8>> {
         .and_then(|b| comment_body_vendor(b.body));
     let vendor = vendor.as_deref().map_or(VENDOR, str::as_bytes);
     let comment = vorbis_comment(&[], vendor, tags);
+    let pictures: Vec<_> = tags
+        .tags()
+        .iter()
+        .filter_map(|tag| {
+            let Tag::Image { data, .. } = tag else {
+                return None;
+            };
+            Some(flac_picture_body(tag.image_media_type()?, data))
+        })
+        .collect();
 
     // STREAMINFO must stay first; the comment goes right behind it, and the rest
     // keep the order they arrived in.
     let mut bodies: Vec<(u8, &[u8])> = Vec::new();
     for block in &blocks {
-        if block.kind == FLAC_COMMENT_BLOCK_TYPE {
+        if block.kind == FLAC_COMMENT_BLOCK_TYPE
+            || (block.kind == FLAC_PICTURE_BLOCK_TYPE && !pictures.is_empty())
+        {
             continue;
         }
         bodies.push((block.kind, block.body));
         if bodies.len() == 1 {
             bodies.push((FLAC_COMMENT_BLOCK_TYPE, &comment));
+            bodies.extend(
+                pictures
+                    .iter()
+                    .map(|body| (FLAC_PICTURE_BLOCK_TYPE, body.as_slice())),
+            );
         }
     }
     if bodies.is_empty() {
@@ -231,7 +248,7 @@ impl AsyncElement for FlacTag {
         ElementMetadata::new(
             "FLAC tag writer",
             "Formatter/Metadata",
-            "Rewrites the VORBIS_COMMENT metadata block of a native FLAC stream",
+            "Rewrites the comments and cover art of a native FLAC stream",
             crate::AARON_BOXER,
         )
     }
@@ -342,9 +359,13 @@ mod tests {
     }
 
     async fn run(input: &[u8], chunk: usize) -> Vec<u8> {
+        run_with_tags(input, chunk, "title=Sine,artist=g2g").await
+    }
+
+    async fn run_with_tags(input: &[u8], chunk: usize, tags: &str) -> Vec<u8> {
         let mut element = FlacTag::new();
         element
-            .set_property("tags", PropValue::Str("title=Sine,artist=g2g".into()))
+            .set_property("tags", PropValue::Str(tags.into()))
             .expect("a valid taglist");
         element.configure_pipeline(&flac_caps()).expect("flac in");
         let mut out = CollectSink::default();
@@ -392,6 +413,33 @@ mod tests {
         // The rewritten header is still one `flacparse` reads the geometry from.
         let info = parse_streaminfo(&written[..header_len]).expect("STREAMINFO");
         assert_eq!((info.sample_rate, info.channels), (44_100, 2));
+    }
+
+    #[tokio::test]
+    async fn cover_art_is_written_as_a_picture_block_and_can_be_replaced() {
+        let stream = flac_stream(&TagList::new());
+        let jpeg = r#"image="data:image/jpeg;base64,/9j/""#;
+        let png = r#"image="data:image/png;base64,iVBORw==""#;
+        let written = run_with_tags(&stream, 7, jpeg).await;
+        let preserved = run(&written, 7).await;
+        let replaced = run_with_tags(&preserved, 7, png).await;
+        let jpeg_tag = Tag::image("image/jpeg", alloc::vec![0xff, 0xd8, 0xff]);
+        let png_tag = Tag::image("image/png", alloc::vec![0x89, 0x50, 0x4e, 0x47]);
+        for (output, expected) in [
+            (written, jpeg_tag.clone()),
+            (preserved, jpeg_tag),
+            (replaced, png_tag),
+        ] {
+            let header_len = complete_header_len(&output, &mut 0).unwrap().unwrap();
+            let blocks = metadata_blocks(&output[..header_len]).unwrap();
+            let pictures: Vec<_> = blocks
+                .iter()
+                .filter(|block| block.kind == FLAC_PICTURE_BLOCK_TYPE)
+                .map(|block| crate::vorbiscomment::parse_flac_picture(block.body))
+                .collect();
+            assert_eq!(pictures, [expected]);
+            assert_eq!(&output[header_len..], AUDIO);
+        }
     }
 
     /// A header with no comment block gains one, behind STREAMINFO.

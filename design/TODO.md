@@ -347,9 +347,6 @@ libraries installed.
   instead of GStreamer's 'AV1G' once any demuxer reads the former (GStreamer's
   `tsdemux` activates no program for an 'AV01' stream, and ffmpeg's muxer writes
   no descriptor at all, so it identifies neither).
-- **Cover art writing:** write `Tag::Image` back as an MP4 `covr` item, a FLAC
-  `PICTURE` block, a VorbisComment `METADATA_BLOCK_PICTURE` field and an ID3
-  `APIC` frame.
 - **WebVTT track writing** (mkv, mp4 `wvtt`): blocked on a reference peer.
   ffmpeg reads only the WebM `D_WEBVTT/*` carriage (different block payload)
   and cannot write WebVTT into MP4 at all; reading both stays supported.
@@ -358,10 +355,6 @@ libraries installed.
   - Demuxers drop streams gst's parsebin exposes: DTS in `filter/242_4.mkv`, TTA,
     pcm_dvd LPCM in `coolitnow-partial.vob`, and the xan_dpcm audio of
     `wc4-xan` AVIs.
-- **MOV-tagged DV in `matroskamux`:** a `.mov` DV stream (`dvc `) goes out as
-  `V_QUICKTIME`, which gst's `matroskademux` cannot read. Write a MOV tag that
-  has an AVI fourcc as `V_MS/VFW/FOURCC` with a built BITMAPINFOHEADER, as
-  ffmpeg does.
 - **Opus end trim in fragmented MP4:** the fragmented `mp4mux` layout writes
   its `moov` before the stream ends, so the `elst` duration is 0 and the end
   trim is only in the last sample's duration, which gst's `qtdemux` ignores (a

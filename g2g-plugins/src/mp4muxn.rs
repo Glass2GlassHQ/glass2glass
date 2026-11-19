@@ -77,6 +77,7 @@ use crate::opusparse::{
 };
 use crate::rtcp;
 use crate::startcodeparse::StartCodeCodec;
+use crate::tagproperty::TagsProperty;
 use crate::uncv::{self, UncvSampleEntry};
 
 /// Video tracks use a 90 kHz media timescale; audio tracks use the sample rate.
@@ -224,7 +225,7 @@ pub struct Mp4MuxN {
     /// fragmented default.
     samples: Vec<ProgSample>,
     /// Whole-file metadata, written as the `moov`'s `udta/meta/ilst`.
-    tags: TagList,
+    tags: TagsProperty,
     /// Per-input metadata, written as that `trak`'s own `udta/meta/ilst`.
     /// One (possibly empty) list per input pad.
     track_tags: Vec<TagList>,
@@ -349,7 +350,7 @@ impl Mp4MuxN {
             chunk_duration_ms: 0,
             write_prft: false,
             samples: Vec::new(),
-            tags: TagList::new(),
+            tags: TagsProperty::default(),
             track_tags: alloc::vec![TagList::new(); inputs],
             chapters: Vec::new(),
         }
@@ -358,7 +359,7 @@ impl Mp4MuxN {
     /// Attach whole-file metadata, written as the `moov`'s own
     /// `udta/meta/ilst`.
     pub fn with_tags(mut self, tags: TagList) -> Self {
-        self.tags = tags;
+        self.tags.set_list(tags);
         self
     }
 
@@ -389,7 +390,7 @@ impl Mp4MuxN {
     /// The tags the `moov` writes, split by the shared global / per-stream merge
     /// policy into the file's own list and one list per pad slot.
     fn moov_metadata(&self) -> MoovMetadata {
-        let (global, per_track) = split_tags(&self.tags, &self.track_tags);
+        let (global, per_track) = split_tags(self.tags.tags(), &self.track_tags);
         MoovMetadata {
             global,
             per_track,
@@ -1355,6 +1356,7 @@ impl MultiInputElement for Mp4MuxN {
             )
             .with_default("false"),
             LIVE_MUX_LATENCY_PROPERTY,
+            TagsProperty::SPEC,
         ];
         PROPS
     }
@@ -1391,6 +1393,7 @@ impl MultiInputElement for Mp4MuxN {
                 self.write_prft = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
+            "tags" => self.tags.set(value.as_str().ok_or(PropError::Type)?),
             _ => self.deadline.set_property(name, value),
         }
     }
@@ -1403,6 +1406,7 @@ impl MultiInputElement for Mp4MuxN {
             "cmaf" => Some(PropValue::Bool(self.cmaf)),
             "chunk-duration" => Some(PropValue::Uint(self.chunk_duration_ms)),
             "write-prft" => Some(PropValue::Bool(self.write_prft)),
+            "tags" => self.tags.value(),
             _ => self.deadline.get_property(name),
         }
     }

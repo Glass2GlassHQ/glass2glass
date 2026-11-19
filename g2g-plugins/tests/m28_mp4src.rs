@@ -250,9 +250,14 @@ async fn sink_written_tags_round_trip_to_the_source_bus() {
     .concat();
 
     // Record with tags attached to the mux's init-segment moov.
-    let tags: TagList = [Tag::Title("Recorded".into()), Tag::Encoder("g2g".into())]
-        .into_iter()
-        .collect();
+    let tags: TagList = [
+        Tag::Title("Recorded".into()),
+        Tag::image("image/jpeg", vec![0xff, 0xd8, 0xff]).unwrap(),
+        Tag::image("image/png", vec![0x89, 0x50, 0x4e, 0x47]).unwrap(),
+        Tag::Encoder("g2g".into()),
+    ]
+    .into_iter()
+    .collect();
     let bytes = mux_to_bytes(&[idr_au], 64, 48, Some(tags.clone())).await;
     std::fs::write(&path, &bytes).unwrap();
 

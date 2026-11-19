@@ -37,6 +37,7 @@ const ID3V2_FLAG_EXTENDED: u8 = 0x40;
 const ID3V2_FLAG_UNSYNC: u8 = 0x80;
 /// A syncsafe integer carries 7 bits per byte, the 8th always clear.
 const SYNCSAFE_BITS: u32 = 7;
+const SYNCSAFE_MAX: usize = (1 << (4 * SYNCSAFE_BITS)) - 1;
 /// The ID3v2 major versions whose frames this parses and writes: 2.3 and 2.4.
 pub(crate) const ID3V2_VERSION_2_3: u8 = 3;
 pub(crate) const ID3V2_VERSION_2_4: u8 = 4;
@@ -322,16 +323,32 @@ fn tag_frame_id(tag: &Tag) -> Option<&'static [u8; 4]> {
     }
 }
 
-/// Write a complete ID3v2 tag (header plus one text frame per writable tag) in
+/// Write a complete ID3v2 tag (header plus one frame per writable tag) in
 /// major `version`, 2.3 or 2.4. Tags with no frame id are dropped: an ID3v2 tag
 /// has no verbatim key/value slot to put them in.
 pub(crate) fn write_id3v2(tags: &TagList, version: u8) -> Vec<u8> {
     let mut frames = Vec::new();
+    let mut picture_count = 0;
     for tag in tags.tags() {
-        let Some(id) = tag_frame_id(tag) else {
-            continue;
+        let (id, data) = match tag {
+            Tag::Image { data, .. } => {
+                let Some(media_type) = tag.image_media_type() else {
+                    continue;
+                };
+                let picture = picture_frame(media_type, data, picture_count);
+                picture_count += 1;
+                (b"APIC", picture)
+            }
+            _ => {
+                let Some(id) = tag_frame_id(tag) else {
+                    continue;
+                };
+                (id, encode_text(&tag.value_string(), version))
+            }
         };
-        let data = encode_text(&tag.value_string(), version);
+        if data.len() > SYNCSAFE_MAX.saturating_sub(frames.len() + ID3V2_FRAME_HEADER_LEN) {
+            continue;
+        }
         frames.extend_from_slice(id);
         frames.extend_from_slice(&frame_size_bytes(data.len(), version));
         frames.extend_from_slice(&[0, 0]); // no frame flags
@@ -342,6 +359,19 @@ pub(crate) fn write_id3v2(tags: &TagList, version: u8) -> Vec<u8> {
     tag.extend_from_slice(&syncsafe_bytes(frames.len()));
     tag.extend_from_slice(&frames);
     tag
+}
+
+fn picture_frame(media_type: &str, picture: &[u8], index: usize) -> Vec<u8> {
+    let mut data = Vec::from([ENCODING_LATIN1]);
+    data.extend_from_slice(media_type.as_bytes());
+    data.extend_from_slice(&[0, crate::vorbiscomment::FRONT_COVER]);
+    // APIC descriptions must be unique within a tag.
+    if index > 0 {
+        data.extend_from_slice(alloc::format!("Picture {}", index + 1).as_bytes());
+    }
+    data.push(0);
+    data.extend_from_slice(picture);
+    data
 }
 
 /// A frame's data size as its version codes it: syncsafe in 2.4, a plain
@@ -357,7 +387,6 @@ fn frame_size_bytes(size: usize, version: u8) -> [u8; 4] {
 /// coded at all, so the value saturates there rather than wrapping into a size
 /// that would frame the tag short.
 fn syncsafe_bytes(value: usize) -> [u8; 4] {
-    const SYNCSAFE_MAX: usize = (1 << (4 * SYNCSAFE_BITS)) - 1;
     let value = value.min(SYNCSAFE_MAX) as u32;
     let mut out = [0u8; 4];
     for (i, byte) in out.iter_mut().enumerate() {
@@ -756,16 +785,17 @@ mod tests {
     #[test]
     fn written_frame_sizes_survive_a_long_value() {
         let long = "x".repeat(300);
-        let written: TagList = [Tag::Album(long.clone()), Tag::Artist("g2g".into())]
-            .into_iter()
-            .collect();
+        let written: TagList = [
+            Tag::Album(long),
+            Tag::image("image/jpeg", alloc::vec![0xff; 300]).unwrap(),
+            Tag::image("image/png", alloc::vec![0x89, 0x50, 0x4e, 0x47]).unwrap(),
+            Tag::Artist("g2g".into()),
+        ]
+        .into_iter()
+        .collect();
         for version in [ID3V2_VERSION_2_3, ID3V2_VERSION_2_4] {
             let tags = parse_id3v2(&write_id3v2(&written, version));
-            assert_eq!(
-                tags.tags(),
-                [Tag::Album(long.clone()), Tag::Artist("g2g".into())],
-                "version {version}"
-            );
+            assert_eq!(tags, written, "version {version}");
         }
     }
 
