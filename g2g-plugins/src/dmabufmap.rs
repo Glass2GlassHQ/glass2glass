@@ -23,6 +23,7 @@ use g2g_core::G2gError;
 const DMA_BUF_IOCTL_SYNC: libc::c_ulong = 0x4008_6200;
 /// `DMA_BUF_SYNC_READ`, and the START / END halves of the access bracket.
 const DMA_BUF_SYNC_READ: u64 = 1 << 0;
+const DMA_BUF_SYNC_WRITE: u64 = 1 << 1;
 const DMA_BUF_SYNC_END: u64 = 1 << 2;
 
 // the whole buffer, from offset 0
@@ -36,38 +37,27 @@ pub(crate) fn dmabuf_len(dmabuf: &OwnedDmaBuf) -> Result<usize, G2gError> {
         .ok_or(G2gError::UnsupportedDomain)
 }
 
-/// A DMABUF mapped for reading, unmapped on drop.
+// the whole buffer mapped from offset 0, inside the CPU-access bracket for `access`
 #[derive(Debug)]
-pub struct DmaBufReadMap {
+struct Mapping {
     address: *mut c_void,
-    /// The whole mapping, which the kernel only hands out entire.
     length: usize,
-    /// Where the frame's payload starts inside it.
-    offset: usize,
     fd: i32,
+    access: u64,
 }
 
-impl DmaBufReadMap {
-    /// Map `dmabuf` and take its payload from `offset` to the end of the
-    /// buffer. The payload is the whole remainder: a dma-buf carries no length
-    /// of its own, so a producer sizes the buffer to the frame it exports.
-    ///
-    /// The kernel maps a dma-buf only whole (`dma_buf_mmap` refuses a non-zero
-    /// page offset), so the offset is applied to the mapping, not to `mmap`.
-    pub fn read(dmabuf: &OwnedDmaBuf) -> Result<Self, G2gError> {
+impl Mapping {
+    // the kernel maps a dma-buf only whole, `dma_buf_mmap` refuses a non-zero page offset
+    fn new(dmabuf: &OwnedDmaBuf, protection: libc::c_int, access: u64) -> Result<Self, G2gError> {
         let fd = dmabuf.as_raw();
         let length = dmabuf_len(dmabuf)?;
-        let offset = dmabuf.offset as usize;
-        if offset >= length {
-            return Err(G2gError::UnsupportedDomain);
-        }
         // SAFETY: a null hint lets the kernel place the mapping; `fd` is an open
         // dma-buf and `length` is the size just read off it.
         let address = unsafe {
             libc::mmap(
                 core::ptr::null_mut(),
                 length,
-                libc::PROT_READ,
+                protection,
                 libc::MAP_SHARED,
                 fd,
                 0,
@@ -76,40 +66,83 @@ impl DmaBufReadMap {
         if address == libc::MAP_FAILED {
             return Err(G2gError::UnsupportedDomain);
         }
-        sync(fd, DMA_BUF_SYNC_READ);
+        sync(fd, access);
         Ok(Self {
             address,
             length,
-            offset,
             fd,
+            access,
         })
     }
 
-    pub fn from_fd_start(&self) -> &[u8] {
+    fn bytes(&self) -> &[u8] {
         // SAFETY: the mapping is live for `self`'s lifetime and covers
         // `self.length` readable bytes.
         unsafe { core::slice::from_raw_parts(self.address as *const u8, self.length) }
     }
-
-    /// The payload: the mapping from the buffer's offset on.
-    pub fn as_slice(&self) -> &[u8] {
-        // SAFETY: the mapping is live for `self`'s lifetime and covers
-        // `self.length` readable bytes, of which `offset` is inside.
-        unsafe {
-            core::slice::from_raw_parts(
-                (self.address as *const u8).add(self.offset),
-                self.length - self.offset,
-            )
-        }
-    }
 }
 
-impl Drop for DmaBufReadMap {
+impl Drop for Mapping {
     fn drop(&mut self) {
-        sync(self.fd, DMA_BUF_SYNC_READ | DMA_BUF_SYNC_END);
+        sync(self.fd, self.access | DMA_BUF_SYNC_END);
         // SAFETY: `address` / `length` are the mapping this type made and has
         // not unmapped before.
         unsafe { libc::munmap(self.address, self.length) };
+    }
+}
+
+/// A DMABUF mapped for reading, unmapped on drop.
+#[derive(Debug)]
+pub struct DmaBufReadMap {
+    mapping: Mapping,
+    /// Where the frame's payload starts inside it.
+    offset: usize,
+}
+
+impl DmaBufReadMap {
+    /// Map `dmabuf` and take its payload from `offset` to the end of the
+    /// buffer. The payload is the whole remainder: a dma-buf carries no length
+    /// of its own, so a producer sizes the buffer to the frame it exports.
+    pub fn read(dmabuf: &OwnedDmaBuf) -> Result<Self, G2gError> {
+        let mapping = Mapping::new(dmabuf, libc::PROT_READ, DMA_BUF_SYNC_READ)?;
+        let offset = dmabuf.offset as usize;
+        if offset >= mapping.length {
+            return Err(G2gError::UnsupportedDomain);
+        }
+        Ok(Self { mapping, offset })
+    }
+
+    pub fn from_fd_start(&self) -> &[u8] {
+        self.mapping.bytes()
+    }
+
+    /// The payload: the mapping from the buffer's offset on.
+    pub fn as_slice(&self) -> &[u8] {
+        &self.mapping.bytes()[self.offset..]
+    }
+}
+
+#[derive(Debug)]
+pub struct DmaBufWriteMap {
+    mapping: Mapping,
+}
+
+impl DmaBufWriteMap {
+    pub fn write(dmabuf: &OwnedDmaBuf) -> Result<Self, G2gError> {
+        let mapping = Mapping::new(
+            dmabuf,
+            libc::PROT_READ | libc::PROT_WRITE,
+            DMA_BUF_SYNC_READ | DMA_BUF_SYNC_WRITE,
+        )?;
+        Ok(Self { mapping })
+    }
+
+    pub fn from_fd_start_mut(&mut self) -> &mut [u8] {
+        // SAFETY: the mapping is live for `self`'s lifetime, writable, and covers
+        // `self.length` bytes, and `&mut self` makes this the only slice over it.
+        unsafe {
+            core::slice::from_raw_parts_mut(self.mapping.address as *mut u8, self.mapping.length)
+        }
     }
 }
 

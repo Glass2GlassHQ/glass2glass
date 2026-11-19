@@ -1318,6 +1318,10 @@ path, `PARSE=0` drops `h264parse` from both lines, and
 namespace with that qdisc on `lo`. The older `tools/latency-bench.sh` covers
 arrival to present, which the two stacks cannot report over one span.
 
+`timestampburn` takes I420, NV12, Y42B, Y444, A420, GRAY8, YUY2 and UYVY, and on
+Linux it writes into a dma-buf frame in place, so a camera to encoder path stays
+zero-copy. `g2g-latency-reader --format` reads the same formats, I420 by default.
+
 `tools/throughput-bench.sh` races the two offline on a cached ffmpeg fixture:
 1800 frames of 1080p H.264 decoded to I420 with libavcodec on both sides,
 reporting wall, CPU seconds, peak RSS, and fps from `/usr/bin/time -v`.

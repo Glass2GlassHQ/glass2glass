@@ -46,6 +46,8 @@ pub(crate) fn export_buffer(
     let mut export: v4l2_exportbuffer = zeroed_arg();
     export.type_ = buffer_type;
     export.index = index;
+    // mmap of a dma-buf with PROT_WRITE needs a descriptor exported read-write
+    export.flags = libc::O_RDWR as u32;
     // SAFETY: `v4l2_exportbuffer` is VIDIOC_EXPBUF's argument type.
     unsafe { v4l2_ioctl(fd, vidioc::VIDIOC_EXPBUF, &mut export) }?;
     if export.fd < 0 {

@@ -538,8 +538,15 @@ impl UdpSink {
     async fn send_datagram(&self, bytes: &[u8]) -> Result<u64, G2gError> {
         let socket = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
         if self.clients.is_empty() {
-            socket.send(bytes).await.map_err(io_err)?;
-            return Ok(1);
+            return match socket.send(bytes).await {
+                Ok(_) => Ok(1),
+                // linux fails the connected socket's next send with an earlier ICMP port unreachable, without sending it
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+                    socket.send(bytes).await.map_err(io_err)?;
+                    Ok(1)
+                }
+                Err(error) => Err(io_err(error)),
+            };
         }
         for client in &self.clients {
             socket.send_to(bytes, client).await.map_err(io_err)?;

@@ -20,6 +20,12 @@ refused request reports `HardwareError::Http(status)`. Socket calls keep
 `HardwareError::Io(errno)`. The message only goes to the element's log.
 `G2gError` cannot carry it.
 
+`udpsink` with one destination connects its socket, so it can read the peer's
+RTCP back off it. Linux then fails a send with `ECONNREFUSED`, without sending
+it, after an earlier datagram drew an ICMP port unreachable. `udpsink` sends
+that datagram again, so a receiver that stops or restarts never stops the
+sender, as with gst's `udpsink`.
+
 The WebRTC elements share the SDP steps in `webrtc_util`. These are
 `accept_offer_sdp`, `accept_answer_sdp`, `negotiate_over_http` (POST the offer,
 apply the answer) and `connect_failed` (log the reason, return `Connect`).

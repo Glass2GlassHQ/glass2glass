@@ -348,3 +348,39 @@ async fn eos_sends_a_sender_report_and_bye_when_reports_are_on() {
         "{packets:?}"
     );
 }
+
+#[tokio::test]
+async fn sending_survives_a_receiver_that_closes_and_comes_back() {
+    let receiver = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind receiver");
+    let dest: SocketAddr = receiver.local_addr().expect("local addr");
+    let mut sink = UdpSink::new(dest).with_rtp(PAYLOAD_TYPE, SSRC);
+    sink.configure_pipeline(&h264_caps()).expect("configure");
+    let slice: &[u8] = &[0x65, 0x88, 0x84, 0x00];
+    let mut out = NullOut;
+    drop(receiver);
+
+    // the first send to the closed port draws the port unreachable the later ones see
+    let frames_while_closed = 3;
+    for sequence in 0..frames_while_closed {
+        sink.process(
+            PipelinePacket::DataFrame(au_frame(annexb(&[slice]), 0, sequence)),
+            &mut out,
+        )
+        .await
+        .expect("a send to a closed port is not a pipeline error");
+    }
+
+    let receiver = tokio::net::UdpSocket::bind(dest)
+        .await
+        .expect("rebind the receiver on the same port");
+    sink.process(
+        PipelinePacket::DataFrame(au_frame(annexb(&[slice]), 0, frames_while_closed)),
+        &mut out,
+    )
+    .await
+    .expect("send after the receiver returns");
+    let received = recv_n(&receiver, 1).await;
+    assert_eq!(&received[0][12..], slice);
+}

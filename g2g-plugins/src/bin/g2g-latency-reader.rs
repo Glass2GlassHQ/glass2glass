@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
-//! `g2g-latency-reader`: reads raw I420 frames from standard input, decodes the
+//! `g2g-latency-reader`: reads raw frames from standard input, decodes the
 //! [`timestampburn`] strip in each one, and reports how long each frame took to
 //! reach here from the moment the strip was written.
 //!
@@ -11,7 +11,7 @@
 //! identical span, on one machine's `CLOCK_MONOTONIC`.
 //!
 //! Usage:
-//!   ... | g2g-latency-reader --width 1280 --height 720 --frames 300
+//!   ... | g2g-latency-reader --width 1280 --height 720 --frames 300 [--format NV12]
 //!
 //! [`timestampburn`]: g2g_plugins::timestampburn
 
@@ -19,14 +19,14 @@ use std::io::Read;
 use std::process::ExitCode;
 
 use g2g_core::RawVideoFormat;
-use g2g_plugins::timestampburn::{decode, monotonic_ns};
+use g2g_plugins::timestampburn::{decode, luma_samples, monotonic_ns};
 
 const NS_PER_MS: f64 = 1_000_000.0;
 
 fn usage() -> ! {
     eprintln!(
         "usage: g2g-latency-reader --width W --height H \
-         [--frames N] [--warmup N] [--label TEXT]"
+         [--format I420|NV12|Y42B|Y444|A420|GRAY8|YUY2|UYVY] [--frames N] [--warmup N] [--label TEXT]"
     );
     std::process::exit(2)
 }
@@ -34,6 +34,7 @@ fn usage() -> ! {
 struct Args {
     width: u32,
     height: u32,
+    format: RawVideoFormat,
     frames: usize,
     warmup: usize,
     label: String,
@@ -42,6 +43,7 @@ struct Args {
 fn parse_args() -> Args {
     let mut width = 0u32;
     let mut height = 0u32;
+    let mut format = RawVideoFormat::I420;
     let mut frames = usize::MAX;
     let mut warmup = 0usize;
     let mut label = String::from("latency");
@@ -51,6 +53,9 @@ fn parse_args() -> Args {
         match flag.as_str() {
             "--width" => width = value.parse().unwrap_or_else(|_| usage()),
             "--height" => height = value.parse().unwrap_or_else(|_| usage()),
+            "--format" => {
+                format = g2g_core::caps_parse::parse_raw_format(&value).unwrap_or_else(|| usage())
+            }
             "--frames" => frames = value.parse().unwrap_or_else(|_| usage()),
             "--warmup" => warmup = value.parse().unwrap_or_else(|_| usage()),
             "--label" => label = value,
@@ -63,6 +68,7 @@ fn parse_args() -> Args {
     Args {
         width,
         height,
+        format,
         frames,
         warmup,
         label,
@@ -77,11 +83,16 @@ fn percentile(sorted: &[u64], pct: usize) -> f64 {
 
 fn main() -> ExitCode {
     let args = parse_args();
-    let frame_bytes = RawVideoFormat::I420
+    let frame_bytes = args
+        .format
         .unpadded_frame_bytes(args.width, args.height)
         .and_then(|bytes| usize::try_from(bytes).ok())
         .unwrap_or_else(|| usage());
-    let (width, height) = (args.width as usize, args.height as usize);
+    let luma = luma_samples(args.format).unwrap_or_else(|| usage());
+    let stride = args
+        .format
+        .plane_stride(0, args.width)
+        .unwrap_or_else(|| usage()) as usize;
     let mut frame = vec![0u8; frame_bytes];
     let mut stdin = std::io::stdin().lock();
 
@@ -100,7 +111,7 @@ fn main() -> ExitCode {
         if read <= args.warmup {
             continue;
         }
-        match decode(&frame[..width * height], width) {
+        match decode(&frame, stride, luma) {
             Some(burned) => samples.push(now.saturating_sub(burned)),
             None => undecodable += 1,
         }

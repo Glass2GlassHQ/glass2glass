@@ -231,6 +231,16 @@ lands within 6% of the bitrate at 4 Mb/s and within 14% at 8 Mb/s. At 2 Mb/s,
 `v4l2slh264enc` at 4 Mb/s codes 9.5 Mb/s, between 3.5 and 28.6 Mb/s per second, because its controller skips IDRs and moves the QP by
 0.0001 per bit/s of error per macroblock.
 
+The IMX335 camera on the same board feeds `v4l2slh264enc` 1280x720 NV12
+dma-bufs at 30 fps with no copy, and the H1 takes 8.4 ms per frame. Sent to
+`rtspserversink` at 4 Mb/s CBR and played by gst's `rtspsrc` over TCP, the
+stream arrives at 30 fps with no drops and 3.5 to 4.4 Mb/s per second.
+`timestampburn` in the camera dma-buf, then RTP over UDP on the board to
+`v4l2slh264dec` and `g2g-latency-reader --format NV12`, measures 24.2 ms p50 and
+26.9 ms p99 from the burn to the decoded frame. That span includes the
+decoder's 720p copy to system memory, which the `waylandsink` path skips, and
+excludes the sensor exposure, the ISP and the display.
+
 On an STM32MP257F-EV1, the 300-frame 1080p clip decoded by `v4l2slh264dec`
 and encoded at QP 18 matches ST's element within 0.005 dB PSNR and 0.2% in size
 in all three profiles. The size difference is the parameter sets g2g repeats.

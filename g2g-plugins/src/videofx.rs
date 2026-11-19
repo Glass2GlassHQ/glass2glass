@@ -75,6 +75,16 @@ pub(crate) trait PixelFilter {
 
     /// Drop any inter-frame state on a flush. The default keeps none.
     fn reset(&mut self) {}
+
+    fn apply_dmabuf(
+        &mut self,
+        _format: RawVideoFormat,
+        _w: u32,
+        _h: u32,
+        _dmabuf: &g2g_core::memory::OwnedDmaBuf,
+    ) -> Result<(), G2gError> {
+        Err(G2gError::UnsupportedDomain)
+    }
 }
 
 /// The input caps a filter accepts: one of its formats at fixed non-zero dims.
@@ -174,6 +184,31 @@ async fn push_control(
     Ok(())
 }
 
+fn apply_system<F: PixelFilter>(
+    filter: &mut F,
+    frame: &mut Frame,
+    format: RawVideoFormat,
+    in_w: u32,
+    in_h: u32,
+) -> Result<(), G2gError> {
+    let in_bytes = frame_byte_size(format, in_w, in_h);
+    let src = frame
+        .domain
+        .require_system_slice(g2g_core::log::short_type_name::<F>())?;
+    if src.len() < in_bytes {
+        return Err(G2gError::CapsMismatch);
+    }
+    if let Some(resized) = filter.apply_resized(format, in_w, in_h, &src[..in_bytes]) {
+        frame.domain = MemoryDomain::System(SystemSlice::from_boxed(resized));
+        return Ok(());
+    }
+    let MemoryDomain::System(slice) = &mut frame.domain else {
+        return Err(G2gError::UnsupportedDomain);
+    };
+    filter.apply(format, in_w, in_h, &mut slice.as_mut_slice()[..in_bytes]);
+    Ok(())
+}
+
 /// Run one packet through `filter`: transform a data frame, emit the output
 /// caps when they change, forward everything else.
 pub(crate) fn drive<'a, F: PixelFilter>(
@@ -190,20 +225,10 @@ pub(crate) fn drive<'a, F: PixelFilter>(
                 let Some((format, in_w, in_h, rate)) = filter.state().input.clone() else {
                     return Err(G2gError::NotConfigured);
                 };
-                let in_bytes = frame_byte_size(format, in_w, in_h);
-                let src = frame
-                    .domain
-                    .require_system_slice(g2g_core::log::short_type_name::<F>())?;
-                if src.len() < in_bytes {
-                    return Err(G2gError::CapsMismatch);
-                }
-                if let Some(resized) = filter.apply_resized(format, in_w, in_h, &src[..in_bytes]) {
-                    frame.domain = MemoryDomain::System(SystemSlice::from_boxed(resized));
+                if let MemoryDomain::DmaBuf(dmabuf) = &frame.domain {
+                    filter.apply_dmabuf(format, in_w, in_h, dmabuf)?;
                 } else {
-                    let MemoryDomain::System(slice) = &mut frame.domain else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
-                    filter.apply(format, in_w, in_h, &mut slice.as_mut_slice()[..in_bytes]);
+                    apply_system(filter, &mut frame, format, in_w, in_h)?;
                 }
 
                 let (out_w, out_h) = filter.output_dims(format, in_w, in_h);
