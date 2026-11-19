@@ -186,6 +186,7 @@ pub enum Caps {
     },
 }
 
+#[cfg(feature = "alloc")]
 pub(crate) const GDP_MEDIA_TYPE: &str = "application/x-gdp";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

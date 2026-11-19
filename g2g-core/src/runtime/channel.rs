@@ -1204,8 +1204,8 @@ enum PushPhase {
 
 impl SenderSink {
     /// Wait for input, letting a seekable arm at EOS park without another packet.
+    #[cfg(feature = "std")]
     pub(crate) async fn await_input<F: Future>(&mut self, wait: F, at_eos: bool) -> F::Output {
-        #[cfg(feature = "std")]
         if let Some(endpoint) = self.endpoint.as_ref().filter(|_| at_eos).cloned() {
             let mut wait = core::pin::pin!(wait);
             return core::future::poll_fn(|cx| {
@@ -1223,8 +1223,6 @@ impl SenderSink {
             })
             .await;
         }
-        #[cfg(not(feature = "std"))]
-        let _ = at_eos;
         wait.await
     }
 
