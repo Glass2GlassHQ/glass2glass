@@ -115,11 +115,30 @@ const LOG2_MAX_MV_LENGTH: u32 = 16;
 const DEFAULT_KEYFRAME_INTERVAL: u32 = 30;
 const DEFAULT_QUANTIZER: u8 = 18;
 const MAX_CABAC_INIT_IDC: u8 = 2;
+// gstreamer's v4l2slh264enc defaults
+const DEFAULT_QP_MIN: u8 = 10;
+const DEFAULT_QP_STEP: u8 = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RateControl {
+    ConstantQp,
+    ConstantBitrate,
+}
+
+const RATE_CONTROL_NAMES: &[(&str, RateControl)] = &[
+    ("cqp", RateControl::ConstantQp),
+    ("cbr", RateControl::ConstantBitrate),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Settings {
     keyframe_interval: u32,
     quantizer: u8,
+    rate_control: RateControl,
+    bitrate: u32,
+    qp_min: u8,
+    qp_max: u8,
+    qp_step: u8,
     cabac: bool,
     cabac_init_idc: u8,
     dct8x8: bool,
@@ -130,10 +149,97 @@ impl Default for Settings {
         Self {
             keyframe_interval: DEFAULT_KEYFRAME_INTERVAL,
             quantizer: DEFAULT_QUANTIZER,
+            rate_control: RateControl::ConstantQp,
+            bitrate: 0,
+            qp_min: DEFAULT_QP_MIN,
+            qp_max: H264_MAX_QP,
+            qp_step: DEFAULT_QP_STEP,
             cabac: false,
             cabac_init_idc: 0,
             dct8x8: false,
         }
+    }
+}
+
+// H.264 doubles the quantizer step size every six QP, which halves the coded bits
+const QP_PER_HALVING: f64 = 6.0;
+
+// the smallest share of its budget cbr gives a frame while it pays back an overspend
+const MIN_FRAME_SHARE: f64 = 0.125;
+// IDRs on the 30 fps 1080p clip code 0.8 to 3.4 times the bits of the P frame after them at QP 51, more at lower QP
+const FIRST_IDR_BUDGET_FRAMES: f64 = 4.0;
+
+#[derive(Debug)]
+struct BitrateControl {
+    bits_per_frame: f64,
+    frames_per_second: f64,
+    // the bits coded past the bitrate so far, down to one second of unspent bits
+    excess_bits: f64,
+    // the bits the last P frame and the last IDR took, scaled to QP 0
+    p_frame_complexity: Option<f64>,
+    idr_complexity: Option<f64>,
+    qp: u8,
+}
+
+impl BitrateControl {
+    fn new(settings: &Settings, frames_per_second: f64) -> Self {
+        Self {
+            bits_per_frame: f64::from(settings.bitrate) / frames_per_second,
+            frames_per_second,
+            excess_bits: 0.0,
+            p_frame_complexity: None,
+            idr_complexity: None,
+            qp: settings.quantizer,
+        }
+    }
+
+    fn next_qp(&self, settings: &Settings) -> u8 {
+        let (p_frame, idr) = match (self.p_frame_complexity, self.idr_complexity) {
+            (None, None) => return self.qp,
+            (Some(p_frame), Some(idr)) => (p_frame, idr),
+            (Some(measured), None) | (None, Some(measured)) => (measured, measured),
+        };
+        let interval = f64::from(settings.keyframe_interval);
+        let mean_complexity = if settings.keyframe_interval == 0 {
+            p_frame
+        } else {
+            (p_frame * (interval - 1.0) + idr) / interval
+        };
+        let wanted_bits = (self.bits_per_frame - self.excess_bits / self.frames_per_second)
+            .max(self.bits_per_frame * MIN_FRAME_SHARE);
+        let ideal = QP_PER_HALVING * (mean_complexity / wanted_bits).log2();
+        let qp = f64::from(self.qp);
+        let step = f64::from(settings.qp_step);
+        ideal
+            .round()
+            .clamp(qp - step, qp + step)
+            .clamp(f64::from(settings.qp_min), f64::from(settings.qp_max)) as u8
+    }
+
+    // the QP that fits the first IDR into its budget, from a trial encode of it at `trial_qp`
+    fn first_idr_qp(&self, settings: &Settings, trial_qp: u8, trial_bits: f64) -> Option<u8> {
+        let measured = self.p_frame_complexity.is_some() || self.idr_complexity.is_some();
+        if measured {
+            return None;
+        }
+        let complexity = trial_bits * (f64::from(trial_qp) / QP_PER_HALVING).exp2();
+        let budget = self.bits_per_frame * FIRST_IDR_BUDGET_FRAMES;
+        let qp = (QP_PER_HALVING * (complexity / budget).log2())
+            .round()
+            .clamp(f64::from(settings.qp_min), f64::from(settings.qp_max)) as u8;
+        (qp != trial_qp).then_some(qp)
+    }
+
+    fn record(&mut self, qp: u8, coded_bits: f64, keyframe: bool) {
+        let complexity = Some(coded_bits * (f64::from(qp) / QP_PER_HALVING).exp2());
+        if keyframe {
+            self.idr_complexity = complexity;
+        } else {
+            self.p_frame_complexity = complexity;
+        }
+        let credit_limit = -self.bits_per_frame * self.frames_per_second;
+        self.excess_bits = (self.excess_bits + coded_bits - self.bits_per_frame).max(credit_limit);
+        self.qp = qp;
     }
 }
 
@@ -497,6 +603,7 @@ impl EncodeSession {
         picture: &Picture,
         settings: &Settings,
         keyframe: bool,
+        qp: u8,
         input: &MemoryDomain,
     ) -> Result<Vec<u8>, G2gError> {
         let picture_number = self.encoded;
@@ -509,7 +616,7 @@ impl EncodeSession {
         };
         let mut parameter_sets = Vec::new();
         if keyframe {
-            self.pic_init_qp = settings.quantizer;
+            self.pic_init_qp = qp;
             parameter_sets = sequence_parameter_set(picture, settings)
                 .ok_or_else(|| encoder_refused("no H.264 level or VUI fits this picture"))?;
             parameter_sets.extend(picture_parameter_set(settings, self.pic_init_qp));
@@ -527,7 +634,7 @@ impl EncodeSession {
         params.idr_pic_id = self.idr_pic_id;
         params.pic_init_qp_minus26 = (i32::from(self.pic_init_qp) - PIC_INIT_QP_BASE) as i8;
         let mut rate_control = V4l2CtrlH264EncodeRc {
-            qp: u32::from(settings.quantizer),
+            qp: u32::from(qp),
             ..Default::default()
         };
 
@@ -614,7 +721,6 @@ impl EncodeSession {
                 "the V4L2 encoder flagged the frame as failed",
             ));
         }
-        self.encoded += 1;
         let coded = self
             .bitstream
             .bytes()
@@ -631,6 +737,7 @@ pub struct V4l2SlH264Enc {
     settings: Settings,
     picture: Option<Picture>,
     session: Option<EncodeSession>,
+    bitrate_control: Option<BitrateControl>,
     force_keyframe: bool,
     emitted: u64,
     caps_sent: bool,
@@ -707,10 +814,50 @@ impl V4l2SlH264Enc {
             };
             self.session = Some(EncodeSession::open(&picture, memory)?);
         }
+        if self.settings.rate_control == RateControl::ConstantBitrate
+            && self.bitrate_control.is_none()
+        {
+            let (numerator, denominator) = picture
+                .frame_rate_fraction()
+                .ok_or_else(|| encoder_refused("rate-control=cbr needs a fixed frame rate"))?;
+            if self.settings.bitrate == 0 {
+                return Err(encoder_refused("rate-control=cbr needs a bitrate"));
+            }
+            let frames_per_second = f64::from(numerator) / f64::from(denominator);
+            self.bitrate_control = Some(BitrateControl::new(&self.settings, frames_per_second));
+        }
+        let mut qp = self
+            .bitrate_control
+            .as_ref()
+            .map_or(self.settings.quantizer, |control| {
+                control.next_qp(&self.settings)
+            });
         let encoded = self.session.as_ref().map_or(0, |session| session.encoded);
         let keyframe = self.keyframe_due(encoded);
         let session = self.session.as_mut().ok_or(G2gError::NotConfigured)?;
-        let access_unit = session.encode(&picture, &self.settings, keyframe, &domain)?;
+        let mut access_unit = session.encode(&picture, &self.settings, keyframe, qp, &domain)?;
+        // hantro h1 takes the next P frame's reference from the latest encode
+        let first_idr_qp = self
+            .bitrate_control
+            .as_ref()
+            .filter(|_| keyframe)
+            .and_then(|control| {
+                control.first_idr_qp(&self.settings, qp, (access_unit.len() * 8) as f64)
+            });
+        if let Some(fitted) = first_idr_qp {
+            qp = fitted;
+            access_unit = session.encode(&picture, &self.settings, keyframe, qp, &domain)?;
+        }
+        session.encoded += 1;
+        if let Some(control) = self.bitrate_control.as_mut() {
+            control.record(qp, (access_unit.len() * 8) as f64, keyframe);
+            g2g_core::g2g_log!(
+                Target::category(short_type_name::<V4l2SlH264Enc>()),
+                "cbr coded {} bits at qp {qp}, {} bits over the bitrate",
+                access_unit.len() * 8,
+                control.excess_bits as i64
+            );
+        }
         if keyframe {
             self.force_keyframe = false;
         }
@@ -810,6 +957,7 @@ impl AsyncElement for V4l2SlH264Enc {
         if self.picture.as_ref() != Some(&picture) {
             self.picture = Some(picture);
             self.session = None;
+            self.bitrate_control = None;
             self.caps_sent = false;
         }
         Ok(ConfigureOutcome::Accepted)
@@ -832,8 +980,30 @@ impl AsyncElement for V4l2SlH264Enc {
                 "frames from one IDR to the next, 0 = only the first frame and requested ones",
             )
             .with_default("30"),
-            PropertySpec::new("quantizer", PropKind::Uint, "QP of every frame, 0..51")
-                .with_default("18"),
+            PropertySpec::new(
+                "quantizer",
+                PropKind::Uint,
+                "QP of every frame under cqp, of the first frame under cbr, 0..51",
+            )
+            .with_default("18"),
+            PropertySpec::new("rate-control", PropKind::Str, "rate control: cqp | cbr")
+                .with_default("cqp"),
+            PropertySpec::new(
+                "bitrate",
+                PropKind::Uint,
+                "target bitrate under cbr, bits/second",
+            )
+            .with_default("0"),
+            PropertySpec::new("qp-min", PropKind::Uint, "lowest QP cbr picks, 0..51")
+                .with_default("10"),
+            PropertySpec::new("qp-max", PropKind::Uint, "highest QP cbr picks, 0..51")
+                .with_default("51"),
+            PropertySpec::new(
+                "qp-step",
+                PropKind::Uint,
+                "most cbr changes the QP from one frame to the next",
+            )
+            .with_default("4"),
             PropertySpec::new(
                 "cabac",
                 PropKind::Bool,
@@ -863,6 +1033,39 @@ impl AsyncElement for V4l2SlH264Enc {
                     u32::try_from(uint(&value)?).map_err(|_| PropError::Value)?;
             }
             "quantizer" => self.settings.quantizer = bounded(&value, H264_MAX_QP)?,
+            "rate-control" => {
+                let name = value.as_str().ok_or(PropError::Type)?;
+                let (_, mode) = RATE_CONTROL_NAMES
+                    .iter()
+                    .find(|(known, _)| *known == name)
+                    .ok_or(PropError::Value)?;
+                if *mode != self.settings.rate_control {
+                    self.settings.rate_control = *mode;
+                    self.bitrate_control = None;
+                }
+            }
+            "bitrate" => {
+                let bitrate = u32::try_from(uint(&value)?).map_err(|_| PropError::Value)?;
+                if let Some(control) = self.bitrate_control.as_mut() {
+                    if bitrate == 0 {
+                        return Err(PropError::Value);
+                    }
+                    control.bits_per_frame = f64::from(bitrate) / control.frames_per_second;
+                }
+                self.settings.bitrate = bitrate;
+            }
+            "qp-min" => {
+                let qp_min = bounded(&value, self.settings.qp_max)?;
+                self.settings.qp_min = qp_min;
+            }
+            "qp-max" => {
+                let qp_max = bounded(&value, H264_MAX_QP)?;
+                if qp_max < self.settings.qp_min {
+                    return Err(PropError::Value);
+                }
+                self.settings.qp_max = qp_max;
+            }
+            "qp-step" => self.settings.qp_step = bounded(&value, H264_MAX_QP)?,
             "cabac" => {
                 let cabac = flag(&value)?;
                 self.set_stream_setting(|settings| settings.cabac = cabac);
@@ -885,6 +1088,16 @@ impl AsyncElement for V4l2SlH264Enc {
         Some(match name {
             "keyframe-interval" => PropValue::Uint(u64::from(settings.keyframe_interval)),
             "quantizer" => PropValue::Uint(u64::from(settings.quantizer)),
+            "rate-control" => {
+                let (name, _) = RATE_CONTROL_NAMES
+                    .iter()
+                    .find(|(_, mode)| *mode == settings.rate_control)?;
+                PropValue::Str((*name).into())
+            }
+            "bitrate" => PropValue::Uint(u64::from(settings.bitrate)),
+            "qp-min" => PropValue::Uint(u64::from(settings.qp_min)),
+            "qp-max" => PropValue::Uint(u64::from(settings.qp_max)),
+            "qp-step" => PropValue::Uint(u64::from(settings.qp_step)),
             "cabac" => PropValue::Bool(settings.cabac),
             "cabac-init-idc" => PropValue::Uint(u64::from(settings.cabac_init_idc)),
             "dct8x8" => PropValue::Bool(settings.dct8x8),
@@ -1015,6 +1228,90 @@ mod tests {
             .set_property("cabac", PropValue::Bool(true))
             .unwrap();
         assert!(encoder.keyframe_due(mid_gop));
+    }
+
+    // a stand-in for the H1: an IDR codes this many times the bits of a P frame of the same content
+    const IDR_TO_P_BITS: f64 = 6.0;
+    const TARGET_BITRATE: u32 = 4_000_000;
+    const SECONDS: u64 = 10;
+    const SCENE_CHANGE_SECOND: u64 = 5;
+    // P frame bits at QP 0, which settle near QP 25 and QP 37 at the target bitrate
+    const EASY_SCENE_BITS: f64 = 2.0e6;
+    const HARD_SCENE_BITS: f64 = 8.0e6;
+
+    fn modelled_bits(qp: u8, scene_bits: f64, keyframe: bool) -> f64 {
+        let frame_bits = if keyframe {
+            scene_bits * IDR_TO_P_BITS
+        } else {
+            scene_bits
+        };
+        frame_bits / (f64::from(qp) / QP_PER_HALVING).exp2()
+    }
+
+    fn bits_per_second_under_cbr() -> Vec<f64> {
+        let settings = Settings {
+            rate_control: RateControl::ConstantBitrate,
+            bitrate: TARGET_BITRATE,
+            ..Settings::default()
+        };
+        let frames_per_second = u64::from(FRAMES_PER_SECOND);
+        let mut control = BitrateControl::new(&settings, f64::from(FRAMES_PER_SECOND));
+        let mut seconds = alloc::vec![0.0; SECONDS as usize];
+        for frame in 0..SECONDS * frames_per_second {
+            let second = frame / frames_per_second;
+            let scene_bits = if second < SCENE_CHANGE_SECOND {
+                EASY_SCENE_BITS
+            } else {
+                HARD_SCENE_BITS
+            };
+            let keyframe = frame.is_multiple_of(u64::from(settings.keyframe_interval));
+            let mut qp = control.next_qp(&settings);
+            let mut bits = modelled_bits(qp, scene_bits, keyframe);
+            if let Some(fitted) = control
+                .first_idr_qp(&settings, qp, bits)
+                .filter(|_| keyframe)
+            {
+                qp = fitted;
+                bits = modelled_bits(qp, scene_bits, keyframe);
+            }
+            control.record(qp, bits, keyframe);
+            seconds[second as usize] += bits;
+        }
+        seconds
+    }
+
+    // the model codes 0.95 of the bitrate in the first second, then settles within 0.5% from the second second
+    const FIRST_SECOND_TOLERANCE: f64 = 0.1;
+    const START_SETTLE_SECONDS: u64 = 1;
+    // and settles within 0.5% four seconds after the scene change
+    const SCENE_CHANGE_SETTLE_SECONDS: u64 = 4;
+    const SETTLED_TOLERANCE: f64 = 0.01;
+    // the model's ten seconds measure 0.995 of the bitrate, the rest of the scene change second's overshoot unpaid
+    const WHOLE_RUN_TOLERANCE: f64 = 0.01;
+
+    #[test]
+    fn cbr_holds_each_second_near_the_bitrate_across_a_scene_change() {
+        let target = f64::from(TARGET_BITRATE);
+        let seconds = bits_per_second_under_cbr();
+        let first_second = seconds[0] / target;
+        assert!(
+            (first_second - 1.0).abs() < FIRST_SECOND_TOLERANCE,
+            "the first second coded {first_second} of the bitrate"
+        );
+        let settled = (START_SETTLE_SECONDS..SCENE_CHANGE_SECOND)
+            .chain(SCENE_CHANGE_SECOND + SCENE_CHANGE_SETTLE_SECONDS..SECONDS);
+        for second in settled {
+            let ratio = seconds[second as usize] / target;
+            assert!(
+                (ratio - 1.0).abs() < SETTLED_TOLERANCE,
+                "second {second} coded {ratio} of the bitrate"
+            );
+        }
+        let whole_run = seconds.iter().sum::<f64>() / (target * SECONDS as f64);
+        assert!(
+            (whole_run - 1.0).abs() < WHOLE_RUN_TOLERANCE,
+            "the run coded {whole_run} of the bitrate"
+        );
     }
 
     #[test]

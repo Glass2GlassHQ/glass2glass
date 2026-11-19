@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2456: `v4l2slh264enc` holds a constant bitrate with `rate-control=cbr`.
 - M2455: `v4l2slh264dec` and `d3d12h264dec` emit each picture as soon as it is decoded.
 - M2454: `v4l2slh264enc` encodes H.264 at a constant QP on V4L2 stateless encoders such as Hantro H1.
 - M2453: `waylandsink` imports dma-bufs in the negotiated format, not only NV12.

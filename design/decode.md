@@ -204,9 +204,32 @@ The H1 writes each slice with its start code and NAL header, so the element
 writes only the SPS and PPS, before every IDR. The SPS has POC type 2, one
 reference frame and a VUI that declares no reordering. The profile follows the
 settings: `dct8x8` gives High, `cabac` gives Main, and otherwise the stream is
-Constrained Baseline. Rate control is constant QP (`quantizer`, default 18).
-Changing `cabac`, `cabac-init-idc` or `dct8x8` forces an IDR, and a downstream
-keyframe request forces one on the next frame.
+Constrained Baseline. Changing `cabac`, `cabac-init-idc` or `dct8x8` forces an
+IDR, and a downstream keyframe request forces one on the next frame.
+
+The H1 driver writes QP limits of 0 and 51 and turns off the hardware's
+in-frame QP adjustment, so the QP the element sends is the QP of the whole
+frame. `rate-control=cqp` (default) sends `quantizer` for every frame.
+`rate-control=cbr` needs `bitrate` and a fixed frame rate. The first IDR is
+coded at `quantizer`, then coded again at the QP that fits it into four frames'
+budget, and only the second encode is sent. The H1 takes the next P frame's
+reference from its latest encode, so the second encode is the reference. On
+1080p the trial costs one more encode, about 30 ms, at stream start. Later
+frames take their QP from the bits the last P frame and the
+last IDR took, scaled to QP 0 by halving the bits every six QP. The QP is the one
+at which a whole keyframe interval averages the bitrate, less the bits coded over
+the bitrate so far spread across one second. Unspent bits carry over up to one
+second's worth. `qp-min` and `qp-max` (defaults 10 and 51) bound the QP and
+`qp-step` (default 4) bounds its change from one frame to the next, with gst's
+`v4l2slh264enc` defaults and names. A `bitrate` change mid-stream keeps the
+measurements.
+
+On the 30 fps 1080p clip, `cbr` at 4 and 8 Mb/s codes 3.99 and 8.00 Mb/s over
+the ten seconds, and the first second codes 3.97 and 7.96 Mb/s. Every second
+lands within 6% of the bitrate at 4 Mb/s and within 14% at 8 Mb/s. At 2 Mb/s,
+239 of the 300 frames code at QP 51 and the clip still codes 2.37 Mb/s. gst's
+`v4l2slh264enc` at 4 Mb/s codes 9.5 Mb/s, between 3.5 and 28.6 Mb/s per second, because its controller skips IDRs and moves the QP by
+0.0001 per bit/s of error per macroblock.
 
 On an STM32MP257F-EV1, the 300-frame 1080p clip decoded by `v4l2slh264dec`
 and encoded at QP 18 matches ST's element within 0.005 dB PSNR and 0.2% in size
