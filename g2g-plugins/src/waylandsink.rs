@@ -9,7 +9,7 @@
 //! software path: NV12 → XRGB8888 conversion (in the caps colorimetry's
 //! matrix and range) into a `wl_shm` pool, then `attach` + `commit` per
 //! frame. A dma-buf frame is imported through `zwp_linux_dmabuf_v1` as a
-//! linear NV12 buffer with no copy, and the compositor converts it with its
+//! linear buffer in the negotiated format with no copy, and the compositor converts it with its
 //! own matrix, since the caps colorimetry has no way to reach it.
 //!
 //! This is the **dev sink**, not the production sink:
@@ -111,6 +111,7 @@ use smithay_client_toolkit::{
     },
 };
 
+use crate::capsfilter::DRM_FOURCC_FORMATS;
 use crate::clock::wait_to_present;
 use crate::display_aspect::{
     display_size, letterbox, FORCE_ASPECT_RATIO_NAME, FORCE_ASPECT_RATIO_PROPERTY,
@@ -151,7 +152,11 @@ enum WorkerCmd {
 enum QueuedPixels {
     // converted into the shm buffer by the worker
     System(SystemSlice),
-    Imported(OwnedDmaBuf),
+    Imported {
+        dmabuf: OwnedDmaBuf,
+        format: RawVideoFormat,
+        drm_format: u32,
+    },
 }
 
 /// One converted frame on its way to the surface.
@@ -518,8 +523,14 @@ impl PipelineClock for WaylandClock {
 
 const NATIVE_FORMATS: &[RawVideoFormat] = &[RawVideoFormat::Nv12];
 // drm_fourcc.h
-const DRM_FORMAT_NV12: u32 = u32::from_le_bytes(*b"NV12");
 const DRM_FORMAT_MOD_LINEAR: u64 = 0;
+
+fn drm_format(format: RawVideoFormat) -> Option<u32> {
+    let (fourcc, _) = DRM_FOURCC_FORMATS
+        .iter()
+        .find(|(_, gst_name)| *gst_name == format.gst_name())?;
+    Some(u32::from_le_bytes(fourcc.as_bytes().try_into().ok()?))
+}
 
 fn accepted_caps() -> CapsSet {
     display_sink_caps(NATIVE_FORMATS)
@@ -787,14 +798,22 @@ impl AsyncElement for WaylandSink {
                     }
                     let input = self.input.ok_or(G2gError::NotConfigured)?;
                     let pixels = match domain {
-                        MemoryDomain::DmaBuf(_) if input.needs_conversion() => {
-                            g2g_core::g2g_error!(
-                                self,
-                                "a dma-buf frame must be NV12, the caps name another format"
-                            );
-                            return Err(G2gError::CapsMismatch);
+                        MemoryDomain::DmaBuf(dmabuf) => {
+                            let format = input.negotiated;
+                            let Some(drm_format) = drm_format(format) else {
+                                g2g_core::g2g_error!(
+                                    self,
+                                    "{} dma-bufs have no DRM format code to import them by",
+                                    format.gst_name()
+                                );
+                                return Err(G2gError::CapsMismatch);
+                            };
+                            QueuedPixels::Imported {
+                                dmabuf,
+                                format,
+                                drm_format,
+                            }
                         }
-                        MemoryDomain::DmaBuf(dmabuf) => QueuedPixels::Imported(dmabuf),
                         MemoryDomain::System(pixels) => {
                             let pixels = match input.convert_frame(pixels.as_slice())? {
                                 Some(converted) => SystemSlice::from_boxed(converted),
@@ -1154,10 +1173,14 @@ impl WorkerState {
         nv12_to_xrgb8888(pixels.as_slice(), self.width, self.height, matrix, canvas)
     }
 
-    fn import(&mut self, dmabuf: &OwnedDmaBuf) -> Result<wl_buffer::WlBuffer, G2gError> {
-        let (layout, size) =
-            dmabuf_plane_layout(dmabuf, RawVideoFormat::Nv12, self.width, self.height)
-                .ok_or(G2gError::CapsMismatch)?;
+    fn import(
+        &mut self,
+        dmabuf: &OwnedDmaBuf,
+        format: RawVideoFormat,
+        drm_format: u32,
+    ) -> Result<wl_buffer::WlBuffer, G2gError> {
+        let (layout, size) = dmabuf_plane_layout(dmabuf, format, self.width, self.height)
+            .ok_or(G2gError::CapsMismatch)?;
         let (dmabuf_state, qh) = (&self.dmabuf_state, &self.qh);
         let (width, height) = (self.width as i32, self.height as i32);
         self.imports.get_or_import(dmabuf, size, || {
@@ -1182,7 +1205,7 @@ impl WorkerState {
             let (wl_buffer, _) = params.create_immed(
                 width,
                 height,
-                DRM_FORMAT_NV12,
+                drm_format,
                 zwp_linux_buffer_params_v1::Flags::empty(),
                 qh,
             );
@@ -1216,12 +1239,17 @@ impl WorkerState {
                 }
                 None
             }
-            QueuedPixels::Imported(dmabuf) => match self.import(&dmabuf) {
+            QueuedPixels::Imported {
+                dmabuf,
+                format,
+                drm_format,
+            } => match self.import(&dmabuf, format, drm_format) {
                 Ok(wl_buffer) => Some((wl_buffer, dmabuf)),
                 Err(error) => {
                     g2g_core::g2g_error!(
                         Target::category(short_type_name::<WaylandSink>()),
-                        "the compositor cannot show this dma-buf as linear NV12: {error:?}"
+                        "the compositor cannot show this dma-buf as linear {}: {error:?}",
+                        format.gst_name()
                     );
                     self.exit = true;
                     return;
@@ -1421,7 +1449,7 @@ impl DmabufHandler for WorkerState {
     ) {
         g2g_core::g2g_error!(
             Target::category(short_type_name::<WaylandSink>()),
-            "the compositor refused a linear NV12 dma-buf"
+            "the compositor refused a linear dma-buf"
         );
         self.exit = true;
     }
@@ -1581,6 +1609,13 @@ mod tests {
     /// any other GPU decoder to download. The allocation cascade reads this declaration, so getting it
     /// wrong means `nvdec ! waylandsink` takes a device pointer and dies with
     /// `UnsupportedDomain`.
+    #[test]
+    fn dmabufs_import_by_their_drm_format_code() {
+        // drm_fourcc.h values of DRM_FORMAT_NV12 and DRM_FORMAT_YUYV
+        assert_eq!(drm_format(RawVideoFormat::Nv12), Some(0x3231_564e));
+        assert_eq!(drm_format(RawVideoFormat::Yuyv), Some(0x5659_5559));
+    }
+
     #[test]
     fn declares_system_memory_and_dmabuf_only() {
         assert_eq!(

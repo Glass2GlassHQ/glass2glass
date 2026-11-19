@@ -223,8 +223,8 @@ const DRM_FORMAT_FIELD: &str = "drm-format=";
 
 const DMA_DRM_FORMAT: &str = "DMA_DRM";
 
-// GStreamer's drm-format fourcc for each format dmabuftowgpu imports
-const DRM_FOURCC_FORMATS: &[(&str, &str)] = &[
+// GStreamer's drm-format fourcc for each format dmabuftowgpu and waylandsink import
+pub(crate) const DRM_FOURCC_FORMATS: &[(&str, &str)] = &[
     ("AB24", "RGBA"),
     ("AR24", "BGRA"),
     ("NV12", "NV12"),

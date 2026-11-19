@@ -643,7 +643,7 @@ pub(crate) mod display {
         pub(crate) height: u32,
         pub(crate) colorimetry: Colorimetry,
         pub(crate) pixel_aspect: g2g_core::PixelAspect,
-        negotiated: RawVideoFormat,
+        pub(crate) negotiated: RawVideoFormat,
     }
 
     impl DisplayInput {

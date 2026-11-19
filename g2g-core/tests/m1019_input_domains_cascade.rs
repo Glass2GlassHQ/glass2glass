@@ -156,3 +156,52 @@ fn a_gpu_consumer_keeps_the_frame_on_the_device() {
 fn a_consumer_declaring_nothing_leaves_the_producer_alone() {
     assert_eq!(settled_domain(DomainSet::ALL), MemoryDomainKind::Cuda);
 }
+
+struct DomainForwarder;
+
+impl AsyncElement for DomainForwarder {
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&self, upstream: &Caps) -> Result<Caps, G2gError> {
+        Ok(upstream.clone())
+    }
+
+    fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn output_domain_follows_input(&self) -> bool {
+        true
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move { out.push(packet).await.map(|_| ()) })
+    }
+}
+
+#[test]
+fn a_link_after_a_domain_forwarder_carries_the_producer_domain() {
+    let mut graph: Graph<GraphNode> = Graph::new();
+    let src = graph.add_source(GraphNode::source(DualDomainSource {
+        settled: MemoryDomainKind::Cuda,
+    }));
+    let forwarder = graph.add_transform(GraphNode::element(DomainForwarder));
+    let sink = graph.add_sink(GraphNode::element(DeclaringSink {
+        accepted: DomainSet::only(MemoryDomainKind::Cuda),
+    }));
+    graph.link(src, forwarder).unwrap();
+    graph.link(forwarder, sink).unwrap();
+
+    let (_vg, _caps, edge_memory) = block_on(negotiate_graph(graph)).expect("negotiation");
+    assert_eq!(
+        edge_memory,
+        [MemoryDomainKind::Cuda, MemoryDomainKind::Cuda]
+    );
+}

@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2453: `waylandsink` imports dma-bufs in the negotiated format, not only NV12.
+- M2452: links after a pass-through element report the producer's memory domain in `-v` and the copy plan.
 - M2451: `g2g-launch -v` prints the links the run negotiated instead of negotiating twice.
 - M2450: `dmabufsink` holds each frame until `dmabufsrc` releases it.
 - M2449: `unixfdsink` and `unixfdsrc` pass buffer releases while no frame flows.

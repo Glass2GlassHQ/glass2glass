@@ -1802,13 +1802,21 @@ struct ProbeTaps<'t> {
 // the domain of the node producing onto each edge
 fn edge_memory(vg: &ValidatedGraph<GraphNodeRef<'_>>) -> Vec<crate::memory::MemoryDomainKind> {
     (0..vg.edge_count())
-        .map(|id| {
-            let src = vg.edge(id).src.node;
-            vg.element(src)
-                .map(|e| e.output_memory())
-                .unwrap_or(crate::memory::MemoryDomainKind::System)
-        })
+        .map(|id| producer_memory(vg, vg.edge(id).src.node))
         .collect()
+}
+
+// tees and domain-forwarding elements emit the domain of their single input
+fn producer_memory(vg: &ValidatedGraph<GraphNodeRef<'_>>, node: NodeId) -> MemoryDomainKind {
+    let is_tee = matches!(vg.kind(node), NodeKind::Tee(_));
+    if is_tee || forwards_input_domain(vg.element(node)) {
+        if let Some(&in_edge) = vg.in_edges(node).first() {
+            return producer_memory(vg, vg.edge(in_edge).src.node);
+        }
+    }
+    vg.element(node)
+        .map(|e| e.output_memory())
+        .unwrap_or(MemoryDomainKind::System)
 }
 
 /// Phases 1-3.5 of the graph runner: name instances + mint probes, probe source
