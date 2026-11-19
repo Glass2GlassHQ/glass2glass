@@ -43,6 +43,13 @@ pub struct PlaybinTrack {
     pub selected: bool,
 }
 
+/// A local playback graph and the tracks it can select.
+#[derive(Debug)]
+pub struct FileTrackPlaybin {
+    pub graph: Graph<GraphNode>,
+    pub tracks: Vec<PlaybinTrack>,
+}
+
 pub(super) struct TrackPicker {
     choice: PlaybinTrackSelection,
     tracks: Vec<PlaybinTrack>,
@@ -135,7 +142,7 @@ pub fn file_track_playbin(
     sinks: &PlaybinSinks<'_>,
     uri: &str,
     selection: PlaybinTrackSelection,
-) -> Result<Option<(Graph<GraphNode>, Vec<PlaybinTrack>)>, ParseError> {
+) -> Result<Option<FileTrackPlaybin>, ParseError> {
     let (base_uri, _) = cc_request(uri);
     let Some(path) = super::file_uri_path(&base_uri) else {
         return Ok(None);
@@ -162,7 +169,10 @@ pub fn file_track_playbin(
         ByteStreamEncoding::MpegPs => ps_playbin_tracks(reg, sinks, uri, Some(&mut picker))?,
         _ => select_demux_ports(reg, sinks, path, encoding, &mut picker)?,
     };
-    Ok(graph.map(|graph| (graph, picker.tracks)))
+    Ok(graph.map(|graph| FileTrackPlaybin {
+        graph,
+        tracks: picker.tracks,
+    }))
 }
 
 fn select_demux_ports(

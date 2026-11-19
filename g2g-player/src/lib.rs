@@ -27,7 +27,7 @@ use g2g_plugins::clock::WallClock;
 use g2g_plugins::edl::{parse_edl_uri, EdlError};
 use g2g_plugins::launched::RunFailure;
 use g2g_plugins::registry::default_registry;
-use g2g_plugins::uridecodebin::{file_track_playbin, PlaybinTrackSelection};
+use g2g_plugins::uridecodebin::{file_track_playbin, FileTrackPlaybin, PlaybinTrackSelection};
 
 mod caps_probe;
 mod demux_probe;
@@ -661,7 +661,7 @@ impl Player {
                 #[cfg(feature = "ffmpeg")]
                 lowres,
             };
-            if let Some((graph, tracks)) =
+            if let Some(FileTrackPlaybin { graph, tracks }) =
                 file_track_playbin(&self.registry, &file.sinks(), uri, file.selection)
                     .map_err(LoadError::Parse)?
             {
@@ -859,11 +859,10 @@ impl Player {
             return Ok(());
         }
         *selected = choice;
-        let (graph, tracks) =
+        let FileTrackPlaybin { mut graph, tracks } =
             file_track_playbin(&self.registry, &file.sinks(), &file.uri, file.selection)
                 .map_err(|error| SelectTrackError::Load(LoadError::Parse(error)))?
                 .ok_or(SelectTrackError::Unsupported)?;
-        let mut graph = graph;
         let (position, replacement) = {
             let mut playback = self.playback.lock().expect("playback lock");
             let old = playback

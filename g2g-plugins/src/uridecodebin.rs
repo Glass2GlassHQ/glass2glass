@@ -35,7 +35,9 @@ use g2g_core::Caps;
 #[path = "playbin_tracks.rs"]
 mod tracks;
 #[cfg(feature = "std")]
-pub use tracks::{file_track_playbin, PlaybinTrack, PlaybinTrackChoice, PlaybinTrackSelection};
+pub use tracks::{
+    file_track_playbin, FileTrackPlaybin, PlaybinTrack, PlaybinTrackChoice, PlaybinTrackSelection,
+};
 
 /// H.264 at any geometry: the media type the H.264 sources declare. Real
 /// dimensions ride in-band in the SPS and are resolved at negotiation.

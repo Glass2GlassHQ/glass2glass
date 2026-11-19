@@ -55,13 +55,7 @@ fn inspection_and_the_catalog_include_fanout_sources() {
     let reg = g2g_plugins::registry::default_registry();
     let catalog = reg.describe_all();
     let listing = reg.element_listing();
-    for (name, role, property) in [
-        ("uridecodebin", "source (bin)", "uri"),
-        #[cfg(feature = "rtsp")]
-        ("rtspsrcn", "source (fan-out)", "location"),
-        #[cfg(feature = "rtsp-server")]
-        ("rtspserversrcn", "source (fan-out)", "address"),
-    ] {
+    let check = |name: &str, role, property| {
         let doc = catalog.iter().find(|doc| doc.name == name).unwrap();
         assert_eq!(doc.role, role);
         assert!(doc.properties.iter().any(|spec| spec.name == property));
@@ -71,20 +65,27 @@ fn inspection_and_the_catalog_include_fanout_sources() {
         let inspect = reg.inspect(name).expect("the source is inspectable");
         assert!(inspect.contains(&format!("Role           {role}")));
         assert!(inspect.contains(property));
-    }
+    };
+    check("uridecodebin", "source (bin)", "uri");
     #[cfg(feature = "rtsp")]
-    assert_eq!(
-        catalog.iter().filter(|doc| doc.name == "rtspsrc").count(),
-        1
-    );
+    {
+        check("rtspsrcn", "source (fan-out)", "location");
+        assert_eq!(
+            catalog.iter().filter(|doc| doc.name == "rtspsrc").count(),
+            1
+        );
+    }
     #[cfg(feature = "rtsp-server")]
-    assert_eq!(
-        catalog
-            .iter()
-            .filter(|doc| doc.name == "rtspserversrc")
-            .count(),
-        1
-    );
+    {
+        check("rtspserversrcn", "source (fan-out)", "address");
+        assert_eq!(
+            catalog
+                .iter()
+                .filter(|doc| doc.name == "rtspserversrc")
+                .count(),
+            1
+        );
+    }
 }
 
 #[test]
