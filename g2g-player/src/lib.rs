@@ -1074,6 +1074,17 @@ async fn install_picture_filters(
     }
 }
 
+fn seek_while_paused(
+    state: &StateController,
+    controller: &SeekController,
+    position: Duration,
+) -> SeekTicket {
+    // A flushing seek lets every sink accept a fresh frame while paused.
+    state.set_state(PipelineState::Paused);
+    state.request_repreroll();
+    controller.seek(Seek::flush_to(nanoseconds(position)))
+}
+
 impl PlaybackRun {
     fn run(self) {
         let PlaybackRun {
@@ -1114,6 +1125,7 @@ impl PlaybackRun {
             let mut pending_filters: Option<Pin<Box<dyn Future<Output = Vec<String>> + '_>>> = None;
             picture_filters.mark_changed();
             let mut filters_changed = false;
+            let mut paused_filter_position = None;
             let mut pending_level_meter: Option<Pin<Box<dyn Future<Output = ()> + '_>>> = None;
             let mut level_meter_changed = false;
             loop {
@@ -1128,16 +1140,48 @@ impl PlaybackRun {
                     }
                     pending_level_meter = Some(Box::pin(apply_level_meter(&mutator, window)));
                 }
-                if filters_changed && pending_filters.is_none() {
+                let paused = shared.paused.load(Ordering::SeqCst);
+                if filters_changed
+                    && pending_filters.is_none()
+                    && pending_seek.is_none()
+                    && (!paused || seek.is_some())
+                {
                     filters_changed = false;
-                    pending_filters = Some(Box::pin(install_picture_filters(
-                        &mutator,
-                        &registry,
-                        core::mem::take(&mut installed_filters),
-                        picture_filters.borrow_and_update().clone(),
-                        *decoded.borrow_and_update(),
-                        source_size.as_mut().and_then(|size| *size.borrow_and_update()),
-                    )));
+                    let filters = picture_filters.borrow_and_update().clone();
+                    let decoded_size = *decoded.borrow_and_update();
+                    if !installed_filters.is_empty() || (decoded_size.is_some() && !filters.is_empty()) {
+                        pending_filters = Some(Box::pin(install_picture_filters(
+                            &mutator,
+                            &registry,
+                            core::mem::take(&mut installed_filters),
+                            filters,
+                            decoded_size,
+                            source_size.as_mut().and_then(|size| *size.borrow_and_update()),
+                        )));
+                    }
+                }
+                if pending_filters.is_some()
+                    && paused_filter_position.is_none()
+                    && pending_seek.is_none()
+                    && seek.is_some()
+                    && paused
+                    && state.state() == PipelineState::Paused
+                {
+                    if let Some(position) = progress.position() {
+                        // Discard queued frames so a splice can send caps through a full link.
+                        state.request_repreroll();
+                        paused_filter_position = Some(Duration::from_nanos(position));
+                    }
+                }
+                if pending_filters.is_none() {
+                    if let Some((controller, position)) = seek.as_ref().zip(paused_filter_position) {
+                        // A queued user seek will show the new filters at its requested position.
+                        let user_seek = shared.seek_target.lock().expect("seek target lock");
+                        if user_seek.is_none() {
+                            paused_filter_position = None;
+                            pending_seek = Some(seek_while_paused(&state, controller, position));
+                        }
+                    }
                 }
                 tokio::select! {
                     outcome = &mut run => break outcome,
@@ -1167,12 +1211,10 @@ impl PlaybackRun {
                         installed_filters = installed;
                         pending_filters = None;
                     }
-                    Some(position) = seek_requests.recv() => {
+                    Some(position) = seek_requests.recv(), if paused_filter_position.is_none() || pending_filters.is_none() => {
                         let controller = seek.as_ref().expect("seek() refuses media that cannot seek");
-                        // gstreamer's flushing seek prerolls every sink again before playing on
-                        state.set_state(PipelineState::Paused);
-                        state.request_repreroll();
-                        pending_seek = Some(controller.seek(Seek::flush_to(nanoseconds(position))));
+                        paused_filter_position = None;
+                        pending_seek = Some(seek_while_paused(&state, controller, position));
                         shared.set_eof_reached(false);
                         shared.events.push(Event::Seek);
                     }
@@ -1194,7 +1236,7 @@ impl PlaybackRun {
                     _ = poll.tick() => {
                         shared.report_progress(&progress);
                         let parked_at_end = seek.as_ref().is_some_and(SeekController::stream_ended);
-                        if parked_at_end && !shared.eof_reached.load(Ordering::SeqCst) {
+                        if parked_at_end && paused_filter_position.is_none() && !shared.eof_reached.load(Ordering::SeqCst) {
                             shared.reach_end(&state);
                         }
                     }

@@ -1036,7 +1036,10 @@ and `videobox` for that size, and splices them in after the probe with a
 removing the old chain from its last element to its first. The filters stay set
 across loads, as mpv's do. When reduced-resolution decoding is active and
 the demuxed size differs, the chain scales back to that size before applying
-the source-pixel filters.
+the source-pixel filters. On a paused seekable stream, the playback thread
+discards queued frames during the splice, then seeks to the paused position to
+show a frame through the updated chain. A pending user seek supplies the
+replacement frame at the requested position.
 
 `hqdn3d` is the element over the clean-room `hqdn3d` crate, with ffmpeg's four
 strengths as properties and its defaults. It filters 8-bit I420, Y42B and Y444,

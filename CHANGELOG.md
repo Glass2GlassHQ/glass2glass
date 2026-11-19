@@ -6,9 +6,9 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2427: changing picture filters refreshes the paused preview at its current position.
 - M2426: player picture filters use source coordinates with reduced-resolution decoding.
 - M2425: the wgpu video renderer preserves the depth of system-memory P010 frames.
-
 - M2424: `v4l2slh264dec` decodes H.264 on V4L2 stateless decoders, sharing its element with `d3d12h264dec`.
 - M2423: `tcpclientsrc` and `tcpserversrc` take a `caps` property, so a GDP stream over TCP reaches `gdpdepay`.
 - M2422: `gdppay` / `gdpdepay` write and read GStreamer Data Protocol streams that GStreamer's own elements read and write.

@@ -545,13 +545,16 @@ impl ProducerEndpoint {
     /// Ask the producer to stop at its next packet boundary and leave its link
     /// behind. Pairs with [`poll_detached`](Self::poll_detached).
     pub(crate) fn request_park(&self) {
-        let mut guard = self.state.lock();
-        guard.park = true;
-        // Raised under the lock, like every other write to it, so it cannot land
-        // after a producer that is concurrently clearing it decides there is
-        // nothing to do (see `poll_producer`).
-        self.pending
-            .store(true, core::sync::atomic::Ordering::Release);
+        let producer = {
+            let mut guard = self.state.lock();
+            guard.park = true;
+            // Publish the request under the same lock the producer uses to clear it.
+            self.pending.store(true, Ordering::Release);
+            guard.producer.take()
+        };
+        if let Some(producer) = producer {
+            producer.wake();
+        }
     }
 
     /// The link the producer gave up, once it has. `Err` once the producer's arm
@@ -657,7 +660,7 @@ impl ProducerEndpoint {
     /// cannot cross: the arms are polled before the mutation service, so the
     /// producer has always taken the staged link by the time the next operation
     /// runs.)
-    fn poll_producer(&self, cx: &mut Context<'_>, link: &mut LinkSender) -> Poll<()> {
+    fn poll_producer(&self, cx: &mut Context<'_>, link: &mut LinkSender, idle: bool) -> Poll<()> {
         let mut g = self.state.lock();
         if let Some(staged) = g.staged.take() {
             *link = staged;
@@ -676,8 +679,8 @@ impl ProducerEndpoint {
             g.producer = Some(cx.waker().clone());
             return Poll::Pending;
         }
-        self.pending
-            .store(false, core::sync::atomic::Ordering::Relaxed);
+        self.pending.store(false, Ordering::Relaxed);
+        g.producer = idle.then(|| cx.waker().clone());
         Poll::Ready(())
     }
 
@@ -1200,6 +1203,31 @@ enum PushPhase {
 }
 
 impl SenderSink {
+    /// Wait for input, letting a seekable arm at EOS park without another packet.
+    pub(crate) async fn await_input<F: Future>(&mut self, wait: F, at_eos: bool) -> F::Output {
+        #[cfg(feature = "std")]
+        if let Some(endpoint) = self.endpoint.as_ref().filter(|_| at_eos).cloned() {
+            let mut wait = core::pin::pin!(wait);
+            return core::future::poll_fn(|cx| {
+                let retargeted = endpoint.pending();
+                if endpoint
+                    .poll_producer(cx, &mut self.link, true)
+                    .is_pending()
+                {
+                    return Poll::Pending;
+                }
+                if retargeted {
+                    self.probe = self.link.probe.clone();
+                }
+                wait.as_mut().poll(cx)
+            })
+            .await;
+        }
+        #[cfg(not(feature = "std"))]
+        let _ = at_eos;
+        wait.await
+    }
+
     pub fn new(link: LinkSender) -> Self {
         // Share the link's per-edge probe slot, so a tool that installed an
         // interceptor on the edge (via the runner/observer) sees this adapter's
@@ -1510,7 +1538,10 @@ impl OutputSink for SenderSink {
             // else: the gate needs the endpoint while the link it retargets is
             // borrowed mutably.
             let endpoint = self.endpoint.clone().expect("checked above");
-            if endpoint.poll_producer(cx, &mut self.link).is_pending() {
+            if endpoint
+                .poll_producer(cx, &mut self.link, false)
+                .is_pending()
+            {
                 return Poll::Pending;
             }
             // The link may have been swapped (possibly more than once, if

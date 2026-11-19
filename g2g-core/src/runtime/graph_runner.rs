@@ -2723,6 +2723,7 @@ fn plan_arms<'a>(
                         control: controllers[index].take(),
                         properties,
                         flush_count,
+                        keep_after_eos: false,
                         latency: Some(LatencyFold::publisher(latency_fold, node)),
                     },
                     done: element_done(live),
@@ -3072,6 +3073,7 @@ pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
                 ticker,
                 visit_recorder.clone(),
                 run_end.clone(),
+                seek_after_end.is_some(),
             )
             .run(),
         ),
@@ -3548,6 +3550,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                     ticker.as_deref().map(|t| t as &dyn DynAsyncClock),
                     visit_recorder.clone(),
                     run_end.clone(),
+                    seek_after_end.is_some(),
                 )
                 .run(),
             )
@@ -4947,6 +4950,7 @@ pub struct TransformArmIo {
     pub(crate) properties: Option<PropertyMailbox>,
     // set when a seek can restart the stream after its Eos, the arm then ends only when its input closes
     pub(crate) flush_count: Option<ArmFlushCount>,
+    pub(crate) keep_after_eos: bool,
     // `None` for a spliced element, which takes no part in the latency fold
     pub(crate) latency: Option<LatencyPublisher>,
 }
@@ -5036,6 +5040,7 @@ pub(crate) async fn transform_arm_on<E: AsyncElement>(
         control,
         properties,
         mut flush_count,
+        keep_after_eos,
         mut latency,
     } = io;
     let mut adapter = SenderSink::new(out_tx);
@@ -5066,6 +5071,7 @@ pub(crate) async fn transform_arm_on<E: AsyncElement>(
         adapter.relay_bitrate_to(in_rx.bitrate_slot());
     }
     let mut control_open = true;
+    let mut at_eos = false;
     let mut last_buffer_bucket: Option<u8> = None;
     loop {
         // M843: interior links report their fill too, so an application can see
@@ -5073,7 +5079,10 @@ pub(crate) async fn transform_arm_on<E: AsyncElement>(
         let input_fill = sample_fill(bus.as_ref(), &probe, &in_rx);
         report_buffering(bus.as_ref(), &probe, input_fill, &mut last_buffer_bucket);
         let packet = if control_open {
-            match select2(arm_rx.recv(), in_rx.recv()).await {
+            match adapter
+                .await_input(select2(arm_rx.recv(), in_rx.recv()), at_eos)
+                .await
+            {
                 Either::Left(Some(ArmDirective::Recascade(params))) => {
                     // β: absorb the downstream proposal, re-derive our own from
                     // our output caps, and report it so the cascade continues to
@@ -5108,7 +5117,7 @@ pub(crate) async fn transform_arm_on<E: AsyncElement>(
                 Either::Right(packet) => packet,
             }
         } else {
-            in_rx.recv().await
+            adapter.await_input(in_rx.recv(), at_eos).await
         };
         if let (Some(probe), Some(packet)) = (&probe, &packet) {
             log_received(probe.log_name(), packet);
@@ -5128,7 +5137,8 @@ pub(crate) async fn transform_arm_on<E: AsyncElement>(
                 {
                     adapter.push(PipelinePacket::Eos).await?;
                 }
-                if flush_count.is_some() {
+                if flush_count.is_some() || keep_after_eos {
+                    at_eos = true;
                     continue;
                 }
                 // Drop our report handle so the coordinator can wind down once
@@ -5220,6 +5230,10 @@ pub(crate) async fn transform_arm_on<E: AsyncElement>(
                 }
             }
             Some(packet) => {
+                if matches!(packet, PipelinePacket::Flush | PipelinePacket::DataFrame(_)) {
+                    at_eos = false;
+                }
+
                 if let (Some(flush_count), PipelinePacket::Flush) = (&mut flush_count, &packet) {
                     flush_count.flushed();
                 }
@@ -5440,9 +5454,10 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
                 continue;
             }
             Some(PipelinePacket::Eos)
-                if stream_end
-                    .as_ref()
-                    .is_some_and(SinkEndReport::awaits_seek_flush) => {}
+                if flushing
+                    || stream_end
+                        .as_ref()
+                        .is_some_and(SinkEndReport::awaits_seek_flush) => {}
             Some(PipelinePacket::Eos) => {
                 match elem.process(PipelinePacket::Eos, &mut null).await {
                     Err(G2gError::WindowClosed) => return Ok(consumed),

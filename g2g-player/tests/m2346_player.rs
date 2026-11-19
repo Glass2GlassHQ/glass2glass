@@ -606,6 +606,49 @@ const PADDED_WIDTH: u32 = 96;
 const WIDENING_PAD: &str = "pad=w=96:h=48:x=16:y=0:color=black";
 
 #[test]
+fn changing_picture_filters_refreshes_the_paused_preview_in_place() {
+    let player = Player::new();
+    player
+        .load(
+            Media::Uri(&format!("file://{CLIP}")),
+            LoadOptions {
+                start: Some(START),
+                pause: Some(true),
+            },
+        )
+        .unwrap();
+
+    let wait_for_size = |width| {
+        wait_until(|| {
+            player.property(Property::VideoOutParams)
+                == PropertyChange::VideoOutParams(Some(VideoSize {
+                    width,
+                    height: CLIP_HEIGHT,
+                }))
+        });
+    };
+    wait_for_size(CLIP_WIDTH);
+    let position = player.property(Property::TimePos);
+    assert!(matches!(position, PropertyChange::TimePos(Some(_))));
+
+    player.set_video_filters(&[WIDENING_PAD]).unwrap();
+    wait_for_size(PADDED_WIDTH);
+    assert_eq!(
+        player.property(Property::Pause),
+        PropertyChange::Pause(true)
+    );
+    assert_eq!(player.property(Property::TimePos), position);
+
+    player.set_video_filters(&[]).unwrap();
+    wait_for_size(CLIP_WIDTH);
+    assert_eq!(
+        player.property(Property::Pause),
+        PropertyChange::Pause(true)
+    );
+    assert_eq!(player.property(Property::TimePos), position);
+}
+
+#[test]
 fn video_params_osd_dimensions_and_the_filtered_size_are_reported() {
     let Ok(context) = pollster::block_on(GpuContext::headless()) else {
         return;

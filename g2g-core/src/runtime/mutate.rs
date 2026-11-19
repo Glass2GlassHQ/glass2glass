@@ -920,6 +920,7 @@ pub(crate) struct MutationService<'a, 'f, 's> {
     /// Per element category, the lowest `<category>N` suffix not known to be taken.
     name_floors: BTreeMap<String, usize>,
     run_end: RunEndRequest,
+    keep_splices_after_eos: bool,
 }
 
 impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
@@ -938,6 +939,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
         ticker: Option<&'s dyn DynAsyncClock>,
         visit_recorder: Option<Arc<dyn VisitRecorder>>,
         run_end: RunEndRequest,
+        keep_splices_after_eos: bool,
     ) -> Self {
         Self {
             rx,
@@ -955,6 +957,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
             visit_recorder,
             name_floors: BTreeMap::new(),
             run_end,
+            keep_splices_after_eos,
         }
     }
 
@@ -1575,6 +1578,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
                 control: None,
                 properties: Some(properties.clone()),
                 flush_count: None,
+                keep_after_eos: self.keep_splices_after_eos,
                 latency: None,
             };
             let arm = (self.spawn.transform)(element, io, done_tx);
@@ -2139,6 +2143,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
                 control: None,
                 properties: Some(properties.clone()),
                 flush_count: None,
+                keep_after_eos: false,
                 latency: None,
             };
             let arm = (self.spawn.transform)(element, io, done_tx);
