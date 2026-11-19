@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2428: `oggdemux` reports duration for video-only Theora and VP8 files.
 - M2427: changing picture filters refreshes the paused preview at its current position.
 - M2426: player picture filters use source coordinates with reduced-resolution decoding.
 - M2425: the wgpu video renderer preserves the depth of system-memory P010 frames.

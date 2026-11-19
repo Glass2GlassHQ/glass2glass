@@ -75,8 +75,9 @@ use g2g_core::{
 
 use crate::demuxseek::{Admitted, DemuxSeek, TailRead};
 use crate::ogg::{
-    last_granules, parse_theora_identification, parse_vp8_stream_info, theora_keyframe, OggCodec,
-    OggDemuxer, OggLogicalStream,
+    last_granules, parse_theora_identification, parse_vp8_stream_info, theora_granule_frame_end,
+    theora_keyframe, vp8_granule_frame_end, vp8_shows_frame, OggCodec, OggDemuxer,
+    OggLogicalStream,
 };
 use crate::opusparse::packet_samples as opus_packet_samples;
 use crate::typefind::framerate_within_placeholder;
@@ -995,21 +996,17 @@ impl StreamEmitter {
         ready: &mut StreamReady,
     ) {
         const INTERFRAME_BIT: u8 = 0x01;
-        const SHOW_FRAME_BIT: u8 = 0x10;
         let Some(vp8) = stream.head_header().and_then(parse_vp8_stream_info) else {
             return;
         };
         let frames_to_ns = |frames: u64| {
-            ticks_to_ns(
-                frames.saturating_mul(u64::from(vp8.framerate_denominator)),
-                vp8.framerate_numerator,
-            )
+            video_frames_to_ns(frames, vp8.framerate_numerator, vp8.framerate_denominator)
         };
         for packet in packets {
             // the parser drops empty packets
             let frame_tag = packet[0];
             let shown_before = self.shown_frames;
-            if frame_tag & SHOW_FRAME_BIT != 0 {
+            if vp8_shows_frame(&packet) {
                 self.shown_frames = shown_before.saturating_add(1);
             }
             let start_ns = frames_to_ns(shown_before);
@@ -1042,9 +1039,10 @@ impl StreamEmitter {
             return;
         };
         let frames_to_ns = |frames: u64| {
-            ticks_to_ns(
-                frames.saturating_mul(u64::from(theora.framerate_denominator)),
+            video_frames_to_ns(
+                frames,
                 theora.framerate_numerator,
+                theora.framerate_denominator,
             )
         };
         for packet in packets {
@@ -1479,6 +1477,67 @@ pub struct OggDemuxN {
     duration_ns: Option<u64>,
 }
 
+fn video_frames_to_ns(frames: u64, numerator: u32, denominator: u32) -> u64 {
+    ticks_to_ns(frames.saturating_mul(u64::from(denominator)), numerator)
+}
+
+fn video_duration_ns(stream: &OggLogicalStream, last: u64) -> Option<u64> {
+    let (first, frames_through_first, _) = stream.first_data_granule()?;
+    if first > i64::MAX as u64 || last > i64::MAX as u64 {
+        return None;
+    }
+    let header = stream.head_header()?;
+    let (first_end, last_end, numerator, denominator) = match stream.info()?.codec {
+        OggCodec::Theora => {
+            let info = parse_theora_identification(header)?;
+            (
+                theora_granule_frame_end(header, first)?,
+                theora_granule_frame_end(header, last)?,
+                info.framerate_numerator,
+                info.framerate_denominator,
+            )
+        }
+        OggCodec::Vp8 => {
+            let info = parse_vp8_stream_info(header)?;
+            (
+                vp8_granule_frame_end(first)?,
+                vp8_granule_frame_end(last)?,
+                info.framerate_numerator,
+                info.framerate_denominator,
+            )
+        }
+        _ => return None,
+    };
+    let frames = last_end
+        .checked_sub(first_end)?
+        .checked_add(u64::from(frames_through_first))?;
+    let duration = video_frames_to_ns(frames, numerator, denominator);
+    (duration != u64::MAX).then_some(duration)
+}
+
+fn ogg_duration_ns(demux: &OggDemuxer, last_granules: &[(u32, u64)]) -> Option<u64> {
+    if demux.streams().iter().any(|stream| {
+        stream.info().is_some_and(|info| {
+            matches!(
+                info.codec,
+                OggCodec::Opus | OggCodec::Vorbis | OggCodec::Flac
+            )
+        })
+    }) {
+        return audio_duration_ns(demux, last_granules);
+    }
+    demux
+        .streams()
+        .iter()
+        .filter_map(|stream| {
+            let (_, last) = last_granules
+                .iter()
+                .find(|(serial, _)| *serial == stream.serial())?;
+            video_duration_ns(stream, *last)
+        })
+        .max()
+}
+
 // the end of the longest audio stream, from its last granule, as gst's oggdemux and ffmpeg read it
 fn audio_duration_ns(demux: &OggDemuxer, last_granules: &[(u32, u64)]) -> Option<u64> {
     demux
@@ -1717,7 +1776,7 @@ impl MultiOutputElement for OggDemuxN {
                     self.guess.note_read(slice.len());
                     self.demux.push_data(slice);
                     if self.duration_ns.is_none() {
-                        self.duration_ns = audio_duration_ns(&self.demux, &self.last_granules);
+                        self.duration_ns = ogg_duration_ns(&self.demux, &self.last_granules);
                         self.seek.set_duration(self.duration_ns);
                     }
                 }

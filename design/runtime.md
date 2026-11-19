@@ -800,7 +800,9 @@ its end, since the source reads on past the `Cues` to the end of the file and
 returns there otherwise. Without it the seek re-scans from byte 0. `OggDemux` and `OggDemuxN` share the
 byte-offset guess (`OggSeekGuess`), which `OggDemuxN` takes only when every port's
 stream can resume mid-file, an audio-only file, since VP8 and Theora are timed by
-counting frames from the start.
+counting frames from the start. For a video-only file, `OggDemuxN` computes
+duration from the last granule and the frame-counter origin recovered from
+the first timestamped data page.
 Each demuxer uses its own keyframe signal: the container flag, or
 `annexb::au_is_keyframe` for TS whose units have none, while every audio packet is a
 resync point and `oggdemux` accumulates an Opus PTS from the TOC byte. Where the

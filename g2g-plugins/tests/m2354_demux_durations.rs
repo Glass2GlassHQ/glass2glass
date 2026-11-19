@@ -91,6 +91,21 @@ async fn every_demuxer_reports_the_duration_ffprobe_reads() {
     }
 }
 
+#[tokio::test]
+async fn a_video_only_ogg_reports_duration_from_its_granules() {
+    // The VP8 file starts at 0.4 s. Its duration excludes that offset.
+    for (fixture, expected_ns) in [
+        ("theora_64x48.ogv", 500_000_000),
+        ("vp8_64x48_25fps_gop10_offset.ogg", 3_000_000_000),
+    ] {
+        assert_eq!(
+            reported_duration_ns(fixture, "oggdemux", "name=d d.video_0 ! fakesink").await,
+            Some(expected_ns),
+            "{fixture}"
+        );
+    }
+}
+
 // ffprobe -show_entries format=start_time,duration: the first is 0.4 s and 3.4 s, the second 0.36 s and 0.64 s
 const LATE_START_MKV_FIXTURES: [(&str, u64, u64); 2] = [
     (

@@ -188,6 +188,28 @@ pub(crate) fn theora_keyframe(packet: &[u8]) -> bool {
         .first()
         .is_some_and(|byte| byte & INTER_FRAME_BIT == 0)
 }
+pub(crate) fn vp8_shows_frame(packet: &[u8]) -> bool {
+    const SHOW_FRAME_BIT: u8 = 0x10;
+    packet.first().is_some_and(|tag| tag & SHOW_FRAME_BIT != 0)
+}
+
+pub(crate) fn vp8_granule_frame_end(granule: u64) -> Option<u64> {
+    // An invisible frame's granule names the next visible frame's end.
+    const INVISIBLE_COUNT_SHIFT: u32 = 30;
+    const INVISIBLE_COUNT_MASK: u64 = 3;
+    let invisible = (granule >> INVISIBLE_COUNT_SHIFT) & INVISIBLE_COUNT_MASK == 0;
+    (granule >> 32).checked_sub(u64::from(invisible))
+}
+
+pub(crate) fn theora_granule_frame_end(header: &[u8], granule: u64) -> Option<u64> {
+    // KFGSHIFT follows the six quality bits at the end of the identification header.
+    let flags = crate::bereader::be_u16(header, 40)?;
+    let shift = (flags >> 5) & 0x1f;
+    let distance = granule & ((1 << shift) - 1);
+    // The pre-3.2.1 frame-index bias cancels when subtracting the first granule.
+    (granule >> shift).checked_add(distance)
+}
+
 const THEORA_IDENTIFICATION_LEN: usize = 42;
 const THEORA_PICTURE_WIDTH_OFFSET: usize = 14;
 const THEORA_PICTURE_HEIGHT_OFFSET: usize = 17;
@@ -270,14 +292,12 @@ pub struct OggLogicalStream {
     /// pre-skip; samples decoded beyond it are encoder padding. `None` until the
     /// EOS page is parsed, or if it carried the -1 "no packet completed" sentinel.
     end_granulepos: Option<u64>,
-    /// The first audio-bearing page's granule position, the count of audio
-    /// packets completed through it, and whether that page is also the EOS
-    /// page. Anchors the Vorbis timeline: the granule names the
-    /// position after the page's last packet, so any excess of the natural
-    /// packet durations over it is initial priming.
+    /// The first timestamped data page's granule, timeline packet count, and
+    /// EOS flag. Vorbis uses this anchor to account for initial priming.
+    /// Video uses it to recover the origin of the frame counter.
     first_data: Option<(u64, u32, bool)>,
-    /// Running count of audio (non-header) packets finalized.
-    audio_finalized: u32,
+    /// Running count of audio packets or video frames that advance presentation.
+    timeline_packets: u32,
     completed: Vec<Vec<u8>>,
     /// Mid-file landing in progress: set by `resume_mid_stream`, cleared
     /// by the first page carrying a granule position. While set, completed
@@ -305,7 +325,7 @@ impl OggLogicalStream {
             setup_header: None,
             end_granulepos: None,
             first_data: None,
-            audio_finalized: 0,
+            timeline_packets: 0,
             completed: Vec::new(),
             resuming: false,
             resume_anchor: None,
@@ -320,7 +340,7 @@ impl OggLogicalStream {
         self.partial.clear();
         self.completed.clear();
         self.first_data = None;
-        self.audio_finalized = 0;
+        self.timeline_packets = 0;
         self.resuming = true;
         self.resume_anchor = None;
     }
@@ -376,8 +396,8 @@ impl OggLogicalStream {
         self.end_granulepos
     }
 
-    /// The first audio-bearing page's `(granulepos, audio packets completed
-    /// through it, is-EOS-page)`, once parsed. See `first_data`.
+    /// The first data page's `(granulepos, timeline packets completed through
+    /// it, is-EOS-page)`, once parsed. Invisible VP8 frames do not count.
     pub fn first_data_granule(&self) -> Option<(u64, u32, bool)> {
         self.first_data
     }
@@ -490,7 +510,7 @@ impl OggDemuxer {
         self.streams.first()?.end_granule()
     }
 
-    /// The first stream's first audio-bearing page granule. See
+    /// The first stream's first timestamped data page granule. See
     /// [`OggLogicalStream::first_data_granule`].
     pub fn first_data_granule(&self) -> Option<(u64, u32, bool)> {
         self.streams.first()?.first_data_granule()
@@ -670,9 +690,9 @@ impl OggLogicalStream {
             self.resuming = false;
             self.resume_anchor = Some((gp, dropped.unwrap_or_default()));
         }
-        // The first page that completed audio packets anchors the timeline.
-        if self.first_data.is_none() && self.audio_finalized > 0 && gp != u64::MAX {
-            self.first_data = Some((gp, self.audio_finalized, header_type & 0x04 != 0));
+        // The first timestamped data page anchors the timeline.
+        if self.first_data.is_none() && self.timeline_packets > 0 && gp != u64::MAX {
+            self.first_data = Some((gp, self.timeline_packets, header_type & 0x04 != 0));
         }
     }
 
@@ -698,7 +718,7 @@ impl OggLogicalStream {
                 }
             } else {
                 self.packets_seen += 1;
-                self.audio_finalized += 1;
+                self.timeline_packets = self.timeline_packets.saturating_add(1);
                 self.completed.push(packet);
                 return;
             }
@@ -734,7 +754,9 @@ impl OggLogicalStream {
             return;
         }
         self.packets_seen += 1;
-        self.audio_finalized += 1;
+        if self.info.map(|i| i.codec) != Some(OggCodec::Vp8) || vp8_shows_frame(&packet) {
+            self.timeline_packets = self.timeline_packets.saturating_add(1);
+        }
         self.completed.push(packet);
     }
 }

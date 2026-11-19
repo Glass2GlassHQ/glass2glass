@@ -49,8 +49,7 @@ The plan is [remote.md](remote.md).
 
 ## Embeddable player (`g2g-player`)
 
-- Duration of an Ogg file with no audio stream (Theora or VP8 granules), and
-  of an FLV file without `onMetaData`, from its last tag.
+- Read the duration of an FLV file without `onMetaData` from its last tag.
 - Track selection and the `track-list` property.
 - Read the index segments of every partition the MXF random index pack lists
   before playback, so a seek in a long MXF file with a body partition every
