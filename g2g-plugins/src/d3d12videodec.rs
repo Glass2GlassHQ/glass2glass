@@ -42,36 +42,24 @@ use windows::Win32::Media::MediaFoundation::{
 };
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
 
-use crate::decoderecovery::DecodeErrorRecovery;
 pub use crate::displayorder::PictureMeta;
-use crate::displayorder::ReorderBuffer;
 use crate::dxva::{
     h264_flat_scaling_matrices, h264_picture_parameters, DxvaH264Picture, DxvaSliceH264Short,
 };
 use crate::gpu::{GpuContext, WgpuNv12Texture};
 use crate::h264dpb::{
-    crop_rectangle, h264_max_frame_num, h264_picture_meta, h264_picture_order, split_h264_pictures,
-    H264ParameterSetTable, H264Picture, H264References, H264SessionShape, CHROMA_420_CROP_UNIT,
-    DPB_FULL, H264_DAMAGE_REFUSALS,
+    chroma_rectangle, h264_dpb_slots, h264_visible_picture, H264DecodeSession, H264Picture,
 };
-use crate::h264parse::{
-    h264_parameter_sets_in, sps_reorder_frames, H264Sps, H264StreamRefused, MALFORMED_SPS,
-};
-use crate::inputstamp::{InputStamp, PendingInputStamps};
+use crate::h264hardwaredec::{H264HardwareDec, H264HardwareDecoder};
+use crate::h264parse::{H264Sps, H264StreamRefused};
 use crate::texturepool::take_from_pool;
 use alloc::boxed::Box;
-use g2g_core::frame::Frame;
 use g2g_core::g2g_error;
-use g2g_core::log::{short_type_name, Target};
+use g2g_core::log::Target;
 use g2g_core::memory::{DomainSet, MemoryDomainKind, OwnedWgpuTexture, SystemSlice};
 use g2g_core::meta::CropRectangle;
 use g2g_core::runtime::block_on;
-use g2g_core::{
-    AllocationParams, AsyncElement, BitstreamAlignment, Caps, CapsConstraint, CapsSet, Colorimetry,
-    ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError, Interlace, MemoryDomain,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PixelAspect, PropError, PropKind,
-    PropValue, PropertySpec, Rate, RawVideoFormat, Segment, VideoCodec,
-};
+use g2g_core::{ElementMetadata, G2gError, MemoryDomain};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum D3D12VideoError {
@@ -476,15 +464,6 @@ pub struct DecodedPicture {
     pub texture: Arc<DecodeTexture>,
 }
 
-fn chroma_rectangle(luma: CropRectangle) -> CropRectangle {
-    CropRectangle {
-        left: luma.left / 2,
-        top: luma.top / 2,
-        width: luma.width.div_ceil(2),
-        height: luma.height.div_ceil(2),
-    }
-}
-
 fn decode_texture(
     device: &D3D12DecodeDevice,
     extent: (u32, u32),
@@ -502,10 +481,7 @@ pub struct D3D12H264Decoder {
     texture_extent: (u32, u32),
     picture: CropRectangle,
     cropped_pool: Vec<Arc<DecodeTexture>>,
-    session_shape: H264SessionShape,
-    parsed_sets: H264ParameterSetTable,
-    poc: crate::poc::H264PocState,
-    references: H264References,
+    session: H264DecodeSession,
     slot_textures: Vec<Option<Arc<DecodeTexture>>>,
     pool: Vec<Arc<DecodeTexture>>,
     bitstream: Option<(ID3D12Resource, usize)>,
@@ -531,24 +507,9 @@ impl D3D12H264Decoder {
             ));
         }
         let (width, height) = sps.coded_extent();
-        let crop = crop_rectangle(
-            (width, height),
-            (
-                CHROMA_420_CROP_UNIT,
-                CHROMA_420_CROP_UNIT * sps.fields_per_frame(),
-            ),
-            [
-                sps.frame_crop_left_offset,
-                sps.frame_crop_right_offset,
-                sps.frame_crop_top_offset,
-                sps.frame_crop_bottom_offset,
-            ],
-        )
-        .ok_or(D3D12VideoError::StreamRefused(
-            "H.264 crop leaves no picture",
-        ))?;
+        let crop = h264_visible_picture(sps)?;
         let texture_extent = device.h264_texture_extent(width, height)?;
-        let slots = usize::from(sps.max_num_ref_frames) + 1;
+        let slots = h264_dpb_slots(sps);
         let decoder_desc = D3D12_VIDEO_DECODER_DESC {
             NodeMask: 0,
             Configuration: H264_CONFIGURATION,
@@ -578,10 +539,7 @@ impl D3D12H264Decoder {
             texture_extent,
             picture: crop,
             cropped_pool: Vec::new(),
-            session_shape: sps.session_shape(),
-            parsed_sets: H264ParameterSetTable::default(),
-            poc: crate::poc::H264PocState::default(),
-            references: H264References::new(slots, usize::from(sps.max_num_ref_frames)),
+            session: H264DecodeSession::new(sps),
             slot_textures: alloc::vec![None; slots],
             pool: Vec::new(),
             bitstream: None,
@@ -589,8 +547,7 @@ impl D3D12H264Decoder {
     }
 
     pub fn reset(&mut self) {
-        self.references.clear();
-        self.poc = crate::poc::H264PocState::default();
+        self.session.reset();
         self.slot_textures.fill(None);
     }
 
@@ -701,7 +658,7 @@ impl D3D12H264Decoder {
         &mut self,
         au: &[u8],
     ) -> Result<Vec<DecodedPicture>, D3D12VideoError> {
-        let pictures = split_h264_pictures(&mut self.parsed_sets, au)?;
+        let pictures = self.session.split_pictures(au)?;
         pictures
             .iter()
             .map(|picture| self.decode_picture(picture))
@@ -712,48 +669,28 @@ impl D3D12H264Decoder {
         &mut self,
         picture: &H264Picture<'_>,
     ) -> Result<DecodedPicture, D3D12VideoError> {
-        // TODO: rebuild the decoder and heap on a size change instead of refusing it
-        if picture.sps.session_shape() != self.session_shape {
-            return Err(D3D12VideoError::StreamRefused(
-                "H.264 stream changes its picture size or DPB mid-stream",
-            ));
-        }
-        let header = &picture.header;
-        let max_frame_num = h264_max_frame_num(&picture.sps);
-        let order = h264_picture_order(&mut self.poc, header, &picture.sps);
-        if header.is_idr {
-            self.references.clear();
-        }
-        self.references.fill_frame_num_gap(header, &picture.sps)?;
-        let references = self.references.active();
-        let target = self.references.free_slot().ok_or(DPB_FULL)?;
+        let slots = self.session.begin_picture(picture)?;
         let output = self.take_texture()?;
-        self.slot_textures[target] = Some(output.clone());
+        self.slot_textures[slots.target] = Some(output.clone());
 
         let parameters = h264_picture_parameters(&DxvaH264Picture {
             sps: &picture.sps,
             pps: &picture.pps,
-            header,
-            order: &order,
-            target_slot: target,
-            references: &references,
+            header: &picture.header,
+            order: &slots.order,
+            target_slot: slots.target,
+            references: &slots.references,
         });
         self.submit(&parameters, &picture.slices, &output.resource)?;
-        self.references
-            .mark_current(target, header, max_frame_num, &order)?;
-        let held: Vec<usize> = self
-            .references
-            .active()
-            .iter()
-            .map(|(slot, _)| *slot)
-            .collect();
+        let meta = self.session.end_picture(picture, &slots)?;
+        let held = self.session.held_slots();
         for (slot, texture) in self.slot_textures.iter_mut().enumerate() {
             if !held.contains(&slot) {
                 *texture = None;
             }
         }
         Ok(DecodedPicture {
-            meta: h264_picture_meta(header, &order),
+            meta,
             texture: output,
         })
     }
@@ -939,7 +876,7 @@ impl D3D12H264Decoder {
 }
 
 fn decode_refused(error: D3D12VideoError) -> G2gError {
-    let target = Target::category(short_type_name::<D3D12H264Dec>());
+    let target = Target::category(D3D12Backend::LOG_CATEGORY);
     match error {
         D3D12VideoError::StreamRefused(reason) => {
             g2g_error!(target, "cannot decode this stream: {reason}")
@@ -956,115 +893,17 @@ fn decode_refused(error: D3D12VideoError) -> G2gError {
     G2gError::CapsMismatch
 }
 
-fn nv12_caps(
-    width: Dim,
-    height: Dim,
-    framerate: Rate,
-    colorimetry: Colorimetry,
-    pixel_aspect: PixelAspect,
-) -> Caps {
-    Caps::RawVideo {
-        format: RawVideoFormat::Nv12,
-        width,
-        height,
-        framerate,
-        interlace: Interlace::Any,
-        colorimetry,
-        pixel_aspect,
-    }
-}
-
-fn h264_caps(width: Dim, height: Dim) -> Caps {
-    Caps::CompressedVideo {
-        codec: VideoCodec::H264,
-        width,
-        height,
-        framerate: Rate::Any,
-        colorimetry: Colorimetry::UNKNOWN,
-        pixel_aspect: PixelAspect::Any,
-        alignment: BitstreamAlignment::Unspecified,
-    }
-}
-
 // the coded size of a 1080p H.264 picture
 const SUPPORT_PROBE_CODED_EXTENT: (u32, u32) = (1920, 1088);
 
-pub struct D3D12H264Dec {
+#[derive(Debug)]
+pub struct D3D12Backend {
     device: Option<D3D12DecodeDevice>,
     decoder: Option<D3D12H264Decoder>,
-    out_domain: MemoryDomainKind,
-    framerate: Rate,
-    input_pixel_aspect: PixelAspect,
-    stream_colorimetry: Colorimetry,
-    reorder: ReorderBuffer<(FrameTiming, DecodedPicture)>,
-    stream_reorder_depth: usize,
-    low_latency: bool,
-    input_stamps: PendingInputStamps,
-    recovery: DecodeErrorRecovery,
-    segment: Segment,
-    last_caps: Option<Caps>,
-    emitted: u64,
 }
 
-impl core::fmt::Debug for D3D12H264Dec {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("D3D12H264Dec")
-            .field("decoder", &self.decoder)
-            .field("out_domain", &self.out_domain)
-            .finish_non_exhaustive()
-    }
-}
-
-impl Default for D3D12H264Dec {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl D3D12H264Dec {
-    const OUTPUT_DOMAINS: DomainSet =
-        DomainSet::only(MemoryDomainKind::WgpuTexture).with(MemoryDomainKind::System);
-
-    pub fn new() -> Self {
-        Self {
-            device: None,
-            decoder: None,
-            out_domain: MemoryDomainKind::System,
-            framerate: Rate::Any,
-            input_pixel_aspect: PixelAspect::Any,
-            stream_colorimetry: Colorimetry::UNKNOWN,
-            reorder: ReorderBuffer::new(),
-            stream_reorder_depth: 0,
-            low_latency: false,
-            input_stamps: PendingInputStamps::default(),
-            recovery: DecodeErrorRecovery::default(),
-            segment: Segment::new(),
-            last_caps: None,
-            emitted: 0,
-        }
-    }
-
-    pub fn accepts_input(input: &Caps) -> bool {
-        static DECODES_H264: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        let is_h264 = matches!(
-            input,
-            Caps::CompressedVideo {
-                codec: VideoCodec::H264,
-                ..
-            }
-        );
-        is_h264
-            && *DECODES_H264.get_or_init(|| {
-                block_on(open_d3d12_decode_device())
-                    .and_then(|device| {
-                        let (width, height) = SUPPORT_PROBE_CODED_EXTENT;
-                        device.h264_texture_extent(width, height)
-                    })
-                    .is_ok()
-            })
-    }
-
-    pub fn gpu_context(&self) -> Option<&GpuContext> {
+impl D3D12Backend {
+    fn gpu_context(&self) -> Option<&GpuContext> {
         match (&self.decoder, &self.device) {
             (Some(decoder), _) => Some(decoder.gpu_context()),
             (None, Some(device)) => Some(device.gpu_context()),
@@ -1072,186 +911,21 @@ impl D3D12H264Dec {
         }
     }
 
-    fn apply_reorder_depth(&mut self) {
-        self.reorder.max_hold = self.stream_reorder_depth;
-        self.reorder.low_latency = self.low_latency;
-    }
-
-    // false while no SPS has arrived to build the decoder from
-    fn ensure_decoder(&mut self, au: &[u8]) -> Result<bool, G2gError> {
-        let Some(sets) = h264_parameter_sets_in(au)
-            .map_err(D3D12VideoError::from)
-            .map_err(decode_refused)?
-        else {
-            return Ok(self.decoder.is_some());
-        };
-        self.stream_colorimetry = Colorimetry::from_cicp(
-            sets.sps.color_primaries,
-            sets.sps.transfer_characteristics,
-            sets.sps.matrix_coefficients,
-            sets.sps.video_full_range_flag,
-        );
-        self.stream_reorder_depth = sps_reorder_frames(au)
-            .map(usize::from)
-            .ok_or(D3D12VideoError::from(MALFORMED_SPS))
-            .map_err(decode_refused)?;
-        self.apply_reorder_depth();
-        if self.decoder.is_some() {
-            return Ok(true);
-        }
-        let device = self.device.take().ok_or(G2gError::NotConfigured)?;
-        self.decoder = Some(D3D12H264Decoder::new(device, &sets.sps).map_err(decode_refused)?);
-        Ok(true)
-    }
-
-    async fn emit(
-        &mut self,
-        pictures: Vec<(FrameTiming, DecodedPicture)>,
-        out: &mut dyn OutputSink,
-    ) -> Result<(), G2gError> {
-        let decoder = self.decoder.as_mut().ok_or(G2gError::NotConfigured)?;
-        let (width, height) = decoder.picture_extent();
-        for (timing, picture) in pictures {
-            let input = self.input_stamps.take(timing.pts_ns);
-            if !self.segment.presents(timing.pts_ns) {
-                g2g_core::g2g_log!(
-                    Target::category(short_type_name::<Self>()),
-                    "dropping frame pts {} outside the segment",
-                    g2g_core::log::ClockTime(timing.pts_ns)
-                );
-                continue;
-            }
-            let caps = nv12_caps(
-                Dim::Fixed(width),
-                Dim::Fixed(height),
-                self.framerate.clone(),
-                self.stream_colorimetry,
-                self.input_pixel_aspect,
-            );
-            if self.last_caps.as_ref() != Some(&caps) {
-                out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
-                self.last_caps = Some(caps);
-            }
-            let domain = if self.out_domain == MemoryDomainKind::WgpuTexture {
-                // the pool reuses a texture only once this frame drops its reference
-                let keep = decoder
-                    .picture_texture(picture.texture)
-                    .map_err(decode_refused)?;
-                MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(width, height, Arc::new(keep)))
-            } else {
-                let bytes = decoder
-                    .read_nv12(&picture.texture)
-                    .map_err(decode_refused)?;
-                MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice()))
-            };
-            let frame = Frame {
-                domain,
-                timing: FrameTiming {
-                    dts_ns: timing.pts_ns,
-                    duration_ns: 0,
-                    ..timing
-                },
-                sequence: self.emitted,
-                meta: input.meta,
-            };
-            self.emitted += 1;
-            out.push(PipelinePacket::DataFrame(frame)).await?;
-        }
-        Ok(())
+    fn session(&mut self) -> &mut D3D12H264Decoder {
+        self.decoder
+            .as_mut()
+            .expect("H264HardwareDec decodes only once a session has started")
     }
 }
 
-impl PadTemplates for D3D12H264Dec {
-    fn pad_templates() -> Vec<PadTemplate> {
-        Vec::from([
-            PadTemplate::sink(CapsSet::from_alternatives(Vec::from([h264_caps(
-                Dim::Any,
-                Dim::Any,
-            )]))),
-            PadTemplate::source(CapsSet::from_alternatives(Vec::from([nv12_caps(
-                Dim::Any,
-                Dim::Any,
-                Rate::Any,
-                Colorimetry::UNKNOWN,
-                PixelAspect::Any,
-            )]))),
-        ])
-    }
-}
+impl H264HardwareDecoder for D3D12Backend {
+    type Picture = Arc<DecodeTexture>;
+    type Error = D3D12VideoError;
+    const LOG_CATEGORY: &'static str = "D3D12H264Dec";
+    const OUTPUT_DOMAINS: DomainSet =
+        DomainSet::only(MemoryDomainKind::WgpuTexture).with(MemoryDomainKind::System);
 
-impl AsyncElement for D3D12H264Dec {
-    type ProcessFuture<'a>
-        = core::pin::Pin<Box<dyn core::future::Future<Output = Result<(), G2gError>> + 'a>>
-    where
-        Self: 'a;
-
-    fn input_domains(&self) -> DomainSet {
-        DomainSet::only(MemoryDomainKind::System)
-    }
-
-    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        upstream_caps
-            .intersect(&h264_caps(Dim::Any, Dim::Any))
-            .map_err(|_| G2gError::CapsMismatch)
-    }
-
-    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::CompressedVideo {
-                codec: VideoCodec::H264,
-                width,
-                height,
-                framerate,
-                pixel_aspect,
-                ..
-            } => CapsSet::from_alternatives(Vec::from([nv12_caps(
-                width.clone(),
-                height.clone(),
-                framerate.clone(),
-                Colorimetry::UNKNOWN,
-                *pixel_aspect,
-            )])),
-            _ => CapsSet::from_alternatives(Vec::new()),
-        }))
-    }
-
-    fn output_memory(&self) -> MemoryDomainKind {
-        self.out_domain
-    }
-
-    fn output_domains(&self) -> DomainSet {
-        Self::OUTPUT_DOMAINS
-    }
-
-    fn configure_allocation(&mut self, params: &AllocationParams) {
-        if let Ok(resolved) = params.clone().resolve_for_producer(Self::OUTPUT_DOMAINS) {
-            self.out_domain = resolved.domain;
-        }
-    }
-
-    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let Caps::CompressedVideo {
-            codec: VideoCodec::H264,
-            framerate,
-            pixel_aspect,
-            ..
-        } = absolute_caps
-        else {
-            return Err(G2gError::CapsMismatch);
-        };
-        self.framerate = framerate.clone();
-        self.input_pixel_aspect = *pixel_aspect;
-        // configure runs again on every caps change, and textures already sent belong to the open device
-        if self.device.is_some() || self.decoder.is_some() {
-            return Ok(ConfigureOutcome::Accepted);
-        }
-        let device = block_on(open_d3d12_decode_device()).map_err(decode_refused)?;
-        crate::gpu::publish_producer_context(device.gpu_context().clone());
-        self.device = Some(device);
-        Ok(ConfigureOutcome::Accepted)
-    }
-
-    fn metadata(&self) -> ElementMetadata {
+    fn metadata() -> ElementMetadata {
         ElementMetadata::new(
             "Direct3D12 H.264 decoder",
             "Codec/Decoder/Video/Hardware",
@@ -1260,139 +934,106 @@ impl AsyncElement for D3D12H264Dec {
         )
     }
 
-    fn properties(&self) -> &'static [PropertySpec] {
-        D3D12H264DEC_PROPERTIES
+    fn decodes_h264() -> bool {
+        static DECODES_H264: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *DECODES_H264.get_or_init(|| {
+            block_on(open_d3d12_decode_device())
+                .and_then(|device| {
+                    let (width, height) = SUPPORT_PROBE_CODED_EXTENT;
+                    device.h264_texture_extent(width, height)
+                })
+                .is_ok()
+        })
     }
 
-    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
-        match name {
-            "low-latency" => {
-                self.low_latency = value.as_bool().ok_or(PropError::Type)?;
-                self.apply_reorder_depth();
-                Ok(())
-            }
-            _ => Err(PropError::Unknown),
+    fn open() -> Result<Self, D3D12VideoError> {
+        let device = block_on(open_d3d12_decode_device())?;
+        crate::gpu::publish_producer_context(device.gpu_context().clone());
+        Ok(Self {
+            device: Some(device),
+            decoder: None,
+        })
+    }
+
+    fn start_session(&mut self, sps: &H264Sps) -> Result<(), D3D12VideoError> {
+        if self.decoder.is_some() {
+            return Ok(());
+        }
+        // a failed session start drops the device it was given
+        let device = self.device.take().ok_or(D3D12VideoError::StreamRefused(
+            "an earlier SPS failed to start a decode session",
+        ))?;
+        self.decoder = Some(D3D12H264Decoder::new(device, sps)?);
+        Ok(())
+    }
+
+    fn has_session(&self) -> bool {
+        self.decoder.is_some()
+    }
+
+    fn decode_access_unit(
+        &mut self,
+        access_unit: &[u8],
+    ) -> Result<Vec<(PictureMeta, Arc<DecodeTexture>)>, D3D12VideoError> {
+        Ok(self
+            .session()
+            .decode_access_unit(access_unit)?
+            .into_iter()
+            .map(|picture| (picture.meta, picture.texture))
+            .collect())
+    }
+
+    fn reset(&mut self) {
+        if let Some(decoder) = self.decoder.as_mut() {
+            decoder.reset();
         }
     }
 
-    fn get_property(&self, name: &str) -> Option<PropValue> {
-        match name {
-            "low-latency" => Some(PropValue::Bool(self.low_latency)),
+    fn picture_extent(&self) -> (u32, u32) {
+        self.decoder
+            .as_ref()
+            .expect("H264HardwareDec emits pictures only once a session has started")
+            .picture_extent()
+    }
+
+    fn output(
+        &mut self,
+        picture: Arc<DecodeTexture>,
+        domain: MemoryDomainKind,
+    ) -> Result<MemoryDomain, D3D12VideoError> {
+        let decoder = self.session();
+        let (width, height) = decoder.picture_extent();
+        if domain == MemoryDomainKind::WgpuTexture {
+            // the pool reuses a texture only once this frame drops its reference
+            let keep = decoder.picture_texture(picture)?;
+            return Ok(MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(
+                width,
+                height,
+                Arc::new(keep),
+            )));
+        }
+        let bytes = decoder.read_nv12(&picture)?;
+        Ok(MemoryDomain::System(SystemSlice::from_boxed(
+            bytes.into_boxed_slice(),
+        )))
+    }
+
+    fn stream_refusal(error: &D3D12VideoError) -> Option<&'static str> {
+        match error {
+            D3D12VideoError::StreamRefused(reason) => Some(reason),
             _ => None,
         }
     }
 
-    fn take_reconfigure(&mut self) -> Option<g2g_core::Reconfigure> {
-        self.recovery.take_keyframe_request()
-    }
-
-    fn latency(&self) -> g2g_core::query::LatencyReport {
-        self.reorder.latency(0, self.framerate.clone())
-    }
-
-    fn process<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-        out: &'a mut dyn OutputSink,
-    ) -> Self::ProcessFuture<'a> {
-        Box::pin(async move {
-            match packet {
-                PipelinePacket::DataFrame(frame) => {
-                    let au = frame
-                        .domain
-                        .require_system_slice(short_type_name::<Self>())?;
-                    if !self.ensure_decoder(au)? {
-                        return Ok(());
-                    }
-                    if !self
-                        .recovery
-                        .admits(|| crate::annexb::au_is_keyframe(VideoCodec::H264, au))
-                    {
-                        return Ok(());
-                    }
-                    let decoder = self.decoder.as_mut().ok_or(G2gError::NotConfigured)?;
-                    let pictures = match decoder.decode_access_unit(au) {
-                        Ok(pictures) => pictures,
-                        Err(D3D12VideoError::StreamRefused(reason))
-                            if H264_DAMAGE_REFUSALS.contains(&H264StreamRefused(reason)) =>
-                        {
-                            self.recovery.failed().map_err(|_| {
-                                decode_refused(D3D12VideoError::StreamRefused(reason))
-                            })?;
-                            decoder.reset();
-                            return Ok(());
-                        }
-                        Err(error) => return Err(decode_refused(error)),
-                    };
-                    self.recovery.decoded();
-                    let timing = frame.timing;
-                    self.input_stamps
-                        .insert(timing.pts_ns, InputStamp::of(&frame));
-                    let mut ready = Vec::new();
-                    for picture in pictures {
-                        let meta = picture.meta;
-                        let release = self.reorder.push(&meta, (timing, picture));
-                        for (dropped, _) in release.dropped {
-                            self.input_stamps.take(dropped.pts_ns);
-                        }
-                        ready.extend(release.output);
-                    }
-                    self.emit(ready, out).await
-                }
-                PipelinePacket::CapsChanged(caps) => match &caps {
-                    Caps::CompressedVideo {
-                        codec: VideoCodec::H264,
-                        pixel_aspect,
-                        ..
-                    } => {
-                        self.input_pixel_aspect = *pixel_aspect;
-                        Ok(())
-                    }
-                    // the runner hands the element its own solved output caps before the first frame
-                    Caps::RawVideo {
-                        format: RawVideoFormat::Nv12,
-                        ..
-                    } => {
-                        out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
-                        self.last_caps = Some(caps);
-                        Ok(())
-                    }
-                    _ => Err(G2gError::CapsMismatch),
-                },
-                PipelinePacket::Eos => {
-                    let held = self.reorder.flush();
-                    self.reorder.reset();
-                    self.emit(held, out).await?;
-                    out.push(PipelinePacket::Eos).await?;
-                    Ok(())
-                }
-                PipelinePacket::Flush => {
-                    if let Some(decoder) = self.decoder.as_mut() {
-                        decoder.reset();
-                    }
-                    self.reorder.reset();
-                    self.input_stamps = PendingInputStamps::default();
-                    self.recovery = DecodeErrorRecovery::default();
-                    self.last_caps = None;
-                    out.push(PipelinePacket::Flush).await?;
-                    Ok(())
-                }
-                PipelinePacket::Segment(segment) => {
-                    self.segment = segment;
-                    out.push(PipelinePacket::Segment(segment)).await?;
-                    Ok(())
-                }
-                other => {
-                    out.push(other).await?;
-                    Ok(())
-                }
-            }
-        })
+    fn refused(error: D3D12VideoError) -> G2gError {
+        decode_refused(error)
     }
 }
 
-static D3D12H264DEC_PROPERTIES: &[PropertySpec] = &[PropertySpec::new(
-    "low-latency",
-    PropKind::Bool,
-    "emit each picture as soon as its display position is certain, as gst's low-latency bump mode does",
-)];
+pub type D3D12H264Dec = H264HardwareDec<D3D12Backend>;
+
+impl D3D12H264Dec {
+    pub fn gpu_context(&self) -> Option<&GpuContext> {
+        self.decoder().and_then(D3D12Backend::gpu_context)
+    }
+}

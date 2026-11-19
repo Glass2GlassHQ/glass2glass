@@ -2185,6 +2185,11 @@ const D3D12H264DEC_FRAME_COST: g2g_core::runtime::FrameCost = g2g_core::runtime:
     fixed_us: 5800,
     per_megapixel_us: 0,
 };
+#[cfg(all(target_os = "linux", feature = "v4l2"))]
+const V4L2SLH264DEC_FRAME_COST: g2g_core::runtime::FrameCost = g2g_core::runtime::FrameCost {
+    fixed_us: 0,
+    per_megapixel_us: 13900,
+};
 #[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
 const CUDADOWNLOAD_COST: g2g_core::runtime::DomainTransferCost =
     g2g_core::runtime::DomainTransferCost {
@@ -2545,6 +2550,15 @@ fn register_autoplug_candidates(reg: &mut Registry) {
         .accepting_input(crate::d3d12videodec::D3D12H264Dec::accepts_input)
         .cost(D3D12H264DEC_FRAME_COST),
     );
+    #[cfg(all(target_os = "linux", feature = "v4l2"))]
+    reg.register(
+        ElementFactory::of::<crate::v4l2h264dec::V4l2SlH264Dec>("v4l2slh264dec", |_| {
+            Box::new(crate::v4l2h264dec::V4l2SlH264Dec::new())
+        })
+        .hardware()
+        .accepting_input(crate::v4l2h264dec::V4l2SlH264Dec::accepts_input)
+        .cost(V4L2SLH264DEC_FRAME_COST),
+    );
     // Android hardware video decode via the NDK MediaCodec (M219/M302); one
     // factory per codec (the MIME is fixed at construction). Reachable from
     // g2g-launch on-device; the gst analog is `amcviddec-<component>`.
@@ -2667,6 +2681,13 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     reg.register_launch(
         LaunchFactory::of::<crate::d3d12videodec::D3D12H264Dec>("d3d12h264dec", || {
             Box::new(crate::d3d12videodec::D3D12H264Dec::new())
+        })
+        .with_experimental(),
+    );
+    #[cfg(all(target_os = "linux", feature = "v4l2"))]
+    reg.register_launch(
+        LaunchFactory::of::<crate::v4l2h264dec::V4l2SlH264Dec>("v4l2slh264dec", || {
+            Box::new(crate::v4l2h264dec::V4l2SlH264Dec::new())
         })
         .with_experimental(),
     );
@@ -3208,6 +3229,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "unixfdsrc" => "unixfd" on "linux";
         "unixfdsink" => "unixfd" on "linux";
         "v4l2src" => "v4l2" on "linux";
+        "v4l2slh264dec" => "v4l2" on "linux";
         "libcamerasrc" => "libcamera" on "linux";
         "ffmpegdec" => "ffmpeg" on "linux" | "macos" | "windows";
         "ffmpegaudiodec" => "ffmpeg" on "linux" | "macos" | "windows";

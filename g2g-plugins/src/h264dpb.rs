@@ -66,6 +66,32 @@ pub(crate) fn crop_rectangle(
     })
 }
 
+pub(crate) fn h264_visible_picture(sps: &H264Sps) -> Result<CropRectangle, H264StreamRefused> {
+    crop_rectangle(
+        sps.coded_extent(),
+        (
+            CHROMA_420_CROP_UNIT,
+            CHROMA_420_CROP_UNIT * sps.fields_per_frame(),
+        ),
+        [
+            sps.frame_crop_left_offset,
+            sps.frame_crop_right_offset,
+            sps.frame_crop_top_offset,
+            sps.frame_crop_bottom_offset,
+        ],
+    )
+    .ok_or(H264StreamRefused("H.264 crop leaves no picture"))
+}
+
+pub(crate) fn chroma_rectangle(luma: CropRectangle) -> CropRectangle {
+    CropRectangle {
+        left: luma.left / 2,
+        top: luma.top / 2,
+        width: luma.width.div_ceil(2),
+        height: luma.height.div_ceil(2),
+    }
+}
+
 pub(crate) const H264_NAL_SLICE: u8 = 1;
 pub(crate) const H264_NAL_IDR_SLICE: u8 = 5;
 
@@ -76,7 +102,11 @@ pub(crate) fn h264_max_frame_num(sps: &H264Sps) -> u32 {
 
 /// `FrameNumWrap` of the short-term reference with `frame_num`, seen from the
 /// picture with `current_frame_num` (8.2.4.1).
-fn h264_frame_num_wrap(frame_num: u32, current_frame_num: u32, max_frame_num: u32) -> i64 {
+pub(crate) fn h264_frame_num_wrap(
+    frame_num: u32,
+    current_frame_num: u32,
+    max_frame_num: u32,
+) -> i64 {
     if frame_num > current_frame_num {
         i64::from(frame_num) - i64::from(max_frame_num)
     } else {
@@ -531,4 +561,97 @@ pub(crate) fn split_h264_pictures<'s>(
     }
     pictures.extend(current);
     Ok(pictures)
+}
+
+pub(crate) const SESSION_SHAPE_CHANGED: H264StreamRefused =
+    H264StreamRefused("H.264 stream changes its picture size or DPB mid-stream");
+
+// one more slot than references, for the picture being decoded
+pub(crate) fn h264_dpb_slots(sps: &H264Sps) -> usize {
+    usize::from(sps.max_num_ref_frames) + 1
+}
+
+#[derive(Debug)]
+pub(crate) struct H264PictureSlots {
+    pub(crate) order: H264PictureOrder,
+    pub(crate) references: alloc::vec::Vec<(usize, RefPic)>,
+    pub(crate) target: usize,
+}
+
+#[derive(Debug)]
+pub(crate) struct H264DecodeSession {
+    shape: H264SessionShape,
+    parsed_sets: H264ParameterSetTable,
+    poc: crate::poc::H264PocState,
+    references: H264References,
+}
+
+impl H264DecodeSession {
+    pub(crate) fn new(sps: &H264Sps) -> Self {
+        Self {
+            shape: sps.session_shape(),
+            parsed_sets: H264ParameterSetTable::default(),
+            poc: crate::poc::H264PocState::default(),
+            references: H264References::new(
+                h264_dpb_slots(sps),
+                usize::from(sps.max_num_ref_frames),
+            ),
+        }
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.references.clear();
+        self.poc = crate::poc::H264PocState::default();
+    }
+
+    pub(crate) fn split_pictures<'s>(
+        &mut self,
+        stream: &'s [u8],
+    ) -> Result<PictureUnits<'s>, H264StreamRefused> {
+        split_h264_pictures(&mut self.parsed_sets, stream)
+    }
+
+    pub(crate) fn begin_picture(
+        &mut self,
+        picture: &H264Picture<'_>,
+    ) -> Result<H264PictureSlots, H264StreamRefused> {
+        // TODO: rebuild the decoder on a size change instead of refusing it
+        if picture.sps.session_shape() != self.shape {
+            return Err(SESSION_SHAPE_CHANGED);
+        }
+        let header = &picture.header;
+        let order = h264_picture_order(&mut self.poc, header, &picture.sps);
+        if header.is_idr {
+            self.references.clear();
+        }
+        self.references.fill_frame_num_gap(header, &picture.sps)?;
+        Ok(H264PictureSlots {
+            order,
+            references: self.references.active(),
+            target: self.references.free_slot().ok_or(DPB_FULL)?,
+        })
+    }
+
+    pub(crate) fn end_picture(
+        &mut self,
+        picture: &H264Picture<'_>,
+        slots: &H264PictureSlots,
+    ) -> Result<PictureMeta, H264StreamRefused> {
+        self.references.mark_current(
+            slots.target,
+            &picture.header,
+            h264_max_frame_num(&picture.sps),
+            &slots.order,
+        )?;
+        Ok(h264_picture_meta(&picture.header, &slots.order))
+    }
+
+    #[cfg(all(target_os = "windows", feature = "d3d12-decode"))]
+    pub(crate) fn held_slots(&self) -> alloc::vec::Vec<usize> {
+        self.references
+            .active()
+            .iter()
+            .map(|(slot, _)| *slot)
+            .collect()
+    }
 }

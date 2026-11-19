@@ -46,6 +46,7 @@ use g2g_core::{
 };
 
 use crate::capturepixelformat::CapturePixelFormat;
+use crate::v4l2ioctl::{v4l2_err, v4l2_ioctl, zeroed_arg};
 
 use std::sync::Arc;
 
@@ -334,10 +335,6 @@ pub fn take_rows(
 
 /// Map a V4L2 / OS error to the reserved `G2gError::V4l2` arm, preserving the
 /// errno where one exists.
-fn v4l2_err(e: &std::io::Error) -> G2gError {
-    G2gError::Hardware(HardwareError::V4l2(e.raw_os_error().unwrap_or(-1)))
-}
-
 /// ENODEV, reported when `device-id` names a camera that is not attached.
 const ENODEV: i32 = 19;
 
@@ -665,7 +662,7 @@ pub(crate) fn query_controls(dev: &Device) -> Vec<DeviceControl> {
         query.id = id | V4L2_CTRL_FLAG_NEXT_CTRL;
         // SAFETY: `v4l2_query_ext_ctrl` is VIDIOC_QUERY_EXT_CTRL's argument type.
         // EINVAL on the id past the last control is how the walk ends.
-        if unsafe { capture_ioctl(fd, vidioc::VIDIOC_QUERY_EXT_CTRL, &mut query) }.is_err() {
+        if unsafe { v4l2_ioctl(fd, vidioc::VIDIOC_QUERY_EXT_CTRL, &mut query) }.is_err() {
             break;
         }
         // The ids come from the driver and must climb, or the walk never ends.
@@ -880,32 +877,6 @@ fn buffer_timestamp_ns(ts: &v4l::timestamp::Timestamp) -> Option<u64> {
     )
 }
 
-/// One ioctl on the capture fd, with the errno kept in the reserved V4L2 error
-/// arm.
-///
-/// # Safety
-/// `arg` must be the argument struct `request` is defined over (the
-/// `vidioc::VIDIOC_*` constant names it), since the kernel reads and writes it
-/// through the pointer.
-unsafe fn capture_ioctl<T>(
-    fd: core::ffi::c_int,
-    request: vidioc::_IOC_TYPE,
-    arg: &mut T,
-) -> Result<(), G2gError> {
-    // SAFETY: the argument type is this function's contract, and `arg` is a live
-    // exclusive borrow for the whole call.
-    unsafe { v4l::v4l2::ioctl(fd, request, arg as *mut T as *mut core::ffi::c_void) }
-        .map_err(|e| v4l2_err(&e))
-}
-
-/// A zeroed V4L2 ioctl argument. Every one of these is plain kernel-ABI data
-/// whose reserved fields must be zero.
-fn zeroed_arg<T>() -> T {
-    // SAFETY: the V4L2 argument structs are `repr(C)` plain data (integers and
-    // unions of integers) for which all-zero is the "nothing requested" value.
-    unsafe { core::mem::zeroed() }
-}
-
 /// A capture-buffer descriptor for the MMAP queue, pre-filled for `index`.
 fn mmap_buffer_arg(index: u32) -> v4l2_buffer {
     let mut buf: v4l2_buffer = zeroed_arg();
@@ -963,7 +934,7 @@ impl ExportedQueue {
         request.type_ = Type::VideoCapture as u32;
         request.memory = Memory::Mmap as u32;
         // SAFETY: `v4l2_requestbuffers` is VIDIOC_REQBUFS's argument type.
-        unsafe { capture_ioctl(fd, vidioc::VIDIOC_REQBUFS, &mut request) }?;
+        unsafe { v4l2_ioctl(fd, vidioc::VIDIOC_REQBUFS, &mut request) }?;
         // A driver may grant fewer buffers than asked for, but none at all leaves
         // nothing to capture into.
         if request.count == 0 {
@@ -976,7 +947,7 @@ impl ExportedQueue {
             export.type_ = Type::VideoCapture as u32;
             export.index = index;
             // SAFETY: `v4l2_exportbuffer` is VIDIOC_EXPBUF's argument type.
-            unsafe { capture_ioctl(fd, vidioc::VIDIOC_EXPBUF, &mut export) }?;
+            unsafe { v4l2_ioctl(fd, vidioc::VIDIOC_EXPBUF, &mut export) }?;
             if export.fd < 0 {
                 return Err(G2gError::Hardware(HardwareError::V4l2(-1)));
             }
@@ -997,7 +968,7 @@ impl ExportedQueue {
     fn queue(&mut self, index: usize) -> Result<(), G2gError> {
         let mut buf = mmap_buffer_arg(index as u32);
         // SAFETY: `v4l2_buffer` is VIDIOC_QBUF's argument type.
-        unsafe { capture_ioctl(self.handle.fd(), vidioc::VIDIOC_QBUF, &mut buf) }?;
+        unsafe { v4l2_ioctl(self.handle.fd(), vidioc::VIDIOC_QBUF, &mut buf) }?;
         self.queued[index] = true;
         Ok(())
     }
@@ -1009,7 +980,7 @@ impl ExportedQueue {
         }
         let mut buf_type = Type::VideoCapture as core::ffi::c_int;
         // SAFETY: VIDIOC_STREAMON takes a buffer-type int.
-        unsafe { capture_ioctl(self.handle.fd(), vidioc::VIDIOC_STREAMON, &mut buf_type) }?;
+        unsafe { v4l2_ioctl(self.handle.fd(), vidioc::VIDIOC_STREAMON, &mut buf_type) }?;
         self.streaming = true;
         Ok(())
     }
@@ -1035,7 +1006,7 @@ impl ExportedQueue {
             .map_err(|e| v4l2_err(&e))?;
         let mut buf = mmap_buffer_arg(0);
         // SAFETY: `v4l2_buffer` is VIDIOC_DQBUF's argument type.
-        unsafe { capture_ioctl(self.handle.fd(), vidioc::VIDIOC_DQBUF, &mut buf) }?;
+        unsafe { v4l2_ioctl(self.handle.fd(), vidioc::VIDIOC_DQBUF, &mut buf) }?;
         let index = buf.index as usize;
         // The index comes from the driver, and indexing on it would panic if a
         // buggy one reported a buffer outside the queue it allocated.
@@ -1058,7 +1029,7 @@ impl Drop for ExportedQueue {
             // SAFETY: VIDIOC_STREAMOFF takes a buffer-type int. A teardown error
             // has nowhere to go: closing the device fd releases the queue anyway.
             let _ =
-                unsafe { capture_ioctl(self.handle.fd(), vidioc::VIDIOC_STREAMOFF, &mut buf_type) };
+                unsafe { v4l2_ioctl(self.handle.fd(), vidioc::VIDIOC_STREAMOFF, &mut buf_type) };
         }
         // No REQBUFS(0) here: a driver refuses to free buffers while an exported
         // dma-buf fd is still open, and a frame may well outlive the stream. The

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2424: `v4l2slh264dec` decodes H.264 on V4L2 stateless decoders, sharing its element with `d3d12h264dec`.
 - M2423: `tcpclientsrc` and `tcpserversrc` take a `caps` property, so a GDP stream over TCP reaches `gdpdepay`.
 - M2422: `gdppay` / `gdpdepay` write and read GStreamer Data Protocol streams that GStreamer's own elements read and write.
 - M2421: `mp4mux` and `qtdemux` carry raw, Bayer and losslessly compressed video as ISO/IEC 23001-17 `uncv`.

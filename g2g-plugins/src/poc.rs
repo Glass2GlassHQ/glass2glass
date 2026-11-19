@@ -146,6 +146,8 @@ pub struct H264SlicePoc {
     /// refuse a `None` rather than assume the default marking, since a stream
     /// using adaptive marking would then decode against the wrong references.
     pub ref_pic_marking: Option<H264RefPicMarking>,
+    pub pic_order_cnt_bit_size: u32,
+    pub dec_ref_pic_marking_bit_size: u32,
 }
 
 /// One `memory_management_control_operation` of a slice's `dec_ref_pic_marking()`
@@ -293,7 +295,9 @@ pub fn parse_h264_slice_marking(
     let mut br = BitReader::skipping_emulation_prevention(&nal[1..]);
     let mut slice = parse_h264_slice_poc_bits(&mut br, nal_ref_idc, nal_unit_type == 5, sps, pps)?;
     skip_to_ref_pic_marking(&mut br, &slice, marking)?;
+    let marking_start = br.bit_pos();
     slice.ref_pic_marking = Some(read_dec_ref_pic_marking(&mut br, &slice)?);
+    slice.dec_ref_pic_marking_bit_size = u32::try_from(br.bit_pos() - marking_start).ok()?;
     Some(slice)
 }
 
@@ -473,6 +477,7 @@ pub(crate) fn parse_h264_slice_poc_bits(
     let mut pic_order_cnt_lsb = 0;
     let mut delta_pic_order_cnt_bottom = 0;
     let mut delta_pic_order_cnt = [0i32; 2];
+    let pic_order_cnt_start = br.bit_pos();
     match sps.pic_order_cnt_type {
         0 => {
             pic_order_cnt_lsb = br.read_bits(sps.log2_max_pic_order_cnt_lsb)?;
@@ -503,6 +508,8 @@ pub(crate) fn parse_h264_slice_poc_bits(
         delta_pic_order_cnt_bottom,
         delta_pic_order_cnt,
         ref_pic_marking: None,
+        pic_order_cnt_bit_size: u32::try_from(br.bit_pos() - pic_order_cnt_start).ok()?,
+        dec_ref_pic_marking_bit_size: 0,
     })
 }
 
@@ -1212,6 +1219,48 @@ mod tests {
         assert!(slice.field_pic_flag && slice.bottom_field_flag);
         assert_eq!(slice.frame_num, 3);
         assert_eq!(slice.pic_order_cnt_lsb, 9);
+    }
+
+    #[test]
+    fn slice_marking_parse_measures_the_order_count_and_marking_bits() {
+        let mut w = BitWriter::default();
+        w.write_ue(0); // first_mb_in_slice
+        w.write_ue(5); // slice_type (P)
+        w.write_ue(0); // pic_parameter_set_id
+        w.write_bits(3, 4); // frame_num
+        w.write_bits(9, 6); // pic_order_cnt_lsb
+        w.write_bit(0); // num_ref_idx_active_override_flag
+        w.write_bit(0); // ref_pic_list_modification_flag_l0
+        w.write_bit(1); // adaptive_ref_pic_marking_mode_flag
+        w.write_ue(1); // memory_management_control_operation
+        w.write_ue(0); // difference_of_pic_nums_minus1
+        w.write_ue(0); // end of the operations
+        w.write_bit(1); // rbsp_stop_one_bit
+        w.align_to_byte();
+        let mut nal = alloc::vec![0x41u8];
+        nal.extend_from_slice(&w.into_bytes());
+
+        let sps = H264PocContext {
+            separate_colour_plane_flag: false,
+            log2_max_frame_num: 4,
+            frame_mbs_only_flag: true,
+            pic_order_cnt_type: 0,
+            log2_max_pic_order_cnt_lsb: 6,
+            delta_pic_order_always_zero_flag: false,
+            offset_for_non_ref_pic: 0,
+            offset_for_top_to_bottom_field: 0,
+            offsets_for_ref_frame: &[],
+        };
+        let slice = parse_h264_slice_marking(
+            &nal,
+            &sps,
+            &[H264PpsPoc::default()],
+            &H264PpsRefMarking::default(),
+        )
+        .expect("parses");
+        assert_eq!(slice.pic_order_cnt_bit_size, 6);
+        // flag 1 bit, operation ue(1) 3 bits, operand ue(0) 1 bit, end ue(0) 1 bit
+        assert_eq!(slice.dec_ref_pic_marking_bit_size, 6);
     }
 
     #[test]

@@ -127,6 +127,45 @@ raw D3D12 object must be released before that, so `D3D12DecodeDevice` and
 `decodebin` offers `d3d12h264dec` for H.264 when a probe at 1920x1088 finds D3D12
 video decode support, with the cost in the next section.
 
+## Shared H.264 hardware decoder element
+
+`d3d12h264dec` and `v4l2slh264dec` are both `H264HardwareDec<B>`
+(`h264hardwaredec.rs`), generic over an `H264HardwareDecoder` backend. The element
+owns what does not depend on the API: the SPS colorimetry and reorder depth, the
+keyframe recovery after a damaged access unit, input timestamps, the
+`ReorderBuffer`, segment clipping, NV12 caps and the `low-latency` property. Its
+log category is the backend's `LOG_CATEGORY`, so `G2G_DEBUG` keeps the old
+per-decoder names. The backend opens the device in `configure_pipeline`, starts a
+session on the first SPS, decodes one access unit into pictures with their
+`PictureMeta`, and turns a picture into the output memory domain.
+
+`H264DecodeSession` in `h264dpb.rs` is the per-picture reference state both
+backends share: the parameter-set table, the POC state, the `H264References`
+slots and the session shape check. `begin_picture` returns the order counts, the
+active references and the target slot, and `end_picture` runs the reference
+marking. `tests/common/h264_hardware_decode.rs` holds the decode tests both
+backends run.
+
+## V4L2 stateless decode (Linux)
+
+`V4l2SlH264Dec` (`g2g-plugins/src/v4l2h264dec.rs`, launch name `v4l2slh264dec`,
+feature `v4l2`, `cfg(target_os = "linux")`) decodes H.264 on a V4L2 stateless
+decoder, such as Hantro G1, through the media request API, as gst's
+`v4l2slh264dec` does. The first `/dev/videoN` with multi-plane mem2mem caps and
+the `S264` output format is used, with the `/dev/mediaN` its sysfs device
+directory lists. The decoder runs frame-based with Annex B start codes. Each
+picture sets the SPS, PPS and decode parameters controls in one request, queues
+the bitstream and the target picture buffer, and waits on the request fd. The
+control and request structs are hand-written `#[repr(C)]` with size and offset
+asserts, because the `v4l2-sys-mit` bindings come from the build host's headers
+and those older than 5.11 lack them.
+
+One capture buffer is allocated per DPB slot, and a DPB entry names its reference
+by the timestamp of the bitstream buffer that decoded it. The decoded picture is
+copied out of the capture buffer to tight NV12 in system memory, so the buffer
+is free to reuse once the DPB drops it. Only 8-bit 4:2:0 is accepted, and the
+SPS scaling matrices `h264parse` refuses are never sent.
+
 ## FfmpegH264Dec (ffmpeg / libavcodec)
 
 `FfmpegH264Dec` (`g2g-plugins/src/ffmpegdec.rs`, feature `ffmpeg`,
@@ -435,6 +474,16 @@ in software against 0.5 s with `nvdec`.
 per frame to system memory on a 300-frame 1080p clip. Its constant is 5800 us
 per frame, the measurement minus the `wgpudownload` price of one 1080p NV12
 frame.
+
+`v4l2slh264dec` was measured the same way on an STM32MP257F-EV1 (Hantro G1, two
+Cortex-A35 cores, kernel 6.6): 12.9 ms per frame at 1280x720 and 28.6 ms at
+1920x1080, both 300-frame High profile clips with B-frames. Both come to 14 ms
+per megapixel, so its constant is 13900 us per megapixel. About 20 ms of the
+1080p frame is the CPU copy out of the capture buffer, which the kernel maps
+uncached. The Hantro queues lack the V4L2 cache hint flag, and that kernel has
+no dma-heap or udmabuf, so no cached capture memory is reachable. On screen,
+`v4l2slh264dec ! waylandsink` shows 11.8 fps at 1080p, since `waylandsink`
+copies each frame into shared memory for Weston to upload.
 
 `dav1ddec`, `rav1ddec`, the VA-API decoders and the other platform decoders are not
 measured. Their cost is unknown, so a chain through one is never priced and the

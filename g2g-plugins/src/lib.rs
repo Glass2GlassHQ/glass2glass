@@ -126,6 +126,7 @@ mod fifobuffer;
     all(target_os = "windows", feature = "mf-encode"),
     all(target_os = "windows", feature = "d3d12-decode"),
     all(target_os = "linux", feature = "openh264"),
+    all(target_os = "linux", feature = "v4l2"),
 ))]
 mod inputstamp;
 // `audioreverse`: the audio half of reverse playback, the analog of `areverse`.
@@ -183,7 +184,8 @@ pub mod fallbackswitch;
         any(target_os = "linux", target_os = "windows"),
         feature = "vulkan-video"
     ),
-    all(target_os = "windows", feature = "d3d12-decode")
+    all(target_os = "windows", feature = "d3d12-decode"),
+    all(target_os = "linux", feature = "v4l2")
 ))]
 mod displayorder;
 #[cfg(any(
@@ -198,7 +200,8 @@ mod heldpictures;
         any(target_os = "linux", target_os = "windows"),
         feature = "vulkan-video"
     ),
-    all(target_os = "windows", feature = "d3d12-decode")
+    all(target_os = "windows", feature = "d3d12-decode"),
+    all(target_os = "linux", feature = "v4l2")
 ))]
 mod decoderecovery;
 #[cfg(feature = "std")]
@@ -210,9 +213,15 @@ pub mod gopreverse;
         any(target_os = "linux", target_os = "windows"),
         feature = "vulkan-video"
     ),
-    all(target_os = "windows", feature = "d3d12-decode")
+    all(target_os = "windows", feature = "d3d12-decode"),
+    all(target_os = "linux", feature = "v4l2")
 ))]
 mod h264dpb;
+#[cfg(any(
+    all(target_os = "windows", feature = "d3d12-decode"),
+    all(target_os = "linux", feature = "v4l2")
+))]
+pub mod h264hardwaredec;
 pub mod h264parse;
 pub mod h265parse;
 pub mod identity;
@@ -1874,7 +1883,14 @@ pub mod ptpclient;
 // (4:2:2) off /dev/videoN via mmap on a dedicated capture thread. See module
 // docs.
 #[cfg(all(target_os = "linux", feature = "v4l2"))]
+mod v4l2ioctl;
+#[cfg(all(target_os = "linux", feature = "v4l2"))]
 pub mod v4l2src;
+
+// V4L2 stateless H.264 decoder (Hantro, Rockchip and similar) driven through the
+// media request API.
+#[cfg(all(target_os = "linux", feature = "v4l2"))]
+pub mod v4l2h264dec;
 
 // V4L2 device discovery: enumerates /dev/videoN capture nodes with the probed
 // modes of every format v4l2src carries, for the device monitor.

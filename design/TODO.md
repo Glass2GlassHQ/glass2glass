@@ -380,9 +380,15 @@ libraries installed.
 
 ## Codecs
 
-- **V4L2 mem2mem decode and encode**, stateful and stateless, the hardware
-  codec path on Raspberry Pi and most ARM SoCs (gst `v4l2h264dec`,
-  `v4l2h264enc`, `v4l2slh264dec`).
+- **V4L2 mem2mem decode and encode**, the hardware codec path on Raspberry Pi
+  and most ARM SoCs: stateful decode and encode (gst `v4l2h264dec`,
+  `v4l2h264enc`), stateless H.265, VP8 and encode.
+- **Zero-copy `v4l2slh264dec` display:** export the capture buffers with
+  `VIDIOC_EXPBUF` and add `zwp_linux_dmabuf_v1` import to `waylandsink`, holding
+  each capture buffer until Weston releases it. On the STM32MP257F-EV1, 1080p
+  reaches 35 fps to `fakesink` and 11.8 fps on screen, since the copy out of the
+  uncached capture buffer takes about 20 ms and `waylandsink` copies again into
+  shared memory.
 - Run `vaav1enc` on a GPU with VA-API AV1 encode (AMD RDNA3, Intel Arc).
 - **Pure-Rust / wasm decode** to drop the ffmpeg FFI: VP8 / VP9 decode and a
   pure-Rust Opus path (see the roadmap for why both are blocked).
