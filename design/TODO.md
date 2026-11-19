@@ -182,10 +182,6 @@ libraries installed.
     with their decoders, as the H.264 code is in `h264parse` and `h264dpb`.
   - Run the JVT conformance streams through `d3d12h264dec` with a calliope
     adapter on japan.
-  - Run `m2210` on japan: its access-unit split in `tests/common/annexb.rs`
-    changed after its last run, and `d3d12h264dec` now runs on the shared
-    `H264HardwareDec` element, checked only by `cargo check` for
-    `x86_64-pc-windows-msvc`. japan needs a Rust toolchain with MSVC first.
   - Pipeline `d3d12h264dec`: the CPU waits on a fence after every picture,
     which is most of its 6.7 ms per 1080p frame.
   - Rebuild the decoder and heap on a mid-stream size change instead of
@@ -330,6 +326,10 @@ libraries installed.
   surface on the first frame, which takes about 1.3 s on a Windows laptop, so a
   live camera shows an empty window and late-drops about 40 frames. Measure the
   split, then open the device at `configure_pipeline`.
+- A `fullscreen` property on `waylandsink`, as gst's has, scaling the picture to
+  the output through `wp_viewporter`: a 1080p window on the STM32MP257's
+  1024x600 panel shows only its top-left corner, and `videoscale` costs the
+  zero-copy path.
 
 ## Containers
 
@@ -375,6 +375,13 @@ libraries installed.
   layout, so a `v4l2slh264dec` frame read through them takes its chroma 8 rows
   early at 1080p. Carry `OwnedDmaBuf::plane_layout` through both wires and the
   CPU path.
+- **`v4l2slh264dec` capture pool depth:** the pool holds six pictures for
+  downstream, one link of four plus Weston's two. Each element between the
+  decoder and the sink adds a link, so under `playbin` (which inserts
+  `deinterlace`) the pool runs out and the decoder polls `yield_now`, using 60%
+  CPU on the STM32MP257 instead of 4%. Size the pool from the links between
+  decoder and sink, or wake the decoder when a downstream frame releases its
+  dma-buf.
 - Run `vaav1enc` on a GPU with VA-API AV1 encode (AMD RDNA3, Intel Arc).
 - **Pure-Rust / wasm decode** to drop the ffmpeg FFI: VP8 / VP9 decode and a
   pure-Rust Opus path (see the roadmap for why both are blocked).
@@ -407,6 +414,9 @@ libraries installed.
   shaping if cosmic-text ever grows writing modes.
 - Add a carrier for non-default channel orders when a source needs an
   interleave order outside the per-count `ChannelLayout` convention.
+- `deinterlace mode=auto` fed an interlaced stream as dma-bufs fails with
+  `UnsupportedDomain`: it declares every input domain because its input domains
+  are fixed before caps say whether it weaves.
 
 ## Metadata (FrameMeta / AnalyticsMeta)
 

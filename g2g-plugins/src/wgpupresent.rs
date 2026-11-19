@@ -813,7 +813,7 @@ async fn open_device(
 #[cfg(not(feature = "cuda-wgpu"))]
 static PRESENT_INSTANCE: std::sync::OnceLock<wgpu::Instance> = std::sync::OnceLock::new();
 
-fn present_instance() -> wgpu::Instance {
+pub(crate) fn present_instance() -> wgpu::Instance {
     #[cfg(feature = "cuda-wgpu")]
     let instance = crate::cudawgpu::vulkan_instance();
     #[cfg(not(feature = "cuda-wgpu"))]

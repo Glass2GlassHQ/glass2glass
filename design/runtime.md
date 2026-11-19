@@ -856,7 +856,10 @@ events, so an element notifies the application without a back-reference.
   and reports it, the `GST_MESSAGE_QOS` analog. The drop decision, count and post
   live in a shared `QosTracker` (`g2g-core::qos`), which also posts the running
   stats periodically (`with_qos_interval_ns`, on pipeline-clock cadence), so an app
-  sees sink health without waiting for a drop.
+  sees sink health without waiting for a drop. As in gst's `basesink`, a late
+  frame whose running time is more than one second past the last presented one
+  is presented anyway, with a `pacing` warning, so a pipeline slower than real
+  time still updates the picture.
 - `Buffering { percent, element }`: a link's fill, 0 for underrun and 100 for full,
   posted on a quartile crossing via `run_graph_with_bus` by the sink and transform
   arms, tagged with the instance name of the element the link feeds, and

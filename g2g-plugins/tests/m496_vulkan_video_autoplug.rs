@@ -46,6 +46,10 @@ fn is_raw(caps: &Caps) -> bool {
 
 #[test]
 fn wgpu_texture_consumer_autoplugs_vulkanvideodec() {
+    if !VulkanVideoDec::accepts_input(&h264_in()) {
+        eprintln!("no Vulkan video device decodes H.264; skipping");
+        return;
+    }
     let reg = default_registry();
 
     // A WgpuTexture-preferring search picks the Vulkan Video decoder (domain match

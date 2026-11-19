@@ -6,6 +6,11 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2444: `deinterlace` asks for system memory when it weaves, so it follows a dma-buf decoder.
+- M2443: Synchronizing sinks present a late frame when none was presented for a second, as gst does.
+- M2442: `autovideosink` skips `wgpusink` when no GPU adapter can run it.
+- M2441: `glimagesink` opens its Wayland EGL display through `eglGetPlatformDisplay`, which Vivante GPUs need.
+- M2440: auto-plug skips `vulkanvideodec` and `nvdec` on a machine where they cannot decode.
 - M2439: `v4l2slh264dec` hands its pictures to `waylandsink` as dma-bufs with no copy.
 - M2438: `videoconvertscale` preserves display aspect ratio when resizing.
 - M2437: Launch pipelines accept bare RTSP URLs.

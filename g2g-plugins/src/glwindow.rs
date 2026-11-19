@@ -25,6 +25,8 @@ use crate::windowworker::{WindowParams, WindowRenderer, WorkerChannels, WorkerCm
 use g2g_core::{Colorimetry, G2gError, HardwareError};
 use smithay_client_toolkit::reexports::calloop::channel::Channel;
 
+const EGL_PLATFORM_WAYLAND_KHR: egl::Enum = 0x31D8;
+
 /// The per-sink half of the worker: which pixel layout to build the GL state
 /// for, and how to get one frame's pixels into it. The draw itself (program,
 /// textures, quad) and the present are shared.
@@ -46,10 +48,18 @@ pub(crate) trait FramePresenter: 'static {
         egl: &crate::egl_library::Egl,
         native_display: egl::NativeDisplayType,
     ) -> Result<egl::Display, Box<dyn std::error::Error>> {
+        // Vivante's eglGetDisplay takes its platform from VIV_EGL_PLATFORM and fails on a wl_display
         // SAFETY: `native_display` is the live connection's libwayland `*mut wl_display`,
         // valid for the worker thread's lifetime (the `Connection` outlives the EGL
-        // display via the caller's `conn`); `get_display` only records the handle.
-        Ok(unsafe { egl.get_display(native_display) }.ok_or("eglGetDisplay failed")?)
+        // display via the caller's `conn`); `get_platform_display` only records the
+        // handle, and the attribute list ends in ATTRIB_NONE.
+        Ok(unsafe {
+            egl.get_platform_display(
+                EGL_PLATFORM_WAYLAND_KHR,
+                native_display,
+                &[egl::ATTRIB_NONE],
+            )
+        }?)
     }
 }
 
@@ -60,9 +70,8 @@ pub(crate) fn open_cuda_display(
     native_display: egl::NativeDisplayType,
     cuda_device_id: i32,
 ) -> Result<egl::Display, Box<dyn std::error::Error>> {
-    const EGL_PLATFORM_WAYLAND_KHR: egl::Enum = 0x31D8;
     let device = crate::egldevice::cuda_egl_device(egl, cuda_device_id)?;
-    // SAFETY: as for `get_display` in `open_display`; the attribute list ends in ATTRIB_NONE.
+    // SAFETY: as for `get_platform_display` in `open_display`.
     let display = unsafe {
         egl.get_platform_display(
             EGL_PLATFORM_WAYLAND_KHR,

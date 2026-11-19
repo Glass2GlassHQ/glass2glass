@@ -549,11 +549,13 @@ impl NvDec {
     }
 
     pub(crate) fn accepts_input(input: &Caps) -> bool {
-        static HARDWARE_INPUT_CAPS: std::sync::OnceLock<CapsSet> = std::sync::OnceLock::new();
-        // no CUDA device leaves the open caps for configure to fail on
-        let hardware_input_caps = HARDWARE_INPUT_CAPS.get_or_init(|| {
-            Self::query_hardware_input_caps().unwrap_or_else(|_| Self::input_caps_set())
-        });
+        static HARDWARE_INPUT_CAPS: std::sync::OnceLock<Option<CapsSet>> =
+            std::sync::OnceLock::new();
+        let Some(hardware_input_caps) =
+            HARDWARE_INPUT_CAPS.get_or_init(|| Self::query_hardware_input_caps().ok())
+        else {
+            return false;
+        };
         hardware_input_caps
             .alternatives()
             .iter()

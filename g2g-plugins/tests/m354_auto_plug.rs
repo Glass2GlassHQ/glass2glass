@@ -306,6 +306,30 @@ async fn deinterlace_hands_the_sink_domain_to_a_multi_domain_producer() {
     assert_eq!(*seen.lock().unwrap(), 3);
 }
 
+#[tokio::test]
+async fn weaving_deinterlace_settles_a_dma_buf_producer_on_system_memory() {
+    let seen = Arc::new(Mutex::new(0u64));
+    let mut g: Graph<GraphNode> = Graph::new();
+    let src = g.add_source(GraphNode::source(FakeSource {
+        count: 0,
+        domains: DomainSet::only(MemoryDomainKind::DmaBuf).with(MemoryDomainKind::System),
+    }));
+    let deinterlace = g.add_transform(GraphNode::element(
+        Deinterlace::new().with_mode(DeinterlaceMode::Interlaced),
+    ));
+    let snk = g.add_sink(GraphNode::element(DomainSink {
+        requires: DomainSet::ALL,
+        seen: Arc::clone(&seen),
+    }));
+    g.link(src, deinterlace).unwrap();
+    g.link(deinterlace, snk).unwrap();
+
+    let g = auto_plug_domain_converters(g, &fake_factory);
+    let stats = run_graph(g, &NullClock, 4).await.expect("runs");
+    let allocation = stats.allocation.expect("the source got a proposal");
+    assert_eq!(allocation.domain, MemoryDomainKind::System);
+}
+
 /// A System producer feeding a Cuda-only consumer gets a converter spliced, and
 /// the spliced graph negotiates and runs.
 #[tokio::test]

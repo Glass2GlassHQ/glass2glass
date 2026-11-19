@@ -960,7 +960,9 @@ run_graph(graph, &clock, LatencyProfile::Live).await?;
 
 Feature-gated capture, decode, and display elements register their launch
 factories when their feature is enabled. `autovideosink` / `autoaudiosink`
-resolve to whichever sink is built, falling back to `fakevideosink` /
+resolve to the first built sink that can run on the machine, skipping a display
+sink with no reachable compositor and `wgpusink` with no usable GPU adapter, and
+fall back to `fakevideosink` /
 `fakeaudiosink` so a tutorial line runs headless. The fallback takes only raw video
 / raw audio, like the real sink, so audio into `autovideosink` still fails to
 negotiate.

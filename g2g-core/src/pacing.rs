@@ -192,6 +192,7 @@ impl PresentationPacer {
     pub fn flush(&mut self) {
         self.anchor_ns = None;
         self.anchor_pre_play = false;
+        self.qos.flush();
         // gstreamer's flushing seek in Paused restarts running time at the next play edge's base time
         self.seek_reanchor = !self
             .clock_sync

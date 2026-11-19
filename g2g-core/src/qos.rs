@@ -19,6 +19,7 @@
 
 use crate::bus::{BusHandle, BusMessage};
 use crate::element::QosMessage;
+use crate::log::{ClockTime, Target, PACING_CATEGORY};
 
 /// Signed lateness of a frame at `deadline_ns` observed at clock time `now_ns`:
 /// positive behind the clock, negative early.
@@ -68,7 +69,11 @@ pub struct QosTracker {
     /// frame arms the interval.
     last_report_ns: Option<u64>,
     dropped: u64,
+    last_presented_running_time_ns: Option<u64>,
 }
+
+// gst basesink presents a late frame anyway when nothing has been presented for this long
+const STARVED_PRESENT_GAP_NS: u64 = 1_000_000_000;
 
 impl Default for QosTracker {
     fn default() -> Self {
@@ -84,6 +89,7 @@ impl QosTracker {
             interval_ns: 0,
             last_report_ns: None,
             dropped: 0,
+            last_presented_running_time_ns: None,
         }
     }
 
@@ -118,6 +124,10 @@ impl QosTracker {
         self.dropped
     }
 
+    pub(crate) fn flush(&mut self) {
+        self.last_presented_running_time_ns = None;
+    }
+
     /// Whether a frame due at `deadline_ns` is too late to present at clock time
     /// `now_ns`. Saturating, so the `u64::MAX` default never trips.
     pub fn is_too_late(&self, deadline_ns: u64, now_ns: u64) -> bool {
@@ -140,11 +150,24 @@ impl QosTracker {
         processed: u64,
     ) -> Option<QosMessage> {
         let jitter = jitter_ns(deadline_ns, now_ns);
+        let last_presented = *self
+            .last_presented_running_time_ns
+            .get_or_insert(running_time_ns);
+        let starved = running_time_ns.saturating_sub(last_presented) > STARVED_PRESENT_GAP_NS;
         if self.is_too_late(deadline_ns, now_ns) {
-            self.dropped += 1;
-            self.post(running_time_ns, jitter, processed, now_ns);
-            return Some(upstream_report(deadline_ns, now_ns, running_time_ns));
+            if !starved {
+                self.dropped += 1;
+                self.post(running_time_ns, jitter, processed, now_ns);
+                return Some(upstream_report(deadline_ns, now_ns, running_time_ns));
+            }
+            crate::g2g_warn!(
+                Target::category(PACING_CATEGORY),
+                "presenting a frame {} late because nothing was presented for {}: the pipeline is slower than real time",
+                ClockTime(now_ns.saturating_sub(deadline_ns)),
+                ClockTime(running_time_ns - last_presented)
+            );
         }
+        self.last_presented_running_time_ns = Some(running_time_ns);
         match self.last_report_ns {
             // First frame only arms the interval, so an application sees the
             // periodic report as a trend rather than a startup event.
@@ -211,6 +234,25 @@ mod tests {
                 dropped: 1,
             })
         );
+    }
+
+    #[test]
+    fn late_frame_presents_after_a_second_without_one() {
+        let mut q = QosTracker::new();
+        q.set_max_lateness_ns(0);
+        let late_by = 50;
+        let frame_period = STARVED_PRESENT_GAP_NS / 4;
+        let mut presented_at = alloc::vec::Vec::new();
+        for i in 0..10u64 {
+            let running_time = i * frame_period;
+            if q.judge_frame(running_time, running_time + late_by, running_time, 0)
+                .is_none()
+            {
+                presented_at.push(i);
+            }
+        }
+        assert_eq!(presented_at, [5]);
+        assert_eq!(q.dropped(), 9);
     }
 
     #[test]

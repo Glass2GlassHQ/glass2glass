@@ -426,7 +426,7 @@ loop stays on the GPU and out of libavcodec.
   3060. The factory registers an input check (`ElementFactory::accepting_input`)
   that the search runs after the sink template matches. The first check queries
   device 0 through a temporary CUDA context and caches the result for the
-  process. With no CUDA device every size passes. The IVF probe reports the
+  process. With no CUDA device auto-plug never picks `NvDec`. The IVF probe reports the
   header size so `filesrc ! decodebin` knows it when it plugs. The solver does
   not refuse: a demuxer's placeholder caps fixate to its range minimum before the
   real size arrives.
@@ -878,8 +878,9 @@ device's while its frames do not, so AV1 is refused per frame instead. Auto-plug
 check (`ElementFactory::accepting_input`), so `decodebin` takes a software
 decoder. The check compares an H.264 stream at its macroblock-aligned coded size,
 which is what the device minimum applies to. The check reads the decode capabilities of
-the GPU the element would open, once per process on first use, and accepts every
-input when no Vulkan video device answers.
+the GPU the element would open, once per process on first use, and refuses every
+input when no Vulkan video device answers, as on a GPU whose Vulkan driver has no
+video queue.
 
 The output is the stream's crop rectangle of the coded picture: the H.264 SPS
 frame crop or the H.265 SPS conformance window, so a 1080p H.264 stream coded at

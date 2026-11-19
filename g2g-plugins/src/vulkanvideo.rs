@@ -14659,10 +14659,13 @@ impl VulkanVideoDec {
     }
 
     pub fn accepts_input(input: &Caps) -> bool {
-        static HARDWARE_INPUT_CAPS: std::sync::OnceLock<CapsSet> = std::sync::OnceLock::new();
-        // no Vulkan video device leaves the open caps for configure to fail on
-        let hardware_input_caps = HARDWARE_INPUT_CAPS
-            .get_or_init(|| Self::query_hardware_input_caps().unwrap_or_else(Self::input_caps_set));
+        static HARDWARE_INPUT_CAPS: std::sync::OnceLock<Option<CapsSet>> =
+            std::sync::OnceLock::new();
+        let Some(hardware_input_caps) =
+            HARDWARE_INPUT_CAPS.get_or_init(Self::query_hardware_input_caps)
+        else {
+            return false;
+        };
         let coded_input = coded_extent_caps(input);
         hardware_input_caps
             .alternatives()

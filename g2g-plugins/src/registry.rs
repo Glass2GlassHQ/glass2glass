@@ -4224,7 +4224,17 @@ fn register_feature_gated(reg: &mut Registry) {
         LaunchFactory::of::<crate::wgpupresent::WgpuPresentSink>("wgpusink", || {
             Box::new(crate::wgpupresent::WgpuPresentSink::new())
         })
-        .with_usable(crate::waylanddisplay::compositor_reachable)
+        .with_usable(|| {
+            crate::waylanddisplay::compositor_reachable()?;
+            g2g_core::runtime::block_on(crate::gpu::compliant_adapter(
+                &crate::wgpupresent::present_instance(),
+                &wgpu::RequestAdapterOptions::default(),
+            ))
+            .map(drop)
+            .ok_or_else(|| {
+                alloc::string::String::from("no GPU adapter has the WebGPU features wgpusink needs")
+            })
+        })
         .with_experimental(),
     );
     #[cfg(all(target_os = "windows", feature = "wgpu-present"))]

@@ -66,6 +66,10 @@ pub(crate) fn crop_rectangle(
     })
 }
 
+#[cfg(any(
+    all(target_os = "windows", feature = "d3d12-decode"),
+    all(target_os = "linux", feature = "v4l2")
+))]
 pub(crate) fn h264_visible_picture(sps: &H264Sps) -> Result<CropRectangle, H264StreamRefused> {
     crop_rectangle(
         sps.coded_extent(),
@@ -83,6 +87,10 @@ pub(crate) fn h264_visible_picture(sps: &H264Sps) -> Result<CropRectangle, H264S
     .ok_or(H264StreamRefused("H.264 crop leaves no picture"))
 }
 
+#[cfg(any(
+    all(target_os = "windows", feature = "d3d12-decode"),
+    all(target_os = "linux", feature = "v4l2")
+))]
 pub(crate) fn chroma_rectangle(luma: CropRectangle) -> CropRectangle {
     CropRectangle {
         left: luma.left / 2,
@@ -563,14 +571,26 @@ pub(crate) fn split_h264_pictures<'s>(
     Ok(pictures)
 }
 
+#[cfg(any(
+    all(target_os = "windows", feature = "d3d12-decode"),
+    all(target_os = "linux", feature = "v4l2")
+))]
 pub(crate) const SESSION_SHAPE_CHANGED: H264StreamRefused =
     H264StreamRefused("H.264 stream changes its picture size or DPB mid-stream");
 
+#[cfg(any(
+    all(target_os = "windows", feature = "d3d12-decode"),
+    all(target_os = "linux", feature = "v4l2")
+))]
 // one more slot than references, for the picture being decoded
 pub(crate) fn h264_dpb_slots(sps: &H264Sps) -> usize {
     usize::from(sps.max_num_ref_frames) + 1
 }
 
+#[cfg(any(
+    all(target_os = "windows", feature = "d3d12-decode"),
+    all(target_os = "linux", feature = "v4l2")
+))]
 #[derive(Debug)]
 pub(crate) struct H264PictureSlots {
     pub(crate) order: H264PictureOrder,
@@ -578,6 +598,10 @@ pub(crate) struct H264PictureSlots {
     pub(crate) target: usize,
 }
 
+#[cfg(any(
+    all(target_os = "windows", feature = "d3d12-decode"),
+    all(target_os = "linux", feature = "v4l2")
+))]
 #[derive(Debug)]
 pub(crate) struct H264DecodeSession {
     shape: H264SessionShape,
@@ -586,6 +610,10 @@ pub(crate) struct H264DecodeSession {
     references: H264References,
 }
 
+#[cfg(any(
+    all(target_os = "windows", feature = "d3d12-decode"),
+    all(target_os = "linux", feature = "v4l2")
+))]
 impl H264DecodeSession {
     pub(crate) fn new(sps: &H264Sps) -> Self {
         Self {
@@ -646,10 +674,6 @@ impl H264DecodeSession {
         Ok(h264_picture_meta(&picture.header, &slots.order))
     }
 
-    #[cfg(any(
-        all(target_os = "windows", feature = "d3d12-decode"),
-        all(target_os = "linux", feature = "v4l2")
-    ))]
     pub(crate) fn held_slots(&self) -> alloc::vec::Vec<usize> {
         self.references
             .active()

@@ -53,7 +53,7 @@ use alloc::vec::Vec;
 
 use g2g_core::caps::framerate_q16_period_ns;
 use g2g_core::frame::{Frame, FrameTiming};
-use g2g_core::memory::SystemSlice;
+use g2g_core::memory::{DomainSet, MemoryDomainKind, SystemSlice};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
     MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
@@ -787,6 +787,13 @@ impl AsyncElement for Deinterlace {
             }
             CapsSet::one(out)
         }))
+    }
+
+    fn input_domains(&self) -> DomainSet {
+        match self.mode {
+            DeinterlaceMode::Interlaced => DomainSet::only(MemoryDomainKind::System),
+            DeinterlaceMode::Auto | DeinterlaceMode::Disabled => DomainSet::ALL,
+        }
     }
 
     fn output_domain_follows_input(&self) -> bool {
