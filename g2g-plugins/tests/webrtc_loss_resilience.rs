@@ -4,7 +4,7 @@
 
 //! Lossy-link P2P resilience for the native duplex WebRTC session
 //! ([`WebRtcDuplexSession`]): two sendrecv peers connect over a test-local UDP
-//! relay that deterministically drops ~10% of large video SRTP packets, and we
+//! relay that deterministically drops ~10% of original video SRTP packets, and we
 //! confirm H.264 frame delivery stays near-complete because str0m's NACK / RTX
 //! resend path recovers the losses. RTX is negotiated automatically by str0m
 //! (each H.264 payload type is offered with an RTX resend PT and `fb_nack`, and
@@ -12,10 +12,12 @@
 //! not new resilience code.
 //!
 //! Runs fully on localhost UDP with a synthetic H.264 stream (no ffmpeg fixture,
-//! no media server), so it is a default CI gate. Two phases:
+//! no media server), so it is a default CI gate:
 //!   - relay at 0% drop: proves the relay plumbing (frames flow through it),
 //!   - relay at ~10% drop of large video RTP: frames still arrive near-complete
-//!     and NACK feedback is observed on both peers.
+//!     and NACK feedback is observed on both peers;
+//!   - receive-only with bounded single-packet frame loss: every frame after
+//!     startup arrives, and NACK feedback is observed.
 
 #![cfg(all(target_os = "linux", feature = "webrtc"))]
 
@@ -39,11 +41,13 @@ use tokio::sync::mpsc;
 use g2g_core::element::DynAsyncElement;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use g2g_core::rtp::RtpHeader;
 use g2g_core::runtime::{run_duplex_session, DynSourceLoop, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain,
     OutputSink, PipelineClock, PipelinePacket, Rate, VideoCodec,
 };
+use g2g_plugins::sdp::SdpMedia;
 use g2g_plugins::webrtcduplex::{SdpChannel, SignalRole, WebRtcDuplexSession};
 
 struct ZeroClock;
@@ -193,12 +197,10 @@ fn rewrite_candidates(sdp: &str, relay: SocketAddr) -> String {
     out
 }
 
-/// True if this datagram is a large video SRTP/RTX packet (first byte in the
-/// RTP/SRTP range, payload over 200 bytes), the class we deterministically drop.
-/// STUN (first byte 0..=3), DTLS (20..=63), and small RTCP/NACK/audio are left
-/// alone so ICE, the handshake, and the loss-recovery feedback all survive.
-fn is_droppable_media(pkt: &[u8]) -> bool {
-    matches!(pkt.first(), Some(b) if (128..=191).contains(b)) && pkt.len() > 200
+#[derive(Clone, Copy)]
+enum VideoLoss {
+    Sustained { every: u64 },
+    SinglePacketFrames { every: u64, count: u64 },
 }
 
 /// Shared relay counters.
@@ -208,47 +210,62 @@ struct RelayStats {
     dropped: AtomicU64,
 }
 
-/// Forward datagrams between the two relay sockets, dropping every `drop_every`-th
-/// droppable media packet (`None` = drop nothing). `sock_a` faces peer A (which
-/// sends here and expects replies from here); `sock_b` faces peer B.
+/// Forward datagrams between the two relay sockets and inject loss into the
+/// negotiated original video payload type. RTX and control traffic pass through.
+/// `sock_a` faces peer A (which sends here and expects replies from here);
+/// `sock_b` faces peer B.
 async fn relay_forward(
     sock_a: UdpSocket,
     sock_b: UdpSocket,
     addr_a: SocketAddr,
-    addr_b: Arc<Mutex<Option<SocketAddr>>>,
-    drop_every: Option<u64>,
+    addr_b: SocketAddr,
+    video_pt: u8,
+    loss: Option<VideoLoss>,
     stats: Arc<RelayStats>,
 ) {
-    let matched = AtomicU64::new(0);
-    let should_drop = |pkt: &[u8]| -> bool {
-        let Some(every) = drop_every else {
+    let mut matched = 0u64;
+    let mut should_drop = |pkt: &[u8], previous_timestamp: &mut Option<u32>| -> bool {
+        let Some(loss) = loss else { return false };
+        let Some(parsed) = RtpHeader::parse_header(pkt) else {
             return false;
         };
-        if is_droppable_media(pkt) {
-            let n = matched.fetch_add(1, Ordering::Relaxed);
-            return n % every == every - 1;
+        let header = parsed.header;
+        if header.payload_type != video_pt {
+            return false;
         }
-        false
+        let starts_frame = previous_timestamp.replace(header.timestamp) != Some(header.timestamp);
+        let every = match loss {
+            VideoLoss::Sustained { every } if pkt.len() > 200 => every,
+            VideoLoss::SinglePacketFrames { every, count }
+                if starts_frame
+                    && header.marker
+                    && stats.dropped.load(Ordering::Relaxed) < count =>
+            {
+                every
+            }
+            _ => return false,
+        };
+        matched += 1;
+        matched.is_multiple_of(every)
     };
+    let mut previous_a = None;
+    let mut previous_b = None;
     let mut buf_a = [0u8; 2048];
     let mut buf_b = [0u8; 2048];
     loop {
         tokio::select! {
             r = sock_a.recv_from(&mut buf_a) => {
                 let Ok((n, _)) = r else { return };
-                if should_drop(&buf_a[..n]) {
+                if should_drop(&buf_a[..n], &mut previous_a) {
                     stats.dropped.fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
-                let dest_b = *addr_b.lock().unwrap();
-                if let Some(b) = dest_b {
-                    let _ = sock_b.send_to(&buf_a[..n], b).await;
-                    stats.forwarded.fetch_add(1, Ordering::Relaxed);
-                }
+                let _ = sock_b.send_to(&buf_a[..n], addr_b).await;
+                stats.forwarded.fetch_add(1, Ordering::Relaxed);
             }
             r = sock_b.recv_from(&mut buf_b) => {
                 let Ok((n, _)) = r else { return };
-                if should_drop(&buf_b[..n]) {
+                if should_drop(&buf_b[..n], &mut previous_b) {
                     stats.dropped.fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
@@ -261,9 +278,9 @@ async fn relay_forward(
 
 /// Splice a candidate-rewriting relay between the offerer and answerer SDP
 /// channels: parse each peer's real host candidate, bind two relay sockets, point
-/// each peer at the relay, and forward media (dropping `drop_every`-th large video
-/// packet). Returns the two spliced channels plus the relay stats handle.
-async fn spliced_channels(drop_every: Option<u64>) -> (SdpChannel, SdpChannel, Arc<RelayStats>) {
+/// each peer at the relay, and forward media with the requested loss schedule.
+/// Returns the two spliced channels plus the relay stats handle.
+async fn spliced_channels(loss: Option<VideoLoss>) -> (SdpChannel, SdpChannel, Arc<RelayStats>) {
     let (off_out_tx, mut off_out_rx) = mpsc::channel::<String>(4);
     let (relay_to_off_tx, relay_to_off_rx) = mpsc::channel::<String>(4);
     let (ans_out_tx, mut ans_out_rx) = mpsc::channel::<String>(4);
@@ -288,24 +305,16 @@ async fn spliced_channels(drop_every: Option<u64>) -> (SdpChannel, SdpChannel, A
         let relay_for_a = sock_a.local_addr().expect("sock_a addr");
         let relay_for_b = sock_b.local_addr().expect("sock_b addr");
 
-        // B will send to sock_b; forward B -> A out of sock_a to addr_a.
-        let addr_b = Arc::new(Mutex::new(None));
-        tokio::spawn(relay_forward(
-            sock_a,
-            sock_b,
-            addr_a,
-            addr_b.clone(),
-            drop_every,
-            stats_task,
-        ));
-
         let offer = rewrite_candidates(&offer, relay_for_b);
         relay_to_ans_tx.send(offer).await.expect("forward offer");
 
-        // Answer from B carries B's real candidate; A will send to sock_a.
+        // Answer from B carries B's address and the accepted video payload type.
         let answer = ans_out_rx.recv().await.expect("answer");
-        let b = first_candidate_addr(&answer).expect("answer candidate");
-        *addr_b.lock().unwrap() = Some(b);
+        let addr_b = first_candidate_addr(&answer).expect("answer candidate");
+        let video_pt = SdpMedia::parse(&answer).expect("answer video").payload_type;
+        tokio::spawn(relay_forward(
+            sock_a, sock_b, addr_a, addr_b, video_pt, loss, stats_task,
+        ));
         let answer = rewrite_candidates(&answer, relay_for_a);
         relay_to_off_tx.send(answer).await.expect("forward answer");
     });
@@ -330,7 +339,8 @@ struct RunResult {
 /// `media_secs` of media and report the outcome.
 async fn run_over_relay(drop_every: Option<u64>, media_secs: u64) -> RunResult {
     let aus = Arc::new(synthetic_h264_stream(240));
-    let (off_chan, ans_chan, stats) = spliced_channels(drop_every).await;
+    let (off_chan, ans_chan, stats) =
+        spliced_channels(drop_every.map(|every| VideoLoss::Sustained { every })).await;
 
     let mut sess_a = WebRtcDuplexSession::new(SignalRole::Offerer, off_chan, 1);
     let mut sess_b = WebRtcDuplexSession::new(SignalRole::Answerer, ans_chan, 1);
@@ -459,6 +469,8 @@ async fn duplex_relay_with_loss_recovers_via_rtx() {
 const ONE_PACKET_INTER_PAYLOAD: usize = 700;
 const RECEIVE_ONLY_FRAMES: usize = 120;
 const RECEIVE_ONLY_DROP_EVERY: u64 = 11;
+// Forward a loss-free tail, so later sequence numbers expose every injected gap.
+const RECEIVE_ONLY_DROPS: u64 = 6;
 const RECEIVE_ONLY_TIMEOUT: Duration = Duration::from_secs(30);
 const LINK_CAPACITY: usize = 8;
 
@@ -473,7 +485,11 @@ async fn receive_only_client_recovers_lost_single_packet_frames() {
         },
     ));
     let (offer_channel, answer_channel, stats) =
-        spliced_channels(Some(RECEIVE_ONLY_DROP_EVERY)).await;
+        spliced_channels(Some(VideoLoss::SinglePacketFrames {
+            every: RECEIVE_ONLY_DROP_EVERY,
+            count: RECEIVE_ONLY_DROPS,
+        }))
+        .await;
     let mut client =
         WebRtcDuplexSession::new(SignalRole::Offerer, offer_channel, 1).with_receive_only();
     let mut host = WebRtcDuplexSession::new(SignalRole::Answerer, answer_channel, 1);
@@ -524,9 +540,14 @@ async fn receive_only_client_recovers_lost_single_packet_frames() {
     let missing: Vec<usize> = (first..units.len())
         .filter(|index| !indices.contains(index))
         .collect();
+    assert_eq!(
+        stats.dropped.load(Ordering::Relaxed),
+        RECEIVE_ONLY_DROPS,
+        "the relay injected every scheduled loss"
+    );
     assert!(
-        stats.dropped.load(Ordering::Relaxed) > 0,
-        "the relay dropped nothing"
+        client.nacks_seen() > 0 && host.nacks_seen() > 0,
+        "NACKs crossed the relay"
     );
     assert!(missing.is_empty(), "frames {missing:?} never arrived");
 }
