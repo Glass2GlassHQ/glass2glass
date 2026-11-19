@@ -189,7 +189,9 @@ libraries installed.
   - Run the JVT conformance streams through `d3d12h264dec` with a calliope
     adapter on japan.
   - Run `m2210` on japan: its access-unit split in `tests/common/annexb.rs`
-    changed after its last run.
+    changed after its last run, and `d3d12h264dec` now runs on the shared
+    `H264HardwareDec` element, checked only by `cargo check` for
+    `x86_64-pc-windows-msvc`. japan needs a Rust toolchain with MSVC first.
   - Pipeline `d3d12h264dec`: the CPU waits on a fence after every picture,
     which is most of its 6.7 ms per 1080p frame.
   - Rebuild the decoder and heap on a mid-stream size change instead of
