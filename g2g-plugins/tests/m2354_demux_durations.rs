@@ -16,6 +16,10 @@ use g2g_plugins::registry::default_registry;
 
 // the fixtures of m2347, 2 s of 25 fps video and 48 kHz audio, with the durations
 // `ffprobe -show_entries format=duration` reports for them
+// A copy of av_seek_h264_aac.flv with its onMetaData tag removed.
+const FLV_WITHOUT_METADATA: &str = "av_seek_h264_aac_no_metadata.flv";
+const FLV_LAST_TAG_NS: u64 = 1_981_000_000;
+
 const FIXTURES: [(&str, &str, u64); 7] = [
     ("av_seek_h264_aac.flv", "flvdemux", 2_021_000_000),
     ("av_seek_vp8_vorbis.ogg", "oggdemux", 2_000_000_000),
@@ -87,6 +91,22 @@ async fn every_demuxer_reports_the_duration_ffprobe_reads() {
         assert!(
             duration_ns.abs_diff(ffprobe_ns) <= FRAME_PERIOD_NS,
             "{fixture}: {duration_ns} ns, ffprobe reads {ffprobe_ns} ns"
+        );
+    }
+}
+
+#[tokio::test]
+async fn flv_without_metadata_reports_the_last_media_timestamp() {
+    assert_eq!(
+        reported_duration_ns(FLV_WITHOUT_METADATA, "flvdemux", AUDIO_AND_VIDEO_BRANCHES).await,
+        Some(FLV_LAST_TAG_NS)
+    );
+    for seek in [None, Some(Seek::flush_to(TARGET_NS))] {
+        let plain = checksums(FLV_WITHOUT_METADATA, "flvdemux", false, seek).await;
+        assert!(!plain.is_empty());
+        assert_eq!(
+            checksums(FLV_WITHOUT_METADATA, "flvdemux", true, seek).await,
+            plain
         );
     }
 }

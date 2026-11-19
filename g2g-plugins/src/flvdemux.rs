@@ -53,8 +53,8 @@ use crate::annexb::{
 };
 use crate::avidemux::{is_pcm, pcm_alternatives};
 use crate::bereader::{take_be_u16, take_be_u32};
-use crate::demuxseek::{DemuxSeek, SharedSegment};
-use crate::flv::{FlvCodec, FlvDemuxer, FlvTrack, FlvUnit, LEGACY_AUDIO_TRACK};
+use crate::demuxseek::{DemuxSeek, SharedSegment, TailRead};
+use crate::flv::{tail_duration_ns, FlvCodec, FlvDemuxer, FlvTrack, FlvUnit, LEGACY_AUDIO_TRACK};
 
 /// Which elementary stream an [`FlvDemux`] instance forwards. An FLV stream
 /// interleaves one video and one audio track; this element has one output pad, so
@@ -692,7 +692,9 @@ pub struct FlvDemuxN {
     segment: SharedSegment,
     emitted: u64,
     seek: DemuxSeek<FlvUnit>,
-    duration_ns: Option<u64>,
+    metadata_duration_ns: Option<u64>,
+    tail_duration_ns: Option<u64>,
+    tail: TailRead,
 }
 
 impl FlvDemuxN {
@@ -711,19 +713,21 @@ impl FlvDemuxN {
             segment: SharedSegment::new(ports.len()),
             emitted: 0,
             seek: DemuxSeek::default(),
-            duration_ns: None,
+            metadata_duration_ns: None,
+            tail_duration_ns: None,
+            tail: TailRead::default(),
         }
     }
 
-    async fn route_units(&mut self, out: &mut dyn MultiOutputSink) -> Result<(), G2gError> {
-        if self.duration_ns.is_none() {
-            self.duration_ns = self.demux.metadata().and_then(on_metadata_duration_ns);
-            self.seek.set_duration(self.duration_ns);
-        }
+    async fn route_units(
+        &mut self,
+        units: Vec<FlvUnit>,
+        out: &mut dyn MultiOutputSink,
+    ) -> Result<(), G2gError> {
         for emitter in &mut self.emitters {
             emitter.sync_configs(&self.demux);
         }
-        for unit in self.demux.take_units() {
+        for unit in units {
             self.seek
                 .note_track_unit(unit.track() as u64, unit.pts_ns());
             let Some(port) = self.emitters.iter().position(|e| e.carries(&unit)) else {
@@ -804,7 +808,7 @@ impl MultiOutputElement for FlvDemuxN {
     }
 
     fn query_duration(&self) -> Option<u64> {
-        self.duration_ns
+        self.metadata_duration_ns.or(self.tail_duration_ns)
     }
 
     fn process<'a>(
@@ -814,7 +818,9 @@ impl MultiOutputElement for FlvDemuxN {
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
             self.seek.hold_at_segment_end().await;
-            self.seek.poll_request();
+            if !self.tail.in_flight() {
+                self.seek.poll_request();
+            }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     if self.seek.dropping_input() {
@@ -823,9 +829,27 @@ impl MultiOutputElement for FlvDemuxN {
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
+                    if self.tail.in_flight() && self.tail.takes_bytes(&self.seek, slice) {
+                        return Ok(());
+                    }
                     self.demux.push_data(slice);
-                    self.route_units(out).await?;
+                    if self.metadata_duration_ns.is_none() {
+                        self.metadata_duration_ns =
+                            self.demux.metadata().and_then(on_metadata_duration_ns);
+                        self.seek.set_duration(self.query_duration());
+                    }
+                    let units = self.demux.take_units();
+                    // The opening tags usually carry duration before the first media unit.
+                    if self.metadata_duration_ns.is_none()
+                        && !units.is_empty()
+                        && self.tail.takes_bytes(&self.seek, &[])
+                    {
+                        self.demux = FlvDemuxer::new();
+                        return Ok(());
+                    }
+                    self.route_units(units, out).await?;
                 }
+                PipelinePacket::Flush if self.tail.takes_flush() => {}
                 PipelinePacket::Flush => {
                     let forward = self.seek.on_flush();
                     self.demux = FlvDemuxer::new();
@@ -837,21 +861,27 @@ impl MultiOutputElement for FlvDemuxN {
                         out.push_to(port, PipelinePacket::Flush).await?;
                     }
                 }
-                PipelinePacket::Segment(seg) => {
+                PipelinePacket::Segment(seg) if !self.tail.in_flight() => {
                     for port in 0..self.emitters.len() {
                         out.push_to(port, PipelinePacket::Segment(seg)).await?;
                     }
                 }
                 // the runner sends the merged Eos to every port
                 PipelinePacket::Eos => {
+                    if let Some(tail) = self.tail.take_tail(&self.seek) {
+                        self.tail_duration_ns = tail_duration_ns(&tail);
+                        self.seek.set_duration(self.query_duration());
+                        return Ok(());
+                    }
                     if self
                         .seek
-                        .eos_before_flush(self.seek.dropping_input())
+                        .eos_before_flush(self.seek.dropping_input() || self.tail.in_flight())
                         .await?
                     {
                         return Ok(());
                     }
-                    self.route_units(out).await?;
+                    let units = self.demux.take_units();
+                    self.route_units(units, out).await?;
                     self.seek
                         .end_ports_and_wait_for_seek(self.emitters.len(), out)
                         .await?;

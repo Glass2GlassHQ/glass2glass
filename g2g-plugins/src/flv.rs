@@ -336,6 +336,24 @@ pub(crate) fn tag_at(buf: &[u8], at: usize) -> Option<(FlvTagHeader, core::ops::
     Some((tag, body_start..body_end))
 }
 
+// Walk backwards over the PreviousTagSize chain, skipping trailing script tags.
+pub(crate) fn tail_duration_ns(tail: &[u8]) -> Option<u64> {
+    let mut end = tail.len();
+    while let Some(trailer) = end.checked_sub(PREV_TAG_SIZE_LEN) {
+        let size = crate::bereader::be_u32(tail, trailer)? as usize;
+        let prefix = trailer.checked_sub(size)?.checked_sub(PREV_TAG_SIZE_LEN)?;
+        let (tag, body) = tag_at(tail, prefix)?;
+        if body.end != trailer {
+            return None;
+        }
+        if matches!(tag.tag_type, TAG_AUDIO | TAG_VIDEO) && !body.is_empty() {
+            return Some(u64::from(tag.timestamp_ms) * NANOS_PER_MILLISECOND);
+        }
+        end = prefix + PREV_TAG_SIZE_LEN;
+    }
+    None
+}
+
 // AMF0 markers the `onMetaData` writer emits (the inverse of the reader subset in
 // `flvdemux::amf0`).
 const AMF0_NUMBER: u8 = 0x00;
@@ -1113,6 +1131,22 @@ mod tests {
             prev = t.len() as u32;
         }
         s
+    }
+
+    #[test]
+    fn the_tail_duration_skips_scripts_and_rejects_a_bad_tag_size() {
+        const LAST_MEDIA_MS: u32 = 1234;
+        let script = tag(TAG_SCRIPT, 0, b"script");
+        let script_size = script.len() as u32;
+        let mut stream = flv_stream(&[tag(TAG_AUDIO, LAST_MEDIA_MS, &[0x2f, 0xaa]), script]);
+        let trailer = stream.len();
+        stream.extend_from_slice(&script_size.to_be_bytes());
+        assert_eq!(
+            tail_duration_ns(&stream[FLV_HEADER_MIN..]),
+            Some(u64::from(LAST_MEDIA_MS) * NANOS_PER_MILLISECOND)
+        );
+        stream[trailer..].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert_eq!(tail_duration_ns(&stream), None);
     }
 
     // regression: an AVC video tag whose body is shorter than the 5-byte AVC
