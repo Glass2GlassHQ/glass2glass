@@ -366,7 +366,8 @@ importer uses. The Hip frame holds a share of the dma-buf, so `v4l2src` does not
 requeue the buffer until the Hip frame drops. ROCm imports only memory amdgpu exported, such
 as a Vulkan or VA-API export, and returns `hipErrorOutOfMemory` for a CPU-backed
 dma-buf (a udmabuf, a UVC webcam's buffer). Then, and always on NVIDIA,
-`hipupload` maps the dma-buf and copies it through the CPU, after one warning.
+`hipupload` maps the dma-buf and copies it through the CPU in its plane layout,
+after one warning.
 `hipupload` waits for a frame's sync_file (see "Cross-device synchronisation"
 in `transports.md`) before it reads the dma-buf, and refuses a frame that
 carries only the timeline semaphore, which reaches it only across a process

@@ -6,6 +6,10 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2451: `g2g-launch -v` prints the links the run negotiated instead of negotiating twice.
+- M2450: `dmabufsink` holds each frame until `dmabufsrc` releases it.
+- M2449: `unixfdsink` and `unixfdsrc` pass buffer releases while no frame flows.
+- M2448: `dmabufsink`, `unixfdsink` and `hipupload`'s CPU copy keep a dma-buf's per-plane layout.
 - M2447: `deinterlace mode=auto` weaves interlaced frames that arrive as dma-bufs.
 - M2446: `waylandsink fullscreen=true` fills the output, the picture scaled to fit.
 - M2445: `v4l2slh264dec` sleeps instead of spinning while downstream holds every capture buffer.

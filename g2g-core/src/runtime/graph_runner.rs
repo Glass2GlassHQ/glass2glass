@@ -1799,6 +1799,18 @@ struct ProbeTaps<'t> {
     visit_recorder: Option<&'t alloc::sync::Arc<dyn VisitRecorder>>,
 }
 
+// the domain of the node producing onto each edge
+fn edge_memory(vg: &ValidatedGraph<GraphNodeRef<'_>>) -> Vec<crate::memory::MemoryDomainKind> {
+    (0..vg.edge_count())
+        .map(|id| {
+            let src = vg.edge(id).src.node;
+            vg.element(src)
+                .map(|e| e.output_memory())
+                .unwrap_or(crate::memory::MemoryDomainKind::System)
+        })
+        .collect()
+}
+
 /// Phases 1-3.5 of the graph runner: name instances + mint probes, probe source
 /// caps, solve + configure the whole DAG, run the allocation cascade, and elect
 /// the clock. Mutates `vg` (configure / clock-sync / instance names) and returns
@@ -1998,6 +2010,9 @@ async fn prepare_graph<'a>(
         let source = upstream_source(vg, proposer).ok_or(G2gError::FixationFailed)?;
         source_caps[source.0 as usize] = Some(CapsSet::one(counter));
     };
+    if let Some(obs) = observer {
+        obs.register_edge_memory(edge_memory(vg));
+    }
 
     // Phase 3.5: DAG-wide M12 folds, so the runner reports the same latency /
     // clock / allocation the linear runners do (the convenience wrappers reduce
@@ -2394,15 +2409,7 @@ fn enforce_copy_policy(
     solution: &[Caps],
     policy: crate::copyplan::CopyPolicy,
 ) -> Result<(), G2gError> {
-    let edge_memory: Vec<crate::memory::MemoryDomainKind> = (0..vg.edge_count())
-        .map(|id| {
-            let src = vg.edge(id).src.node;
-            vg.element(src)
-                .map(|e| e.output_memory())
-                .unwrap_or(crate::memory::MemoryDomainKind::System)
-        })
-        .collect();
-    let plan = copy_plan(vg, solution, &edge_memory);
+    let plan = copy_plan(vg, solution, &edge_memory(vg));
     plan.check(policy).map_err(|_| G2gError::CopyBudget)
 }
 
@@ -4187,16 +4194,7 @@ pub async fn negotiate_graph_explained<'a>(
     // the dump would call a downloading link a GPU link.
     cascade_allocation(&mut vg, &topo, &solution).map_err(NegotiateError::Setup)?;
 
-    // Per-edge memory domain: the domain of the node producing onto that edge.
-    let edge_memory: Vec<crate::memory::MemoryDomainKind> = (0..vg.edge_count())
-        .map(|id| {
-            let src = vg.edge(id).src.node;
-            vg.element(src)
-                .map(|e| e.output_memory())
-                .unwrap_or(crate::memory::MemoryDomainKind::System)
-        })
-        .collect();
-
+    let edge_memory = edge_memory(&vg);
     Ok((vg, solution, edge_memory))
 }
 

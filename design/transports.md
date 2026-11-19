@@ -1265,14 +1265,17 @@ source as `SCM_RIGHTS` ancillary data of a `sendmsg` over a Unix socket, using
 hand-rolled `sendmsg` / `recvmsg` FFI in `scmfd` with no crate dependency, Linux
 LP64 only, and the kernel installs a dup of the fd in the receiver.
 
-That makes the transport both simpler and safer than the CUDA path. The
-underlying buffer is kernel-refcounted across both processes' fds, so once the
-sink's `sendmsg` returns the receiver's dup already keeps the buffer alive and
-the sink may drop its frame immediately, with no per-frame ack. Backpressure
-still comes from the graph's bounded channel upstream. Every message is a
+The underlying memory is kernel-refcounted across both processes' fds, so the
+receiver's dup keeps it alive once `sendmsg` returns. A pooled producer such as
+`v4l2slh264dec` still rewrites a buffer once every share in its own process
+drops, so the sink keeps one share of each frame until the source sends a
+RELEASE record, which it does when its downstream drops the frame. A task reads
+those records, so a release lands while no frame is flowing. Backpressure still
+comes from the graph's bounded channel upstream. Every message is a
 fixed-size record sent and received with a single `sendmsg` / `recvmsg`, so a
 frame record's fd is never separated from its bytes and a plain read never
-crosses, and thus discards, a pending fd.
+crosses, and thus discards, a pending fd. A frame record carries the dma-buf's
+`PlaneLayout` when it has one, so the source emits the same planes.
 
 The transport is GPU-agnostic and carries any dma-buf: a GPU-exported texture, a
 V4L2 or CSI capture buffer, a `dma_heap` or `udmabuf` allocation. Importing the
@@ -1290,8 +1293,12 @@ message is an 8-byte `{type, payload_size}` header with the buffer's fds
 attached through `scmfd`, one per memory, then the payload: the caps string, a
 buffer with its memories and serialized metas, a release, or EOS. The sink sends
 a dma-buf frame as its own fd and copies a system frame into a memfd, and writes
-a `GstVideoMeta` for raw video so a gst reader sees the real strides. It holds
-every buffer per client until that client releases it or disconnects.
+a `GstVideoMeta` for raw video so a gst reader sees the real strides. A dma-buf
+goes out as one memory from offset 0 with every plane's offset counted from the
+start of the fd, taken from its `PlaneLayout` or derived from plane 0. It holds
+every buffer per client until that client releases it or disconnects, and a task
+per client applies releases as they arrive, so a decoder waiting on its pool
+gets a buffer back while no frame is flowing.
 
 The memfds come from a pool, following gst's flow. A memfd returns to the pool
 once every client has released it. A frame takes the first free memfd that fits,
@@ -1310,7 +1317,8 @@ The source maps a memfd read-only into a foreign `SystemSlice` with no copy, and
 the slice's free callback queues the release, so the sink keeps the buffer until
 the frame is dropped downstream. Under `memory:DMABuf` caps it hands the dma-buf
 on as `OwnedDmaBuf`, which has no drop hook, so it keeps one share and releases
-once `share_count` falls to one. Padded rows from a `GstVideoMeta` travel as a
+once `share_count` falls to one. The dma-buf carries the meta's planes as a
+`PlaneLayout` when its rows are padded. Padded rows from a `GstVideoMeta` travel as a
 `PlaneLayout` when downstream asked for one and are packed tight otherwise.
 Timestamps cross as absolute `CLOCK_MONOTONIC`: running time plus the sink's
 base time and path latency, mapped off the pipeline clock, and the source

@@ -696,12 +696,9 @@ fn packed_dma_buf_frame(
     };
     let (layout, _) = crate::paddedrows::dmabuf_plane_layout(dmabuf, format, width, height)
         .ok_or(G2gError::CapsMismatch)?;
-    // dmabuf_plane_layout counts plane offsets from the start of the fd
-    let mut whole = dmabuf.clone();
-    whole.offset = 0;
-    let mapped = crate::dmabufmap::DmaBufReadMap::read(&whole)?;
+    let mapped = crate::dmabufmap::DmaBufReadMap::read(dmabuf)?;
     let packed = crate::pixel::pack_planes(
-        mapped.as_slice(),
+        mapped.from_fd_start(),
         format,
         width as usize,
         height as usize,

@@ -93,6 +93,7 @@ struct State {
     /// Per edge id: the link's live packet / byte / drop counters. `None` for an
     /// edge the runner did not instrument.
     edge_counters: Vec<Option<Arc<EdgeCounters>>>,
+    edge_memory: Vec<crate::memory::MemoryDomainKind>,
     /// The graph-wide default link depth, for the queueing floor a measured
     /// journey is compared against. `0` until the runner registers it.
     link_capacity: usize,
@@ -153,6 +154,10 @@ impl Observer {
         s.edge_counters = edge_counters;
     }
 
+    pub(crate) fn register_edge_memory(&self, edge_memory: Vec<crate::memory::MemoryDomainKind>) {
+        self.inner.state.lock().edge_memory = edge_memory;
+    }
+
     /// Append a node that appeared after [`register`](Self::register): a fan-out
     /// branch or a fan-in input attached while the run was going. Returns
     /// its `NodeId`. The three per-node vectors are pushed under one lock hold,
@@ -200,6 +205,10 @@ impl Observer {
     /// the bytes). `None` if the index is out of range.
     pub fn edge_caps(&self, idx: usize) -> Option<Caps> {
         self.inner.state.lock().edge_caps.get(idx).cloned()
+    }
+
+    pub fn edge_memory(&self, idx: usize) -> Option<crate::memory::MemoryDomainKind> {
+        self.inner.state.lock().edge_memory.get(idx).copied()
     }
 
     /// Number of edges registered (0 before the runner registers them).

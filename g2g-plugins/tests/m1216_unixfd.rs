@@ -30,6 +30,7 @@ use std::time::Duration;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::{MemoryDomain, MemoryDomainKind, OwnedDmaBuf, SyncFile, SystemSlice};
+use g2g_core::meta::{Plane, PlaneLayout};
 use g2g_core::runtime::{parse_launch, run_graph, RunStats, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, ClockSync, Colorimetry, Dim, FrameTiming, G2gError, Interlace,
@@ -69,6 +70,9 @@ const LINK_CAPACITY: usize = 4;
 const PADDED_STRIDE: u32 = 64;
 /// Where plane 0 starts inside the dma-buf.
 const PLANE_OFFSET: u32 = 128;
+// h264 decoders pad the picture to whole macroblock rows, 1088 for a 1080 picture
+const DECODED_ROWS: usize = HEIGHT as usize + 4;
+const NV12_CHROMA_ROWS: usize = HEIGHT as usize / 2;
 const GST_DEADLINE: Duration = Duration::from_secs(60);
 const GST_FRAMES: u64 = 30;
 const GST_WIDTH: u32 = 64;
@@ -103,16 +107,12 @@ fn socket_name(socket_type: SocketType, name: &str) -> String {
 }
 
 fn rgba_caps(width: u32, height: u32) -> Caps {
-    rgba_caps_interlaced(width, height, Interlace::Any)
-}
-
-fn rgba_caps_interlaced(width: u32, height: u32, interlace: Interlace) -> Caps {
     Caps::RawVideo {
         format: RawVideoFormat::Rgba8,
         width: Dim::Fixed(width),
         height: Dim::Fixed(height),
         framerate: Rate::Fixed(FRAMERATE << 16),
-        interlace,
+        interlace: Interlace::Any,
         colorimetry: Colorimetry::UNKNOWN,
         pixel_aspect: g2g_core::PixelAspect::Any,
     }
@@ -236,6 +236,23 @@ impl OutputSink for DroppingOutput {
         packet: &mut Option<PipelinePacket>,
     ) -> Poll<Result<PushOutcome, G2gError>> {
         drop(packet.take());
+        Poll::Ready(Ok(PushOutcome::Accepted))
+    }
+}
+
+// Hands every packet to the test, which decides when downstream drops a frame.
+#[derive(Debug)]
+struct ChannelOutput(tokio::sync::mpsc::UnboundedSender<PipelinePacket>);
+
+impl OutputSink for ChannelOutput {
+    fn poll_push(
+        &mut self,
+        _cx: &mut Context<'_>,
+        packet: &mut Option<PipelinePacket>,
+    ) -> Poll<Result<PushOutcome, G2gError>> {
+        let _ = self
+            .0
+            .send(packet.take().expect("poll_push without a packet"));
         Poll::Ready(Ok(PushOutcome::Accepted))
     }
 }
@@ -409,6 +426,78 @@ async fn a_dmabuf_crosses_as_a_dmabuf_with_its_layout() {
     }
 }
 
+// where each row of a tight NV12 picture lies under `layout`, luma first
+fn nv12_rows(layout: &PlaneLayout) -> Vec<std::ops::Range<usize>> {
+    let row_bytes = WIDTH as usize;
+    let luma = (0..HEIGHT as usize).map(|row| layout.row_range(0, row, row_bytes));
+    let chroma = (0..NV12_CHROMA_ROWS).map(|row| layout.row_range(1, row, row_bytes));
+    luma.chain(chroma)
+        .map(|range| range.expect("the layout holds every row"))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_dmabuf_keeps_chroma_that_starts_after_the_decoded_rows() {
+    let caps = Caps::RawVideo {
+        format: RawVideoFormat::Nv12,
+        width: Dim::Fixed(WIDTH),
+        height: Dim::Fixed(HEIGHT),
+        framerate: Rate::Fixed(FRAMERATE << 16),
+        interlace: Interlace::Any,
+        colorimetry: Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
+    };
+    let stride = PADDED_STRIDE as usize;
+    let luma_offset = PLANE_OFFSET as usize;
+    let layout = PlaneLayout::new(&[
+        Plane {
+            offset: luma_offset,
+            stride,
+        },
+        Plane {
+            offset: luma_offset + DECODED_ROWS * stride,
+            stride,
+        },
+    ])
+    .unwrap();
+    let rows = nv12_rows(&layout);
+    let picture: Vec<u8> = (1..=rows.len() * WIDTH as usize)
+        .map(|byte| byte as u8)
+        .collect();
+    let mut bytes = vec![0u8; rows.last().unwrap().end];
+    for (range, line) in rows.iter().zip(picture.chunks(WIDTH as usize)) {
+        bytes[range.clone()].copy_from_slice(line);
+    }
+    let fd = std::os::fd::IntoRawFd::into_raw_fd(memfd_holding(&bytes));
+    // SAFETY: the memfd was just created and is handed over whole.
+    let dmabuf =
+        unsafe { OwnedDmaBuf::from_raw(fd, PADDED_STRIDE, PLANE_OFFSET) }.with_plane_layout(layout);
+
+    let (mut sink, mut source) = connected_pair(SocketType::Path, "dmabuf-decoded");
+    sink.configure_pipeline(&caps).expect("the sink binds");
+    let (_, received) = tokio::time::timeout(RUN_DEADLINE, async {
+        tokio::join!(
+            feed(&mut sink, &caps, vec![dmabuf_frame(dmabuf, 0)]),
+            receive(&mut source)
+        )
+    })
+    .await
+    .expect("the loopback finishes");
+    let (_, count, out) = received.expect("the source runs");
+
+    assert_eq!(count, 1);
+    let MemoryDomain::DmaBuf(dmabuf) = &out.frames()[0].domain else {
+        panic!("the frame is not a dma-buf");
+    };
+    let received_layout = dmabuf.plane_layout().expect("a plane layout");
+    let map = DmaBufReadMap::read(dmabuf).expect("map the received fd");
+    let received_picture: Vec<u8> = nv12_rows(received_layout)
+        .into_iter()
+        .flat_map(|range| map.from_fd_start()[range].to_vec())
+        .collect();
+    assert_eq!(received_picture, picture);
+}
+
 fn signalled_fence() -> SyncFile {
     // an eventfd created at 1 stands in for a sync_file whose GPU work finished
     // SAFETY: eventfd takes no pointers and returns a fresh descriptor or -1.
@@ -528,6 +617,83 @@ async fn the_sink_holds_a_buffer_until_the_client_releases_it() {
         1,
         "a dropped client releases what it held"
     );
+}
+
+#[tokio::test]
+async fn a_release_frees_a_dmabuf_while_no_frame_arrives() {
+    let socket = unique_path("idle_release");
+    let caps = rgba_caps(WIDTH, HEIGHT);
+    let mut sink = UnixFdSink::new(socket.display().to_string());
+    sink.configure_pipeline(&caps).expect("the sink binds");
+    let client = UnixStream::connect(&socket).expect("connect");
+    let dmabuf = padded_dmabuf(0);
+    let watch = dmabuf.clone();
+    sink.process(dmabuf_frame(dmabuf, 0), &mut CollectSink::default())
+        .await
+        .expect("send the frame");
+    let (command, _, _) = read_message(&client);
+    assert_eq!(command, COMMAND_CAPS);
+    let (_, payload, _) = read_message(&client);
+    let buffer = NewBuffer::decode(&payload).expect("a well-formed buffer");
+    write_message(
+        &client,
+        COMMAND_RELEASE_BUFFER,
+        &release_payload(buffer.id),
+        &[],
+    );
+
+    // a decoder in front of the sink sends nothing more until this buffer comes back
+    let started = std::time::Instant::now();
+    while watch.share_count() > 1 {
+        assert!(
+            started.elapsed() < RUN_DEADLINE,
+            "the release never freed the frame"
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
+#[tokio::test]
+async fn the_source_releases_a_dropped_dmabuf_while_no_command_arrives() {
+    let caps = rgba_caps(WIDTH, HEIGHT);
+    let (mut sink, mut source) = connected_pair(SocketType::Path, "late_drop");
+    sink.configure_pipeline(&caps).expect("the sink binds");
+    let dmabuf = padded_dmabuf(0);
+    let watch = dmabuf.clone();
+    let (sender, mut packets) = tokio::sync::mpsc::unbounded_channel();
+    let mut downstream = ChannelOutput(sender);
+    let script = async {
+        let mut unused = CollectSink::default();
+        sink.process(dmabuf_frame(dmabuf, 0), &mut unused)
+            .await
+            .expect("send the frame");
+        let frame = loop {
+            match packets.recv().await.expect("the source runs") {
+                PipelinePacket::DataFrame(frame) => break frame,
+                _ => continue,
+            }
+        };
+        // the source has read the whole command, so only the drop below gives it work
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(frame);
+        let started = std::time::Instant::now();
+        while watch.share_count() > 1 {
+            assert!(
+                started.elapsed() < RUN_DEADLINE,
+                "the source never released the frame"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        sink.process(PipelinePacket::Eos, &mut unused)
+            .await
+            .expect("eos");
+    };
+    let (received, ()) = tokio::time::timeout(RUN_DEADLINE * 2, async {
+        tokio::join!(receive_into(&mut source, &mut downstream), script)
+    })
+    .await
+    .expect("the loopback finishes");
+    received.expect("the source runs");
 }
 
 fn read_new_buffer(stream: &UnixStream) -> (NewBuffer, std::fs::File) {
@@ -1129,8 +1295,19 @@ async fn unixfdsrc_reads_gst_unixfdsink() {
         .expect("the source runs");
     wait_for_gst(peer);
 
-    let progressive = rgba_caps_interlaced(GST_WIDTH, GST_HEIGHT, Interlace::Progressive);
-    assert_eq!(caps, progressive, "gst names its interlace mode");
+    let gst_caps = Caps::RawVideo {
+        format: RawVideoFormat::Rgba8,
+        width: Dim::Fixed(GST_WIDTH),
+        height: Dim::Fixed(GST_HEIGHT),
+        framerate: Rate::Fixed(FRAMERATE << 16),
+        interlace: Interlace::Progressive,
+        colorimetry: Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::SQUARE,
+    };
+    assert_eq!(
+        caps, gst_caps,
+        "gst names its interlace mode and pixel aspect ratio"
+    );
     assert_eq!(count, GST_FRAMES);
     let received: Vec<u8> = out
         .frames()

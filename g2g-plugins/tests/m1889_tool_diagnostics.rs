@@ -179,3 +179,86 @@ fn inspect_into_a_closed_pipe_ends_by_sigpipe() {
     );
     assert!(output.stderr.is_empty(), "nothing printed on stderr");
 }
+
+#[cfg(all(target_os = "linux", feature = "local-dmabuf"))]
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+
+#[cfg(all(target_os = "linux", feature = "local-dmabuf"))]
+#[tokio::test]
+async fn verbose_launch_keeps_its_socket_source_connection() {
+    use g2g_core::memory::OwnedDmaBuf;
+    use g2g_core::{
+        AsyncElement, Colorimetry, Frame, FrameTiming, Interlace, MemoryDomain, PipelinePacket,
+        PixelAspect, Rate, RawVideoFormat,
+    };
+    use g2g_plugins::localdmabuf::DmaBufSink;
+    use std::os::fd::IntoRawFd;
+    use std::time::{Duration, Instant};
+
+    const FRAMES: u64 = 5;
+    const DEADLINE: Duration = Duration::from_secs(20);
+    let socket =
+        std::env::temp_dir().join(format!("g2g-m1889-verbose-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&socket);
+    let location = socket.to_str().expect("a utf-8 temp path");
+    let mut receiver = Command::new(env!("CARGO_BIN_EXE_g2g-launch"))
+        .args([
+            "-v",
+            "dmabufsrc",
+            &format!("location={location}"),
+            &format!("num-buffers={FRAMES}"),
+            "!",
+            "fakesink",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("g2g-launch runs");
+    let started = Instant::now();
+    while !socket.exists() {
+        assert!(started.elapsed() < DEADLINE, "dmabufsrc never listened");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let caps = Caps::RawVideo {
+        format: RawVideoFormat::Nv12,
+        width: Dim::Fixed(16),
+        height: Dim::Fixed(16),
+        framerate: Rate::Fixed(30 << 16),
+        interlace: Interlace::Progressive,
+        colorimetry: Colorimetry::UNKNOWN,
+        pixel_aspect: PixelAspect::Any,
+    };
+    let mut sink = DmaBufSink::new(location);
+    sink.configure_pipeline(&caps).expect("the sink configures");
+    let mut unused = collect_sink::CollectSink::default();
+    for sequence in 0..FRAMES {
+        let fd = std::fs::File::open("/dev/null")
+            .expect("open /dev/null")
+            .into_raw_fd();
+        // SAFETY: the descriptor was just opened and is handed over whole.
+        let dmabuf = unsafe { OwnedDmaBuf::from_raw(fd, 16, 0) };
+        let frame = Frame::new(
+            MemoryDomain::DmaBuf(dmabuf),
+            FrameTiming::default(),
+            sequence,
+        );
+        sink.process(PipelinePacket::DataFrame(frame), &mut unused)
+            .await
+            .expect("the receiver keeps the connection");
+    }
+
+    while receiver.try_wait().expect("poll g2g-launch").is_none() {
+        if started.elapsed() > DEADLINE {
+            let _ = receiver.kill();
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let output = receiver.wait_with_output().expect("g2g-launch exits");
+    let _ = std::fs::remove_file(&socket);
+    let stderr = stderr_of(&output);
+    assert!(output.status.success(), "{stderr}");
+    assert!(stderr.contains("negotiated links (1)"), "{stderr}");
+}

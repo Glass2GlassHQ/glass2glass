@@ -1162,7 +1162,13 @@ pub use webrtc_util::fuzz_parse as stun_fuzz_parse;
 // `ice-transport-policy` on the elements whose signalling server hands out TURN.
 #[cfg(any(feature = "webrtc-livekit", feature = "webrtc-kvs"))]
 pub use webrtc_util::IceTransportPolicy;
-#[cfg(any(feature = "webrtc", feature = "http-server", feature = "webtransport"))]
+#[cfg(any(
+    feature = "webrtc",
+    feature = "http-server",
+    feature = "webtransport",
+    all(target_os = "linux", feature = "unixfd"),
+    all(target_os = "linux", feature = "local-dmabuf")
+))]
 mod abortondrop;
 #[cfg(any(feature = "webrtc", feature = "http-server"))]
 pub(crate) mod httprequest;
@@ -2104,8 +2110,7 @@ pub mod unixfdwire;
 
 // DmaBufSink / DmaBufSrc (M557): the vendor-neutral analog of LocalCudaSink/Src,
 // carrying a MemoryDomain::DmaBuf frame to a same-machine peer over a Unix socket
-// by passing the dma-buf fd as SCM_RIGHTS ancillary data (kernel-refcounted, so
-// no per-frame ack). Linux only.
+// by passing the dma-buf fd as SCM_RIGHTS ancillary data. Linux only.
 #[cfg(all(target_os = "linux", feature = "local-dmabuf"))]
 pub mod localdmabuf;
 

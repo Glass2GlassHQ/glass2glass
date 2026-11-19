@@ -366,11 +366,6 @@ libraries installed.
 - **V4L2 mem2mem decode and encode**, the hardware codec path on Raspberry Pi
   and most ARM SoCs: stateful decode and encode (gst `v4l2h264dec`,
   `v4l2h264enc`), stateless H.265, VP8 and encode.
-- **Dma-buf plane layouts across processes:** `localdmabufsink` and `unixfdsink`
-  send only plane 0's stride and offset, and `hipupload`'s CPU path ignores the
-  layout, so a `v4l2slh264dec` frame read through them takes its chroma 8 rows
-  early at 1080p. Carry `OwnedDmaBuf::plane_layout` through both wires and the
-  CPU path.
 - Run `vaav1enc` on a GPU with VA-API AV1 encode (AMD RDNA3, Intel Arc).
 - **Pure-Rust / wasm decode** to drop the ffmpeg FFI: VP8 / VP9 decode and a
   pure-Rust Opus path (see the roadmap for why both are blocked).

@@ -28,7 +28,7 @@ use crate::hip::{
     HipEvent, HipExternalBuffer, HipMemoryPool, HipPinnedMemory, HipStream,
 };
 use crate::hipdeviceid::{HipDeviceChoice, HIP_DEVICE_ID_PROP, HIP_VENDOR_PROP};
-use crate::paddedrows::{dmabuf_plane_layout, single_stride_layout};
+use crate::paddedrows::dmabuf_plane_layout;
 use crate::pixel::RawVideoGeometry;
 
 type PinnedFrames = crate::pinnedframes::PinnedFrames<HipPinnedMemory>;
@@ -200,11 +200,9 @@ fn upload_dmabuf(
         }
     }
     let map = DmaBufReadMap::read(dmabuf)?;
-    let (layout, size) = single_stride_layout(format, width, height, 0, dmabuf.stride)
-        .ok_or(G2gError::CapsMismatch)?;
     let bytes = usize::try_from(size)
         .ok()
-        .and_then(|size| map.as_slice().get(..size))
+        .and_then(|size| map.from_fd_start().get(..size))
         .ok_or(G2gError::CapsMismatch)?;
     Ok(upload(gpu, frames, bytes)?.with_plane_layout(layout))
 }

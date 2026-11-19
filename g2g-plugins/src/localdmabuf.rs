@@ -10,17 +10,15 @@
 //! machine* with no copy, by passing the frame's dma-buf file descriptor over the
 //! socket as `SCM_RIGHTS` ancillary data (see [`crate::scmfd`]).
 //!
-//! # Why this is simpler than the CUDA path
+//! # Buffer lifetime
 //!
-//! A CUDA IPC handle is plain bytes but the exporting *allocation* must stay live
-//! until the importer maps it, so [`LocalCudaSink`](crate::localcuda) needs a
-//! per-frame ack (or a keep-alive handshake) to couple the two processes'
-//! lifetimes. A dma-buf is different: `SCM_RIGHTS` makes the kernel install a
-//! *dup* of the fd in the receiver, and the underlying buffer is refcounted
-//! across both fds. So once the sink's `sendmsg` returns, the receiver's dup
-//! already keeps the buffer alive; the sink may drop its frame (closing its fd)
-//! immediately, and no ack is required for correctness. Backpressure is still
-//! provided by the graph's bounded channel upstream of the sink.
+//! `SCM_RIGHTS` makes the kernel install a *dup* of the fd in the receiver, and
+//! the underlying memory is refcounted across both fds, so it outlives the
+//! sink's frame. A pooled producer (a V4L2 decoder, a capture device) still
+//! rewrites the buffer once the frame drops in its own process, so the sink keeps
+//! one share of every frame it sent until the source answers with a RELEASE
+//! record, sent when downstream drops the frame. Backpressure is still provided
+//! by the graph's bounded channel upstream of the sink.
 //!
 //! # Contract
 //!
@@ -37,17 +35,20 @@ use core::pin::Pin;
 
 use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixListener as StdUnixListener;
+use std::sync::{Mutex, PoisonError};
 
 use tokio::io::Interest;
 use tokio::net::UnixStream;
 
 use g2g_core::clock::ClockSync;
 use g2g_core::log::io_err;
-use g2g_core::memory::{MemoryDomain, MemoryDomainKind, OwnedDmaBuf, SyncFd};
+use g2g_core::memory::{DmaBufReleaseWaker, MemoryDomain, MemoryDomainKind, OwnedDmaBuf, SyncFd};
+use g2g_core::meta::{Plane, PlaneLayout, MAX_PLANES};
 use g2g_core::pad_template::{PadTemplate, PadTemplates};
 use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
@@ -74,6 +75,7 @@ const SRC_PROPS: &[PropertySpec] = &[
     .with_range("-1", "9223372036854775807"),
 ];
 
+use crate::abortondrop::AbortOnDrop;
 use crate::arrivalstamp::SenderTimelineShift;
 use crate::scmfd;
 
@@ -90,16 +92,23 @@ const TAG_EOS: u8 = 2;
 /// Carries the stream's exported timeline-semaphore fd (as ancillary data) once,
 /// before the first synced frame. See the sync notes on [`DmaBufSink`].
 const TAG_SYNC: u8 = 3;
+// source to sink: downstream dropped the frame record at position `sequence`, counted from zero
+const TAG_RELEASE: u8 = 4;
 
 /// Fixed record length: tag + format + geometry + sequence + timing + keyframe +
-/// sync value.
+/// sync value + plane layout.
 const RECORD_LEN: usize = 1  // tag
     + 1                      // format (raw_format_to_u8)
     + 4 * 4                  // width, height, stride, offset
     + 8                      // sequence
     + 8 * 5                  // timing: pts, dts, dur, capture, arrival
     + 1                      // keyframe
-    + 8; // sync_value (timeline value to wait on; 0 = frame carries no sync)
+    + 8                      // sync_value (timeline value to wait on; 0 = frame carries no sync)
+    + 1                      // plane count (0 = the dma-buf carries no plane layout)
+    + MAX_PLANES * PLANE_BYTES; // each plane's offset and stride
+const PLANE_COUNT_AT: usize = 75;
+const PLANES_AT: usize = PLANE_COUNT_AT + 1;
+const PLANE_BYTES: usize = 8 * 2;
 
 /// The per-frame descriptor (everything except the fd, which travels as
 /// ancillary data). For a CAPS record only tag/format/width/height are read; for
@@ -117,6 +126,7 @@ struct Record {
     /// Timeline value the consumer must host-wait before reading this frame's
     /// buffer (0 = no GPU sync; the producer synchronised itself).
     sync_value: u64,
+    plane_layout: Option<PlaneLayout>,
 }
 
 impl Record {
@@ -131,6 +141,7 @@ impl Record {
             sequence: 0,
             timing: FrameTiming::default(),
             sync_value: 0,
+            plane_layout: None,
         }
     }
 
@@ -150,13 +161,40 @@ impl Record {
         b[58..66].copy_from_slice(&self.timing.arrival_ns.to_le_bytes());
         b[66] = self.timing.keyframe as u8;
         b[67..75].copy_from_slice(&self.sync_value.to_le_bytes());
+        if let Some(layout) = &self.plane_layout {
+            b[PLANE_COUNT_AT] = layout.count() as u8;
+            for (index, plane) in (0..layout.count())
+                .filter_map(|index| layout.plane(index))
+                .enumerate()
+            {
+                let at = PLANES_AT + index * PLANE_BYTES;
+                b[at..at + 8].copy_from_slice(&(plane.offset as u64).to_le_bytes());
+                b[at + 8..at + 16].copy_from_slice(&(plane.stride as u64).to_le_bytes());
+            }
+        }
         b
     }
 
-    fn decode(b: &[u8; RECORD_LEN]) -> Self {
+    fn decode(b: &[u8; RECORD_LEN]) -> Option<Self> {
         let u32_at = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
         let u64_at = |o: usize| u64::from_le_bytes(b[o..o + 8].try_into().unwrap());
-        Self {
+        let plane_layout = match usize::from(b[PLANE_COUNT_AT]) {
+            0 => None,
+            count if count > MAX_PLANES => return None,
+            count => {
+                let planes = (0..count)
+                    .map(|index| {
+                        let at = PLANES_AT + index * PLANE_BYTES;
+                        Some(Plane {
+                            offset: usize::try_from(u64_at(at)).ok()?,
+                            stride: usize::try_from(u64_at(at + 8)).ok()?,
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Some(PlaneLayout::new(&planes)?)
+            }
+        };
+        Some(Self {
             tag: b[0],
             format: b[1],
             width: u32_at(2),
@@ -174,7 +212,8 @@ impl Record {
                 ..FrameTiming::default()
             },
             sync_value: u64_at(67),
-        }
+            plane_layout,
+        })
     }
 }
 
@@ -233,7 +272,27 @@ async fn recv_record(sock: &UnixStream) -> Result<Option<(Record, Option<i32>)>,
         }
         got += n;
     }
-    Ok(Some((Record::decode(&buf), fd)))
+    let Some(record) = Record::decode(&buf) else {
+        if let Some(fd) = fd {
+            close_fd(fd);
+        }
+        return Err(G2gError::Hardware(HardwareError::Other));
+    };
+    Ok(Some((record, fd)))
+}
+
+async fn apply_releases(socket: Arc<UnixStream>, lent: Arc<Mutex<Vec<(u64, OwnedDmaBuf)>>>) {
+    while let Ok(Some((record, fd))) = recv_record(&socket).await {
+        if let Some(fd) = fd {
+            close_fd(fd);
+        }
+        if record.tag == TAG_RELEASE {
+            lent.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .retain(|(position, _)| *position != record.sequence);
+        }
+    }
+    lent.lock().unwrap_or_else(PoisonError::into_inner).clear();
 }
 
 /// Close a received fd we will not keep (error paths). Best-effort.
@@ -309,7 +368,10 @@ fn dims_of(caps: &Caps) -> Option<(RawVideoFormat, u32, u32)> {
 #[derive(Debug)]
 pub struct DmaBufSink {
     path: String,
-    socket: Option<UnixStream>,
+    socket: Option<Arc<UnixStream>>,
+    // one share of every frame the source has not released, so a pooled producer cannot reuse its buffer
+    lent: Arc<Mutex<Vec<(u64, OwnedDmaBuf)>>>,
+    releases: Option<AbortOnDrop>,
     configured_caps: Option<Caps>,
     caps_sent: bool,
     /// Whether the stream's timeline-semaphore fd has been shared (once, before the
@@ -325,6 +387,8 @@ impl DmaBufSink {
         Self {
             path: path.into(),
             socket: None,
+            lent: Arc::default(),
+            releases: None,
             configured_caps: None,
             caps_sent: false,
             sync_sent: false,
@@ -386,7 +450,11 @@ impl AsyncElement for DmaBufSink {
                 return Err(G2gError::NotConfigured);
             }
             if self.socket.is_none() {
-                self.socket = Some(UnixStream::connect(&self.path).await.map_err(io_err)?);
+                let socket = Arc::new(UnixStream::connect(&self.path).await.map_err(io_err)?);
+                let releases =
+                    tokio::spawn(apply_releases(Arc::clone(&socket), Arc::clone(&self.lent)));
+                self.releases = Some(AbortOnDrop(releases));
+                self.socket = Some(socket);
             }
             // Announce format + dims once so the receiver discovers its caps.
             if !self.caps_sent {
@@ -436,22 +504,22 @@ impl AsyncElement for DmaBufSink {
                         sequence: frame.sequence,
                         timing: frame.timing,
                         sync_value: dmabuf.sync_value().unwrap_or(0),
+                        plane_layout: dmabuf.plane_layout().copied(),
                     };
                     let fd = dmabuf.as_raw();
+                    // a pooled producer such as a V4L2 decoder rewrites the buffer once every share in this process drops
+                    self.lent
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push((self.sent, dmabuf.clone()));
                     let sock = self.socket.as_ref().unwrap();
-                    // The kernel dups our fd into the receiver during this send, so
-                    // once it returns the buffer stays alive on the receiver's dup;
-                    // `frame` may drop (closing our fd) immediately, no ack needed.
                     send_record(sock, &rec, Some(fd)).await?;
                     self.sent += 1;
                 }
                 PipelinePacket::Eos => {
-                    if let Some(sock) = self.socket.as_ref() {
-                        let _ = send_record(sock, &Record::zeroed(TAG_EOS), None).await;
-                    }
-                    if let Some(mut sock) = self.socket.take() {
-                        use tokio::io::AsyncWriteExt;
-                        let _ = sock.shutdown().await;
+                    // the release task keeps the socket open until the source closes it
+                    if let Some(sock) = self.socket.take() {
+                        let _ = send_record(&sock, &Record::zeroed(TAG_EOS), None).await;
                     }
                 }
                 PipelinePacket::CapsChanged(_)
@@ -661,8 +729,36 @@ impl SourceLoop for DmaBufSrc {
             // and shared (refcounted) into every synced frame; a sem-aware consumer
             // (`DmaBufToWgpu`) host-waits each frame's value before reading.
             let mut sync: Option<SyncFd> = None;
+            let release_waker = Arc::new(DmaBufReleaseWaker::default());
+            // one share of every frame downstream still holds, by its position in the stream
+            let mut lent: Vec<(u64, OwnedDmaBuf)> = Vec::new();
+            let mut frames_received = 0u64;
+            // a dropped `recv_record` loses the part of a record it already read
+            let mut receiving = Box::pin(recv_record(&sock));
             loop {
-                let (rec, fd) = match recv_record(&sock).await? {
+                let received = core::future::poll_fn(|cx| {
+                    release_waker.register(cx.waker());
+                    if let Some(index) = lent.iter().position(|(_, lent)| lent.share_count() == 1) {
+                        return core::task::Poll::Ready(Err(index));
+                    }
+                    receiving.as_mut().poll(cx).map(Ok)
+                })
+                .await;
+                let received = match received {
+                    Err(index) => {
+                        let (position, _) = lent.swap_remove(index);
+                        let mut release = Record::zeroed(TAG_RELEASE);
+                        release.sequence = position;
+                        // a sink that exited after its EOS record still has that record waiting to be read
+                        let _ = send_record(&sock, &release, None).await;
+                        continue;
+                    }
+                    Ok(received) => {
+                        receiving = Box::pin(recv_record(&sock));
+                        received
+                    }
+                };
+                let (rec, fd) = match received? {
                     Some(m) => m,
                     None => {
                         out.push(PipelinePacket::Eos).await?;
@@ -696,6 +792,9 @@ impl SourceLoop for DmaBufSrc {
                         // on drop.
                         let mut dmabuf =
                             unsafe { OwnedDmaBuf::from_raw(fd, rec.stride, rec.offset) };
+                        if let Some(layout) = rec.plane_layout {
+                            dmabuf = dmabuf.with_plane_layout(layout);
+                        }
                         // Re-attach the shared stream semaphore + this frame's value
                         // so the GPU consumer waits before reading.
                         if rec.sync_value != 0 {
@@ -703,6 +802,9 @@ impl SourceLoop for DmaBufSrc {
                                 dmabuf = dmabuf.with_sync(s.clone(), rec.sync_value);
                             }
                         }
+                        let dmabuf = dmabuf.with_release_waker(Arc::clone(&release_waker));
+                        lent.push((frames_received, dmabuf.clone()));
+                        frames_received += 1;
                         out.push(PipelinePacket::DataFrame(Frame {
                             domain: MemoryDomain::DmaBuf(dmabuf),
                             timing: timeline.apply(rec.timing),
@@ -752,9 +854,195 @@ mod tests {
                 ..FrameTiming::default()
             },
             sync_value: 7,
+            plane_layout: None,
         };
         let bytes = rec.encode();
         assert_eq!(bytes.len(), RECORD_LEN);
-        assert_eq!(Record::decode(&bytes), rec);
+        assert_eq!(Record::decode(&bytes), Some(rec));
+    }
+
+    #[test]
+    fn a_plane_count_past_the_record_fails_to_decode() {
+        let mut bytes = Record::zeroed(TAG_FRAME).encode();
+        bytes[PLANE_COUNT_AT] = u8::MAX;
+        assert_eq!(Record::decode(&bytes), None);
+    }
+
+    fn null_dmabuf(stride: u32) -> OwnedDmaBuf {
+        let fd = std::os::fd::IntoRawFd::into_raw_fd(std::fs::File::open("/dev/null").unwrap());
+        // SAFETY: the descriptor was just opened and is handed over whole.
+        unsafe { OwnedDmaBuf::from_raw(fd, stride, 0) }
+    }
+
+    fn dmabuf_frame(dmabuf: OwnedDmaBuf) -> PipelinePacket {
+        PipelinePacket::DataFrame(Frame {
+            domain: MemoryDomain::DmaBuf(dmabuf),
+            timing: FrameTiming::default(),
+            sequence: 0,
+            meta: Default::default(),
+        })
+    }
+
+    // a sink connected to a configured source, `first` sent along with the caps
+    async fn connected_pair(
+        name: &str,
+        caps: &Caps,
+        first: OwnedDmaBuf,
+    ) -> (DmaBufSink, DmaBufSrc) {
+        let path = std::env::temp_dir().join(alloc::format!(
+            "g2g-localdmabuf-{name}-{}.sock",
+            std::process::id()
+        ));
+        let path = path.to_str().unwrap();
+        let mut source = DmaBufSrc::new(path);
+        let _ = std::fs::remove_file(path);
+        source.listener = Some(StdUnixListener::bind(path).unwrap());
+        let mut sink = DmaBufSink::new(path);
+        sink.configure_pipeline(caps).unwrap();
+        let mut unused = crate::testutil::CollectSink::default();
+        let (discovered, sent) = tokio::join!(
+            source.intercept_caps(),
+            sink.process(dmabuf_frame(first), &mut unused)
+        );
+        discovered.unwrap();
+        sent.unwrap();
+        source.configure_pipeline(caps).unwrap();
+        let _ = std::fs::remove_file(path);
+        (sink, source)
+    }
+
+    #[tokio::test]
+    async fn a_dmabuf_arrives_with_the_plane_layout_it_was_sent_with() {
+        let (width, height) = (16, 8);
+        let decoded_rows = 16;
+        let stride = 32;
+        // chroma follows the decoded rows, past where plane 0's stride and the visible height put it
+        let layout = PlaneLayout::new(&[
+            Plane { offset: 0, stride },
+            Plane {
+                offset: stride * decoded_rows,
+                stride,
+            },
+        ])
+        .unwrap();
+        let caps = caps_of(RawVideoFormat::Nv12, width, height);
+        let dmabuf = null_dmabuf(stride as u32).with_plane_layout(layout);
+        let (_sink, source) = connected_pair("layout", &caps, dmabuf).await;
+        let mut received = crate::testutil::CollectSink::default();
+        source.with_frame_limit(1).run(&mut received).await.unwrap();
+
+        let Some(PipelinePacket::DataFrame(frame)) = received
+            .packets
+            .into_iter()
+            .find(|packet| matches!(packet, PipelinePacket::DataFrame(_)))
+        else {
+            panic!("no frame arrived");
+        };
+        let MemoryDomain::DmaBuf(dmabuf) = frame.domain else {
+            panic!("the frame is not a dma-buf");
+        };
+        assert_eq!(dmabuf.plane_layout(), Some(&layout));
+    }
+
+    struct DroppingSink;
+
+    impl OutputSink for DroppingSink {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<g2g_core::PushOutcome, G2gError>> {
+            drop(packet_slot.take());
+            core::task::Poll::Ready(Ok(g2g_core::PushOutcome::Accepted))
+        }
+    }
+
+    #[tokio::test]
+    async fn the_source_ends_at_eos_from_a_sink_that_already_exited() {
+        let caps = caps_of(RawVideoFormat::Nv12, 16, 8);
+        let path = std::env::temp_dir().join(alloc::format!(
+            "g2g-localdmabuf-exited-{}.sock",
+            std::process::id()
+        ));
+        let path = path.to_str().unwrap();
+        let mut source = DmaBufSrc::new(path);
+        let _ = std::fs::remove_file(path);
+        source.listener = Some(StdUnixListener::bind(path).unwrap());
+        let peer = UnixStream::connect(path).await.unwrap();
+        let mut announce = Record::zeroed(TAG_CAPS);
+        announce.format = raw_format_to_u8(RawVideoFormat::Nv12);
+        (announce.width, announce.height) = (16, 8);
+        send_record(&peer, &announce, None).await.unwrap();
+        let frame = null_dmabuf(16);
+        let mut record = Record::zeroed(TAG_FRAME);
+        record.stride = 16;
+        send_record(&peer, &record, Some(frame.as_raw()))
+            .await
+            .unwrap();
+        send_record(&peer, &Record::zeroed(TAG_EOS), None)
+            .await
+            .unwrap();
+        drop(peer);
+        drop(frame);
+
+        source.intercept_caps().await.unwrap();
+        source.configure_pipeline(&caps).unwrap();
+        let _ = std::fs::remove_file(path);
+        let emitted = source.run(&mut DroppingSink).await;
+        assert_eq!(emitted.ok(), Some(1));
+    }
+
+    struct ChannelSink(tokio::sync::mpsc::UnboundedSender<PipelinePacket>);
+
+    impl OutputSink for ChannelSink {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<g2g_core::PushOutcome, G2gError>> {
+            let packet = packet_slot.take().expect("poll_push without a packet");
+            let _ = self.0.send(packet);
+            core::task::Poll::Ready(Ok(g2g_core::PushOutcome::Accepted))
+        }
+    }
+
+    #[tokio::test]
+    async fn the_sink_keeps_a_frame_until_downstream_of_the_source_drops_it() {
+        const DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
+        let caps = caps_of(RawVideoFormat::Nv12, 16, 8);
+        let dmabuf = null_dmabuf(16);
+        let watch = dmabuf.clone();
+        let (mut sink, mut source) = connected_pair("release", &caps, dmabuf).await;
+        let (sender, mut packets) = tokio::sync::mpsc::unbounded_channel();
+        let mut downstream = ChannelSink(sender);
+        let script = async {
+            let frame = loop {
+                match packets.recv().await.expect("the source runs") {
+                    PipelinePacket::DataFrame(frame) => break frame,
+                    _ => continue,
+                }
+            };
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            assert_eq!(
+                watch.share_count(),
+                2,
+                "the sink keeps the frame downstream holds"
+            );
+            drop(frame);
+            let started = std::time::Instant::now();
+            while watch.share_count() > 1 {
+                assert!(
+                    started.elapsed() < DEADLINE,
+                    "the release never reached the sink"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            let mut unused = crate::testutil::CollectSink::default();
+            sink.process(PipelinePacket::Eos, &mut unused)
+                .await
+                .unwrap();
+        };
+        let (ran, ()) = tokio::join!(source.run(&mut downstream), script);
+        ran.unwrap();
     }
 }

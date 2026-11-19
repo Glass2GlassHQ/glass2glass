@@ -66,9 +66,10 @@ use g2g_core::{
     PropValue, PropertySpec, RawVideoFormat,
 };
 
+use crate::abortondrop::AbortOnDrop;
 use crate::capsfilter::{dmabuf_gst_caps, normalize_gst_caps, parse_caps, read_memory_feature};
 use crate::dmabufmap::DmaBufReadMap;
-use crate::paddedrows::{padded_planes, PaddedPlane};
+use crate::paddedrows::{dmabuf_plane_layout, padded_planes, PaddedPlane};
 use crate::pixel::pack_planes;
 use crate::unixfdwire::{
     caps_payload, decode_caps, decode_release, from_wire_time, gst_video_format, monotonic_offset,
@@ -231,6 +232,12 @@ fn padded_offsets_and_strides(planes: Vec<PaddedPlane>) -> impl Iterator<Item = 
     planes.into_iter().map(|plane| (plane.offset, plane.stride))
 }
 
+fn layout_offsets_and_strides(layout: &PlaneLayout) -> impl Iterator<Item = (usize, usize)> + '_ {
+    (0..layout.count())
+        .filter_map(|index| layout.plane(index))
+        .map(|plane| (plane.offset, plane.stride))
+}
+
 /// What keeps a sent buffer's memory alive until every client releases it.
 #[derive(Debug, Clone)]
 enum SentMemory {
@@ -238,32 +245,58 @@ enum SentMemory {
     Memfd { memfd: Arc<Memfd> },
 }
 
-#[derive(Debug)]
-struct Client {
-    stream: Socket,
+#[derive(Debug, Default)]
+struct Holds {
     received: Vec<u8>,
-    sent_caps: Option<String>,
     held: Vec<(u64, SentMemory)>,
     // every buffer up to this id is released or forgotten
     forgotten_through: Option<u64>,
+    // the client closed, errored, named a buffer it does not hold, or sent a command only a sink sends
+    finished: bool,
+}
+
+impl Holds {
+    fn finish(&mut self) {
+        self.finished = true;
+        self.held.clear();
+    }
+}
+
+#[derive(Debug)]
+struct Client {
+    stream: Arc<Socket>,
+    sent_caps: Option<String>,
+    holds: Arc<Mutex<Holds>>,
+    _releases: AbortOnDrop,
 }
 
 impl Client {
     fn new(stream: Socket) -> Self {
+        let stream = Arc::new(stream);
+        let holds = Arc::new(Mutex::new(Holds::default()));
+        let releases = tokio::spawn(apply_releases(Arc::clone(&stream), Arc::clone(&holds)));
         Self {
             stream,
-            received: Vec::new(),
             sent_caps: None,
-            held: Vec::new(),
-            forgotten_through: None,
+            holds,
+            _releases: AbortOnDrop(releases),
         }
+    }
+
+    fn finished(&self) -> bool {
+        self.holds
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .finished
     }
 
     // returns the memfd forgotten past MAX_HELD_MEMFDS, whose bytes the client's own fd keeps
     fn hold(&mut self, id: u64, memory: &SentMemory) -> Option<Arc<Memfd>> {
-        self.held.push((id, memory.clone()));
+        let mut holds = self.holds.lock().unwrap_or_else(PoisonError::into_inner);
+        holds.held.push((id, memory.clone()));
         let held_memfds = || {
-            self.held
+            holds
+                .held
                 .iter()
                 .enumerate()
                 .filter_map(|(index, (held_id, held))| match held {
@@ -276,8 +309,8 @@ impl Client {
         }
         let (index, oldest_id, oldest) = held_memfds().min_by_key(|(_, held_id, _)| *held_id)?;
         let oldest = Arc::clone(oldest);
-        self.held.swap_remove(index);
-        self.forgotten_through = Some(oldest_id);
+        holds.held.swap_remove(index);
+        holds.forgotten_through = Some(oldest_id);
         Some(oldest)
     }
 
@@ -292,40 +325,65 @@ impl Client {
         self.sent_caps = Some(caps.to_string());
         Ok(())
     }
+}
 
-    /// Apply every release waiting on the socket. `false` means this client is
-    /// finished with: it closed, errored, named a buffer it does not hold, or
-    /// sent a command only a sink sends.
-    fn read_releases(&mut self) -> bool {
+async fn apply_releases(stream: Arc<Socket>, holds: Arc<Mutex<Holds>>) {
+    loop {
+        let Ok(mut ready) = stream.readable().await else {
+            holds
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .finish();
+            return;
+        };
+        if ready
+            .try_io(|stream| apply_waiting_releases(stream.get_ref(), &holds))
+            .is_ok()
+        {
+            return;
+        }
+    }
+}
+
+// `WouldBlock` while the client is open, `Ok` once it is finished and has let go of every buffer
+fn apply_waiting_releases(stream: &UnixStream, holds: &Mutex<Holds>) -> std::io::Result<()> {
+    let mut holds = holds.lock().unwrap_or_else(PoisonError::into_inner);
+    let read = read_releases(stream, &mut holds);
+    if !matches!(&read, Err(error) if error.kind() == ErrorKind::WouldBlock) {
+        holds.finish();
+    }
+    read
+}
+
+fn read_releases(mut stream: &UnixStream, holds: &mut Holds) -> std::io::Result<()> {
+    loop {
+        let mut chunk = [0u8; CLIENT_READ_CHUNK];
+        let filled = match stream.read(&mut chunk) {
+            Ok(0) => return Ok(()),
+            Ok(filled) => filled,
+            Err(error) if error.kind() == ErrorKind::WouldBlock => return Err(error),
+            Err(_) => return Ok(()),
+        };
+        holds.received.extend_from_slice(&chunk[..filled]);
         loop {
-            let mut chunk = [0u8; CLIENT_READ_CHUNK];
-            let filled = match self.stream.get_ref().read(&mut chunk) {
-                Ok(0) => return false,
-                Ok(filled) => filled,
-                Err(error) if error.kind() == ErrorKind::WouldBlock => return true,
-                Err(_) => return false,
-            };
-            self.received.extend_from_slice(&chunk[..filled]);
-            loop {
-                match take_command(&mut self.received) {
-                    Err(_) => return false,
-                    Ok(None) => break,
-                    Ok(Some((COMMAND_RELEASE_BUFFER, payload))) => {
-                        let Some(id) = decode_release(&payload) else {
-                            return false;
-                        };
-                        let held = self.held.iter().position(|(held, _)| *held == id);
-                        let forgotten = self.forgotten_through.is_some_and(|through| id <= through);
-                        match (held, forgotten) {
-                            (Some(index), _) => drop(self.held.swap_remove(index)),
-                            (None, true) => {}
-                            (None, false) => return false,
-                        }
+            match take_command(&mut holds.received) {
+                Err(_) => return Ok(()),
+                Ok(None) => break,
+                Ok(Some((COMMAND_RELEASE_BUFFER, payload))) => {
+                    let Some(id) = decode_release(&payload) else {
+                        return Ok(());
+                    };
+                    let held = holds.held.iter().position(|(held, _)| *held == id);
+                    let forgotten = holds.forgotten_through.is_some_and(|through| id <= through);
+                    match (held, forgotten) {
+                        (Some(index), _) => drop(holds.held.swap_remove(index)),
+                        (None, true) => {}
+                        (None, false) => return Ok(()),
                     }
-                    Ok(Some((COMMAND_NEW_BUFFER | COMMAND_CAPS, _))) => return false,
-                    // gst ignores a command it does not know, the protocol may grow
-                    Ok(Some(_)) => {}
                 }
+                Ok(Some((COMMAND_NEW_BUFFER | COMMAND_CAPS, _))) => return Ok(()),
+                // gst ignores a command it does not know, the protocol may grow
+                Ok(Some(_)) => {}
             }
         }
     }
@@ -346,6 +404,10 @@ async fn send_to_clients(
     let mut index = 0;
     while index < clients.len() {
         let client = &mut clients[index];
+        // apply_releases drops a hold as soon as its release arrives, which can be before the send returns
+        if let Some((id, memory)) = held {
+            forgotten_memfds.extend(client.hold(id, memory));
+        }
         let delivered = match client.send_caps_if_stale(caps).await {
             Ok(()) => send_command(&client.stream, command, payload, fds)
                 .await
@@ -355,9 +417,6 @@ async fn send_to_clients(
         if !delivered {
             clients.swap_remove(index);
             continue;
-        }
-        if let Some((id, memory)) = held {
-            forgotten_memfds.extend(client.hold(id, memory));
         }
         index += 1;
     }
@@ -502,14 +561,13 @@ impl UnixFdSink {
         }
     }
 
-    fn drain_releases(&mut self) {
-        self.clients.retain_mut(Client::read_releases);
-    }
-
-    /// Accept new clients and read what the connected ones sent back.
+    /// Accept new clients and drop the finished ones.
     async fn service_clients(&mut self) -> Result<(), G2gError> {
         self.accept_pending().await?;
-        self.drain_releases();
+        self.clients.retain(|client| {
+            let open = apply_waiting_releases(client.stream.get_ref(), &client.holds).is_err();
+            open && !client.finished()
+        });
         Ok(())
     }
 
@@ -581,15 +639,20 @@ impl UnixFdSink {
         let (memory, fd) = match &frame.domain {
             MemoryDomain::DmaBuf(dmabuf) => {
                 let fd = dmabuf.as_raw();
-                let offset = u64::from(dmabuf.offset);
-                let size = descriptor_size(fd)?
-                    .checked_sub(offset)
-                    .ok_or(G2gError::UnsupportedDomain)?;
                 buffer.memory_type = MEMORY_TYPE_DMABUF;
-                buffer.memories.push(Memory { size, offset });
+                // dmabuf_plane_layout counts plane offsets from the start of the fd
+                buffer.memories.push(Memory {
+                    size: descriptor_size(fd)?,
+                    offset: 0,
+                });
                 buffer.video_meta = geometry.and_then(|(format, width, height)| {
-                    let planes = padded_planes(format, width, height, 0, dmabuf.stride as usize)?;
-                    video_meta(format, width, height, padded_offsets_and_strides(planes))
+                    let (layout, _) = dmabuf_plane_layout(
+                        dmabuf,
+                        format,
+                        u32::try_from(width).ok()?,
+                        u32::try_from(height).ok()?,
+                    )?;
+                    video_meta(format, width, height, layout_offsets_and_strides(&layout))
                 });
                 (
                     SentMemory::DmaBuf {
@@ -610,10 +673,7 @@ impl UnixFdSink {
                 });
                 buffer.video_meta = geometry.and_then(|(format, width, height)| {
                     let planes: Vec<(usize, usize)> = match frame.meta.get::<PlaneLayout>() {
-                        Some(layout) => (0..layout.count())
-                            .filter_map(|index| layout.plane(index))
-                            .map(|plane| (plane.offset, plane.stride))
-                            .collect(),
+                        Some(layout) => layout_offsets_and_strides(layout).collect(),
                         None => {
                             padded_offsets_and_strides(padded_planes(format, width, height, 0, 0)?)
                                 .collect()
@@ -913,37 +973,49 @@ enum Rows {
     Packed(Box<[u8]>),
 }
 
-/// The plane-0 stride and offset a dma-buf frame carries, read from the
-/// `GstVideoMeta` when there is one. g2g's dma-buf layout puts the planes back
-/// to back after plane 0, so a meta describing anything else is refused.
-fn dmabuf_layout(caps: &Caps, meta: Option<&VideoMeta>) -> Result<(u32, u64), G2gError> {
-    let Some((format, width, height)) = raw_video_geometry(caps) else {
-        return Ok((0, 0));
+/// A received dma-buf, with the plane layout of its `GstVideoMeta` counted
+/// from the start of the fd when its rows are padded.
+fn received_dmabuf(
+    fd: OwnedFd,
+    caps: &Caps,
+    meta: Option<&VideoMeta>,
+    memory: &Memory,
+) -> Result<OwnedDmaBuf, G2gError> {
+    let out_of_range = || protocol_error("plane offset out of range");
+    let memory_offset = usize::try_from(memory.offset).map_err(|_| out_of_range())?;
+    let memory_size =
+        usize::try_from(memory.size).map_err(|_| protocol_error("memory size out of range"))?;
+    let Some(padded) = padded_layout(caps, meta, memory_size)? else {
+        let stride = match raw_video_geometry(caps) {
+            Some((format, width, _)) => format
+                .plane_stride(0, width as u32)
+                .ok_or(G2gError::CapsMismatch)?,
+            None => 0,
+        };
+        let offset = u32::try_from(memory_offset).map_err(|_| out_of_range())?;
+        // SAFETY: `fd` came off the socket and this process owns it alone.
+        return Ok(unsafe { OwnedDmaBuf::from_raw(fd.into_raw_fd(), stride, offset) });
     };
-    let Some(meta) = meta else {
-        let stride = format
-            .plane_stride(0, width as u32)
-            .ok_or(G2gError::CapsMismatch)?;
-        return Ok((stride, 0));
-    };
-    let first = meta
-        .planes
-        .first()
+    let planes = (0..padded.count())
+        .map(|index| {
+            let plane = padded.plane(index)?;
+            Some(Plane {
+                offset: plane.offset.checked_add(memory_offset)?,
+                stride: plane.stride,
+            })
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(out_of_range)?;
+    let layout =
+        PlaneLayout::new(&planes).ok_or_else(|| protocol_error("video meta has no planes"))?;
+    let first = layout
+        .plane(0)
         .ok_or_else(|| protocol_error("video meta has no planes"))?;
-    let stride = u32::try_from(first.stride).map_err(|_| protocol_error("negative stride"))?;
-    let first_offset =
-        usize::try_from(first.offset).map_err(|_| protocol_error("plane offset out of range"))?;
-    let expected = padded_planes(format, width, height, first_offset, stride as usize)
-        .ok_or(G2gError::CapsMismatch)?;
-    let matches = expected.len() == meta.planes.len()
-        && expected.iter().zip(&meta.planes).all(|(want, got)| {
-            u64::try_from(want.offset).is_ok_and(|offset| offset == got.offset)
-                && i32::try_from(want.stride).is_ok_and(|stride| stride == got.stride)
-        });
-    if !matches {
-        return Err(G2gError::CapsMismatch);
-    }
-    Ok((stride, first.offset))
+    let offset = u32::try_from(first.offset).map_err(|_| out_of_range())?;
+    let stride = u32::try_from(first.stride).map_err(|_| protocol_error("stride out of range"))?;
+    // SAFETY: `fd` came off the socket and this process owns it alone.
+    let dmabuf = unsafe { OwnedDmaBuf::from_raw(fd.into_raw_fd(), stride, offset) };
+    Ok(dmabuf.with_plane_layout(layout))
 }
 
 fn require_covered(fd: &OwnedFd, memory: &Memory) -> Result<(), G2gError> {
@@ -1132,14 +1204,7 @@ impl UnixFdSrc {
             };
             let fd = fds.pop().ok_or_else(missing_fd)?;
             require_covered(&fd, memory)?;
-            let (stride, plane_offset) = dmabuf_layout(caps, meta)?;
-            let offset = memory
-                .offset
-                .checked_add(plane_offset)
-                .and_then(|offset| u32::try_from(offset).ok())
-                .ok_or_else(|| protocol_error("plane offset out of range"))?;
-            // SAFETY: `fd` came off the socket and this process owns it alone.
-            let dmabuf = unsafe { OwnedDmaBuf::from_raw(fd.into_raw_fd(), stride, offset) };
+            let dmabuf = received_dmabuf(fd, caps, meta, memory)?;
             held_dmabufs.push((buffer.id, dmabuf.clone()));
             return Ok((MemoryDomain::DmaBuf(dmabuf), None));
         }
@@ -1241,8 +1306,30 @@ async fn wait_for_work(stream: &Socket, releases: &Releases, dmabufs_out: bool) 
     let mut dropped = core::pin::pin!(releases.wake.notified());
     let mut poll_period = core::pin::pin!(tokio::time::sleep(DMABUF_RELEASE_POLL));
     core::future::poll_fn(|cx| {
-        if stream.poll_read_ready(cx).is_ready() {
-            return Poll::Ready(true);
+        while let Poll::Ready(ready) = stream.poll_read_ready(cx) {
+            let Ok(mut ready) = ready else {
+                return Poll::Ready(true);
+            };
+            // tokio keeps read readiness until a read would block, so it stays set after read_command takes a whole command
+            let waiting = ready.try_io(|stream| {
+                let mut byte = 0u8;
+                // SAFETY: recv writes at most one byte into `byte`, which outlives the call.
+                let peeked = unsafe {
+                    libc::recv(
+                        stream.as_raw_fd(),
+                        (&mut byte as *mut u8).cast(),
+                        1,
+                        libc::MSG_PEEK | libc::MSG_DONTWAIT,
+                    )
+                };
+                match peeked {
+                    -1 => Err(std::io::Error::last_os_error()),
+                    _ => Ok(()),
+                }
+            });
+            if waiting.is_ok() {
+                return Poll::Ready(true);
+            }
         }
         let other_work = dropped.as_mut().poll(cx).is_ready()
             || (dmabufs_out && poll_period.as_mut().poll(cx).is_ready());

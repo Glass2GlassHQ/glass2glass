@@ -14,6 +14,7 @@ use std::sync::{Mutex, PoisonError};
 use collect_sink::CollectSink;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{GpuVendor, MemoryDomain, OwnedDmaBuf};
+use g2g_core::meta::{Plane, PlaneLayout};
 use g2g_core::runtime::block_on;
 use g2g_core::{AsyncElement, Caps, Colorimetry, Dim, Interlace, PropValue, Rate, RawVideoFormat};
 use g2g_plugins::hip::HipDevice;
@@ -24,6 +25,8 @@ use udmabuf::udmabuf_of;
 const WIDTH: usize = 64;
 const HEIGHT: usize = 48;
 const PADDED_STRIDE: usize = 128;
+// h264 decoders pad the picture to whole macroblock rows, 1088 for a 1080 picture
+const DECODED_HEIGHT: usize = HEIGHT + 16;
 const PAD_BYTE: u8 = 0xee;
 const PAGE: usize = 4096;
 // the open-fd count is process-wide, so these tests take turns
@@ -97,12 +100,16 @@ fn upload_dmabuf(upload: &mut HipUpload, dmabuf: &OwnedDmaBuf) -> Frame {
     hip
 }
 
-// the tight frame's rows at `PADDED_STRIDE` in a udmabuf, which hip does not import
-fn padded_udmabuf(tight: &[u8]) -> Option<OwnedDmaBuf> {
-    let rows = HEIGHT * 3 / 2;
+// the tight frame's rows at `PADDED_STRIDE` in a udmabuf, chroma from row `chroma_row`, which hip does not import
+fn padded_udmabuf(tight: &[u8], chroma_row: usize) -> Option<OwnedDmaBuf> {
+    let rows = chroma_row + HEIGHT / 2;
     let mut padded = vec![PAD_BYTE; (rows * PADDED_STRIDE).next_multiple_of(PAGE)];
     for (row, line) in tight.chunks(WIDTH).enumerate() {
-        padded[row * PADDED_STRIDE..][..WIDTH].copy_from_slice(line);
+        let at = match row.checked_sub(HEIGHT) {
+            Some(chroma) => chroma_row + chroma,
+            None => row,
+        };
+        padded[at * PADDED_STRIDE..][..WIDTH].copy_from_slice(line);
     }
     let mut dmabuf = udmabuf_of(&padded)?;
     dmabuf.stride = PADDED_STRIDE as u32;
@@ -115,12 +122,41 @@ fn copies_a_padded_udmabuf(vendor: GpuVendor, vendor_name: &str) {
         return;
     }
     let picture = tight_nv12(1);
-    let Some(dmabuf) = padded_udmabuf(&picture) else {
+    let Some(dmabuf) = padded_udmabuf(&picture, HEIGHT) else {
         eprintln!("skipping: /dev/udmabuf is not available");
         return;
     };
     let hip = upload_dmabuf(&mut hipupload(vendor_name), &dmabuf);
     assert!(download(&hip) == picture, "the padded rows come back tight");
+}
+
+#[test]
+fn nvidia_copies_a_dmabuf_with_chroma_after_the_decoded_rows() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+    if !device_present(GpuVendor::Nvidia) {
+        return;
+    }
+    let picture = tight_nv12(2);
+    let Some(dmabuf) = padded_udmabuf(&picture, DECODED_HEIGHT) else {
+        eprintln!("skipping: /dev/udmabuf is not available");
+        return;
+    };
+    let layout = PlaneLayout::new(&[
+        Plane {
+            offset: 0,
+            stride: PADDED_STRIDE,
+        },
+        Plane {
+            offset: DECODED_HEIGHT * PADDED_STRIDE,
+            stride: PADDED_STRIDE,
+        },
+    ])
+    .unwrap();
+    let hip = upload_dmabuf(&mut hipupload("nvidia"), &dmabuf.with_plane_layout(layout));
+    assert!(
+        download(&hip) == picture,
+        "the chroma comes from where the layout puts it"
+    );
 }
 
 #[test]

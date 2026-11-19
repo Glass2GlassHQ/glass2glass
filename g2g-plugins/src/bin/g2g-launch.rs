@@ -111,15 +111,15 @@ use std::time::{Duration, Instant};
 use g2g_core::element::BoxFuture;
 use g2g_core::runtime::{
     attach_seek, attach_seek_controller, fallback_factory, has_live_source, parse_launch,
-    parse_launch_avoiding, FlightRecorder, GraphNode, PipelineProgress, Registry, RunBuilder,
-    SeekController, SeekOutcome, SeekTicket,
+    parse_launch_avoiding, FlightRecorder, GraphNode, Observer, PipelineProgress, Registry,
+    RunBuilder, SeekController, SeekOutcome, SeekTicket,
 };
 #[cfg(any(feature = "observe", feature = "tui"))]
-use g2g_core::runtime::{run_graph_observed, run_graph_observed_recorded, Observer};
+use g2g_core::runtime::{run_graph_observed, run_graph_observed_recorded};
 #[cfg(feature = "multi-thread")]
 use g2g_core::runtime::{GraphSpawner, LocalArmFuture};
-use g2g_core::{Bus, BusMessage, Seek};
-use g2g_core::{Graph, NodeKind};
+use g2g_core::Graph;
+use g2g_core::{Bus, BusMessage, MemoryDomainKind, Seek};
 use g2g_plugins::cli_stdout::write_stdout;
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::perfetto_trace::PerfettoTrace;
@@ -837,63 +837,6 @@ fn launch() {
             (_, Some(p)) => eprintln!("script: {p}"),
             _ => eprintln!("pipeline: {pipeline}"),
         }
-        // Show each link's negotiated caps + memory domain (gst `-v` style). The
-        // solve lives in `negotiate_graph`, which consumes a graph, so negotiate a
-        // freshly-parsed throwaway copy and keep `graph` for the run. On a
-        // negotiation failure, dump the topology-only wiring and stop: the run
-        // would fail the same way and log the same ERROR block a second time.
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build tokio runtime");
-        let fresh = match build_graph(&reg, &opts, &pipeline) {
-            Ok(fresh) => fresh,
-            Err(err) => {
-                eprintln!("{err}");
-                process::exit(1);
-            }
-        };
-        match rt.block_on(g2g_core::runtime::negotiate_graph(fresh)) {
-            Ok((vg, caps, memory)) => {
-                eprintln!("negotiated links ({}):", vg.edge_count());
-                for id in 0..vg.edge_count() {
-                    let e = vg.edge(id);
-                    let caps = caps
-                        .get(id)
-                        .map_or_else(|| "?".to_string(), |c| c.to_gst_string());
-                    let mem = memory
-                        .get(id)
-                        .copied()
-                        .unwrap_or(g2g_core::MemoryDomainKind::System);
-                    eprintln!(
-                        "  [{id}] {} -> {} : {caps}  mem={mem:?} policy={:?}",
-                        node_name(vg.element(e.src.node), vg.kind(e.src.node)),
-                        node_name(vg.element(e.dst.node), vg.kind(e.dst.node)),
-                        e.policy
-                    );
-                }
-            }
-            Err(err) => {
-                eprintln!(
-                    "links ({}) [negotiation failed, topology only]:",
-                    graph.edges().len()
-                );
-                let graph_node_name = |node| {
-                    let kind = graph.node_kind(node).expect("an edge endpoint is a node");
-                    node_name(graph.element(node), kind)
-                };
-                for (i, e) in graph.edges().iter().enumerate() {
-                    eprintln!(
-                        "  [{i}] {} -> {}  policy={:?}",
-                        graph_node_name(e.src.node),
-                        graph_node_name(e.dst.node),
-                        e.policy
-                    );
-                }
-                eprintln!("pipeline error: {err:?}");
-                process::exit(1);
-            }
-        }
     }
 
     // `enable_all` (IO + time), not just time: a network source (HlsSrc, RtspSrc,
@@ -989,6 +932,8 @@ fn launch() {
         // than a second stays quiet.
         let mut printed_status = false;
         let mut failed: Option<String> = None;
+        let mut links_printed = !opts.verbose;
+        let topology = opts.verbose.then(|| topology_lines(&graph));
         // the run future borrows the spawner for the whole run
         #[cfg(feature = "multi-thread")]
         let spawner = match opts.threads {
@@ -1010,6 +955,14 @@ fn launch() {
                 g2g_plugins::placement::ProfileRun::prepare(&mut graph),
             )
         });
+        // a run takes one observer, and a profile run already has one
+        let own_observer = Observer::new();
+        #[cfg(all(target_os = "linux", feature = "placement"))]
+        let links_observer = profile
+            .as_ref()
+            .map_or(&own_observer, |(_, run)| run.observer());
+        #[cfg(not(all(target_os = "linux", feature = "placement")))]
+        let links_observer = &own_observer;
         let result = rt.block_on(async {
             let mut run_builder = RunBuilder::new(graph, &clock, LINK_CAPACITY)
                 .with_progress(&progress)
@@ -1017,6 +970,9 @@ fn launch() {
             #[cfg(all(target_os = "linux", feature = "placement"))]
             if let Some((_, run)) = &profile {
                 run_builder = run_builder.with_observer(run.observer());
+            }
+            if opts.verbose && std::ptr::eq(links_observer, &own_observer) {
+                run_builder = run_builder.with_observer(links_observer);
             }
             if let Some(controller) = &launch_seeks.seek_at_controller {
                 controller.keep_run_open();
@@ -1072,6 +1028,11 @@ fn launch() {
                     }
                 }
                 let polled = run.as_mut().poll(cx);
+                // the graph runner registers the caps once the links exist, before any frame flows
+                if !links_printed && links_observer.edge_caps(0).is_some() {
+                    print_negotiated_links(links_observer);
+                    links_printed = true;
+                }
                 if let (Poll::Pending, Some(controller)) =
                     (&polled, &launch_seeks.seek_at_controller)
                 {
@@ -1177,6 +1138,15 @@ fn launch() {
                         continue;
                     }
                 }
+                if let (Some(topology), false) = (&topology, links_printed) {
+                    eprintln!(
+                        "links ({}) [negotiation failed, topology only]:",
+                        topology.len()
+                    );
+                    for line in topology {
+                        eprintln!("{line}");
+                    }
+                }
                 eprintln!("pipeline error: {err:?}");
                 if let (Some(rec), Some(dir)) = (&recorder, &opts.record_on_error) {
                     dump_flight_recording(rec, dir);
@@ -1220,9 +1190,44 @@ fn place_on_gpus(
     }
 }
 
-// the label the DOT dump gives a node: its element's log category, or its kind for a tee
-fn node_name(element: Option<&GraphNode>, kind: NodeKind) -> &'static str {
-    element.map_or_else(|| g2g_core::dot::kind_label(kind), |e| e.log_category())
+// each link by element name and policy, for a run that fails before its links exist
+fn topology_lines(graph: &Graph<GraphNode>) -> Vec<String> {
+    let name = |node| {
+        let kind = graph.node_kind(node).expect("an edge endpoint is a node");
+        graph
+            .element(node)
+            .map_or_else(|| g2g_core::dot::kind_label(kind), |e| e.log_category())
+    };
+    graph
+        .edges()
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            format!(
+                "  [{i}] {} -> {}  policy={:?}",
+                name(e.src.node),
+                name(e.dst.node),
+                e.policy
+            )
+        })
+        .collect()
+}
+
+// gst `-v` style: each link's negotiated caps and memory domain, read off the run itself
+// because a second negotiation would take a socket source's peer connection
+fn print_negotiated_links(observer: &Observer) {
+    let snapshot = observer.snapshot();
+    eprintln!("negotiated links ({}):", snapshot.edges.len());
+    for (id, edge) in snapshot.edges.iter().enumerate() {
+        let name = |node: usize| snapshot.nodes.get(node).map_or("?", |n| n.name.as_str());
+        eprintln!(
+            "  [{id}] {} -> {} : {}  mem={:?}",
+            name(edge.from),
+            name(edge.to),
+            edge.caps.as_deref().unwrap_or("?"),
+            observer.edge_memory(id).unwrap_or(MemoryDomainKind::System)
+        );
+    }
 }
 
 fn create_trace(path: &str) -> Arc<PerfettoTrace> {

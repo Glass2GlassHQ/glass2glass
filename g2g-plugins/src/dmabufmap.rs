@@ -85,6 +85,12 @@ impl DmaBufReadMap {
         })
     }
 
+    pub fn from_fd_start(&self) -> &[u8] {
+        // SAFETY: the mapping is live for `self`'s lifetime and covers
+        // `self.length` readable bytes.
+        unsafe { core::slice::from_raw_parts(self.address as *const u8, self.length) }
+    }
+
     /// The payload: the mapping from the buffer's offset on.
     pub fn as_slice(&self) -> &[u8] {
         // SAFETY: the mapping is live for `self`'s lifetime and covers
