@@ -730,6 +730,37 @@ pub struct OwnedDmaBuf {
     sync_file: Option<SyncFile>,
     // boxed so this payload does not grow every `MemoryDomain`
     plane_layout: Option<Box<PlaneLayout>>,
+    release_waker: Option<Arc<DmaBufReleaseWaker>>,
+}
+
+#[cfg(feature = "alloc")]
+#[derive(Debug, Default)]
+pub struct DmaBufReleaseWaker {
+    waker: spin::Mutex<Option<core::task::Waker>>,
+}
+
+#[cfg(feature = "alloc")]
+impl DmaBufReleaseWaker {
+    pub fn register(&self, waker: &core::task::Waker) {
+        let mut registered = self.waker.lock();
+        if !registered
+            .as_ref()
+            .is_some_and(|current| current.will_wake(waker))
+        {
+            *registered = Some(waker.clone());
+        }
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl Drop for OwnedDmaBuf {
+    fn drop(&mut self) {
+        if let Some(release_waker) = &self.release_waker {
+            if let Some(waker) = release_waker.waker.lock().take() {
+                waker.wake();
+            }
+        }
+    }
 }
 
 /// A shared, reference-counted GPU-completion sync fd: an exported timeline
@@ -814,6 +845,7 @@ impl OwnedDmaBuf {
             sync: None,
             sync_file: None,
             plane_layout: None,
+            release_waker: None,
         }
     }
 
@@ -828,6 +860,11 @@ impl OwnedDmaBuf {
 
     pub fn plane_layout(&self) -> Option<&PlaneLayout> {
         self.plane_layout.as_deref()
+    }
+
+    pub fn with_release_waker(mut self, release_waker: Arc<DmaBufReleaseWaker>) -> Self {
+        self.release_waker = Some(release_waker);
+        self
     }
 
     /// How many shares of this buffer are alive, this one counted. A producer
@@ -1798,6 +1835,32 @@ mod tests {
         assert!(MemoryDomainKind::SystemView.is_system());
         assert!(!MemoryDomainKind::Cuda.is_system());
         assert!(!MemoryDomainKind::DmaBuf.is_system());
+    }
+
+    #[cfg(all(feature = "std", target_os = "linux"))]
+    #[test]
+    fn dropping_a_lent_dma_buf_share_wakes_the_registered_task() {
+        extern crate std;
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+        struct CountWaker(core::sync::atomic::AtomicUsize);
+        impl alloc::task::Wake for CountWaker {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let (buffer_end, _buffer_peer) = UnixStream::pair().expect("socket pair");
+        let release_waker = Arc::new(DmaBufReleaseWaker::default());
+        // SAFETY: `into_raw_fd` just released this fd, so nothing else owns it.
+        let owned = unsafe { OwnedDmaBuf::from_raw(buffer_end.into_raw_fd(), 0, 0) }
+            .with_release_waker(Arc::clone(&release_waker));
+        let lent = owned.clone();
+        let wakes = Arc::new(CountWaker(core::sync::atomic::AtomicUsize::new(0)));
+        release_waker.register(&core::task::Waker::from(Arc::clone(&wakes)));
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+        drop(lent);
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
+        assert_eq!(owned.share_count(), 1);
     }
 
     #[cfg(all(feature = "std", target_os = "linux"))]

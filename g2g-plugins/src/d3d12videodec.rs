@@ -975,9 +975,9 @@ impl H264HardwareDecoder for D3D12Backend {
         self.decoder.is_some()
     }
 
-    fn has_free_picture(&self) -> bool {
+    fn poll_free_picture(&self, _cx: &mut core::task::Context<'_>) -> core::task::Poll<()> {
         // the texture pool grows on demand
-        true
+        core::task::Poll::Ready(())
     }
 
     fn decode_access_unit(

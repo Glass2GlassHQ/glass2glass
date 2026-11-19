@@ -4,6 +4,7 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::task::{Context, Poll};
 
 use crate::decoderecovery::DecodeErrorRecovery;
 use crate::displayorder::{PictureMeta, ReorderBuffer};
@@ -12,7 +13,6 @@ use crate::h264parse::{
     h264_parameter_sets_in, sps_reorder_frames, H264Sps, H264StreamRefused, MALFORMED_SPS,
 };
 use crate::inputstamp::{InputStamp, PendingInputStamps};
-use crate::yieldnow::yield_now;
 use g2g_core::frame::Frame;
 use g2g_core::log::{ClockTime, Target};
 use g2g_core::memory::{DomainSet, MemoryDomainKind};
@@ -35,7 +35,7 @@ pub trait H264HardwareDecoder: Sized + Send + core::fmt::Debug {
     // later calls, for the SPS a keyframe repeats, leave the running session alone
     fn start_session(&mut self, sps: &H264Sps, reorder_depth: usize) -> Result<(), Self::Error>;
     fn has_session(&self) -> bool;
-    fn has_free_picture(&self) -> bool;
+    fn poll_free_picture(&self, cx: &mut Context<'_>) -> Poll<()>;
     fn decode_access_unit(
         &mut self,
         access_unit: &[u8],
@@ -190,9 +190,7 @@ impl<B: H264HardwareDecoder> H264HardwareDec<B> {
             return Ok(());
         }
         let decoder = self.decoder.as_mut().ok_or(G2gError::NotConfigured)?;
-        while !decoder.has_free_picture() {
-            yield_now().await;
-        }
+        core::future::poll_fn(|cx| decoder.poll_free_picture(cx)).await;
         let pictures = match decoder.decode_access_unit(access_unit) {
             Ok(pictures) => pictures,
             Err(error) => {

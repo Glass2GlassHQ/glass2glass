@@ -440,7 +440,7 @@ pub mod videodiff;
 pub mod videoanalyse;
 // `scenechange`: SAD-based shot-change detector.
 mod display_aspect;
-#[cfg(any(feature = "wgpu-sink", feature = "gl-render"))]
+#[cfg(any(feature = "wgpu-sink", feature = "gl-render", feature = "wayland-sink"))]
 pub use display_aspect::ViewportRectangle;
 #[cfg(any(feature = "wgpu-sink", feature = "gl-render"))]
 mod filled_rectangles;
@@ -886,9 +886,7 @@ pub mod mpegaudioparse;
     ),
     all(target_os = "windows", feature = "wasapi-sink"),
     all(target_os = "macos", feature = "coreaudio"),
-    all(target_os = "android", feature = "aaudio"),
-    all(target_os = "windows", feature = "d3d12-decode"),
-    all(target_os = "linux", feature = "v4l2")
+    all(target_os = "android", feature = "aaudio")
 ))]
 mod yieldnow;
 // Non-blocking link to a blocking audio device worker thread, shared by the

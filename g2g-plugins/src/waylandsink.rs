@@ -112,7 +112,9 @@ use smithay_client_toolkit::{
 };
 
 use crate::clock::wait_to_present;
-use crate::display_aspect::{display_size, FORCE_ASPECT_RATIO_NAME, FORCE_ASPECT_RATIO_PROPERTY};
+use crate::display_aspect::{
+    display_size, letterbox, FORCE_ASPECT_RATIO_NAME, FORCE_ASPECT_RATIO_PROPERTY,
+};
 use crate::dmabufimport::DmaBufImportCache;
 use crate::paddedrows::dmabuf_plane_layout;
 use crate::pixel::{frame_byte_size, rgba_rb_offsets};
@@ -302,6 +304,7 @@ pub struct WaylandSink {
     input: Option<DisplayInput>,
     pixel_aspect: PixelAspect,
     force_aspect_ratio: bool,
+    fullscreen: bool,
     /// NV12 -> XRGB coefficients for the negotiated caps' colorimetry, re-derived
     /// whenever `configure_pipeline` runs.
     matrix: YuvRgbMatrix,
@@ -370,6 +373,7 @@ impl WaylandSink {
             input: None,
             pixel_aspect: PixelAspect::Any,
             force_aspect_ratio: true,
+            fullscreen: false,
             matrix: YuvRgbMatrix::new(Colorimetry::UNKNOWN),
             frames_presented: Arc::new(AtomicU64::new(0)),
             latency: Arc::new(LatencyRecorder::new()),
@@ -635,6 +639,8 @@ impl AsyncElement for WaylandSink {
         let last_frame_callback_ns = Arc::clone(&self.last_frame_callback_ns);
         let title = self.title.clone();
         let app_id = self.app_id.clone();
+        let fullscreen = self.fullscreen;
+        let force_aspect_ratio = self.force_aspect_ratio;
 
         // Synchronous handshake: the worker signals readiness once the
         // compositor's first `configure` lands. Until then `process()`
@@ -650,6 +656,8 @@ impl AsyncElement for WaylandSink {
                     h,
                     surface_width,
                     surface_height,
+                    fullscreen,
+                    force_aspect_ratio,
                     title,
                     app_id,
                     rx,
@@ -696,6 +704,12 @@ impl AsyncElement for WaylandSink {
             PropertySpec::new("app-id", PropKind::Str, "Wayland xdg app id")
                 .with_default("io.glass2glass.WaylandSink"),
             FORCE_ASPECT_RATIO_PROPERTY,
+            PropertySpec::new(
+                "fullscreen",
+                PropKind::Bool,
+                "make the window fullscreen, the picture scaled to the output",
+            )
+            .with_default("false"),
             MAX_LATENESS_PROPERTY,
             QOS_INTERVAL_PROPERTY,
             SYNC_PROPERTY,
@@ -717,6 +731,10 @@ impl AsyncElement for WaylandSink {
                 self.force_aspect_ratio = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
+            "fullscreen" => {
+                self.fullscreen = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
             _ => self
                 .pacer
                 .set_property(name, &value)
@@ -729,6 +747,7 @@ impl AsyncElement for WaylandSink {
             "title" => Some(PropValue::Str(self.title.clone())),
             "app-id" => Some(PropValue::Str(self.app_id.clone())),
             FORCE_ASPECT_RATIO_NAME => Some(PropValue::Bool(self.force_aspect_ratio)),
+            "fullscreen" => Some(PropValue::Bool(self.fullscreen)),
             _ => self.pacer.get_property(name),
         }
     }
@@ -931,6 +950,9 @@ struct WorkerState {
     surface_width: u32,
     surface_height: u32,
     viewport: Option<WpViewport>,
+    fullscreen: bool,
+    force_aspect_ratio: bool,
+    fullscreen_output_size: Option<(u32, u32)>,
     configured: bool,
     exit: bool,
     ready: Option<Arc<Handshake>>,
@@ -963,6 +985,8 @@ fn worker_main(
     height: u32,
     surface_width: u32,
     surface_height: u32,
+    fullscreen: bool,
+    force_aspect_ratio: bool,
     title: String,
     app_id: String,
     rx: Channel<WorkerCmd>,
@@ -989,8 +1013,12 @@ fn worker_main(
     let window = xdg_shell.create_window(surface, WindowDecorations::RequestServer, &qh);
     window.set_title(&title);
     window.set_app_id(&app_id);
-    window.set_min_size(Some((surface_width, surface_height)));
-    let viewport = if (surface_width, surface_height) == (width, height) {
+    if fullscreen {
+        window.set_fullscreen(None);
+    } else {
+        window.set_min_size(Some((surface_width, surface_height)));
+    }
+    let viewport = if !fullscreen && (surface_width, surface_height) == (width, height) {
         None
     } else {
         let viewporter: WpViewporter = globals.bind(&qh, 1..=1, ())?;
@@ -1020,6 +1048,9 @@ fn worker_main(
         surface_width,
         surface_height,
         viewport,
+        fullscreen,
+        force_aspect_ratio,
+        fullscreen_output_size: None,
         configured: false,
         exit: false,
         ready: Some(ready),
@@ -1055,7 +1086,43 @@ fn worker_main(
     Ok(())
 }
 
+fn viewport_destination(
+    (surface_width, surface_height): (u32, u32),
+    orientation: Orientation,
+    fullscreen_output_size: Option<(u32, u32)>,
+    force_aspect_ratio: bool,
+) -> (u32, u32) {
+    let (width, height) = if orientation.swaps_dims() {
+        (surface_height, surface_width)
+    } else {
+        (surface_width, surface_height)
+    };
+    let Some((output_width, output_height)) = fullscreen_output_size else {
+        return (width, height);
+    };
+    if !force_aspect_ratio {
+        return (output_width, output_height);
+    }
+    let fitted = letterbox(
+        width,
+        height,
+        PixelAspect::SQUARE,
+        output_width,
+        output_height,
+    );
+    (fitted.width, fitted.height)
+}
+
 impl WorkerState {
+    fn viewport_destination(&self, orientation: Orientation) -> (u32, u32) {
+        viewport_destination(
+            (self.surface_width, self.surface_height),
+            orientation,
+            self.fullscreen_output_size,
+            self.force_aspect_ratio,
+        )
+    }
+
     fn fill_shm_buffer(
         &mut self,
         pixels: &SystemSlice,
@@ -1168,12 +1235,10 @@ impl WorkerState {
             // The surface is what the compositor lays out, and a turn that
             // transposes the picture transposes it. The buffer, and
             // `damage_buffer` with it, stays in buffer coordinates.
-            let (surface_w, surface_h) = if orientation.swaps_dims() {
-                (self.surface_height, self.surface_width)
-            } else {
-                (self.surface_width, self.surface_height)
-            };
-            self.window.set_min_size(Some((surface_w, surface_h)));
+            let (surface_w, surface_h) = self.viewport_destination(orientation);
+            if !self.fullscreen {
+                self.window.set_min_size(Some((surface_w, surface_h)));
+            }
             if let Some(viewport) = &self.viewport {
                 viewport.set_destination(surface_w as i32, surface_h as i32);
             }
@@ -1272,11 +1337,21 @@ impl WindowHandler for WorkerState {
         _: &Connection,
         _: &QueueHandle<Self>,
         _: &Window,
-        _configure: WindowConfigure,
+        configure: WindowConfigure,
         _serial: u32,
     ) {
-        // Ignore the compositor's suggested size — we render at the
-        // input video dims and let the compositor letterbox/clip.
+        // Only a fullscreen window takes the compositor's suggested size.
+        // Otherwise we render at the input video dims and let the compositor
+        // letterbox/clip.
+        if let (true, (Some(bound_width), Some(bound_height))) =
+            (self.fullscreen, configure.new_size)
+        {
+            self.fullscreen_output_size = Some((bound_width.get(), bound_height.get()));
+            let (width, height) = self.viewport_destination(self.orientation);
+            if let Some(viewport) = &self.viewport {
+                viewport.set_destination(width as i32, height as i32);
+            }
+        }
         let was_first = !self.configured;
         self.configured = true;
         if was_first {
@@ -1436,6 +1511,28 @@ const XRGB8888_BYTES_PER_PIXEL: usize = 4;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fullscreen_fits_the_picture_inside_the_output() {
+        const PANEL: (u32, u32) = (1024, 600);
+        const PICTURE: (u32, u32) = (1920, 1080);
+        assert_eq!(
+            viewport_destination(PICTURE, Orientation::Identity, Some(PANEL), true),
+            (1024, 576)
+        );
+        assert_eq!(
+            viewport_destination(PICTURE, Orientation::Rotate90Cw, Some(PANEL), true),
+            (337, 600)
+        );
+        assert_eq!(
+            viewport_destination(PICTURE, Orientation::Identity, Some(PANEL), false),
+            PANEL
+        );
+        assert_eq!(
+            viewport_destination(PICTURE, Orientation::Identity, None, true),
+            PICTURE
+        );
+    }
     use g2g_core::{BusMessage, Dim, Rate, VideoCodec, VIDEO_SINK_MAX_LATENESS_NS};
 
     /// Pins all eight descriptors to the transform that makes the compositor

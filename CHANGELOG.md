@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2446: `waylandsink fullscreen=true` fills the output, the picture scaled to fit.
+- M2445: `v4l2slh264dec` sleeps instead of spinning while downstream holds every capture buffer.
 - M2444: `deinterlace` asks for system memory when it weaves, so it follows a dma-buf decoder.
 - M2443: Synchronizing sinks present a late frame when none was presented for a second, as gst does.
 - M2442: `autovideosink` skips `wgpusink` when no GPU adapter can run it.

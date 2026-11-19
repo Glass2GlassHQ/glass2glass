@@ -3,15 +3,17 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ffi::c_void;
 use core::mem::{offset_of, size_of};
+use core::task::{Context, Poll};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 
 use g2g_core::g2g_error;
 use g2g_core::log::Target;
-use g2g_core::memory::{DomainSet, MemoryDomainKind, OwnedDmaBuf, SystemSlice};
+use g2g_core::memory::{DmaBufReleaseWaker, DomainSet, MemoryDomainKind, OwnedDmaBuf, SystemSlice};
 use g2g_core::meta::{CropRectangle, Plane, PlaneLayout};
 use g2g_core::{BufferPool, ElementMetadata, G2gError, MemoryDomain};
 use v4l::v4l2::vidioc;
@@ -629,6 +631,7 @@ struct V4l2Session {
     bitstream: Mapping,
     pictures: Vec<Mapping>,
     exports: Vec<OwnedDmaBuf>,
+    release_waker: Arc<DmaBufReleaseWaker>,
     slot_buffers: Vec<Option<usize>>,
     // created on the first picture a system-memory consumer takes
     copies: Option<BufferPool<Box<[u8]>>>,
@@ -757,6 +760,7 @@ impl V4l2Session {
         let plane_layout = nv12_plane_layout(&layout, visible).ok_or(
             V4l2DecodeError::StreamRefused("the visible picture lies outside the decoded picture"),
         )?;
+        let release_waker = Arc::new(DmaBufReleaseWaker::default());
         let exports = (0..granted)
             .map(|index| {
                 export_buffer(
@@ -765,7 +769,11 @@ impl V4l2Session {
                     index,
                     layout.bytes_per_line as u32,
                 )
-                .map(|dmabuf| dmabuf.with_plane_layout(plane_layout))
+                .map(|dmabuf| {
+                    dmabuf
+                        .with_plane_layout(plane_layout)
+                        .with_release_waker(Arc::clone(&release_waker))
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
         set_stream(video, OUTPUT_TYPE, true)?;
@@ -783,6 +791,7 @@ impl V4l2Session {
             bitstream,
             pictures,
             exports,
+            release_waker,
             slot_buffers: alloc::vec![None; slots],
             copies: None,
             reorder_depth,
@@ -1087,10 +1096,15 @@ impl H264HardwareDecoder for V4l2H264Decoder {
         self.session.is_some()
     }
 
-    fn has_free_picture(&self) -> bool {
-        self.session.as_ref().is_none_or(|session| {
-            free_capture_buffer(&session.exports, &session.slot_buffers).is_some()
-        })
+    fn poll_free_picture(&self, cx: &mut Context<'_>) -> Poll<()> {
+        let Some(session) = self.session.as_ref() else {
+            return Poll::Ready(());
+        };
+        session.release_waker.register(cx.waker());
+        if free_capture_buffer(&session.exports, &session.slot_buffers).is_some() {
+            return Poll::Ready(());
+        }
+        Poll::Pending
     }
 
     fn decode_access_unit(

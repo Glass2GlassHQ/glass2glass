@@ -167,8 +167,10 @@ than the DPB slots plus the reorder depth plus one. DPB slots map to capture
 buffers the way `d3d12h264dec` maps them to textures, and a DPB entry names its
 reference by the timestamp of the bitstream buffer that decoded it. A buffer is
 reused once no slot references it and no frame downstream holds a share of its
-export. When none is free the element yields to the executor until one comes
-back, so a consumer that keeps every dma-buf frame stalls the decoder.
+export. Each export carries a `DmaBufReleaseWaker`, which wakes the element
+when a downstream share drops. When no buffer is free the element waits on it,
+so a consumer that keeps every dma-buf frame stalls the decoder without using
+CPU.
 
 Each capture buffer is exported once with `VIDIOC_EXPBUF`. A consumer that takes
 `DmaBuf` (`waylandsink`) gets the export with a `PlaneLayout` on the
