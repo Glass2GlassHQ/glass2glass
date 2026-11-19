@@ -144,12 +144,11 @@ fn assert_cropped_as_ffmpeg_does(fixture: &Fixture, decoded: &[u8], snapshot: &T
     assert!(decoded == reference, "the cropped pixels are ffmpeg's");
 }
 
-fn decodebin_line(fixture: &Fixture) -> impl Fn(&str) -> String + '_ {
+fn decodebin_line(input: &str) -> impl Fn(&str) -> String + '_ {
     move |out| {
         format!(
-            "filesrc location={} ! decodebin ! videoconvert ! video/x-raw,format=I420 \
-             ! filesink location={out}",
-            fixture.file
+            "filesrc location={input} ! decodebin ! videoconvert ! video/x-raw,format=I420 \
+             ! filesink location={out}"
         )
     }
 }
@@ -166,8 +165,32 @@ fn uridecodebin_line(fixture: &Fixture) -> impl Fn(&str) -> String + '_ {
 
 #[tokio::test]
 async fn decodebin_crops_to_the_clean_aperture_as_ffmpeg_does() {
-    let (decoded, snapshot) = run_line("decodebin", decodebin_line(&H264)).await;
+    let (decoded, snapshot) = run_line("decodebin", decodebin_line(H264.file)).await;
     assert_cropped_as_ffmpeg_does(&H264, &decoded, &snapshot);
+}
+
+#[tokio::test]
+async fn mp4mux_remux_keeps_the_off_center_clean_aperture() {
+    for (tag, properties) in [
+        ("fragmented", "fragmented=true"),
+        ("progressive", "fragmented=false"),
+        ("faststart", "fragmented=false faststart=true"),
+    ] {
+        let remuxed = output_path(tag).with_extension("mp4");
+        let line = format!(
+            "filesrc location={} ! qtdemux ! mp4mux {properties} ! filesink location={}",
+            H264.file,
+            remuxed.display()
+        );
+        let graph = parse_launch(&default_registry(), &line).expect("parses the remux pipeline");
+        run_graph_observed(graph, &ZeroClock, 4, &Observer::new(), None)
+            .await
+            .expect("remuxes the video into MP4");
+
+        let (decoded, snapshot) = run_line(tag, decodebin_line(remuxed.to_str().unwrap())).await;
+        std::fs::remove_file(remuxed).expect("removes the remuxed file");
+        assert_cropped_as_ffmpeg_does(&H264, &decoded, &snapshot);
+    }
 }
 
 #[tokio::test]
@@ -283,14 +306,14 @@ async fn playbin_crops_its_video_branch() {
 
 #[tokio::test]
 async fn decodebin_crops_av1_in_mp4_to_the_clean_aperture() {
-    let (decoded, snapshot) = run_line("decodebin-av1", decodebin_line(&AV1)).await;
+    let (decoded, snapshot) = run_line("decodebin-av1", decodebin_line(AV1.file)).await;
     assert_cropped_as_ffmpeg_does(&AV1, &decoded, &snapshot);
 }
 
 // qtdemux, Mp4Src and Mp4DemuxN each read the mp4v entry
 #[tokio::test]
 async fn decodebin_crops_mpeg2_in_mp4_to_the_clean_aperture() {
-    let (decoded, snapshot) = run_line("decodebin-mpeg2", decodebin_line(&MPEG2)).await;
+    let (decoded, snapshot) = run_line("decodebin-mpeg2", decodebin_line(MPEG2.file)).await;
     assert_cropped_as_ffmpeg_does(&MPEG2, &decoded, &snapshot);
 }
 
@@ -315,7 +338,7 @@ async fn the_decodebin_fan_out_decodes_and_crops_mpeg2_in_mp4() {
 
 #[tokio::test]
 async fn decodebin_crops_mpeg4_part2_in_mp4_to_the_clean_aperture() {
-    let (decoded, snapshot) = run_line("decodebin-mpeg4", decodebin_line(&MPEG4)).await;
+    let (decoded, snapshot) = run_line("decodebin-mpeg4", decodebin_line(MPEG4.file)).await;
     assert_cropped_as_ffmpeg_does(&MPEG4, &decoded, &snapshot);
 }
 

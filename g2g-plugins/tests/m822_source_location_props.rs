@@ -55,6 +55,25 @@ fn rtspsrc_location_round_trips_and_parses() {
     );
 }
 
+#[cfg(feature = "rtsp")]
+#[test]
+fn bare_rtsp_uri_sets_the_source_location() {
+    use g2g_core::runtime::{parse_launch, GraphNodeRef};
+    use g2g_plugins::registry::default_registry;
+
+    let uri = "rtsp://cam.local:554/stream1?profile=main";
+    let graph = parse_launch(&default_registry(), &format!("{uri} name=cam ! fakesink"))
+        .expect("bare RTSP URL parses");
+    let node = graph.node_by_name("cam").expect("named RTSP source");
+    let Some(GraphNodeRef::Source(source)) = graph.element(node) else {
+        panic!("bare RTSP URL builds a source");
+    };
+    assert_eq!(
+        source.get_property("location"),
+        Some(PropValue::Str(uri.into()))
+    );
+}
+
 #[cfg(all(target_os = "linux", feature = "v4l2"))]
 #[test]
 fn v4l2src_device_round_trips_and_parses() {

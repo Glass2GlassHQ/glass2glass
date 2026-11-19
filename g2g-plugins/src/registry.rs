@@ -3451,6 +3451,8 @@ fn register_feature_gated(reg: &mut Registry) {
 
     // Network sources / sinks.
     #[cfg(feature = "rtsp")]
+    reg.register_uri_scheme("rtsp", "rtspsrc");
+    #[cfg(feature = "rtsp")]
     reg.register_source(SourceFactory::new(
         "rtspsrc",
         Caps::CompressedVideo {

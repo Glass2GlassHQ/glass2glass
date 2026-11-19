@@ -66,10 +66,10 @@ geometry as text.
 
 A bare `scheme://...` stage names an element by its URI, as gst-launch does
 with an element's URI handler. `Registry::register_uri_scheme` maps a scheme to
-an element, and the parser builds that element with the URI as its `location`,
-so `... ! ice+http://source:pass@host:8000/radio` is `icecastsink`. Only the
-`ice+http` and `ice+https` schemes are registered. A token whose scheme has no
-element stays an unknown element.
+an element, and the parser builds that element with the URI as its `location`.
+The `ice+http` and `ice+https` schemes select `icecastsink`. With the `rtsp`
+feature, `rtsp://camera.local/stream ! fakesink` selects `rtspsrc`. A token
+whose scheme has no element stays an unknown element.
 
 Branching makes this a chain parser. `name=t` names an element and a `t.`
 reference opens a branch, with `tee` the structural fan-out node broadcasting to

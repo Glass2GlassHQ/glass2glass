@@ -6,6 +6,9 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2438: `videoconvertscale` preserves display aspect ratio when resizing.
+- M2437: Launch pipelines accept bare RTSP URLs.
+- M2436: `mp4mux` preserves video clean apertures when remuxing MP4.
 - M2435: `g2g-discover` reads tags from audio-only MP4, FLAC and MP3.
 - M2434: `g2g-player` lists and switches tracks in local media files.
 - M2433: `g2g-inspect` and the element reference list fan-out sources and `uridecodebin`.

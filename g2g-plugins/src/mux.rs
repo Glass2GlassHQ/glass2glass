@@ -183,6 +183,11 @@ impl InputPriming {
         self.first_pts_ns[input].get_or_insert(pts_ns);
     }
 
+    #[cfg(feature = "metadata")]
+    pub(crate) fn has_frame(&self, input: usize) -> bool {
+        self.first_pts_ns[input].is_some()
+    }
+
     pub(crate) fn priming_ns(&self, input: usize) -> u64 {
         let first = self.first_pts_ns[input].unwrap_or(0);
         self.segment_start_ns[input].saturating_sub(first)

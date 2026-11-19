@@ -27,6 +27,7 @@ use core::task::{Context, Poll};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+use crate::display_aspect::scaled_pixel_aspect;
 use crate::pixel::{chroma_420_offsets, chroma_420_size, frame_byte_size};
 use crate::videoconvert::VideoConvert;
 use crate::videoscale::{bilerp, map_axis, map_axis_scaled, VideoScale};
@@ -36,8 +37,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::{DomainSet, SystemSlice};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsTransform, ConfigureOutcome, Dim, ElementMetadata,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, PushOutcome, RawVideoFormat, RawVideoShape,
+    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PixelAspect,
+    PropError, PropKind, PropValue, PropertySpec, PushOutcome, RawVideoFormat, RawVideoShape,
 };
 
 /// Resample and convert in one pass over the output: each output pixel is
@@ -237,7 +238,13 @@ pub struct VideoConvertScale {
 /// and colorimetry. The colorimetry rides along so the halfway caps still name
 /// the matrix the inner convert has to use. Anything but a raw-video caps comes
 /// back unchanged.
-fn retarget(caps: &Caps, format: RawVideoFormat, width: u32, height: u32) -> Caps {
+fn retarget(
+    caps: &Caps,
+    format: RawVideoFormat,
+    width: u32,
+    height: u32,
+    pixel_aspect: PixelAspect,
+) -> Caps {
     match caps {
         Caps::RawVideo {
             framerate,
@@ -251,9 +258,24 @@ fn retarget(caps: &Caps, format: RawVideoFormat, width: u32, height: u32) -> Cap
             framerate: framerate.clone(),
             interlace: *interlace,
             colorimetry: *colorimetry,
-            pixel_aspect: g2g_core::PixelAspect::Any,
+            pixel_aspect: pixel_aspect_at(caps, width, height, pixel_aspect),
         },
         other => other.clone(),
+    }
+}
+
+fn pixel_aspect_at(input: &Caps, width: u32, height: u32, requested: PixelAspect) -> PixelAspect {
+    match (requested, input) {
+        (
+            PixelAspect::Any,
+            Caps::RawVideo {
+                width: Dim::Fixed(in_w),
+                height: Dim::Fixed(in_h),
+                pixel_aspect,
+                ..
+            },
+        ) => scaled_pixel_aspect(*in_w, *in_h, *pixel_aspect, width, height),
+        _ => requested,
     }
 }
 
@@ -318,10 +340,16 @@ impl VideoConvertScale {
         let (in_format, in_w, in_h) = fixed_video(input)?;
         if self.scale_first {
             let (w, h) = (self.scale.target_dims().0, self.scale.target_dims().1);
-            (w > 0 && h > 0).then(|| retarget(input, in_format, w, h))
+            (w > 0 && h > 0).then(|| retarget(input, in_format, w, h, PixelAspect::Any))
         } else {
             let format = self.convert.target()?;
-            Some(retarget(input, format, in_w as u32, in_h as u32))
+            Some(retarget(
+                input,
+                format,
+                in_w as u32,
+                in_h as u32,
+                PixelAspect::Any,
+            ))
         }
     }
 
@@ -492,21 +520,37 @@ impl AsyncElement for VideoConvertScale {
     /// to announce on the first frame, so anything waiting on that announcement
     /// would never be configured at all.
     fn configure_output(&mut self, output_caps: &Caps) -> Result<(), G2gError> {
-        let input = self.input_caps.clone().ok_or(G2gError::NotConfigured)?;
-        let (in_format, ..) = fixed_video(&input).ok_or(G2gError::CapsMismatch)?;
-        let (out_format, out_w, out_h) = fixed_video(output_caps).ok_or(G2gError::CapsMismatch)?;
+        let input = self.input_caps.as_ref().ok_or(G2gError::NotConfigured)?;
+        let (in_format, in_w, in_h) = fixed_video(input).ok_or(G2gError::CapsMismatch)?;
+        let mut output = output_caps.clone();
+        let Caps::RawVideo {
+            format: out_format,
+            width: Dim::Fixed(out_w),
+            height: Dim::Fixed(out_h),
+            pixel_aspect,
+            ..
+        } = &mut output
+        else {
+            return Err(G2gError::CapsMismatch);
+        };
+        *pixel_aspect = pixel_aspect_at(input, *out_w, *out_h, *pixel_aspect);
 
         // Scaling first changes only the geometry, converting first only the
         // format, so the halfway caps takes one field from each side.
         let intermediate = if self.scale_first {
-            retarget(&input, in_format, out_w as u32, out_h as u32)
+            retarget(input, in_format, *out_w, *out_h, *pixel_aspect)
         } else {
-            let (_, in_w, in_h) = fixed_video(&input).ok_or(G2gError::CapsMismatch)?;
-            retarget(&input, out_format, in_w as u32, in_h as u32)
+            retarget(
+                input,
+                *out_format,
+                in_w as u32,
+                in_h as u32,
+                PixelAspect::Any,
+            )
         };
 
-        self.configure_second(&intermediate, Some(output_caps))?;
-        self.output_caps = Some(output_caps.clone());
+        self.configure_second(&intermediate, Some(&output))?;
+        self.output_caps = Some(output);
         Ok(())
     }
 

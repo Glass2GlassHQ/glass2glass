@@ -359,8 +359,6 @@ libraries installed.
   demuxer reads no end trim from any MP4, so it cannot check this. ffmpeg also
   applies no start trim from that `elst`, so a fragmented remux of a gapless
   MP3 keeps its 1105-sample encoder delay in ffmpeg.
-- **`clap` in `mp4mux`:** the MP4 reader crops to a `clap` box, and `mp4mux`
-  writes none, so a remuxed file decodes uncropped.
 - **ST 2038 elements:** `st2038ancdemux` should add a port when a stream no pad
   names appears, once a launch line can link a pad that appears at run time.
 - **Demuxer features:** VP8 and VP9 alpha from Matroska BlockAdditions, ONVIF
@@ -398,9 +396,9 @@ libraries installed.
 - Letterbox `kmssink` on an overlay plane with source and destination
   rectangles, and size and letterbox `glsink`, `cudaglsink`, `d3d11videosink`
   and `metalvideosink` by display aspect behind `force-aspect-ratio`.
-- Keep the display aspect through `videoconvertscale` and the GPU scalers as
-  `videoscale` does, and pick the output width that keeps it when downstream
-  pins a ratio.
+- Keep the display aspect through the GPU scalers.
+- Derive an unpinned output width that keeps the display aspect when downstream
+  pins the pixel aspect ratio.
 - Map the caps ratio to the widescreen SD modes of `decklinkvideosink`.
 
 ## Transforms and effects
@@ -446,9 +444,9 @@ libraries installed.
 ## Properties / introspection / DSL
 
 - A GUI / tooling introspection surface beyond the text dump.
-- Register URI schemes for bare `scheme://` launch stages beyond `ice+http(s)`:
-  `udp`, `srt`, `rtsp`, `rtmp`, `http(s)`, and `file` (as a path for `filesrc` /
-  `filesink`), each with the property its element takes the URI in.
+- Register bare URI launch stages for `udp`, `srt`, `rtmp`, `http(s)`, and
+  `file` (as a path for `filesrc` / `filesink`), each using its element's URI
+  property.
 
 ## GStreamer element coverage
 

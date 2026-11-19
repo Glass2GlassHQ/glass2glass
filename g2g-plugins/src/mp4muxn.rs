@@ -42,6 +42,9 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::log::short_type_name;
 use g2g_core::memory::SystemSlice;
+#[cfg(feature = "metadata")]
+use g2g_core::meta::CropMeta;
+use g2g_core::meta::CropRectangle;
 use g2g_core::{
     resolve_tags, split_tags, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
     Chapter, ClosedCaptionFormat, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError,
@@ -180,6 +183,8 @@ pub struct Mp4MuxN {
     inits: Vec<Option<TrackInit>>,
     /// Per-pad video caps geometry, recorded at configure.
     geometry: Vec<VideoGeometry>,
+    /// The first frame's clean aperture for each video pad.
+    clean_apertures: Vec<Option<CropRectangle>>,
     agg: InputAggregator<Frame>,
     deadline: LiveMuxDeadline,
     /// Per-track accumulated decode time in that track's timescale (`tfdt`).
@@ -332,6 +337,11 @@ impl Mp4MuxN {
             kinds: alloc::vec![None; inputs],
             inits: alloc::vec![None; inputs],
             geometry: alloc::vec![VideoGeometry::default(); inputs],
+            clean_apertures: if cfg!(feature = "metadata") {
+                alloc::vec![None; inputs]
+            } else {
+                Vec::new()
+            },
             agg: InputAggregator::new(inputs),
             deadline: LiveMuxDeadline::default(),
             decode_time: alloc::vec![0; inputs],
@@ -387,14 +397,15 @@ impl Mp4MuxN {
         self
     }
 
-    /// The tags the `moov` writes, split by the shared global / per-stream merge
-    /// policy into the file's own list and one list per pad slot.
+    /// The metadata the `moov` writes, with tags split by the shared global /
+    /// per-stream merge policy into the file's own list and one list per pad slot.
     fn moov_metadata(&self) -> MoovMetadata {
         let (global, per_track) = split_tags(self.tags.tags(), &self.track_tags);
         MoovMetadata {
             global,
             per_track,
             chapters: self.chapters.clone(),
+            clean_apertures: self.clean_apertures.clone(),
         }
     }
 
@@ -1441,6 +1452,15 @@ impl MultiInputElement for Mp4MuxN {
                             return Ok(());
                         }
                     }
+                    #[cfg(feature = "metadata")]
+                    if matches!(
+                        self.kinds[input],
+                        Some(PadKind::Video { .. } | PadKind::Uncompressed { .. })
+                    ) && !self.priming.has_frame(input)
+                    {
+                        self.clean_apertures[input] =
+                            frame.meta.get::<CropMeta>().map(|crop| crop.rectangle);
+                    }
                     self.priming.note_frame(input, frame.timing.pts_ns);
                     self.agg.push(input, frame);
                 }
@@ -1482,6 +1502,19 @@ impl MultiInputElement for Mp4MuxN {
             if !every_track_header_ready(&self.inits, &self.agg) {
                 return Ok(());
             }
+            // Raw video has its sample entry at configure, but its crop comes
+            // with the first frame. Wait for that frame before streaming a moov.
+            #[cfg(feature = "metadata")]
+            if self.fragmented
+                && !self.header_written
+                && self.kinds.iter().enumerate().any(|(input, kind)| {
+                    matches!(kind, Some(PadKind::Uncompressed { .. }))
+                        && !self.priming.has_frame(input)
+                        && !self.agg.is_ended(input)
+                })
+            {
+                return Ok(());
+            }
             // Release AUs now safe to emit, in global PTS order.
             while let Some((track, frame)) = self
                 .agg
@@ -1506,13 +1539,14 @@ impl MultiInputElement for Mp4MuxN {
 }
 
 /// The metadata a `moov` carries: the file's own tags and one list per pad slot,
-/// already split by the global / per-stream merge policy, plus the
-/// file's table of contents (which has no per-track scope).
+/// already split by the global / per-stream merge policy, plus the file's
+/// table of contents and the video tracks' clean apertures.
 #[derive(Debug, Default)]
 pub(crate) struct MoovMetadata {
     pub(crate) global: TagList,
     pub(crate) per_track: Vec<TagList>,
     pub(crate) chapters: Vec<Chapter>,
+    clean_apertures: Vec<Option<CropRectangle>>,
 }
 
 /// Build a multi-track `moov`: `mvhd` + one `trak` per track + `mvex` (one
@@ -1572,6 +1606,7 @@ pub(crate) fn av_moov(
             track_tags,
             &header_tags,
             media_start,
+            metadata.clean_apertures.get(i).copied().flatten(),
         ));
     }
     // A progressive file has no fragments, so no `mvex` to announce them.
@@ -1770,7 +1805,7 @@ fn presentation_size(geometry: &VideoGeometry) -> (u32, u32) {
     )
 }
 
-fn trak_media(init: &TrackInit) -> TrakMedia {
+fn trak_media(init: &TrackInit, clean_aperture: Option<CropRectangle>) -> TrakMedia {
     match init {
         TrackInit::Video {
             codec,
@@ -1814,7 +1849,7 @@ fn trak_media(init: &TrackInit) -> TrakMedia {
             TrakMedia {
                 handler: b"vide",
                 media_header: full_box(b"vmhd", 0, 1, &[0u8; 8]),
-                sample_entry: visual_sample_entry(fourcc, geometry, &config),
+                sample_entry: visual_sample_entry(fourcc, geometry, &config, clean_aperture),
                 timescale: VIDEO_TIMESCALE,
                 presentation_size: presentation_size(geometry),
                 is_video: true,
@@ -1823,7 +1858,12 @@ fn trak_media(init: &TrackInit) -> TrakMedia {
         TrackInit::Uncompressed { geometry, entry } => TrakMedia {
             handler: b"vide",
             media_header: full_box(b"vmhd", 0, 1, &[0u8; 8]),
-            sample_entry: visual_sample_entry(&entry.fourcc, geometry, &entry.boxes),
+            sample_entry: visual_sample_entry(
+                &entry.fourcc,
+                geometry,
+                &entry.boxes,
+                clean_aperture,
+            ),
             timescale: VIDEO_TIMESCALE,
             presentation_size: presentation_size(geometry),
             is_video: true,
@@ -2098,6 +2138,7 @@ fn trak(
     tags: Option<&TagList>,
     header_tags: &TagList,
     media_start: u64,
+    clean_aperture: Option<CropRectangle>,
 ) -> Vec<u8> {
     let TrakMedia {
         handler,
@@ -2106,7 +2147,7 @@ fn trak(
         timescale,
         presentation_size,
         is_video,
-    } = trak_media(init);
+    } = trak_media(init, clean_aperture);
     let orientation = header_tags
         .tags()
         .iter()
@@ -2330,6 +2371,62 @@ mod tests {
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
             pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
+        }
+    }
+
+    #[cfg(feature = "metadata")]
+    #[tokio::test]
+    async fn fragmented_mp4_uses_each_raw_tracks_first_crop() {
+        let caps = crate::uncompressedvideo::raw_video_caps(
+            g2g_core::RawVideoFormat::Gray8,
+            Dim::Fixed(16),
+            Dim::Fixed(8),
+            Rate::Any,
+            PixelAspect::Any,
+        );
+        let mut mux = Mp4MuxN::new(2);
+        mux.configure_liveness(true);
+        for input in 0..2 {
+            mux.configure_pipeline(input, &caps).unwrap();
+        }
+        let crops = [
+            CropRectangle {
+                left: 4,
+                top: 1,
+                width: 9,
+                height: 6,
+            },
+            CropRectangle {
+                left: 1,
+                top: 3,
+                width: 10,
+                height: 3,
+            },
+        ];
+        let cropped_frame = |rectangle| {
+            let mut frame = crate::testutil::frame(alloc::vec![0; 16 * 8]);
+            frame.timing.pts_ns = 0;
+            frame.meta.attach(CropMeta { rectangle });
+            PipelinePacket::DataFrame(frame)
+        };
+        let mut sink = CaptureSink::default();
+        mux.process(0, cropped_frame(crops[0]), &mut sink)
+            .await
+            .unwrap();
+        assert!(
+            sink.bytes.is_empty(),
+            "the second video track has yet to start"
+        );
+        mux.process(0, cropped_frame(crops[1]), &mut sink)
+            .await
+            .unwrap();
+        mux.process(1, cropped_frame(crops[1]), &mut sink)
+            .await
+            .unwrap();
+        let tracks = crate::fmp4::parse_all_tracks(&sink.bytes).unwrap();
+        assert_eq!(tracks.len(), crops.len());
+        for (track, crop) in tracks.iter().zip(crops) {
+            assert_eq!(track.clean_aperture, Some(crop));
         }
     }
 
@@ -2562,7 +2659,7 @@ mod tests {
                 .collect(),
                 TagList::new(),
             ],
-            chapters: Vec::new(),
+            ..MoovMetadata::default()
         };
         let moov = av_moov(&tracks, None, &metadata, &[]);
         let parsed = crate::fmp4::parse_all_tracks(&moov).unwrap();

@@ -10,6 +10,7 @@
 
 use alloc::vec::Vec;
 
+use g2g_core::meta::CropRectangle;
 use g2g_core::{Caps, Dim, PixelAspect, VideoCodec};
 
 use crate::annexb::au_is_keyframe;
@@ -57,11 +58,12 @@ impl VideoGeometry {
 }
 
 /// The `VisualSampleEntry` box `fourcc` holding the codec's `config` box, and a
-/// `pasp` box when the pixel aspect is known.
+/// `pasp` box when the pixel aspect is known and a `clap` box for a clean aperture.
 pub(crate) fn visual_sample_entry(
     fourcc: &[u8; 4],
     geometry: &VideoGeometry,
     config: &[u8],
+    clean_aperture: Option<CropRectangle>,
 ) -> Vec<u8> {
     let mut p = Vec::new();
     p.extend_from_slice(&[0u8; 6]); // reserved
@@ -84,7 +86,38 @@ pub(crate) fn visual_sample_entry(
         ];
         p.extend_from_slice(&mp4_box(b"pasp", &spacing.concat()));
     }
+    if let Some(clap) = clean_aperture.and_then(|crop| clap_box(geometry, crop)) {
+        p.extend_from_slice(&clap);
+    }
     mp4_box(fourcc, &p)
+}
+
+fn clap_box(geometry: &VideoGeometry, crop: CropRectangle) -> Option<Vec<u8>> {
+    if crop.width == 0
+        || crop.height == 0
+        || (crop.width == geometry.width && crop.height == geometry.height)
+    {
+        return None;
+    }
+    let offset_numerator = |picture: u32, before: u32, aperture: u32| {
+        let picture = u32::from(u16::try_from(picture).ok()?);
+        let after = picture.checked_sub(before)?.checked_sub(aperture)?;
+        // The centre offset is half the difference between the two margins.
+        Some(before as i32 - after as i32)
+    };
+    let horizontal = offset_numerator(geometry.width, crop.left, crop.width)?;
+    let vertical = offset_numerator(geometry.height, crop.top, crop.height)?;
+    let fields = [
+        crop.width as i32,
+        1,
+        crop.height as i32,
+        1,
+        horizontal,
+        2,
+        vertical,
+        2,
+    ];
+    Some(mp4_box(b"clap", &fields.map(i32::to_be_bytes).concat()))
 }
 
 /// The sample entry fourcc and config box for H.26x: `avc1`+`avcC` for H.264,

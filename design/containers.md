@@ -842,6 +842,17 @@ scales or shears, as gst's `qtdemux` does except for the Macintosh codes, which 
 maps. Both directions are validated against gst 1.28, and ffprobe reports the
 same language and rotation for a g2g file as for gst's.
 
+### MP4 clean aperture
+
+With `metadata` enabled, `mp4mux` takes each video track's clean aperture from
+`CropMeta` on its first frame. It writes a `clap` box in the visual sample
+entry in both fragmented and progressive files. The box stores the aperture
+size in coded pixels and its signed centre offsets as half-pixel fractions.
+Apertures outside the coded picture and crops covering the whole picture are
+omitted. The sample entry applies to the entire track. Fragmented output waits
+for each raw video input's first frame or end of stream before writing the
+`moov`.
+
 ## Chapters
 
 Chapters, the table of contents that GStreamer calls `GstToc`, travel an

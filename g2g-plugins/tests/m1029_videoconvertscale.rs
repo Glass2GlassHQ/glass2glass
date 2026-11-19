@@ -14,8 +14,8 @@ use collect_sink::CollectSink;
 
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, Dim, Frame, FrameTiming, MemoryDomain, PipelinePacket, PropError,
-    PropValue, Rate, RawVideoFormat,
+    AspectRatio, AsyncElement, Caps, Dim, Frame, FrameTiming, MemoryDomain, PipelinePacket,
+    PixelAspect, PropError, PropValue, Rate, RawVideoFormat,
 };
 use g2g_plugins::videoconvertscale::VideoConvertScale;
 
@@ -83,6 +83,50 @@ fn run_negotiated(
     rt.block_on(element.process(PipelinePacket::DataFrame(frame(bytes)), &mut sink))
         .unwrap();
     sink.packets
+}
+
+#[test]
+fn resize_keeps_the_display_aspect_unless_output_pins_a_ratio() {
+    use RawVideoFormat::{Nv12, Rgb8, Rgba8, Yuyv, I420};
+
+    let input_aspect = PixelAspect::Exact(AspectRatio::new(4, 3).unwrap());
+    let resized_aspect = PixelAspect::Exact(AspectRatio::new(8, 3).unwrap());
+    let square = PixelAspect::SQUARE;
+    let any = PixelAspect::Any;
+    for (from, to, negotiate, requested, expected) in [
+        (Nv12, Rgb8, true, any, resized_aspect),
+        (Nv12, Rgb8, true, square, square),
+        (Rgba8, I420, true, square, square),
+        (Rgba8, I420, false, any, resized_aspect),
+        (Yuyv, Rgb8, true, any, resized_aspect),
+    ] {
+        let mut input = raw(from, 8, 8);
+        if let Caps::RawVideo { pixel_aspect, .. } = &mut input {
+            *pixel_aspect = input_aspect;
+        }
+        let mut output = raw(to, 4, 8);
+        if let Caps::RawVideo { pixel_aspect, .. } = &mut output {
+            *pixel_aspect = requested;
+        }
+        let mut element = if negotiate {
+            VideoConvertScale::auto()
+        } else {
+            VideoConvertScale::new(to, 4, 8)
+        };
+        let size = from.unpadded_frame_bytes(8, 8).unwrap() as usize;
+        let packets = run_negotiated(
+            &mut element,
+            input,
+            negotiate.then_some(output),
+            vec![128; size],
+        );
+        let Some(PipelinePacket::CapsChanged(Caps::RawVideo { pixel_aspect, .. })) =
+            packets.first()
+        else {
+            panic!("the output caps precede the resized frame");
+        };
+        assert_eq!(*pixel_aspect, expected, "{from:?} to {to:?}");
+    }
 }
 
 #[test]
@@ -297,7 +341,7 @@ fn a_format_the_scaler_cannot_take_is_refused() {
 /// output, and the runner is what calls `configure_pipeline` / `configure_output`.
 #[cfg(feature = "std")]
 mod launch {
-    use g2g_core::runtime::{parse_launch, run_graph};
+    use g2g_core::runtime::{parse_launch, run_graph, run_graph_observed, Observer};
     use g2g_core::{PipelineClock, RawVideoFormat};
     use g2g_plugins::appsrc::register_appsrc;
     use g2g_plugins::registry::default_registry;
@@ -340,6 +384,29 @@ mod launch {
             runs("videotestsrc num-buffers=5 ! videoconvertscale ! video/x-raw,format=NV12,width=320,height=240 ! fakesink").await,
             5
         );
+    }
+
+    #[tokio::test]
+    async fn a_non_uniform_resize_announces_the_new_pixel_aspect() {
+        const CHANNEL: &str = "m1029_nonsquare_pixels";
+        let feed = register_appsrc(CHANNEL);
+        assert!(feed.push(&[128; 8 * 8 * 3 / 2], 0));
+        feed.end_of_stream();
+        let line = format!(
+            "appsrc channel={CHANNEL} caps=video/x-raw,format=NV12,width=8,height=8,framerate=30/1,pixel-aspect-ratio=4/3 \
+             ! videoconvertscale ! video/x-raw,format=RGB,width=4,height=8 ! fakesink"
+        );
+        let graph = parse_launch(&default_registry(), &line).expect("pipeline parses");
+        let observer = Observer::new();
+        let stats = run_graph_observed(graph, &ZeroClock, 4, &observer, None)
+            .await
+            .expect("pipeline runs");
+        assert_eq!(stats.frames_consumed, 1);
+        assert!(observer.snapshot().edges.iter().any(|edge| {
+            edge.observed_caps.as_deref().is_some_and(|caps| {
+                caps.contains("width=4") && caps.contains("pixel-aspect-ratio=8/3")
+            })
+        }));
     }
 
     // a YUYV output here would reach a scaler that takes no YUYV
