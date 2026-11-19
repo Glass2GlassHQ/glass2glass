@@ -403,9 +403,6 @@ libraries installed.
   shaping if cosmic-text ever grows writing modes.
 - Add a carrier for non-default channel orders when a source needs an
   interleave order outside the per-count `ChannelLayout` convention.
-- `deinterlace mode=auto` fed an interlaced stream as dma-bufs fails with
-  `UnsupportedDomain`: it declares every input domain because its input domains
-  are fixed before caps say whether it weaves.
 
 ## Metadata (FrameMeta / AnalyticsMeta)
 

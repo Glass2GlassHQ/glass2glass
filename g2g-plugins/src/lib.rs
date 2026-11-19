@@ -597,7 +597,8 @@ pub mod yuvmatrix;
     all(target_os = "linux", feature = "dmabuf-wgpu"),
     all(target_os = "linux", feature = "kms-sink"),
     all(target_os = "linux", feature = "hip"),
-    all(target_os = "linux", feature = "wayland-sink")
+    all(target_os = "linux", feature = "wayland-sink"),
+    all(target_os = "linux", feature = "std")
 ))]
 mod paddedrows;
 // Sans-IO RFC 4566 SDP: the shared media-section scanner plus the RTP/AVP
@@ -1233,16 +1234,7 @@ pub mod tcp;
 
 // Read-only CPU mapping of a dma-buf, so a sink that feeds a host pointer to a
 // device takes the exporter's buffer instead of a system copy.
-#[cfg(all(
-    target_os = "linux",
-    any(
-        feature = "alsa-sink",
-        feature = "pulse-sink",
-        feature = "pipewire",
-        feature = "unixfd",
-        feature = "hip"
-    )
-))]
+#[cfg(all(target_os = "linux", feature = "std"))]
 pub mod dmabufmap;
 
 #[cfg(any(

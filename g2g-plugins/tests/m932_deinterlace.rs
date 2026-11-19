@@ -559,3 +559,81 @@ fn graph_dot(path: &std::path::Path) -> String {
         &DotAnnotations::default(),
     )
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_padded_dma_buf_weaves_like_the_same_picture_in_system_memory() {
+    use g2g_core::memory::OwnedDmaBuf;
+    use g2g_core::meta::{Plane, PlaneLayout};
+    use g2g_plugins::deinterlace::DeinterlaceMode;
+    use std::os::unix::io::IntoRawFd;
+
+    const WIDTH: usize = 8;
+    const HEIGHT: usize = 8;
+    const STRIDE: usize = 16;
+    const CHROMA_OFFSET: usize = STRIDE * (HEIGHT + 2);
+    let chroma_rows = HEIGHT / 2;
+    let tight: Vec<u8> = (0..WIDTH * HEIGHT + WIDTH * chroma_rows)
+        .map(|index| (index * 37 % 251) as u8)
+        .collect();
+    let mut padded = vec![0u8; CHROMA_OFFSET + STRIDE * chroma_rows];
+    for (row, line) in tight.as_chunks::<WIDTH>().0.iter().enumerate() {
+        let start = if row < HEIGHT {
+            row * STRIDE
+        } else {
+            CHROMA_OFFSET + (row - HEIGHT) * STRIDE
+        };
+        padded[start..start + WIDTH].copy_from_slice(line);
+    }
+    let path = temp_path("padded-nv12");
+    std::fs::write(&path, &padded).unwrap();
+    let fd = std::fs::File::open(&path).unwrap().into_raw_fd();
+    let layout = PlaneLayout::new(&[
+        Plane {
+            offset: 0,
+            stride: STRIDE,
+        },
+        Plane {
+            offset: CHROMA_OFFSET,
+            stride: STRIDE,
+        },
+    ])
+    .unwrap();
+    // SAFETY: `into_raw_fd` just released this fd, so nothing else owns it.
+    let dmabuf = unsafe { OwnedDmaBuf::from_raw(fd, STRIDE as u32, 0) }.with_plane_layout(layout);
+
+    let interlaced = Caps::RawVideo {
+        format: RawVideoFormat::Nv12,
+        width: Dim::Fixed(WIDTH as u32),
+        height: Dim::Fixed(HEIGHT as u32),
+        framerate: Rate::Fixed(25 << 16),
+        interlace: g2g_core::Interlace::Interleaved,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
+    };
+    let mut woven = Vec::new();
+    for domain in [
+        MemoryDomain::System(SystemSlice::from_boxed(tight.clone().into_boxed_slice())),
+        MemoryDomain::DmaBuf(dmabuf),
+    ] {
+        let mut element = Deinterlace::new()
+            .with_mode(DeinterlaceMode::Auto)
+            .with_method(DeinterlaceMethod::Linear);
+        element.configure_pipeline(&interlaced).unwrap();
+        let mut out = Collect::default();
+        let frame = Frame::new(domain, FrameTiming::default(), 0);
+        element
+            .process(PipelinePacket::DataFrame(frame), &mut out)
+            .await
+            .unwrap();
+        element
+            .process(PipelinePacket::Eos, &mut out)
+            .await
+            .unwrap();
+        woven.push(out.frames);
+    }
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(woven[0].len(), 1);
+    assert_ne!(woven[0][0], tight, "the system frame was woven");
+    assert_eq!(woven[1], woven[0]);
+}

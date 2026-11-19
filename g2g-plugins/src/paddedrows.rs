@@ -59,7 +59,8 @@ pub(crate) fn plane_shapes_with_stride_shift(
     all(target_os = "linux", feature = "unixfd"),
     all(target_os = "linux", feature = "kms-sink"),
     all(target_os = "linux", feature = "hip"),
-    all(target_os = "linux", feature = "wayland-sink")
+    all(target_os = "linux", feature = "wayland-sink"),
+    all(target_os = "linux", feature = "std")
 ))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PaddedPlane {
@@ -82,7 +83,8 @@ pub(crate) struct PaddedPlane {
     all(target_os = "linux", feature = "unixfd"),
     all(target_os = "linux", feature = "kms-sink"),
     all(target_os = "linux", feature = "hip"),
-    all(target_os = "linux", feature = "wayland-sink")
+    all(target_os = "linux", feature = "wayland-sink"),
+    all(target_os = "linux", feature = "std")
 ))]
 pub(crate) fn padded_planes(
     format: RawVideoFormat,
@@ -121,7 +123,8 @@ pub(crate) fn padded_planes(
 #[cfg(any(
     all(target_os = "linux", feature = "dmabuf-wgpu"),
     all(target_os = "linux", feature = "hip"),
-    all(target_os = "linux", feature = "wayland-sink")
+    all(target_os = "linux", feature = "wayland-sink"),
+    all(target_os = "linux", feature = "std")
 ))]
 pub(crate) fn single_stride_layout(
     format: RawVideoFormat,
@@ -158,7 +161,8 @@ pub(crate) fn single_stride_layout(
 #[cfg(any(
     all(target_os = "linux", feature = "dmabuf-wgpu"),
     all(target_os = "linux", feature = "hip"),
-    all(target_os = "linux", feature = "wayland-sink")
+    all(target_os = "linux", feature = "wayland-sink"),
+    all(target_os = "linux", feature = "std")
 ))]
 pub(crate) fn dmabuf_plane_layout(
     dmabuf: &g2g_core::memory::OwnedDmaBuf,

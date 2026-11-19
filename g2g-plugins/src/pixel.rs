@@ -146,7 +146,8 @@ pub(crate) fn tight_plane(
 #[cfg(any(
     feature = "metadata",
     feature = "wgpu-sink",
-    all(target_os = "linux", feature = "hip")
+    all(target_os = "linux", feature = "hip"),
+    all(target_os = "linux", feature = "std")
 ))]
 pub(crate) fn plane_shapes(
     format: RawVideoFormat,
@@ -169,7 +170,8 @@ pub(crate) fn plane_shapes(
 #[cfg(any(
     feature = "metadata",
     feature = "wgpu-sink",
-    all(target_os = "linux", feature = "hip")
+    all(target_os = "linux", feature = "hip"),
+    all(target_os = "linux", feature = "std")
 ))]
 pub(crate) fn pack_planes(
     src: &[u8],

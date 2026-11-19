@@ -683,6 +683,37 @@ impl Deinterlace {
 /// answer is provisional at negotiation time: a stream the decoder only later
 /// declares interleaved starts weaving mid-run, and the runtime `CapsChanged`
 /// carries the corrected output caps.
+// a dma-buf frame copied tight into system memory, any other frame unchanged
+#[cfg(all(target_os = "linux", feature = "std"))]
+fn packed_dma_buf_frame(
+    frame: Frame,
+    format: RawVideoFormat,
+    width: u32,
+    height: u32,
+) -> Result<Frame, G2gError> {
+    let MemoryDomain::DmaBuf(dmabuf) = &frame.domain else {
+        return Ok(frame);
+    };
+    let (layout, _) = crate::paddedrows::dmabuf_plane_layout(dmabuf, format, width, height)
+        .ok_or(G2gError::CapsMismatch)?;
+    // dmabuf_plane_layout counts plane offsets from the start of the fd
+    let mut whole = dmabuf.clone();
+    whole.offset = 0;
+    let mapped = crate::dmabufmap::DmaBufReadMap::read(&whole)?;
+    let packed = crate::pixel::pack_planes(
+        mapped.as_slice(),
+        format,
+        width as usize,
+        height as usize,
+        &layout,
+    )
+    .ok_or(G2gError::CapsMismatch)?;
+    Ok(Frame {
+        domain: MemoryDomain::System(SystemSlice::from_boxed(packed)),
+        ..frame
+    })
+}
+
 fn weaves(mode: DeinterlaceMode, caps: &Caps) -> bool {
     match mode {
         DeinterlaceMode::Disabled => false,
@@ -832,6 +863,13 @@ impl AsyncElement for Deinterlace {
                     if self.input.is_none() {
                         return Err(G2gError::NotConfigured);
                     }
+                    #[cfg(all(target_os = "linux", feature = "std"))]
+                    let frame = match &self.input {
+                        Some((format, width, height, _)) => {
+                            packed_dma_buf_frame(frame, *format, *width, *height)?
+                        }
+                        None => frame,
+                    };
                     let src = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;

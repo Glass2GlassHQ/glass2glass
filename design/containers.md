@@ -1737,6 +1737,12 @@ a forwarding hop, and the interlacing verdict comes from the decoder's own
 per-picture report rather than a container probe of `progressive_sequence` in
 the MPEG-2 sequence extension.
 
+`interlaced` mode asks for system memory, so a producer that can emit either
+copies there. `auto` mode accepts any memory domain, because whether it weaves
+is known only once caps arrive. When it weaves a dma-buf frame on Linux, it
+maps the buffer and copies its planes tight, reading plane offsets and strides
+from the frame's `PlaneLayout`.
+
 ## Adaptive streaming
 
 Adaptive streaming sits one layer above the demuxers: an HTTP byte source feeds
