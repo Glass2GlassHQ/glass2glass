@@ -8,6 +8,7 @@ use core::task::{Context, Poll};
 
 use crate::decoderecovery::DecodeErrorRecovery;
 use crate::displayorder::{PictureMeta, ReorderBuffer};
+pub use crate::h264dpb::H264Picture;
 use crate::h264dpb::H264_DAMAGE_REFUSALS;
 use crate::h264parse::{
     h264_parameter_sets_in, sps_reorder_frames, H264Sps, H264StreamRefused, MALFORMED_SPS,
@@ -36,10 +37,14 @@ pub trait H264HardwareDecoder: Sized + Send + core::fmt::Debug {
     fn start_session(&mut self, sps: &H264Sps, reorder_depth: usize) -> Result<(), Self::Error>;
     fn has_session(&self) -> bool;
     fn poll_free_picture(&self, cx: &mut Context<'_>) -> Poll<()>;
-    fn decode_access_unit(
+    fn split_pictures<'s>(
         &mut self,
-        access_unit: &[u8],
-    ) -> Result<Vec<(PictureMeta, Self::Picture)>, Self::Error>;
+        access_unit: &'s [u8],
+    ) -> Result<Vec<H264Picture<'s>>, Self::Error>;
+    fn decode_picture(
+        &mut self,
+        picture: &H264Picture<'_>,
+    ) -> Result<(PictureMeta, Self::Picture), Self::Error>;
     fn reset(&mut self);
     fn picture_extent(&self) -> (u32, u32);
     fn output(
@@ -190,34 +195,44 @@ impl<B: H264HardwareDecoder> H264HardwareDec<B> {
             return Ok(());
         }
         let decoder = self.decoder.as_mut().ok_or(G2gError::NotConfigured)?;
-        core::future::poll_fn(|cx| decoder.poll_free_picture(cx)).await;
-        let pictures = match decoder.decode_access_unit(access_unit) {
+        let pictures = match decoder.split_pictures(access_unit) {
             Ok(pictures) => pictures,
-            Err(error) => {
-                let damaged = B::stream_refusal(&error).is_some_and(|reason| {
-                    H264_DAMAGE_REFUSALS.contains(&H264StreamRefused(reason))
-                });
-                if !damaged {
-                    return Err(B::refused(error));
-                }
-                self.recovery.failed().map_err(|_| B::refused(error))?;
-                decoder.reset();
-                return Ok(());
-            }
+            Err(error) => return self.decode_failed(error),
         };
-        self.recovery.decoded();
         let timing = frame.timing;
-        self.input_stamps
-            .insert(timing.pts_ns, InputStamp::of(&frame));
-        let mut ready = Vec::new();
-        for (meta, picture) in pictures {
-            let release = self.reorder.push(&meta, (timing, picture));
+        for (index, picture) in pictures.iter().enumerate() {
+            let decoder = self.decoder.as_mut().ok_or(G2gError::NotConfigured)?;
+            core::future::poll_fn(|cx| decoder.poll_free_picture(cx)).await;
+            let (meta, decoded) = match decoder.decode_picture(picture) {
+                Ok(decoded) => decoded,
+                Err(error) => return self.decode_failed(error),
+            };
+            if index == 0 {
+                self.input_stamps
+                    .insert(timing.pts_ns, InputStamp::of(&frame));
+            }
+            let release = self.reorder.push(&meta, (timing, decoded));
             for (dropped, _) in release.dropped {
                 self.input_stamps.take(dropped.pts_ns);
             }
-            ready.extend(release.output);
+            self.emit(release.output, out).await?;
         }
-        self.emit(ready, out).await
+        self.recovery.decoded();
+        Ok(())
+    }
+
+    fn decode_failed(&mut self, error: B::Error) -> Result<(), G2gError> {
+        let damaged = B::stream_refusal(&error)
+            .is_some_and(|reason| H264_DAMAGE_REFUSALS.contains(&H264StreamRefused(reason)));
+        if !damaged {
+            return Err(B::refused(error));
+        }
+        self.recovery.failed().map_err(|_| B::refused(error))?;
+        self.decoder
+            .as_mut()
+            .ok_or(G2gError::NotConfigured)?
+            .reset();
+        Ok(())
     }
 
     async fn emit(

@@ -628,6 +628,7 @@ cargo clippy --workspace --all-targets
 | `MfDecode` / `MfEncode` / `MfAacEncode` / `MfAacDecode` | `mf-decode`, `mf-encode`, `mf-aac` | Windows + Media Foundation |
 | `D3D12H264Dec` (`d3d12h264dec`: 8-bit 4:2:0 H.264 on the D3D12 video decode API, zero-copy NV12 wgpu textures or system memory) | `d3d12-decode` | Windows + a GPU with D3D12 video decode |
 | `V4l2SlH264Dec` (`v4l2slh264dec`: 8-bit 4:2:0 H.264 on a V4L2 stateless decoder such as Hantro, zero-copy NV12 dma-bufs or system memory) | `v4l2` | Linux + a stateless decoder with a media controller |
+| `V4l2SlH264Enc` (`v4l2slh264enc`: NV12 or YUY2 to H.264 at a constant QP on a V4L2 stateless encoder such as Hantro H1, dma-bufs imported with no copy) | `v4l2` | Linux + a stateless encoder with ST's downstream encode controls |
 | `VtDecode` / `VtEncode` (H.264 / H.265, H.265 with alpha from BGRA, zero-copy `CVPixelBuffer` output via `cv-output`) | `vtdecode`, `vtencode` | macOS + VideoToolbox |
 | `AtEnc` (`atenc`: PCM to ADTS AAC-LC, mono or stereo) | `audiotoolbox-aac` | macOS + AudioToolbox |
 | `MediaCodecDec` (H.264 / H.265, zero-copy GPU output via `with_gpu_output`) | `mediacodec`, `mediacodec-wgpu` | Android + NDK MediaCodec (+ wgpu / Vulkan for GPU output) |

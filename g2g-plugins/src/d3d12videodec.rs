@@ -654,18 +654,14 @@ impl D3D12H264Decoder {
         ))
     }
 
-    pub fn decode_access_unit(
+    pub fn split_pictures<'s>(
         &mut self,
-        au: &[u8],
-    ) -> Result<Vec<DecodedPicture>, D3D12VideoError> {
-        let pictures = self.session.split_pictures(au)?;
-        pictures
-            .iter()
-            .map(|picture| self.decode_picture(picture))
-            .collect()
+        au: &'s [u8],
+    ) -> Result<Vec<H264Picture<'s>>, D3D12VideoError> {
+        Ok(self.session.split_pictures(au)?)
     }
 
-    fn decode_picture(
+    pub fn decode_picture(
         &mut self,
         picture: &H264Picture<'_>,
     ) -> Result<DecodedPicture, D3D12VideoError> {
@@ -980,16 +976,19 @@ impl H264HardwareDecoder for D3D12Backend {
         core::task::Poll::Ready(())
     }
 
-    fn decode_access_unit(
+    fn split_pictures<'s>(
         &mut self,
-        access_unit: &[u8],
-    ) -> Result<Vec<(PictureMeta, Arc<DecodeTexture>)>, D3D12VideoError> {
-        Ok(self
-            .session()
-            .decode_access_unit(access_unit)?
-            .into_iter()
-            .map(|picture| (picture.meta, picture.texture))
-            .collect())
+        access_unit: &'s [u8],
+    ) -> Result<Vec<H264Picture<'s>>, D3D12VideoError> {
+        self.session().split_pictures(access_unit)
+    }
+
+    fn decode_picture(
+        &mut self,
+        picture: &H264Picture<'_>,
+    ) -> Result<(PictureMeta, Arc<DecodeTexture>), D3D12VideoError> {
+        let decoded = self.session().decode_picture(picture)?;
+        Ok((decoded.meta, decoded.texture))
     }
 
     fn reset(&mut self) {

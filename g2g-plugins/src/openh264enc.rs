@@ -23,10 +23,11 @@ use openh264::encoder::{
 use openh264::formats::YUVSlices;
 use openh264::{OpenH264API, Timestamp};
 
+use crate::h264parse::H264_MAX_QP;
+
 // gst openh264enc defaults
 const DEFAULT_BITRATE_BPS: u32 = 128_000;
 const DEFAULT_GOP_SIZE: u32 = 90;
-const MAX_QP: u8 = 51;
 
 const RATE_CONTROL_NAMES: &[(&str, RateControlMode)] = &[
     ("quality", RateControlMode::Quality),
@@ -90,7 +91,7 @@ impl Default for Settings {
             complexity: "medium",
             usage_type: "camera",
             qp_min: 0,
-            qp_max: MAX_QP,
+            qp_max: H264_MAX_QP,
             threads: 0,
             slices: 1,
             frame_skip: false,
@@ -491,7 +492,7 @@ impl AsyncElement for OpenH264Enc {
         let qp = |value: &PropValue| {
             u8::try_from(uint(value)?)
                 .ok()
-                .filter(|&qp| qp <= MAX_QP)
+                .filter(|&qp| qp <= H264_MAX_QP)
                 .ok_or(PropError::Value)
         };
         match name {

@@ -513,7 +513,7 @@ pub(crate) fn h264_picture_meta(header: &H264SliceHeader, order: &H264PictureOrd
 /// One primary coded picture of a stream: its first slice header, its slice
 /// NALs (borrowing the input stream), and the parameter sets it was coded with.
 #[derive(Debug)]
-pub(crate) struct H264Picture<'s> {
+pub struct H264Picture<'s> {
     pub(crate) header: H264SliceHeader,
     pub(crate) slices: alloc::vec::Vec<&'s [u8]>,
     pub(crate) sps: H264Sps,

@@ -136,8 +136,11 @@ keyframe recovery after a damaged access unit, input timestamps, the
 `ReorderBuffer`, segment clipping, NV12 caps and the `low-latency` property. Its
 log category is the backend's `LOG_CATEGORY`, so `G2G_DEBUG` keeps the old
 per-decoder names. The backend opens the device in `configure_pipeline`, starts a
-session on the first SPS, decodes one access unit into pictures with their
-`PictureMeta`, and turns a picture into the output memory domain.
+session on the first SPS, splits an input buffer into pictures, decodes one
+picture into its `PictureMeta` and output picture, and turns a picture into the
+output memory domain. The element waits for a free picture buffer before each
+picture and emits what the reorder buffer releases right after it, so a buffer
+holding a whole stream needs no more picture buffers than one picture does.
 
 `H264DecodeSession` in `h264dpb.rs` is the per-picture reference state both
 backends share: the parameter-set table, the POC state, the `H264References`
@@ -181,6 +184,33 @@ to tight NV12 in a buffer from a pool sized for the reorder depth and the frames
 downstream. When a consumer keeps every pooled copy, the copy goes to a fresh
 heap buffer. Only 8-bit 4:2:0 is accepted, and the SPS scaling matrices
 `h264parse` refuses are never sent.
+
+## V4L2 stateless encode (Linux)
+
+`V4l2SlH264Enc` (`g2g-plugins/src/v4l2h264enc.rs`, launch name `v4l2slh264enc`,
+feature `v4l2`, `cfg(target_os = "linux")`) encodes H.264 on a V4L2 stateless
+encoder, such as the STM32MP257's Hantro H1, as ST's patched gst
+`v4l2slh264enc` does. It sets the `V4L2_CID_STATELESS_H264_ENCODE_PARAMS` and
+`_ENCODE_RC` controls from ST's kernel patches in one media request per frame. The request plumbing it
+shares with `v4l2slh264dec` is in `v4l2stateless.rs`.
+
+Input is NV12 or YUY2. NV12 goes to the driver as two-plane NV12M, because the
+H1 has no single-plane NV12 input. A system frame is copied into one MMAP raw
+buffer. A dma-buf frame is imported into one of eight DMABUF slots, each plane
+at its offset in the buffer, and is refused when its row stride differs from
+the driver's `bytesperline`.
+
+The H1 writes each slice with its start code and NAL header, so the element
+writes only the SPS and PPS, before every IDR. The SPS has POC type 2, one
+reference frame and a VUI that declares no reordering. The profile follows the
+settings: `dct8x8` gives High, `cabac` gives Main, and otherwise the stream is
+Constrained Baseline. Rate control is constant QP (`quantizer`, default 18).
+Changing `cabac`, `cabac-init-idc` or `dct8x8` forces an IDR, and a downstream
+keyframe request forces one on the next frame.
+
+On an STM32MP257F-EV1, the 300-frame 1080p clip decoded by `v4l2slh264dec`
+and encoded at QP 18 matches ST's element within 0.005 dB PSNR and 0.2% in size
+in all three profiles. The size difference is the parameter sets g2g repeats.
 
 ## FfmpegH264Dec (ffmpeg / libavcodec)
 

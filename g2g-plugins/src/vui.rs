@@ -6,6 +6,8 @@ use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::{AspectRatio, Colorimetry, PixelAspect};
 
 use crate::annexb::BitReader;
+#[cfg(any(test, all(target_os = "linux", feature = "v4l2")))]
+use crate::annexb::BitWriter;
 use crate::sei::PicTimingContext;
 use crate::startcodeparse::sample_aspect;
 
@@ -122,6 +124,39 @@ fn read_sample_aspect(br: &mut BitReader) -> Option<PixelAspect> {
     Some(ratio.map_or(PixelAspect::Any, PixelAspect::Exact))
 }
 
+// H.264 Table E-2 and H.265 Table E.2
+#[cfg(any(test, all(target_os = "linux", feature = "v4l2")))]
+const UNSPECIFIED_VIDEO_FORMAT: u32 = 5;
+
+// the inverse of `read_vui_head`, `None` for a sample aspect wider than the 16-bit SAR fields
+#[cfg(any(test, all(target_os = "linux", feature = "v4l2")))]
+pub(crate) fn write_vui_head(w: &mut BitWriter, head: &VuiHead) -> Option<()> {
+    match head.pixel_aspect {
+        PixelAspect::Exact(ratio) => {
+            let sar_width = u16::try_from(ratio.numerator()).ok()?;
+            let sar_height = u16::try_from(ratio.denominator()).ok()?;
+            w.write_bit(1); // aspect_ratio_info_present_flag
+            w.write_bits(EXTENDED_SAR, 8);
+            w.write_bits(u32::from(sar_width), 16);
+            w.write_bits(u32::from(sar_height), 16);
+        }
+        PixelAspect::Any => w.write_bit(0),
+    }
+    w.write_bit(0); // overscan_info_present_flag
+    let Some(signal) = head.signal_type else {
+        w.write_bit(0); // video_signal_type_present_flag
+        return Some(());
+    };
+    w.write_bit(1);
+    w.write_bits(UNSPECIFIED_VIDEO_FORMAT, 3);
+    w.write_bit(u32::from(signal.video_full_range_flag));
+    w.write_bit(1); // colour_description_present_flag
+    w.write_bits(u32::from(signal.color_primaries), 8);
+    w.write_bits(u32::from(signal.transfer_characteristics), 8);
+    w.write_bits(u32::from(signal.matrix_coefficients), 8);
+    Some(())
+}
+
 /// Walk an H.264 `hrd_parameters()` (E.1.2), returning the three delay bit
 /// widths a `pic_timing` SEI is sized by: `(cpb_removal_delay_length,
 /// dpb_output_delay_length, time_offset_length)`.
@@ -220,4 +255,45 @@ fn walk_h264_vui_tail(br: &mut BitReader, tail: &mut H264VuiTail) -> Option<()> 
         tail.max_dec_frame_buffering = Some(dec_frame_buffering as u8);
     }
     Some(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn round_trip(head: &VuiHead) -> Option<VuiHead> {
+        let mut writer = BitWriter::default();
+        write_vui_head(&mut writer, head)?;
+        let bytes = writer.into_bytes();
+        read_vui_head(&mut BitReader::new(&bytes))
+    }
+
+    #[test]
+    fn a_written_vui_head_reads_back_the_same() {
+        let signal = VideoSignalType {
+            color_primaries: 1,
+            transfer_characteristics: 1,
+            matrix_coefficients: 1,
+            video_full_range_flag: true,
+        };
+        let heads = [
+            VuiHead::ABSENT,
+            VuiHead {
+                pixel_aspect: PixelAspect::Exact(AspectRatio::new(64, 45).unwrap()),
+                signal_type: Some(signal),
+            },
+        ];
+        for head in heads {
+            assert_eq!(round_trip(&head), Some(head));
+        }
+    }
+
+    #[test]
+    fn a_sample_aspect_past_sixteen_bits_is_refused() {
+        let head = VuiHead {
+            pixel_aspect: PixelAspect::Exact(AspectRatio::new(65_537, 1).unwrap()),
+            signal_type: None,
+        };
+        assert_eq!(round_trip(&head), None);
+    }
 }

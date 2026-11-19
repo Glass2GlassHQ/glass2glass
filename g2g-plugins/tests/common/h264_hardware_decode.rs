@@ -116,9 +116,17 @@ pub(crate) fn system_frame(bytes: &[u8]) -> Frame {
     }
 }
 
-// the whole stream as one buffer, so every picture shares one timestamp
 pub(crate) fn decode<B: H264HardwareDecoder>(
     fixture: &Fixture,
+    domain: MemoryDomainKind,
+) -> (H264HardwareDec<B>, Collect, Result<(), G2gError>) {
+    decode_stream::<B>(fixture.stream, fixture.picture, domain)
+}
+
+// the whole stream as one buffer, so every picture shares one timestamp
+pub(crate) fn decode_stream<B: H264HardwareDecoder>(
+    stream: &[u8],
+    picture: (u32, u32),
     domain: MemoryDomainKind,
 ) -> (H264HardwareDec<B>, Collect, Result<(), G2gError>) {
     let mut decoder = H264HardwareDec::<B>::new();
@@ -131,11 +139,11 @@ pub(crate) fn decode<B: H264HardwareDecoder>(
         ..Default::default()
     });
     decoder
-        .configure_pipeline(&h264_caps(fixture.picture))
+        .configure_pipeline(&h264_caps(picture))
         .expect("configure opens the decode device");
     let mut collect = Collect::default();
     let decoded = block_on(decoder.process(
-        PipelinePacket::DataFrame(system_frame(fixture.stream)),
+        PipelinePacket::DataFrame(system_frame(stream)),
         &mut collect,
     ));
     if decoded.is_ok() {
@@ -146,9 +154,17 @@ pub(crate) fn decode<B: H264HardwareDecoder>(
 }
 
 pub(crate) fn system_frames<B: H264HardwareDecoder>(fixture: &Fixture) -> Vec<Vec<u8>> {
-    let (_, collect, decoded) = decode::<B>(fixture, MemoryDomainKind::System);
+    system_frames_of::<B>(fixture.name, fixture.stream, fixture.picture)
+}
+
+pub(crate) fn system_frames_of<B: H264HardwareDecoder>(
+    name: &str,
+    stream: &[u8],
+    picture: (u32, u32),
+) -> Vec<Vec<u8>> {
+    let (_, collect, decoded) = decode_stream::<B>(stream, picture, MemoryDomainKind::System);
     decoded.expect("decode stream");
-    let (width, height) = fixture.picture;
+    let (width, height) = picture;
     let caps = collect.caps_changes();
     assert!(
         matches!(
@@ -160,8 +176,7 @@ pub(crate) fn system_frames<B: H264HardwareDecoder>(fixture: &Fixture) -> Vec<Ve
                 ..
             }] if (*caps_width, *caps_height) == (width, height)
         ),
-        "{}: one NV12 caps event at the visible size, got {caps:?}",
-        fixture.name
+        "{name}: one NV12 caps event at the visible size, got {caps:?}"
     );
     collect
         .into_frames()

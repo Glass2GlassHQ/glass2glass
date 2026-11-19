@@ -389,6 +389,48 @@ fn max_macroblocks_per_second(level_idc: u8) -> u64 {
     }
 }
 
+// the level_idc of every H.264 level but 1b, lowest first
+#[cfg(any(test, all(target_os = "linux", feature = "v4l2")))]
+const LEVEL_IDCS: [u8; 19] = [
+    10, 11, 12, 13, 20, 21, 22, 30, 31, 32, 40, 41, 42, 50, 51, 52, 60, 61, 62,
+];
+
+// MaxFS, H.264 table A-1, in macroblocks
+#[cfg(any(test, all(target_os = "linux", feature = "v4l2")))]
+fn max_frame_size_mbs(level_idc: u8) -> u64 {
+    match level_idc {
+        10 => 99,
+        11..=20 => 396,
+        21 => 792,
+        22 | 30 => 1620,
+        31 => 3600,
+        32 => 5120,
+        40 | 41 => 8192,
+        42 => 8704,
+        50 => 22080,
+        51 | 52 => 36864,
+        _ => 139264,
+    }
+}
+
+// the lowest level whose frame size and macroblock rate limits hold the stream, A.3.1 a) to c)
+#[cfg(any(test, all(target_os = "linux", feature = "v4l2")))]
+pub(crate) fn h264_level_for(
+    width_mbs: u32,
+    height_mbs: u32,
+    macroblocks_per_second: u64,
+) -> Option<u8> {
+    let frame_mbs = u64::from(width_mbs) * u64::from(height_mbs);
+    LEVEL_IDCS.into_iter().find(|&level_idc| {
+        let max_frame_size = max_frame_size_mbs(level_idc);
+        let side_limit = 8 * max_frame_size;
+        frame_mbs <= max_frame_size
+            && u64::from(width_mbs).pow(2) <= side_limit
+            && u64::from(height_mbs).pow(2) <= side_limit
+            && macroblocks_per_second <= max_macroblocks_per_second(level_idc)
+    })
+}
+
 /// `MaxDpbMbs` for an H.264 level (Table A-1), in macroblocks. The reorder /
 /// DPB frame bound is this divided by the frame size in macroblocks.
 fn max_dpb_mbs(level_idc: u8) -> u32 {
@@ -505,6 +547,8 @@ pub struct H264ParameterSets {
 }
 
 pub(crate) const H264_MACROBLOCK_SIZE: u32 = 16;
+#[cfg(all(target_os = "linux", any(feature = "openh264", feature = "v4l2")))]
+pub(crate) const H264_MAX_QP: u8 = 51;
 
 pub(crate) const H264_NAL_SPS: u8 = 7;
 pub(crate) const H264_NAL_PPS: u8 = 8;
@@ -979,6 +1023,20 @@ mod tests {
         let au = annexb_sps(100, 40, &w.into_bytes());
         // Same 1080p level-4.0 bound as the no-matrix case: 32768 / 8160 = 4.
         assert_eq!(sps_reorder_frames(&au), Some(4));
+    }
+
+    #[test]
+    fn picks_the_lowest_level_that_holds_the_stream() {
+        let frames_per_second = 30;
+        let level = |width_mbs: u32, height_mbs: u32| {
+            let rate = u64::from(width_mbs * height_mbs) * frames_per_second;
+            h264_level_for(width_mbs, height_mbs, rate)
+        };
+        // 320x240, 1280x720 and 1920x1088 macroblock grids
+        assert_eq!(level(20, 15), Some(13));
+        assert_eq!(level(80, 45), Some(31));
+        assert_eq!(level(120, 68), Some(40));
+        assert_eq!(h264_level_for(1, 1, u64::MAX), None);
     }
 
     #[cfg(all(

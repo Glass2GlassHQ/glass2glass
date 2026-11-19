@@ -983,7 +983,8 @@ impl BitWriter {
         all(
             any(target_os = "linux", target_os = "macos", windows),
             feature = "ffmpeg"
-        )
+        ),
+        all(target_os = "linux", feature = "v4l2")
     ))]
     pub(crate) fn write_ue(&mut self, v: u32) {
         let v1 = v + 1;
@@ -992,6 +993,17 @@ impl BitWriter {
             self.write_bit(0);
         }
         self.write_bits(v1, n + 1);
+    }
+
+    // H.264 9.1.1 maps k > 0 to 2k - 1 and k <= 0 to -2k
+    #[cfg(any(test, all(target_os = "linux", feature = "v4l2")))]
+    pub(crate) fn write_se(&mut self, v: i32) {
+        let magnitude = v.unsigned_abs();
+        self.write_ue(if v > 0 {
+            2 * magnitude - 1
+        } else {
+            2 * magnitude
+        });
     }
 
     pub(crate) fn bit_pos(&self) -> usize {
@@ -1428,5 +1440,19 @@ mod tests {
         assert!(!au_is_keyframe(Mpeg2, &[0x00, 0x00, 0x01, 0x01, 0xFF]));
         assert!(!au_is_keyframe(Mpeg2, &[0x00, 0x00, 0x01, 0x00, 0x00]));
         assert!(!au_is_keyframe(Mpeg2, &[]));
+    }
+
+    #[test]
+    fn signed_exp_golomb_round_trips() {
+        let values = [0, 1, -1, 2, -2, 25, -26, 51, -51];
+        let mut writer = BitWriter::default();
+        for value in values {
+            writer.write_se(value);
+        }
+        let bytes = writer.into_bytes();
+        let mut reader = BitReader::new(&bytes);
+        for value in values {
+            assert_eq!(reader.read_se(), Some(value));
+        }
     }
 }

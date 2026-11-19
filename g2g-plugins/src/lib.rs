@@ -1553,6 +1553,7 @@ pub mod mfaacencode;
     ),
     all(any(target_os = "linux", windows), feature = "nvenc"),
     all(target_os = "linux", feature = "openh264"),
+    all(target_os = "linux", feature = "v4l2"),
     all(target_os = "macos", feature = "audiotoolbox-aac"),
     feature = "gstreamer"
 ))]
@@ -1901,6 +1902,12 @@ pub mod v4l2src;
 // media request API.
 #[cfg(all(target_os = "linux", feature = "v4l2"))]
 pub mod v4l2h264dec;
+// V4L2 stateless H.264 encoder (Hantro H1 on STMicroelectronics' kernel controls).
+#[cfg(all(target_os = "linux", feature = "v4l2"))]
+pub mod v4l2h264enc;
+// The media request plumbing the V4L2 stateless decoder and encoder share.
+#[cfg(all(target_os = "linux", feature = "v4l2"))]
+mod v4l2stateless;
 
 // V4L2 device discovery: enumerates /dev/videoN capture nodes with the probed
 // modes of every format v4l2src carries, for the device monitor.
