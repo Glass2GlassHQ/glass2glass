@@ -358,6 +358,7 @@ impl AsyncElement for CudaGlSink {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        self.pacer.adopt_framerate(absolute_caps);
         // NV12 only. Caps do not encode the memory domain, so the Cuda-vs-
         // System distinction is checked per frame in `process`.
         let (w, h, colorimetry) = match absolute_caps {
@@ -444,6 +445,9 @@ impl AsyncElement for CudaGlSink {
         _out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
+            if let PipelinePacket::CapsChanged(caps) = &packet {
+                self.pacer.adopt_framerate(caps);
+            }
             match packet {
                 PipelinePacket::DataFrame(Frame { domain, timing, .. }) => {
                     // This sink consumes CUDA device memory only; a system

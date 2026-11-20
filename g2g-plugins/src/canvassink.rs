@@ -189,7 +189,8 @@ impl AsyncElement for CanvasSink {
         self.pacer.get_property(name)
     }
 
-    fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        self.pacer.adopt_framerate(absolute_caps);
         let err = || G2gError::Hardware(HardwareError::Other);
         let canvas = self.target.resolve()?;
         let object = canvas.context(CONTEXT_2D)?;
@@ -209,6 +210,9 @@ impl AsyncElement for CanvasSink {
         Box::pin(async move {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
+            }
+            if let PipelinePacket::CapsChanged(caps) = &packet {
+                self.pacer.adopt_framerate(caps);
             }
             match packet {
                 PipelinePacket::CapsChanged(Caps::RawVideo {

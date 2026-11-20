@@ -951,7 +951,8 @@ impl AsyncElement for VulkanHdrPresentSink {
         CapsConstraint::AcceptsAny
     }
 
-    fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        self.pacer.adopt_framerate(absolute_caps);
         // Geometry needs no state here: the blit scales the decoded texture onto
         // the swapchain extent, which the surface (not the caps) decides.
         self.configured = true;
@@ -1000,6 +1001,9 @@ impl AsyncElement for VulkanHdrPresentSink {
         Box::pin(async move {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
+            }
+            if let PipelinePacket::CapsChanged(caps) = &packet {
+                self.pacer.adopt_framerate(caps);
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {

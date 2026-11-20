@@ -1553,6 +1553,7 @@ impl AsyncElement for WgpuSink {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        self.pacer.adopt_framerate(absolute_caps);
         self.renderer.configure(absolute_caps)?;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -1616,6 +1617,9 @@ impl AsyncElement for WgpuSink {
         Box::pin(async move {
             if self.renderer.source.is_none() {
                 return Err(G2gError::NotConfigured);
+            }
+            if let PipelinePacket::CapsChanged(caps) = &packet {
+                self.pacer.adopt_framerate(caps);
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {

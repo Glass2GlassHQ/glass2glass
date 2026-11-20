@@ -18,6 +18,7 @@
 //! it always answers [`Pace::Now`], which is the pre-sync "present as fast as
 //! backpressure allows" behaviour.
 
+use crate::caps::{framerate_q16_period_ns, Caps, Rate};
 use crate::clock::ClockSync;
 use crate::element::QosMessage;
 use crate::frame::FrameTiming;
@@ -137,6 +138,7 @@ pub struct PresentationPacer {
     // Late drops since the last presented frame, so a run of them logs once at each end.
     late_drops_in_a_row: u64,
     processing_deadline_ns: u64,
+    frame_period_ns: Option<u64>,
 }
 
 /// GStreamer's `GstVideoSink` default.
@@ -301,9 +303,13 @@ impl PresentationPacer {
             &mut self.seek_reanchor,
         );
         self.last_deadline_ns = Some(deadline);
-        let duration = (timing.duration_ns > 0).then(|| {
+        // gst video sinks take a frame without a duration to last one frame period of the caps
+        let stream_duration = (timing.duration_ns > 0)
+            .then_some(timing.duration_ns)
+            .or(self.frame_period_ns);
+        let duration = stream_duration.map(|stream_duration| {
             // gst basesink clips a frame's end to the segment before taking its running time
-            let end_pts = pts_ns.saturating_add(timing.duration_ns);
+            let end_pts = pts_ns.saturating_add(stream_duration);
             let end_pts = self
                 .segment
                 .and_then(|segment| segment.stop)
@@ -376,6 +382,13 @@ impl PresentationPacer {
     /// Attach the pipeline bus so QoS reports reach the application.
     pub fn set_bus(&mut self, bus: crate::BusHandle) {
         self.qos.set_bus(bus);
+    }
+
+    pub fn adopt_framerate(&mut self, caps: &Caps) {
+        self.frame_period_ns = match caps.framerate() {
+            Rate::Fixed(q16) => framerate_q16_period_ns(q16),
+            _ => None,
+        };
     }
 
     pub fn set_sync(&mut self, sync: bool) {
@@ -631,15 +644,45 @@ mod tests {
         }
     }
 
-    fn video_sink_judging_the_first_frame_at(segment: Segment, late_ns: u64) -> Pace {
+    fn first_frame_judged_late(
+        mut p: PresentationPacer,
+        timing: FrameTiming,
+        late_ns: u64,
+    ) -> Pace {
         let (clock, sync) = manual();
-        let mut p = PresentationPacer::for_video_sink();
         p.set_clock_sync(sync);
-        p.set_segment(segment);
         // the first frame anchors on the clock at zero, so a frame at pts zero is due then
-        assert_eq!(p.judge(&lasting(0), 0), Pace::Now);
+        assert_eq!(p.judge(&timing, 0), Pace::Now);
         clock.store(late_ns, Ordering::Relaxed);
-        p.judge(&lasting(0), 1)
+        p.judge(&timing, 1)
+    }
+
+    fn video_sink_judging_the_first_frame_at(segment: Segment, late_ns: u64) -> Pace {
+        let mut p = PresentationPacer::for_video_sink();
+        p.set_segment(segment);
+        first_frame_judged_late(p, lasting(0), late_ns)
+    }
+
+    #[test]
+    fn a_frame_without_a_duration_lasts_one_period_of_the_caps_framerate() {
+        let fps = 30;
+        let caps = Caps::RawVideo {
+            format: crate::RawVideoFormat::Rgba8,
+            width: crate::Dim::Fixed(64),
+            height: crate::Dim::Fixed(64),
+            framerate: Rate::Fixed(fps << 16),
+            interlace: crate::Interlace::Any,
+            colorimetry: crate::Colorimetry::UNKNOWN,
+            pixel_aspect: crate::PixelAspect::Any,
+        };
+        let judged_late = |late_ns| {
+            let mut p = PresentationPacer::for_video_sink();
+            p.adopt_framerate(&caps);
+            first_frame_judged_late(p, at(0), late_ns)
+        };
+        let tolerated = crate::caps::fps_period_ns(fps) + VIDEO_SINK_MAX_LATENESS_NS;
+        assert_eq!(judged_late(tolerated), Pace::Now);
+        assert_eq!(judged_late(tolerated + 1), Pace::Drop);
     }
 
     #[test]

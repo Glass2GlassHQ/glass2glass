@@ -340,6 +340,7 @@ impl AsyncElement for D3D11Sink {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        self.pacer.adopt_framerate(absolute_caps);
         let input = DisplayInput::from_caps(absolute_caps, NATIVE_FORMATS)?;
         let (w, h) = (input.width, input.height);
         if w % 2 != 0 || h % 2 != 0 {
@@ -392,6 +393,9 @@ impl AsyncElement for D3D11Sink {
         _out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
+            if let PipelinePacket::CapsChanged(caps) = &packet {
+                self.pacer.adopt_framerate(caps);
+            }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     let orientation = frame_orientation(&frame);

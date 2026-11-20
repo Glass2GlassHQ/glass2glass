@@ -351,6 +351,7 @@ impl AsyncElement for GlSink {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        self.pacer.adopt_framerate(absolute_caps);
         let (format, w, h, colorimetry) = match absolute_caps {
             Caps::RawVideo {
                 format,
@@ -441,6 +442,9 @@ impl AsyncElement for GlSink {
         _out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
+            if let PipelinePacket::CapsChanged(caps) = &packet {
+                self.pacer.adopt_framerate(caps);
+            }
             match packet {
                 PipelinePacket::DataFrame(Frame { domain, timing, .. }) => {
                     let slice =

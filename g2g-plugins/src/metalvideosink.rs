@@ -739,6 +739,7 @@ impl AsyncElement for MetalVideoSink {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        self.pacer.adopt_framerate(absolute_caps);
         let input = display_input(absolute_caps)?;
         self.build_state(input.width, input.height)?;
         self.input = Some(input);
@@ -754,6 +755,9 @@ impl AsyncElement for MetalVideoSink {
         Box::pin(async move {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
+            }
+            if let PipelinePacket::CapsChanged(caps) = &packet {
+                self.pacer.adopt_framerate(caps);
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {

@@ -195,6 +195,7 @@ impl AsyncElement for PlayerVideoSink {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        self.pacer.adopt_framerate(absolute_caps);
         self.adopt_caps(absolute_caps.clone());
         Ok(ConfigureOutcome::Accepted)
     }
@@ -242,6 +243,9 @@ impl AsyncElement for PlayerVideoSink {
         _out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
+            if let PipelinePacket::CapsChanged(caps) = &packet {
+                self.pacer.adopt_framerate(caps);
+            }
             match packet {
                 PipelinePacket::DataFrame(mut frame) => {
                     self.estimate_fps(frame.timing.pts_ns);

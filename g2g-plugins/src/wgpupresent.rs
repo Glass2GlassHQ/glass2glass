@@ -618,6 +618,7 @@ impl AsyncElement for WgpuPresentSink {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        self.pacer.adopt_framerate(absolute_caps);
         // Reject here what the renderer cannot present, before opening a window.
         let (width, height) = crate::wgpusink::source_geometry(absolute_caps)?;
         let pixel_aspect = match absolute_caps {
@@ -652,6 +653,9 @@ impl AsyncElement for WgpuPresentSink {
         _out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
+            if let PipelinePacket::CapsChanged(caps) = &packet {
+                self.pacer.adopt_framerate(caps);
+            }
             match packet {
                 PipelinePacket::DataFrame(Frame { domain, timing, .. }) => {
                     self.open_window()?;

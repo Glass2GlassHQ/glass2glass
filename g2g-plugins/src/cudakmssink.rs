@@ -420,6 +420,7 @@ impl AsyncElement for CudaKmsSink {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        self.pacer.adopt_framerate(absolute_caps);
         let (w, h, colorimetry) = match absolute_caps {
             Caps::RawVideo {
                 format: RawVideoFormat::Nv12,
@@ -494,6 +495,9 @@ impl AsyncElement for CudaKmsSink {
         _out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
+            if let PipelinePacket::CapsChanged(caps) = &packet {
+                self.pacer.adopt_framerate(caps);
+            }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     let orientation = frame_orientation(&frame);

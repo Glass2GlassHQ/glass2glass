@@ -276,7 +276,8 @@ impl AsyncElement for SurfaceSink {
         self.pacer.get_property(name)
     }
 
-    fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        self.pacer.adopt_framerate(absolute_caps);
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -286,6 +287,9 @@ impl AsyncElement for SurfaceSink {
         _out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
+            if let PipelinePacket::CapsChanged(caps) = &packet {
+                self.pacer.adopt_framerate(caps);
+            }
             match packet {
                 PipelinePacket::CapsChanged(Caps::RawVideo {
                     format: RawVideoFormat::Rgba8,

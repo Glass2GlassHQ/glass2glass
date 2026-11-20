@@ -611,6 +611,7 @@ impl AsyncElement for WaylandSink {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        self.pacer.adopt_framerate(absolute_caps);
         let input = DisplayInput::from_caps(absolute_caps, NATIVE_FORMATS)?;
         let (w, h, colorimetry, pixel_aspect) = (
             input.width,
@@ -777,6 +778,9 @@ impl AsyncElement for WaylandSink {
         _out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
+            if let PipelinePacket::CapsChanged(caps) = &packet {
+                self.pacer.adopt_framerate(caps);
+            }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     let orientation = frame_orientation(&frame);
