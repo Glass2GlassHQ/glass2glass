@@ -23,7 +23,9 @@ use executorch::module::Module;
 use executorch::ndarray::Array;
 use executorch::tensor::{Scalar, ScalarType, TensorAny, TensorPtr};
 
-use crate::inference::{Inference, InferenceBackend, LoadedModel, ModelGeometry, BASE_PROPERTIES};
+use crate::inference::{
+    Inference, InferenceBackend, LoadedModel, ModelGeometry, ModelOutput, BASE_PROPERTIES,
+};
 use crate::model_dims::{input_geometry, static_output_dims};
 use crate::tensor_bytes::f32_le_bytes;
 
@@ -87,7 +89,7 @@ impl InferenceBackend for ExecutorchBackend {
 
 fn model_geometry(module: &mut Module<'static>) -> Result<ModelGeometry, G2gError> {
     let meta = module.method_meta(FORWARD_METHOD).map_err(executorch_err)?;
-    if meta.num_inputs() != 1 || meta.num_outputs() != 1 {
+    if meta.num_inputs() != 1 || meta.num_outputs() == 0 {
         return Err(G2gError::CapsMismatch);
     }
     if meta.input_tag(0).map_err(executorch_err)? != Tag::Tensor {
@@ -102,10 +104,18 @@ fn model_geometry(module: &mut Module<'static>) -> Result<ModelGeometry, G2gErro
         ScalarType::Char => TensorDType::I8,
         _ => return Err(G2gError::CapsMismatch),
     };
-    let output = meta.output_tensor_meta(0).map_err(executorch_err)?;
-    if output.scalar_type() != ScalarType::Float {
-        return Err(G2gError::CapsMismatch);
+    for output_index in 0..meta.num_outputs() {
+        if meta.output_tag(output_index).map_err(executorch_err)? != Tag::Tensor
+            || meta
+                .output_tensor_meta(output_index)
+                .map_err(executorch_err)?
+                .scalar_type()
+                != ScalarType::Float
+        {
+            return Err(G2gError::CapsMismatch);
+        }
     }
+    let output = meta.output_tensor_meta(0).map_err(executorch_err)?;
     let output_dims: Vec<i64> = output.sizes().iter().map(|&d| i64::from(d)).collect();
     Ok(ModelGeometry {
         width,
@@ -113,11 +123,12 @@ fn model_geometry(module: &mut Module<'static>) -> Result<ModelGeometry, G2gErro
         input_dtype,
         input_layout: TensorLayout::Nchw,
         output_shape: static_output_dims(&output_dims)?,
+        output_tensor_count: meta.num_outputs(),
     })
 }
 
 impl ExecutorchModel {
-    fn run<S: Scalar>(&mut self, values: Vec<S>) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
+    fn run<S: Scalar>(&mut self, values: Vec<S>) -> Result<Vec<ModelOutput>, G2gError> {
         let shape = (
             INPUT_BATCH,
             INPUT_CHANNELS,
@@ -130,16 +141,20 @@ impl ExecutorchModel {
             .module
             .forward(&[input.into_evalue()])
             .map_err(executorch_err)?;
-        let [output] = &outputs[..] else {
-            return Err(G2gError::CapsMismatch);
-        };
-        let output = TensorAny::try_from(output)
-            .map_err(|_| G2gError::CapsMismatch)?
-            .try_into_typed::<f32>()
-            .map_err(|_| G2gError::CapsMismatch)?;
-        let dims: Vec<u32> = output.sizes().iter().map(|&d| d.max(0) as u32).collect();
-        let values: Vec<f32> = output.as_array_dyn().iter().copied().collect();
-        Ok((f32_le_bytes(&values).into_boxed_slice(), dims))
+        outputs
+            .iter()
+            .map(|output| {
+                let output = TensorAny::try_from(output)
+                    .map_err(|_| G2gError::CapsMismatch)?
+                    .try_into_typed::<f32>()
+                    .map_err(|_| G2gError::CapsMismatch)?;
+                let values: Vec<f32> = output.as_array_dyn().iter().copied().collect();
+                Ok(ModelOutput {
+                    data: f32_le_bytes(&values).into_boxed_slice(),
+                    dims: output.sizes().iter().map(|&d| d.max(0) as u32).collect(),
+                })
+            })
+            .collect()
     }
 }
 
@@ -148,11 +163,11 @@ impl LoadedModel for ExecutorchModel {
         &self.geometry
     }
 
-    fn run_f32(&mut self, chw: Vec<f32>) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
+    fn run_f32(&mut self, chw: Vec<f32>) -> Result<Vec<ModelOutput>, G2gError> {
         self.run(chw)
     }
 
-    fn run_int(&mut self, bytes: &[u8]) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
+    fn run_int(&mut self, bytes: &[u8]) -> Result<Vec<ModelOutput>, G2gError> {
         match self.geometry.input_dtype {
             TensorDType::U8 => self.run(bytes.to_vec()),
             TensorDType::I8 => self.run(bytes.iter().map(|&b| b as i8).collect::<Vec<i8>>()),

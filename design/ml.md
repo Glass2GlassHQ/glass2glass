@@ -159,6 +159,13 @@ its own layout with no normalization, which is how quantized vision models from
 TFLite and ST's tools expect them, or a u8 tensor. RGB video into an NHWC model is
 passed through uncopied.
 
+A model can have several outputs, and `run` returns all of them in model order.
+With `attach-tensor=true` each one is attached as its own tensor, named
+`<tensor-name>.N` for output `N`, or just `N` when `tensor-name` is empty. A
+model with one output keeps the plain `tensor-name`. The tensor-frame mode emits
+a single tensor, so a model with several outputs fails configure without
+`attach-tensor`.
+
 `OrtInference` takes `only-on=`, which names a blob header, or `detections` for
 any detection, that a frame has to carry to be inferred on. A frame without it is
 forwarded with no session run, so a second stage can ride the first one's results
@@ -367,8 +374,8 @@ optimizer and VeriSilicon's Acuity toolkit produce them. `g2g-plugins/src/openvx
 imports the graph as one OpenVX node through `vxImportKernelFromURL`, binds a host
 tensor to each parameter and runs it with `vxProcessGraph`. `libOpenVX.so.1` is
 loaded at run time, so the build needs no NPU SDK. The model contract is one RGB
-input, NHWC or NCHW, u8, i8 or f32, and one output, which is dequantized to f32
-(affine u8 and i8, dynamic fixed point i8 and i16, f16).
+input, NHWC or NCHW, u8, i8 or f32. Every output is dequantized to f32 (affine u8
+and i8, dynamic fixed point i8 and i16, f16).
 
 On an STM32MP257 this is the only path that reaches the NPU with ST's models. ST's
 onnxruntime 1.19.2 has a `VSINPUExecutionProvider`, but it ran ST's per-channel
@@ -382,6 +389,14 @@ graph through `ovxinference` on the board and checks its scores against ST's
 times it: `ovxinference` takes 11.9 ms per frame (p50), 11.6 ms of it the input
 copy and graph run, against 12.0 ms for `stai_mpu` with the same input and output
 copies.
+
+The smoke script also runs ST's SSD MobileNet v2 (256x256, three outputs) through
+`ovxinference attach-tensor=true` and `detectionpostprocess head=ssd`, and
+checks the detections against ST's `ssd_mobilenet_pp.py` on the same picture:
+the labels and scores match exactly and the boxes are within one f16 step. Its
+NPU graph runs in 27 ms. The element takes 42 ms per frame on an idle board, about
+15 ms of it the f16 to f32 conversion, and 63 to 111 ms beside a live camera
+pipeline, where `detectionpostprocess` takes 15 to 33 ms.
 
 ### Microcontrollers
 
@@ -562,6 +577,12 @@ channel-major with the four box channels `cx, cy, w, h` first:
 - `pose`: `[1, 5+3K, A]`, one person score then `K` keypoints as `x, y,
   visibility` rows, giving `Pose` nodes whose `Keypoint`s carry the visibility
   as their confidence. NMS is class-agnostic.
+- `ssd`: ST model zoo SSD MobileNet, three outputs attached as
+  `<tensor-name>.0` to `.2`: `[1, A, 1+C]` scores with background in column 0,
+  `[1, A, 4]` box offsets and `[1, A, 4]` anchor boxes, both as corners. Each
+  offset scales by its anchor's width or height and adds to the anchor corner.
+  Labels leave out the background column, so COCO person is 0. NMS is
+  class-agnostic.
 - `obb`: `[1, 4+C+1, A]`, the class scores then the angle in radians as the last
   channel, giving `OrientedDetection` nodes (normalised centre and size, the
   angle as the model emits it). Suppression is Ultralytics' Fast-NMS on its
@@ -648,7 +669,10 @@ class-name tables fail the run with `CapsMismatch`. A frame with no match passes
 through unchanged, and when the analytics pad ends the held video is released in
 order. A mid-stream caps change on the video pad is queued with the held frames,
 so it reaches downstream after the frames that came before it. The wait adds one
-detection stride plus inference time of latency. Stretching to the model size
+detection stride plus inference time of latency. The element cannot measure that
+wait ahead of time, so the `latency` property (nanoseconds, default 0) states it
+and is reported as buffered latency, and synchronized sinks downstream allow for
+it instead of dropping late frames. Stretching to the model size
 keeps the normalised boxes valid on the full frame, and `videorate` restamps onto
 its own grid, which the half-frame window absorbs.
 
@@ -967,7 +991,9 @@ rather than two findings.
 
 Two backends. The CPU `g2g-plugins::analyticsoverlay::AnalyticsOverlay`
 (`analytics` feature) paints onto RGBA8 with the compositor's integer source-over
-blend, the `no_std` baseline. The GPU `vellooverlay::VelloAnalyticsOverlay`
+blend, the `no_std` baseline. On NV12 it paints the shapes onto a transparent
+RGBA layer and blends that into the luma plane per pixel and into the chroma
+plane per 2x2 block. The GPU `vellooverlay::VelloAnalyticsOverlay`
 (`vello-overlay` feature) strokes antialiased boxes and scales each mask on as an
 alpha image fill over a full-frame image with the Vello GPU 2D renderer, emitting
 the result in the `MemoryDomain::WgpuTexture` domain.

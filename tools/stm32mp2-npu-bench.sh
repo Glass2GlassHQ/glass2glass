@@ -20,7 +20,7 @@ TIMED_RUNS=200
 WORK=/root/g2g/npu
 cd "$REPO"
 
-cross build --release --target "$TARGET" -p g2g-ml --features openvx --example ovxinference_bench
+cross build --release --target "$TARGET" -p g2g-ml --features openvx,analytics --example ovxinference_bench
 ssh "$BOARD" "mkdir -p $WORK"
 scp -q "target/$TARGET/release/examples/ovxinference_bench" "$BOARD:$WORK/"
 ssh "$BOARD" "cd $WORK && timeout 300 ./ovxinference_bench $MODEL 2>/dev/null"

@@ -11,7 +11,8 @@ use alloc::collections::VecDeque;
 use g2g_core::frame::Frame;
 use g2g_core::{
     AnalyticsMeta, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError,
-    MultiInputElement, OutputSink, PipelinePacket, Relation,
+    LatencyReport, MultiInputElement, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, Relation,
 };
 
 // gst-python-ml's metadata replay allows this window when a frame has no duration.
@@ -50,7 +51,15 @@ pub struct AnalyticsJoin {
     unmatched_analytics: VecDeque<(u64, AnalyticsMeta)>,
     latest_analytics_pts_ns: Option<u64>,
     analytics_ended: bool,
+    latency_ns: u64,
 }
+
+static ANALYTICSJOIN_PROPS: &[PropertySpec] = &[PropertySpec::new(
+    "latency",
+    PropKind::Uint,
+    "nanoseconds a video frame waits for the analytics branch, added to the pipeline latency so synchronized sinks allow for it",
+)
+.with_default("0")];
 
 impl AnalyticsJoin {
     pub const VIDEO: usize = 0;
@@ -173,6 +182,29 @@ impl MultiInputElement for AnalyticsJoin {
 
     fn output_caps(&self) -> Result<Caps, G2gError> {
         self.video_caps.clone().ok_or(G2gError::NotConfigured)
+    }
+
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::buffered(self.latency_ns, None)
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        ANALYTICSJOIN_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "latency" => self.latency_ns = value.as_uint().ok_or(PropError::Type)?,
+            _ => return Err(PropError::Unknown),
+        }
+        Ok(())
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "latency" => Some(PropValue::Uint(self.latency_ns)),
+            _ => None,
+        }
     }
 
     fn metadata(&self) -> ElementMetadata {

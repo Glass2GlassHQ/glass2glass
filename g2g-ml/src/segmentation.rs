@@ -31,7 +31,7 @@
 
 use g2g_core::{AnalyticsMeta, AnalyticsNode, BBox, Mask, RelationKind, Roi, Segmentation};
 
-use crate::detect::{decode_anchors, suppress_overlaps, AnchorLayout, PictureMapping};
+use crate::detect::{decode_anchors, same_label, suppress_overlaps, AnchorLayout, PictureMapping};
 
 /// The geometry a segmentation model's two outputs define: the box output's
 /// anchors and class count, and the mask output's prototype grid.
@@ -109,6 +109,7 @@ pub fn decode_instances(
             thresholds.confidence,
         ),
         thresholds.iou,
+        same_label,
     );
     let picture =
         PictureMapping::stretch(geometry.input_width as f32, geometry.input_height as f32);

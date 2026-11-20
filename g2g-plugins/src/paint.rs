@@ -21,6 +21,13 @@ pub(crate) fn blend_px(canvas: &mut [u8], d: usize, src: [u8; 4], galpha: u8) {
     canvas[d + 3] = (a + canvas[d + 3] as u32 * inv / 255) as u8;
 }
 
+/// Blend one source sample over a destination sample with scalar alpha (0..=255).
+#[inline]
+pub(crate) fn blend_u8(dst: u8, src: u8, alpha: u8) -> u8 {
+    let a = alpha as u32;
+    ((src as u32 * a + dst as u32 * (255 - a) + 127) / 255) as u8
+}
+
 // gst's compositor `source` operator: the colour is copied and the alpha scaled by `galpha`
 #[inline]
 pub(crate) fn source_px(canvas: &mut [u8], d: usize, src: [u8; 4], galpha: u8) {

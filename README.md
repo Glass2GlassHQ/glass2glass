@@ -991,7 +991,7 @@ registry: `g2g_ml::register(&mut reg)` (the `launch` feature) adds `ortinfer`,
 segmentation), `whispertranscribe` and `llamachat`, so
 `... ! ortinfer model=yolov8n.onnx ! detectionpostprocess conf-threshold=0.3 ! ...`
 parses. `detectionpostprocess head=pose` or `head=obb` decodes a YOLO `-pose` or
-`-obb` export into keypoints or rotated boxes, and `picture-width` /
+`-obb` export into keypoints or rotated boxes, `head=ssd` decodes ST's SSD MobileNet, and `picture-width` /
 `picture-height` map coordinates back through a letterboxed model input.
 `analyticsjoin` puts the detections from a scaled, rate-reduced `tee` branch back
 onto the full-resolution frames (`... ! tracker ! j.analytics  t. ! j.video`).

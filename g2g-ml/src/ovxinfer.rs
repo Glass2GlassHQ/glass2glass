@@ -6,7 +6,9 @@ use g2g_plugins::openvx::{
     NetworkBinaryGraph, OpenVxDataType, OpenVxQuantization, OpenVxTensorInfo,
 };
 
-use crate::inference::{Inference, InferenceBackend, LoadedModel, ModelGeometry, BASE_PROPERTIES};
+use crate::inference::{
+    Inference, InferenceBackend, LoadedModel, ModelGeometry, ModelOutput, BASE_PROPERTIES,
+};
 use crate::safetensors::f16_to_f32;
 use crate::tensor_bytes::{f32_le_bytes, RGB_CHANNELS};
 
@@ -25,7 +27,8 @@ pub type OvxInference = Inference<OvxBackend>;
 pub struct OvxModel {
     graph: NetworkBinaryGraph,
     geometry: ModelGeometry,
-    output: OpenVxTensorInfo,
+    outputs: Vec<OpenVxTensorInfo>,
+    output_dims: Vec<Vec<u32>>,
 }
 
 impl InferenceBackend for OvxBackend {
@@ -37,15 +40,20 @@ impl InferenceBackend for OvxBackend {
         let graph = NetworkBinaryGraph::load(path)?;
         let inputs: Vec<&OpenVxTensorInfo> = graph.inputs().collect();
         let outputs: Vec<&OpenVxTensorInfo> = graph.outputs().collect();
-        let ([input], [output]) = (&inputs[..], &outputs[..]) else {
+        let [input] = &inputs[..] else {
             return Err(G2gError::CapsMismatch);
         };
-        let geometry = model_geometry(input, output)?;
-        let output = (*output).clone();
+        let output_dims = outputs
+            .iter()
+            .map(|output| output_dims(output))
+            .collect::<Result<Vec<_>, _>>()?;
+        let geometry = model_geometry(input, &output_dims)?;
+        let outputs = outputs.into_iter().cloned().collect();
         Ok(OvxModel {
             graph,
             geometry,
-            output,
+            outputs,
+            output_dims,
         })
     }
 
@@ -58,9 +66,19 @@ impl InferenceBackend for OvxBackend {
     }
 }
 
+fn output_dims(output: &OpenVxTensorInfo) -> Result<Vec<u32>, G2gError> {
+    output
+        .dims
+        .iter()
+        // openvx lists dims innermost first
+        .rev()
+        .map(|&dim| u32::try_from(dim).map_err(|_| G2gError::CapsMismatch))
+        .collect()
+}
+
 fn model_geometry(
     input: &OpenVxTensorInfo,
-    output: &OpenVxTensorInfo,
+    output_dims: &[Vec<u32>],
 ) -> Result<ModelGeometry, G2gError> {
     let (width, height, input_layout) = match input.dims[..] {
         [RGB_CHANNELS, width, height, BATCH] => (width, height, TensorLayout::Nhwc),
@@ -73,19 +91,15 @@ fn model_geometry(
         OpenVxDataType::F32 => TensorDType::F32,
         OpenVxDataType::I16 | OpenVxDataType::F16 => return Err(G2gError::CapsMismatch),
     };
-    let output_dims: Vec<u32> = output
-        .dims
-        .iter()
-        .rev()
-        .map(|&dim| u32::try_from(dim).map_err(|_| G2gError::CapsMismatch))
-        .collect::<Result<_, _>>()?;
+    let first_output_dims = output_dims.first().ok_or(G2gError::CapsMismatch)?;
     let to_u32 = |dim: usize| u32::try_from(dim).map_err(|_| G2gError::CapsMismatch);
     Ok(ModelGeometry {
         width: to_u32(width)?,
         height: to_u32(height)?,
         input_dtype,
         input_layout,
-        output_shape: TensorShape::from_slice(&output_dims).ok_or(G2gError::CapsMismatch)?,
+        output_shape: TensorShape::from_slice(first_output_dims).ok_or(G2gError::CapsMismatch)?,
+        output_tensor_count: output_dims.len(),
     })
 }
 
@@ -127,11 +141,20 @@ fn dequantize(bytes: &[u8], info: &OpenVxTensorInfo) -> Result<Vec<f32>, G2gErro
 }
 
 impl OvxModel {
-    fn run(&mut self, input: &[u8]) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
+    fn run(&mut self, input: &[u8]) -> Result<Vec<ModelOutput>, G2gError> {
         self.graph.run(&[input])?;
-        let values = dequantize(&self.graph.output(0)?, &self.output)?;
-        let dims = self.geometry.output_shape.dims().to_vec();
-        Ok((f32_le_bytes(&values).into_boxed_slice(), dims))
+        self.outputs
+            .iter()
+            .zip(&self.output_dims)
+            .enumerate()
+            .map(|(index, (info, dims))| {
+                let values = dequantize(&self.graph.output(index)?, info)?;
+                Ok(ModelOutput {
+                    data: f32_le_bytes(&values).into_boxed_slice(),
+                    dims: dims.clone(),
+                })
+            })
+            .collect()
     }
 }
 
@@ -140,7 +163,7 @@ impl LoadedModel for OvxModel {
         &self.geometry
     }
 
-    fn run_f32(&mut self, chw: Vec<f32>) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
+    fn run_f32(&mut self, chw: Vec<f32>) -> Result<Vec<ModelOutput>, G2gError> {
         if self.geometry.input_dtype != TensorDType::F32 {
             return Err(G2gError::CapsMismatch);
         }
@@ -157,7 +180,7 @@ impl LoadedModel for OvxModel {
         self.run(&f32_le_bytes(&values))
     }
 
-    fn run_int(&mut self, bytes: &[u8]) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
+    fn run_int(&mut self, bytes: &[u8]) -> Result<Vec<ModelOutput>, G2gError> {
         self.run(bytes)
     }
 }
@@ -188,7 +211,7 @@ mod tests {
             OpenVxQuantization::None,
         );
         let output = tensor(&[CLASSES, 1], OpenVxDataType::F16, OpenVxQuantization::None);
-        let geometry = model_geometry(&input, &output).unwrap();
+        let geometry = model_geometry(&input, &[output_dims(&output).unwrap()]).unwrap();
         assert_eq!(
             (
                 geometry.width,
@@ -209,7 +232,7 @@ mod tests {
             OpenVxQuantization::None,
         );
         let output = tensor(&[CLASSES, 1], OpenVxDataType::F32, OpenVxQuantization::None);
-        let geometry = model_geometry(&input, &output).unwrap();
+        let geometry = model_geometry(&input, &[output_dims(&output).unwrap()]).unwrap();
         assert_eq!(
             (geometry.width, geometry.height, geometry.input_layout),
             (224, 128, TensorLayout::Nchw)

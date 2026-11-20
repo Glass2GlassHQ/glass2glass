@@ -44,7 +44,7 @@
 //! that path fails the load loud when the provider cannot be enabled.
 
 use crate::inference::{
-    Inference, InferenceBackend, LoadedModel, ModelGeometry, MODEL_PROP, ONLY_ON_PROP,
+    Inference, InferenceBackend, LoadedModel, ModelGeometry, ModelOutput, MODEL_PROP, ONLY_ON_PROP,
     TENSOR_INPUT_PROP,
 };
 #[cfg(feature = "analytics")]
@@ -69,7 +69,7 @@ use g2g_core::{
 pub struct OrtModel {
     session: Session,
     input_name: String,
-    output_name: String,
+    output_names: Vec<String>,
     geometry: ModelGeometry,
     #[cfg(all(
         target_os = "linux",
@@ -502,30 +502,37 @@ impl OrtModel {
         let [input] = session.inputs() else {
             return Err(G2gError::CapsMismatch);
         };
-        let [output] = session.outputs() else {
-            return Err(G2gError::CapsMismatch);
-        };
+        let outputs = session.outputs();
         // The input may be f32 (RGBA / f32-tensor path) or quantized u8 / i8 (a
-        // quantized model fed an integer tensor). The output is always f32 (a
-        // quantized model dequantizes before its output).
+        // quantized model fed an integer tensor). Every output is f32 (a
+        // quantized model dequantizes before its outputs).
         let (input_name, (in_dims, input_dtype)) =
             (input.name().to_owned(), input_tensor_dims(input.dtype())?);
-        let (output_name, out_dims) = (output.name().to_owned(), f32_tensor_dims(output.dtype())?);
+        let output_names: Vec<String> = outputs
+            .iter()
+            .map(|output| output.name().to_owned())
+            .collect();
+        let output_dims = outputs
+            .iter()
+            .map(|output| f32_tensor_dims(output.dtype()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let out_dims = output_dims.first().ok_or(G2gError::CapsMismatch)?;
 
         let (width, height) = input_geometry(&in_dims)?;
-        let output_shape = static_output_dims(&out_dims)?;
+        let output_shape = static_output_dims(out_dims)?;
 
         Ok(Self {
             session,
             input_name,
-            output_name,
             geometry: ModelGeometry {
                 width,
                 height,
                 input_dtype,
                 input_layout: TensorLayout::Nchw,
                 output_shape,
+                output_tensor_count: output_names.len(),
             },
+            output_names,
             #[cfg(all(
                 target_os = "linux",
                 any(feature = "ort-cuda-wgpu", feature = "ort-hip-wgpu")
@@ -544,14 +551,21 @@ impl OrtModel {
     fn run<'i, 'v: 'i>(
         &mut self,
         input: impl Into<SessionInputs<'i, 'v>>,
-    ) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
+    ) -> Result<Vec<ModelOutput>, G2gError> {
         let outputs = self.session.run(input).map_err(ort_err)?;
-        let value = outputs
-            .get(self.output_name.as_str())
-            .ok_or(G2gError::Hardware(HardwareError::Other))?;
-        let (shape, data) = value.try_extract_tensor::<f32>().map_err(ort_err)?;
-        let dims: Vec<u32> = shape.iter().map(|d| (*d).max(0) as u32).collect();
-        Ok((f32_le_bytes(data).into_boxed_slice(), dims))
+        self.output_names
+            .iter()
+            .map(|name| {
+                let value = outputs
+                    .get(name.as_str())
+                    .ok_or(G2gError::Hardware(HardwareError::Other))?;
+                let (shape, data) = value.try_extract_tensor::<f32>().map_err(ort_err)?;
+                Ok(ModelOutput {
+                    data: f32_le_bytes(data).into_boxed_slice(),
+                    dims: shape.iter().map(|d| (*d).max(0) as u32).collect(),
+                })
+            })
+            .collect()
     }
 }
 
@@ -562,7 +576,7 @@ impl LoadedModel for OrtModel {
 
     /// Run the session on a `[1, 3, H, W]` f32 plane, returning the first
     /// output tensor's little-endian bytes plus its actual dims.
-    fn run_f32(&mut self, chw: Vec<f32>) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
+    fn run_f32(&mut self, chw: Vec<f32>) -> Result<Vec<ModelOutput>, G2gError> {
         let (w, h) = (self.geometry.width as i64, self.geometry.height as i64);
         let tensor = Tensor::from_array((vec![1i64, 3, h, w], chw)).map_err(ort_err)?;
         let name = self.input_name.clone();
@@ -573,7 +587,7 @@ impl LoadedModel for OrtModel {
     /// session (the quantized-model tensor-input path): one byte per element,
     /// no normalize. The bytes are the integer tensor values (i8 reinterpreted from
     /// the byte). Returns the (f32) output, like [`run_f32`](Self::run_f32).
-    fn run_int(&mut self, bytes: &[u8]) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
+    fn run_int(&mut self, bytes: &[u8]) -> Result<Vec<ModelOutput>, G2gError> {
         let (iw, ih) = (self.geometry.width as i64, self.geometry.height as i64);
         let shape = vec![1i64, 3, ih, iw];
         let name = self.input_name.clone();
@@ -598,7 +612,7 @@ impl LoadedModel for OrtModel {
     fn run_wgpu_f32(
         &mut self,
         tensor: &g2g_core::memory::OwnedWgpuBuffer,
-    ) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
+    ) -> Result<Vec<ModelOutput>, G2gError> {
         let len = self.f32_input_len();
         let (device_pointer, memory_device) =
             wgpu_input::stage(&mut self.wgpu_imports, tensor, len, self.device_ordinal)?;
@@ -609,7 +623,7 @@ impl LoadedModel for OrtModel {
     fn run_hip_f32(
         &mut self,
         tensor: &g2g_core::memory::OwnedHipBuffer,
-    ) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
+    ) -> Result<Vec<ModelOutput>, G2gError> {
         use g2g_plugins::hip::HipDevice;
         let (width, height) = (self.geometry.width, self.geometry.height);
         let tight =
@@ -660,7 +674,7 @@ impl OrtModel {
         &mut self,
         device_pointer: u64,
         memory_device: ::ort::memory::AllocationDevice,
-    ) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
+    ) -> Result<Vec<ModelOutput>, G2gError> {
         let (w, h) = (self.geometry.width as i64, self.geometry.height as i64);
         let memory = ::ort::memory::MemoryInfo::new(
             memory_device,

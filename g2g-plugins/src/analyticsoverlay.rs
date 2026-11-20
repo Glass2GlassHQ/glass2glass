@@ -47,13 +47,17 @@ use alloc::vec::Vec;
 
 use g2g_core::{
     AnalyticsMeta, AnalyticsNode, AsyncElement, BBox, Caps, CapsConstraint, CapsSet,
-    Classification, ConfigureOutcome, Dim, ElementMetadata, G2gError, MemoryDomain,
+    Classification, Colorimetry, ConfigureOutcome, Dim, ElementMetadata, G2gError, MemoryDomain,
     ObjectDetection, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
     RawVideoFormat, RelationKind, Roi, Segmentation,
 };
 
 use crate::bitmapfont::{glyph, GLYPH_ADVANCE, GLYPH_HEIGHT};
-use crate::paint::{blend_px, Canvas};
+use crate::paint::{blend_px, blend_u8, Canvas};
+use crate::pixel::{chroma_420_offsets, chroma_420_size, frame_byte_size};
+use crate::yuvmatrix::YuvRgbMatrix;
+
+const DRAWN_FORMATS: [RawVideoFormat; 2] = [RawVideoFormat::Rgba8, RawVideoFormat::Nv12];
 
 /// Default mask fill alpha: faint enough that the picture reads through the fill.
 pub(crate) const MASK_ALPHA_DEFAULT: u8 = 96;
@@ -94,6 +98,9 @@ const TRAIL_MIN_ALPHA: u32 = 40;
 pub struct AnalyticsOverlay {
     width: u32,
     height: u32,
+    format: RawVideoFormat,
+    matrix: YuvRgbMatrix,
+    nv12_layer: Vec<u8>,
     /// Outline thickness in pixels (>= 1).
     thickness: u32,
     /// Alpha the mask fill is blended at (0 = invisible, 255 = opaque).
@@ -319,6 +326,9 @@ impl AnalyticsOverlay {
         Self {
             width: 0,
             height: 0,
+            format: RawVideoFormat::Rgba8,
+            matrix: YuvRgbMatrix::new(Colorimetry::UNKNOWN),
+            nv12_layer: Vec::new(),
             thickness: 2,
             mask_alpha: MASK_ALPHA_DEFAULT,
             caption: CaptionParts::default(),
@@ -378,30 +388,29 @@ impl AnalyticsOverlay {
         self.drawn
     }
 
-    /// RGBA8 at fixed geometry, the only format this element draws on.
-    fn dims(caps: &Caps) -> Option<(u32, u32)> {
-        if let Caps::RawVideo {
-            format: RawVideoFormat::Rgba8,
-            width: Dim::Fixed(w),
-            height: Dim::Fixed(h),
+    fn configure_picture(&mut self, caps: &Caps) -> Result<(), G2gError> {
+        let Caps::RawVideo {
+            format,
+            width: Dim::Fixed(width),
+            height: Dim::Fixed(height),
+            colorimetry,
             ..
         } = caps
-        {
-            Some((*w, *h))
-        } else {
-            None
+        else {
+            return Err(G2gError::CapsMismatch);
+        };
+        if !DRAWN_FORMATS.contains(format) {
+            return Err(G2gError::CapsMismatch);
         }
+        self.width = *width;
+        self.height = *height;
+        self.format = *format;
+        self.matrix = YuvRgbMatrix::new(*colorimetry);
+        Ok(())
     }
 
-    /// Whether `caps` is RGBA8 (geometry may still be unfixed at negotiation).
     fn accepts(caps: &Caps) -> bool {
-        matches!(
-            caps,
-            Caps::RawVideo {
-                format: RawVideoFormat::Rgba8,
-                ..
-            }
-        )
+        matches!(caps, Caps::RawVideo { format, .. } if DRAWN_FORMATS.contains(format))
     }
 
     /// Paint every shape onto the RGBA8 `buf` of `self.width` x `self.height`.
@@ -600,6 +609,55 @@ impl AnalyticsOverlay {
     }
 }
 
+fn blend_layer_into_nv12(
+    layer: &[u8],
+    frame: &mut [u8],
+    (width, height): (usize, usize),
+    matrix: &YuvRgbMatrix,
+) {
+    let unpremultiplied = |sum: u32, alpha: u32| (sum * 255 / alpha) as i32;
+    for (index, pixel) in layer.as_chunks::<4>().0.iter().enumerate() {
+        let alpha = pixel[3];
+        if alpha == 0 {
+            continue;
+        }
+        let [r, g, b] = [0, 1, 2].map(|c| unpremultiplied(pixel[c] as u32, alpha as u32));
+        frame[index] = blend_u8(frame[index], matrix.rgb_to_luma(r, g, b) as u8, alpha);
+    }
+    let (chroma_w, chroma_h) = chroma_420_size(width, height);
+    let luma = width * height;
+    for chroma_y in 0..chroma_h {
+        let rows = 2 * chroma_y..(2 * chroma_y + 2).min(height);
+        for chroma_x in 0..chroma_w {
+            let columns = 2 * chroma_x..(2 * chroma_x + 2).min(width);
+            let mut sums = [0u32; 4];
+            for y in rows.clone() {
+                for x in columns.clone() {
+                    let pixel = &layer[(y * width + x) * 4..][..4];
+                    for (sum, value) in sums.iter_mut().zip(pixel) {
+                        *sum += *value as u32;
+                    }
+                }
+            }
+            if sums[3] == 0 {
+                continue;
+            }
+            let samples = (rows.len() * columns.len()) as u32;
+            let alpha = (sums[3] / samples) as u8;
+            let [r, g, b] = [0, 1, 2].map(|c| unpremultiplied(sums[c], sums[3]));
+            let (_, u, v) = matrix.rgb_to_yuv(r, g, b);
+            let (u_at, v_at) = chroma_420_offsets(
+                luma,
+                chroma_w * chroma_h,
+                chroma_y * chroma_w + chroma_x,
+                true,
+            );
+            frame[u_at] = blend_u8(frame[u_at], u as u8, alpha);
+            frame[v_at] = blend_u8(frame[v_at], v as u8, alpha);
+        }
+    }
+}
+
 /// The pixel rectangle (inclusive) a normalized box covers on a `w` x `h` canvas,
 /// or `None` when it collapses to nothing. `+ 0.5` rounds without the std-only
 /// `f32::round` (the `no_std` baseline has no float intrinsics).
@@ -735,9 +793,7 @@ impl AsyncElement for AnalyticsOverlay {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let (w, h) = Self::dims(absolute_caps).ok_or(G2gError::CapsMismatch)?;
-        self.width = w;
-        self.height = h;
+        self.configure_picture(absolute_caps)?;
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -854,19 +910,32 @@ impl AsyncElement for AnalyticsOverlay {
                         let MemoryDomain::System(slice) = &mut frame.domain else {
                             return Err(G2gError::UnsupportedDomain);
                         };
-                        let need = self.width as usize * self.height as usize * 4;
+                        let need = frame_byte_size(self.format, self.width, self.height);
                         let buf = slice.as_mut_slice();
                         if buf.len() < need {
                             return Err(G2gError::CapsMismatch);
                         }
-                        self.render(&mut buf[..need], &shapes);
+                        if self.format == RawVideoFormat::Rgba8 {
+                            self.render(&mut buf[..need], &shapes);
+                        } else {
+                            let mut layer = core::mem::take(&mut self.nv12_layer);
+                            layer.clear();
+                            layer.resize(self.width as usize * self.height as usize * 4, 0);
+                            self.render(&mut layer, &shapes);
+                            blend_layer_into_nv12(
+                                &layer,
+                                &mut buf[..need],
+                                (self.width as usize, self.height as usize),
+                                &self.matrix,
+                            );
+                            self.nv12_layer = layer;
+                        }
                     }
                     out.push(PipelinePacket::DataFrame(frame)).await?;
                 }
                 PipelinePacket::CapsChanged(caps) => {
-                    if let Some((w, h)) = Self::dims(&caps) {
-                        self.width = w;
-                        self.height = h;
+                    if Self::accepts(&caps) {
+                        self.configure_picture(&caps)?;
                     }
                     out.push(PipelinePacket::CapsChanged(caps)).await?;
                 }
@@ -926,13 +995,8 @@ mod tests {
             width,
             height,
             thickness,
-            mask_alpha: MASK_ALPHA_DEFAULT,
-            caption: CaptionParts::default(),
-            show_trail: false,
-            trail_length: TRAIL_LENGTH_DEFAULT,
-            trails: BTreeMap::new(),
             configured: true,
-            drawn: 0,
+            ..AnalyticsOverlay::new()
         }
     }
 
@@ -1479,19 +1543,70 @@ mod tests {
         );
     }
 
-    #[test]
-    fn intercept_rejects_non_rgba() {
-        let ov = AnalyticsOverlay::new();
-        let nv12 = Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
-            width: Dim::Fixed(8),
-            height: Dim::Fixed(8),
+    fn video_caps(format: RawVideoFormat, w: u32, h: u32) -> Caps {
+        Caps::RawVideo {
+            format,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
             pixel_aspect: g2g_core::PixelAspect::Any,
-        };
-        assert!(ov.intercept_caps(&nv12).is_err(), "only RGBA8 accepted");
+        }
+    }
+
+    #[test]
+    fn intercept_takes_rgba_and_nv12_only() {
+        let ov = AnalyticsOverlay::new();
+        assert!(ov
+            .intercept_caps(&video_caps(RawVideoFormat::I420, 8, 8))
+            .is_err());
+        assert!(ov
+            .intercept_caps(&video_caps(RawVideoFormat::Nv12, 8, 8))
+            .is_ok());
         assert!(ov.intercept_caps(&rgba_caps(8, 8)).is_ok());
+    }
+
+    #[tokio::test]
+    async fn process_draws_detections_onto_an_nv12_frame() {
+        const SIDE: u32 = 8;
+        const GREY_LUMA: u8 = 100;
+        const NEUTRAL_CHROMA: u8 = 128;
+        let mut ov = AnalyticsOverlay::new().with_thickness(1);
+        ov.configure_pipeline(&video_caps(RawVideoFormat::Nv12, SIDE, SIDE))
+            .unwrap();
+        let mut meta = AnalyticsMeta::new();
+        meta.add_detection(det(0.25, 0.25, 0.5, 0.5, 0));
+        let luma = (SIDE * SIDE) as usize;
+        let mut pixels = alloc::vec![GREY_LUMA; luma];
+        pixels.resize(
+            frame_byte_size(RawVideoFormat::Nv12, SIDE, SIDE),
+            NEUTRAL_CHROMA,
+        );
+        let mut frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(pixels.into_boxed_slice())),
+            FrameTiming::default(),
+            0,
+        );
+        frame.meta.attach(meta);
+
+        let mut sink = PixelSink::default();
+        ov.process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
+
+        let out = sink.last.expect("frame forwarded");
+        let matrix = YuvRgbMatrix::new(g2g_core::Colorimetry::UNKNOWN);
+        let [r, g, b, _] = palette_color(0).map(i32::from);
+        let (y, u, v) = matrix.rgb_to_yuv(r, g, b);
+        let at = |x: usize, y: usize| y * SIDE as usize + x;
+        assert_eq!(out[at(2, 2)], y as u8, "box border drawn in luma");
+        assert_eq!(out[at(3, 3)], GREY_LUMA, "interior untouched");
+        // the 2x2 chroma block at (2, 2) is the box's corner: three of its four pixels are border
+        let block = luma + 2 * (SIDE as usize / 2 + 1);
+        let three_quarters =
+            |neutral: u8, drawn: i32| blend_u8(neutral, drawn as u8, (3 * 255 / 4) as u8);
+        assert_eq!(out[block], three_quarters(NEUTRAL_CHROMA, u));
+        assert_eq!(out[block + 1], three_quarters(NEUTRAL_CHROMA, v));
     }
 }

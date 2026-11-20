@@ -15,7 +15,7 @@ mod bench {
     use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
     use g2g_core::memory::{MemoryDomain, SystemSlice};
     use g2g_core::{
-        Caps, Colorimetry, Dim, G2gError, Interlace, PixelAspect, Rate, RawVideoFormat,
+        Caps, Colorimetry, Dim, G2gError, Interlace, PixelAspect, PropValue, Rate, RawVideoFormat,
     };
     use g2g_ml::ovxinfer::OvxInference;
     use g2g_plugins::openvx::NetworkBinaryGraph;
@@ -68,12 +68,18 @@ mod bench {
             .expect("one sized input");
         let input = vec![0u8; input_len];
         let graph_run = timed(|| graph.run(&[&input]).expect("graph runs"));
+        let output_count = graph.outputs().count();
         let output_copy = timed(|| {
-            graph.output(0).expect("output copies");
+            for index in 0..output_count {
+                graph.output(index).expect("output copies");
+            }
         });
         drop(graph);
 
         let mut inference = OvxInference::from_file(model).expect("model loads");
+        inference
+            .set_property("attach-tensor", PropValue::Bool(true))
+            .expect("attach-tensor is a property");
         let (width, height) = inference.input_dims();
         let video = Caps::RawVideo {
             format: RawVideoFormat::Rgb8,

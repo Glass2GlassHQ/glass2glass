@@ -402,10 +402,58 @@ impl g2g_core::PipelineClock for NullClock {
     }
 }
 
+fn join_graph(
+    join: AnalyticsJoin,
+    video: ScriptedSource,
+    analytics: ScriptedSource,
+    seen: SharedSink,
+) -> g2g_core::Graph<g2g_core::runtime::GraphNode> {
+    use g2g_core::runtime::GraphNode;
+    let mut graph = g2g_core::Graph::new();
+    let video_node = graph.add_source(GraphNode::source(video));
+    let analytics_node = graph.add_source(GraphNode::source(analytics));
+    let join = graph.add_muxer(GraphNode::muxer(join), 2);
+    let sink = graph.add_sink(GraphNode::element(seen));
+    graph
+        .link(
+            video_node,
+            join.input(u8::try_from(AnalyticsJoin::VIDEO).unwrap()),
+        )
+        .unwrap();
+    graph
+        .link(
+            analytics_node,
+            join.input(u8::try_from(AnalyticsJoin::ANALYTICS).unwrap()),
+        )
+        .unwrap();
+    graph.link(join.output(), sink).unwrap();
+    graph
+}
+
+#[tokio::test]
+async fn the_join_latency_reaches_the_pipeline_latency() {
+    use g2g_core::MultiInputElement as _;
+    const DETECTOR_LATENCY_NS: u64 = 250_000_000;
+    let mut join = AnalyticsJoin::new();
+    join.set_property("latency", g2g_core::PropValue::Uint(DETECTOR_LATENCY_NS))
+        .unwrap();
+    let graph = join_graph(
+        join,
+        scripted(vec![video_frame(0)]),
+        scripted(vec![detections_frame(0, 0.5)]),
+        SharedSink::default(),
+    );
+
+    let stats = g2g_core::runtime::run_graph(graph, &NullClock, 4)
+        .await
+        .expect("the join runs");
+    assert_eq!(stats.latency.min_ns, DETECTOR_LATENCY_NS);
+}
+
 // decoders announce a stream before they know its framerate
 #[tokio::test]
 async fn video_caps_with_an_unknown_framerate_mid_stream_keep_the_join_running() {
-    use g2g_core::runtime::{run_graph, GraphNode};
+    use g2g_core::runtime::run_graph;
     let unknown_rate = Caps::RawVideo {
         format: RawVideoFormat::Rgba8,
         width: Dim::Fixed(WIDTH),
@@ -420,24 +468,12 @@ async fn video_caps_with_an_unknown_framerate_mid_stream_keep_the_join_running()
     let analytics = vec![detections_frame(0, 0.5)];
 
     let seen = SharedSink::default();
-    let mut graph: g2g_core::Graph<GraphNode> = g2g_core::Graph::new();
-    let video_source = graph.add_source(GraphNode::source(scripted(video)));
-    let analytics_source = graph.add_source(GraphNode::source(scripted(analytics)));
-    let join = graph.add_muxer(GraphNode::muxer(AnalyticsJoin::new()), 2);
-    let sink = graph.add_sink(GraphNode::element(seen.clone()));
-    graph
-        .link(
-            video_source,
-            join.input(u8::try_from(AnalyticsJoin::VIDEO).unwrap()),
-        )
-        .unwrap();
-    graph
-        .link(
-            analytics_source,
-            join.input(u8::try_from(AnalyticsJoin::ANALYTICS).unwrap()),
-        )
-        .unwrap();
-    graph.link(join.output(), sink).unwrap();
+    let graph = join_graph(
+        AnalyticsJoin::new(),
+        scripted(video),
+        scripted(analytics),
+        seen.clone(),
+    );
 
     run_graph(graph, &NullClock, 4)
         .await
@@ -472,7 +508,7 @@ fn rgba_frame(width: u32, index: u64) -> PipelinePacket {
 
 #[tokio::test]
 async fn a_size_change_reaches_downstream_after_the_frames_held_before_it() {
-    use g2g_core::runtime::{run_graph, GraphNode};
+    use g2g_core::runtime::run_graph;
     const NARROW: u32 = WIDTH / 2;
     const WIDE_FRAMES: u64 = 2;
     const NARROW_FRAMES: u64 = 8;
@@ -503,24 +539,12 @@ async fn a_size_change_reaches_downstream_after_the_frames_held_before_it() {
     };
 
     let seen = SharedSink::default();
-    let mut graph: g2g_core::Graph<GraphNode> = g2g_core::Graph::new();
-    let video_node = graph.add_source(GraphNode::source(video_source));
-    let analytics_node = graph.add_source(GraphNode::source(analytics_source));
-    let join = graph.add_muxer(GraphNode::muxer(AnalyticsJoin::new()), 2);
-    let sink = graph.add_sink(GraphNode::element(seen.clone()));
-    graph
-        .link(
-            video_node,
-            join.input(u8::try_from(AnalyticsJoin::VIDEO).unwrap()),
-        )
-        .unwrap();
-    graph
-        .link(
-            analytics_node,
-            join.input(u8::try_from(AnalyticsJoin::ANALYTICS).unwrap()),
-        )
-        .unwrap();
-    graph.link(join.output(), sink).unwrap();
+    let graph = join_graph(
+        AnalyticsJoin::new(),
+        video_source,
+        analytics_source,
+        seen.clone(),
+    );
 
     run_graph(graph, &NullClock, 4)
         .await

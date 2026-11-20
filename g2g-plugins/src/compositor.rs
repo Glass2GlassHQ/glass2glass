@@ -53,7 +53,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::padprop::split_pad_name;
-use crate::paint::{blend_px, source_px};
+use crate::paint::{blend_px, blend_u8, source_px};
 use crate::pixel::{chroma_420_size, frame_byte_size, planar_planes, tight_plane};
 use crate::videoscale::{axis_samples, bilerp};
 use crate::yuvmatrix::YuvRgbMatrix;
@@ -1394,13 +1394,6 @@ fn fill_channel(buf: &mut [u8], c: &Chan, val: u8) {
             buf[c.base + (y * c.w + x) * c.stride + c.off] = val;
         }
     }
-}
-
-/// Blend one source sample over a destination sample with scalar alpha (0..=255).
-#[inline]
-fn blend_u8(dst: u8, src: u8, alpha: u8) -> u8 {
-    let a = alpha as u32;
-    ((src as u32 * a + dst as u32 * (255 - a) + 127) / 255) as u8
 }
 
 /// Alpha-blend a source plane onto a destination plane at channel-space

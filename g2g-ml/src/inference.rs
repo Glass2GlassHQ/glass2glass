@@ -6,6 +6,8 @@ use core::fmt::Debug;
 use core::future::Future;
 use core::pin::Pin;
 
+#[cfg(feature = "analytics")]
+use crate::detect::output_tensor_name;
 use crate::tensor_bytes::{
     rgb_pixels_in_layout, rgba_to_nchw, tensor_bytes_to_chw, RGBA_BYTES_PER_PIXEL, RGB_CHANNELS,
 };
@@ -43,22 +45,19 @@ pub trait InferenceBackend: Default + Debug + ElementBound {
 pub trait LoadedModel {
     fn geometry(&self) -> &ModelGeometry;
 
-    // a `[1, 3, H, W]` f32 plane in, the first output's little-endian f32 bytes and dims out
-    fn run_f32(&mut self, chw: Vec<f32>) -> Result<(Box<[u8]>, Vec<u32>), G2gError>;
+    // a `[1, 3, H, W]` f32 plane in, every output in model order out
+    fn run_f32(&mut self, chw: Vec<f32>) -> Result<Vec<ModelOutput>, G2gError>;
 
     // exactly `3 * H * W` u8 / i8 values, one byte each
-    fn run_int(&mut self, bytes: &[u8]) -> Result<(Box<[u8]>, Vec<u32>), G2gError>;
+    fn run_int(&mut self, bytes: &[u8]) -> Result<Vec<ModelOutput>, G2gError>;
 
     // a `[1, 3, H, W]` f32 tensor left on a GPU by `wgpupreprocess`
-    fn run_wgpu_f32(
-        &mut self,
-        _tensor: &OwnedWgpuBuffer,
-    ) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
+    fn run_wgpu_f32(&mut self, _tensor: &OwnedWgpuBuffer) -> Result<Vec<ModelOutput>, G2gError> {
         Err(G2gError::UnsupportedDomain)
     }
 
     // a `[1, 3, H, W]` f32 tensor in HIP device memory
-    fn run_hip_f32(&mut self, _tensor: &OwnedHipBuffer) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
+    fn run_hip_f32(&mut self, _tensor: &OwnedHipBuffer) -> Result<Vec<ModelOutput>, G2gError> {
         Err(G2gError::UnsupportedDomain)
     }
 }
@@ -74,8 +73,16 @@ pub struct ModelGeometry {
     pub input_dtype: TensorDType,
     // `Nchw` for `[1, 3, H, W]` or `Nhwc` for `[1, H, W, 3]`, the order `run_int` bytes arrive in
     pub input_layout: TensorLayout,
-    /// Static output shape (a dynamic leading batch dim coerced to 1).
+    /// Static shape of the first output (a dynamic leading batch dim coerced to 1).
     pub output_shape: TensorShape,
+    pub output_tensor_count: usize,
+}
+
+#[derive(Debug)]
+pub struct ModelOutput {
+    // little-endian f32 values
+    pub data: Box<[u8]>,
+    pub dims: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,6 +330,17 @@ impl<B: InferenceBackend> AsyncElement for Inference<B> {
         if self.only_on.is_set() && !self.attach_tensor {
             return Err(G2gError::CapsMismatch);
         }
+        #[cfg(feature = "analytics")]
+        let attach = self.attach_tensor;
+        #[cfg(not(feature = "analytics"))]
+        let attach = false;
+        let output_tensor_count = self
+            .geometry()
+            .ok_or(G2gError::NotConfigured)?
+            .output_tensor_count;
+        if output_tensor_count != 1 && !attach {
+            return Err(G2gError::CapsMismatch);
+        }
         let (_, encoding) = self.accepted_input(absolute_caps)?;
         self.input_encoding = encoding;
         self.configured = true;
@@ -414,28 +432,39 @@ impl<B: InferenceBackend> AsyncElement for Inference<B> {
                     #[cfg(not(feature = "offload"))]
                     let (model, frame, result) = run(model);
                     self.model = Some(model);
-                    let (bytes, dims) = result?;
-                    let shape = TensorShape::from_slice(&dims).ok_or(G2gError::CapsMismatch)?;
+                    let outputs = result?;
                     #[cfg(feature = "analytics")]
                     if self.attach_tensor {
                         // Caps are identity here, so no CapsChanged: the frame
                         // going out is the one that came in, carrying the model
                         // output for a post-processor downstream.
                         let mut frame = frame;
-                        let produced = g2g_core::NamedTensor {
-                            name: self.tensor_name.clone(),
-                            dtype: TensorDType::F32,
-                            shape,
-                            layout: TensorLayout::Nchw,
-                            data: bytes.into_vec(),
-                        };
+                        let several = outputs.len() > 1;
+                        let produced = outputs
+                            .into_iter()
+                            .enumerate()
+                            .map(|(output_index, output)| {
+                                Ok(g2g_core::NamedTensor {
+                                    name: if several {
+                                        output_tensor_name(&self.tensor_name, output_index)
+                                    } else {
+                                        self.tensor_name.clone()
+                                    },
+                                    dtype: TensorDType::F32,
+                                    shape: TensorShape::from_slice(&output.dims)
+                                        .ok_or(G2gError::CapsMismatch)?,
+                                    layout: TensorLayout::Nchw,
+                                    data: output.data.into_vec(),
+                                })
+                            })
+                            .collect::<Result<Vec<_>, G2gError>>()?;
                         // Add to whatever an earlier inference stage already put
                         // on this frame rather than displacing it.
                         match frame.meta.get_mut::<g2g_core::TensorMeta>() {
-                            Some(tensors) => tensors.push(produced),
+                            Some(tensors) => produced.into_iter().for_each(|t| tensors.push(t)),
                             None => {
                                 let mut tensors = g2g_core::TensorMeta::new();
-                                tensors.push(produced);
+                                produced.into_iter().for_each(|t| tensors.push(t));
                                 frame.meta.attach(tensors);
                             }
                         }
@@ -443,6 +472,10 @@ impl<B: InferenceBackend> AsyncElement for Inference<B> {
                         out.push(PipelinePacket::DataFrame(frame)).await?;
                         return Ok(());
                     }
+                    let [output]: [ModelOutput; 1] =
+                        outputs.try_into().map_err(|_| G2gError::CapsMismatch)?;
+                    let shape =
+                        TensorShape::from_slice(&output.dims).ok_or(G2gError::CapsMismatch)?;
                     let new_caps = Caps::Tensor {
                         dtype: TensorDType::F32,
                         shape,
@@ -454,7 +487,7 @@ impl<B: InferenceBackend> AsyncElement for Inference<B> {
                         self.last_caps = Some(new_caps);
                     }
                     let tensor_frame = Frame {
-                        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes)),
+                        domain: MemoryDomain::System(SystemSlice::from_boxed(output.data)),
                         // inference is per-frame: the tensor inherits the
                         // source frame's timing so latency stays traceable.
                         timing: frame.timing,
@@ -504,7 +537,7 @@ fn infer<M: LoadedModel>(
     model: &mut M,
     input_encoding: InputEncoding,
     frame: &Frame,
-) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
+) -> Result<Vec<ModelOutput>, G2gError> {
     let geometry = *model.geometry();
     match (&frame.domain, input_encoding) {
         (MemoryDomain::WgpuBuffer(tensor), InputEncoding::F32Planes) => {
@@ -642,89 +675,146 @@ mod tests {
         }
     }
 
+    #[cfg(any(feature = "offload", feature = "analytics"))]
+    use std::sync::{Arc, Mutex};
+    #[cfg(any(feature = "offload", feature = "analytics"))]
+    use std::thread::ThreadId;
+
+    #[cfg(any(feature = "offload", feature = "analytics"))]
+    const SIDE: u32 = 2;
+    #[cfg(any(feature = "offload", feature = "analytics"))]
+    const OUTPUT: [u8; 4] = [1, 2, 3, 4];
+
+    #[cfg(any(feature = "offload", feature = "analytics"))]
+    #[derive(Debug, Default)]
+    struct FakeBackend;
+
+    #[cfg(any(feature = "offload", feature = "analytics"))]
+    #[derive(Debug)]
+    struct FakeModel {
+        geometry: ModelGeometry,
+        ran_on: Arc<Mutex<Option<ThreadId>>>,
+        output_tensor_count: usize,
+    }
+
+    #[cfg(any(feature = "offload", feature = "analytics"))]
+    impl InferenceBackend for FakeBackend {
+        type Model = FakeModel;
+        const PROPERTIES: &'static [PropertySpec] = BASE_PROPERTIES;
+
+        fn load(&self, _path: &str) -> Result<Self::Model, G2gError> {
+            unreachable!("the test installs its model directly")
+        }
+
+        fn set_property(&mut self, _name: &str, _value: PropValue) -> Result<(), PropError> {
+            Err(PropError::Unknown)
+        }
+
+        fn get_property(&self, _name: &str) -> Option<PropValue> {
+            None
+        }
+    }
+
+    #[cfg(any(feature = "offload", feature = "analytics"))]
+    impl LoadedModel for FakeModel {
+        fn geometry(&self) -> &ModelGeometry {
+            &self.geometry
+        }
+
+        fn run_f32(&mut self, chw: Vec<f32>) -> Result<Vec<ModelOutput>, G2gError> {
+            assert_eq!(chw.len(), INPUT_CHANNELS * (SIDE * SIDE) as usize);
+            *self.ran_on.lock().unwrap() = Some(std::thread::current().id());
+            Ok((0..self.output_tensor_count)
+                .map(|_| ModelOutput {
+                    data: Box::new(OUTPUT),
+                    dims: vec![1, OUTPUT.len() as u32],
+                })
+                .collect())
+        }
+
+        fn run_int(&mut self, _bytes: &[u8]) -> Result<Vec<ModelOutput>, G2gError> {
+            unreachable!("the test feeds RGBA")
+        }
+    }
+
+    #[cfg(any(feature = "offload", feature = "analytics"))]
+    fn element(
+        ran_on: Arc<Mutex<Option<ThreadId>>>,
+        output_tensor_count: usize,
+    ) -> Inference<FakeBackend> {
+        let mut element = Inference::<FakeBackend>::new();
+        element.model = Some(FakeModel {
+            geometry: ModelGeometry {
+                width: SIDE,
+                height: SIDE,
+                input_dtype: TensorDType::F32,
+                input_layout: TensorLayout::Nchw,
+                output_shape: TensorShape::from_slice(&[1, OUTPUT.len() as u32]).unwrap(),
+                output_tensor_count,
+            },
+            ran_on,
+            output_tensor_count,
+        });
+        element.configured = true;
+        element
+    }
+
+    #[cfg(any(feature = "offload", feature = "analytics"))]
+    fn rgba_frame() -> PipelinePacket {
+        PipelinePacket::DataFrame(Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(
+                vec![0u8; (SIDE * SIDE * 4) as usize].into_boxed_slice(),
+            )),
+            timing: g2g_core::FrameTiming::default(),
+            sequence: 0,
+            meta: Default::default(),
+        })
+    }
+
+    #[cfg(feature = "analytics")]
+    #[test]
+    fn attaches_every_output_under_its_index() {
+        let mut element = element(Arc::new(Mutex::new(None)), 3);
+        let rgba = Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
+            width: Dim::Fixed(SIDE),
+            height: Dim::Fixed(SIDE),
+            framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
+        };
+        assert_eq!(
+            element.configure_pipeline(&rgba).err(),
+            Some(G2gError::CapsMismatch),
+            "a tensor frame carries one output"
+        );
+        element
+            .set_property("attach-tensor", PropValue::Bool(true))
+            .unwrap();
+        element
+            .set_property("tensor-name", PropValue::Str(String::from("ssd")))
+            .unwrap();
+        element.configure_pipeline(&rgba).unwrap();
+        let mut sink = CollectSink::default();
+        g2g_core::runtime::block_on(element.process(rgba_frame(), &mut sink)).unwrap();
+        let [PipelinePacket::DataFrame(frame)] = &sink.packets[..] else {
+            panic!("one video frame goes downstream");
+        };
+        let tensors = frame
+            .meta
+            .get::<g2g_core::TensorMeta>()
+            .expect("outputs attached");
+        let names: Vec<&str> = tensors.iter().map(|tensor| tensor.name.as_str()).collect();
+        assert_eq!(names, ["ssd.0", "ssd.1", "ssd.2"]);
+    }
+
     /// The session runs off the element's arm: under a tokio runtime the model
     /// runs on a blocking-pool thread, and with no runtime it runs inline. Both
     /// ways the output tensor reaches the sink.
     #[cfg(feature = "offload")]
     mod offload {
         use super::*;
-
-        use std::sync::{Arc, Mutex};
-        use std::thread::ThreadId;
-
-        use g2g_core::FrameTiming;
-
-        const SIDE: u32 = 2;
-        const OUTPUT: [u8; 4] = [1, 2, 3, 4];
-
-        #[derive(Debug, Default)]
-        struct ThreadBackend;
-
-        #[derive(Debug)]
-        struct ThreadModel {
-            geometry: ModelGeometry,
-            ran_on: Arc<Mutex<Option<ThreadId>>>,
-        }
-
-        impl InferenceBackend for ThreadBackend {
-            type Model = ThreadModel;
-            const PROPERTIES: &'static [PropertySpec] = BASE_PROPERTIES;
-
-            fn load(&self, _path: &str) -> Result<Self::Model, G2gError> {
-                unreachable!("the test installs its model directly")
-            }
-
-            fn set_property(&mut self, _name: &str, _value: PropValue) -> Result<(), PropError> {
-                Err(PropError::Unknown)
-            }
-
-            fn get_property(&self, _name: &str) -> Option<PropValue> {
-                None
-            }
-        }
-
-        impl LoadedModel for ThreadModel {
-            fn geometry(&self) -> &ModelGeometry {
-                &self.geometry
-            }
-
-            fn run_f32(&mut self, chw: Vec<f32>) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
-                assert_eq!(chw.len(), INPUT_CHANNELS * (SIDE * SIDE) as usize);
-                *self.ran_on.lock().unwrap() = Some(std::thread::current().id());
-                Ok((Box::new(OUTPUT), vec![1, OUTPUT.len() as u32]))
-            }
-
-            fn run_int(&mut self, _bytes: &[u8]) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
-                unreachable!("the test feeds RGBA")
-            }
-        }
-
-        fn element(ran_on: Arc<Mutex<Option<ThreadId>>>) -> Inference<ThreadBackend> {
-            let mut element = Inference::<ThreadBackend>::new();
-            element.model = Some(ThreadModel {
-                geometry: ModelGeometry {
-                    width: SIDE,
-                    height: SIDE,
-                    input_dtype: TensorDType::F32,
-                    input_layout: TensorLayout::Nchw,
-                    output_shape: TensorShape::from_slice(&[1, OUTPUT.len() as u32]).unwrap(),
-                },
-                ran_on,
-            });
-            element.configured = true;
-            element
-        }
-
-        fn rgba_frame() -> PipelinePacket {
-            PipelinePacket::DataFrame(Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(
-                    vec![0u8; (SIDE * SIDE * 4) as usize].into_boxed_slice(),
-                )),
-                timing: FrameTiming::default(),
-                sequence: 0,
-                meta: Default::default(),
-            })
-        }
 
         fn output_bytes(sink: &CollectSink) -> Vec<u8> {
             let tensor = sink
@@ -741,7 +831,7 @@ mod tests {
         #[test]
         fn runs_the_model_on_the_blocking_pool_under_tokio() {
             let ran_on = Arc::new(Mutex::new(None));
-            let mut element = element(ran_on.clone());
+            let mut element = element(ran_on.clone(), 1);
             let mut sink = CollectSink::default();
             tokio::runtime::Builder::new_current_thread()
                 .build()
@@ -760,7 +850,7 @@ mod tests {
         #[test]
         fn runs_the_model_inline_without_a_runtime() {
             let ran_on = Arc::new(Mutex::new(None));
-            let mut element = element(ran_on.clone());
+            let mut element = element(ran_on.clone(), 1);
             let mut sink = CollectSink::default();
             g2g_core::runtime::block_on(element.process(rgba_frame(), &mut sink)).unwrap();
             let ran_on = ran_on.lock().unwrap().expect("the model ran");

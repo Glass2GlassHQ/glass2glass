@@ -13,7 +13,10 @@
 //! [`AnalyticsMeta`] of [`ObjectDetection`]s to the frame, which it forwards
 //! unchanged (an identity pass-through carrying metadata). The `head` property
 //! switches to a `-pose` export (`[1, 5 + 3K, A]`, emitting [`Pose`]s) or an
-//! `-obb` export (`[1, 4 + C + 1, A]`, emitting [`OrientedDetection`]s). Box
+//! `-obb` export (`[1, 4 + C + 1, A]`, emitting [`OrientedDetection`]s), or
+//! `ssd` to the three outputs of ST's SSD MobileNet, attached by an inference
+//! element as `<tensor-name>.0` to `.2` (`[1, A, 1 + C]` scores with background
+//! first, `[1, A, 4]` box offsets, `[1, A, 4]` anchor boxes). Box
 //! coordinates are normalized to `[0, 1]` by the model input size, or by the
 //! picture when `picture-width` / `picture-height` say the model input was a
 //! letterbox of it, so they survive a downstream scale / crop without a rewrite.
@@ -48,10 +51,11 @@ enum Head {
     Detect,
     Pose,
     Obb,
+    Ssd,
 }
 
 /// The `head` property's values, each one `Head::from_name` accepts.
-const HEAD_NICKS: &str = "detect | pose | obb";
+const HEAD_NICKS: &str = "detect | pose | obb | ssd";
 
 impl Head {
     fn from_name(name: &str) -> Option<Head> {
@@ -59,6 +63,7 @@ impl Head {
             "detect" => Some(Head::Detect),
             "pose" => Some(Head::Pose),
             "obb" => Some(Head::Obb),
+            "ssd" => Some(Head::Ssd),
             _ => None,
         }
     }
@@ -68,6 +73,7 @@ impl Head {
             Head::Detect => "detect",
             Head::Pose => "pose",
             Head::Obb => "obb",
+            Head::Ssd => "ssd",
         }
     }
 
@@ -121,6 +127,14 @@ pub struct DetectionPostprocess {
     input_caps: Option<Caps>,
     configured: bool,
     emitted: u64,
+}
+
+pub(crate) fn output_tensor_name(tensor_name: &str, output_index: usize) -> String {
+    if tensor_name.is_empty() {
+        output_index.to_string()
+    } else {
+        format!("{tensor_name}.{output_index}")
+    }
 }
 
 impl DetectionPostprocess {
@@ -273,6 +287,7 @@ impl DetectionPostprocess {
         suppress_overlaps(
             decode_anchors(values, layout, self.conf_threshold),
             self.iou_threshold,
+            same_label,
         )
         .into_iter()
         .map(|b| ObjectDetection {
@@ -289,6 +304,7 @@ impl DetectionPostprocess {
         suppress_overlaps(
             decode_anchors(values, layout, self.conf_threshold),
             self.iou_threshold,
+            same_label,
         )
         .into_iter()
         .map(|b| Pose {
@@ -360,6 +376,49 @@ impl DetectionPostprocess {
                     analytics.push(AnalyticsNode::OrientedDetection(o));
                 }
             }
+            Head::Ssd => return Err(G2gError::CapsMismatch),
+        }
+        Ok(analytics)
+    }
+
+    fn ssd_analytics(&self, tensors: &g2g_core::TensorMeta) -> Result<AnalyticsMeta, G2gError> {
+        self.check_picture_size()?;
+        let output = |index| {
+            tensors
+                .get(&output_tensor_name(&self.tensor_name, index))
+                .filter(|tensor| tensor.dtype == TensorDType::F32)
+                .ok_or(G2gError::CapsMismatch)
+        };
+        let (scores, box_offsets, anchor_boxes) = (output(0)?, output(1)?, output(2)?);
+        let &[1, anchors, score_columns] = scores.shape.dims() else {
+            return Err(G2gError::CapsMismatch);
+        };
+        let box_dims = [1, anchors, BOX_CHANNELS as u32];
+        if score_columns < 2
+            || box_offsets.shape.dims() != box_dims
+            || anchor_boxes.shape.dims() != box_dims
+        {
+            return Err(G2gError::CapsMismatch);
+        }
+        let anchors = anchors as usize;
+        let outputs = SsdOutputs {
+            scores: &Self::read_f32(&scores.data, score_columns as usize, anchors)?,
+            score_columns: score_columns as usize,
+            box_offsets: &Self::read_f32(&box_offsets.data, BOX_CHANNELS, anchors)?,
+            anchor_boxes: &Self::read_f32(&anchor_boxes.data, BOX_CHANNELS, anchors)?,
+        };
+        let (input_w, input_h) = self.normalize_size();
+        let picture = self.picture_mapping();
+        let mut analytics = AnalyticsMeta::new();
+        for kept in suppress_overlaps(
+            decode_ssd(&outputs, self.conf_threshold, input_w, input_h),
+            self.iou_threshold,
+            |_, _| true,
+        ) {
+            analytics.add_detection(ObjectDetection {
+                bbox: picture.bbox(kept.detection.bbox),
+                ..kept.detection
+            });
         }
         Ok(analytics)
     }
@@ -537,9 +596,72 @@ pub(crate) fn decode_anchors(
     out
 }
 
-/// Greedy per-class non-maximum suppression: highest confidence first, dropping
-/// later same-class boxes that overlap a kept one beyond the IoU threshold.
-pub(crate) fn suppress_overlaps(mut boxes: Vec<AnchorBox>, iou_threshold: f32) -> Vec<AnchorBox> {
+#[derive(Debug)]
+struct SsdOutputs<'a> {
+    // per anchor, background first
+    scores: &'a [f32],
+    score_columns: usize,
+    // ST's model zoo encodes each corner as an offset scaled by the anchor's size from the anchor's same corner
+    box_offsets: &'a [f32],
+    // normalized xmin, ymin, xmax, ymax
+    anchor_boxes: &'a [f32],
+}
+
+fn decode_ssd(
+    outputs: &SsdOutputs<'_>,
+    conf_threshold: f32,
+    input_w: f32,
+    input_h: f32,
+) -> Vec<AnchorBox> {
+    outputs
+        .scores
+        .chunks_exact(outputs.score_columns)
+        .zip(outputs.box_offsets.as_chunks::<BOX_CHANNELS>().0)
+        .zip(outputs.anchor_boxes.as_chunks::<BOX_CHANNELS>().0)
+        .filter_map(|((scores, offset), anchor)| {
+            let (column, confidence) = scores
+                .iter()
+                .copied()
+                .enumerate()
+                .skip(1)
+                .max_by(|(_, a), (_, b)| a.total_cmp(b))?;
+            if confidence <= conf_threshold {
+                return None;
+            }
+            let anchor_w = anchor[2] - anchor[0];
+            let anchor_h = anchor[3] - anchor[1];
+            let x0 = offset[0] * anchor_w + anchor[0];
+            let y0 = offset[1] * anchor_h + anchor[1];
+            let x1 = offset[2] * anchor_w + anchor[2];
+            let y1 = offset[3] * anchor_h + anchor[3];
+            Some(AnchorBox {
+                detection: ObjectDetection {
+                    bbox: BBox {
+                        x: x0 * input_w,
+                        y: y0 * input_h,
+                        w: (x1 - x0) * input_w,
+                        h: (y1 - y0) * input_h,
+                    },
+                    label: (column - 1) as u32,
+                    confidence,
+                },
+                extra: Vec::new(),
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn same_label(kept: &ObjectDetection, candidate: &ObjectDetection) -> bool {
+    kept.label == candidate.label
+}
+
+/// Greedy non-maximum suppression: highest confidence first, dropping later
+/// boxes that `compete` with a kept one and overlap it beyond the IoU threshold.
+pub(crate) fn suppress_overlaps(
+    mut boxes: Vec<AnchorBox>,
+    iou_threshold: f32,
+    compete: impl Fn(&ObjectDetection, &ObjectDetection) -> bool,
+) -> Vec<AnchorBox> {
     boxes.sort_by(|x, y| {
         y.detection
             .confidence
@@ -549,7 +671,7 @@ pub(crate) fn suppress_overlaps(mut boxes: Vec<AnchorBox>, iou_threshold: f32) -
     let mut kept: Vec<AnchorBox> = Vec::new();
     for cand in boxes {
         let suppressed = kept.iter().any(|k| {
-            k.detection.label == cand.detection.label
+            compete(&k.detection, &cand.detection)
                 && k.detection.bbox.iou(&cand.detection.bbox) > iou_threshold
         });
         if !suppressed {
@@ -748,6 +870,13 @@ impl AsyncElement for DetectionPostprocess {
                     // The model output is either the frame itself (tensor link)
                     // or riding on it as meta (video link, `attach-tensor`).
                     if let Some(tensors) = frame.meta.get::<g2g_core::TensorMeta>() {
+                        if self.head == Head::Ssd {
+                            let analytics = self.ssd_analytics(tensors)?;
+                            frame.meta.attach(analytics);
+                            self.emitted += 1;
+                            out.push(PipelinePacket::DataFrame(frame)).await?;
+                            return Ok(());
+                        }
                         // Unnamed takes the only tensor: with several on the
                         // frame the pipeline has to say which, rather than get
                         // whichever model happened to run first.
@@ -840,12 +969,12 @@ static DETECT_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "tensor-name",
         PropKind::Str,
-        "which attached tensor to decode when the frame carries several",
+        "which attached tensor to decode when the frame carries several, for head=ssd the tensor-name the model's outputs were attached under",
     ),
     PropertySpec::new(
         "head",
         PropKind::Str,
-        "YOLO export the tensor comes from: boxes, pose keypoints or oriented boxes",
+        "model output to decode: YOLO boxes, pose keypoints or oriented boxes, or ST's SSD MobileNet",
     )
     .with_enum_values(HEAD_NICKS)
     .with_default("detect"),
@@ -1470,6 +1599,69 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn decodes_ssd_outputs_attached_by_index() {
+        const ANCHORS: u32 = 3;
+        let mut det = DetectionPostprocess::new(0.5, 0.45);
+        det.set_property("head", PropValue::Str(String::from("ssd")))
+            .unwrap();
+        det.set_property("tensor-name", PropValue::Str(String::from("ssd")))
+            .unwrap();
+        det.configure_pipeline(&rgba_caps(256, 256)).unwrap();
+
+        let output = |index: usize, columns: u32, values: &[f32]| g2g_core::NamedTensor {
+            name: output_tensor_name("ssd", index),
+            dtype: TensorDType::F32,
+            shape: TensorShape::new([1, ANCHORS, columns]),
+            layout: TensorLayout::Nchw,
+            data: f32_le_bytes(values),
+        };
+        let mut tensors = g2g_core::TensorMeta::new();
+        // background, class 0, class 1 per anchor
+        tensors.push(output(
+            0,
+            3,
+            &[0.1, 0.9, 0.0, 0.2, 0.0, 0.8, 0.9, 0.05, 0.05],
+        ));
+        tensors.push(output(
+            1,
+            4,
+            &[0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ));
+        tensors.push(output(
+            2,
+            4,
+            &[0.1, 0.1, 0.3, 0.3, 0.12, 0.1, 0.32, 0.3, 0.6, 0.6, 0.8, 0.8],
+        ));
+        let mut frame = Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(vec![0u8; 4].into_boxed_slice())),
+            timing: FrameTiming::default(),
+            sequence: 0,
+            meta: Default::default(),
+        };
+        frame.meta.attach(tensors);
+
+        let mut sink = PixelAndMetaSink::default();
+        det.process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
+
+        let meta = sink.meta.expect("frame carries AnalyticsMeta");
+        let detections: Vec<&ObjectDetection> = meta.detections().collect();
+        let [only] = detections[..] else {
+            panic!("the class 1 box overlaps the class 0 box and the background anchor stays out");
+        };
+        assert_eq!((only.label, only.confidence), (0, 0.9));
+        let expected = [0.2, 0.1, 0.1, 0.2];
+        let got = [only.bbox.x, only.bbox.y, only.bbox.w, only.bbox.h];
+        for (got, expected) in got.iter().zip(expected) {
+            assert!(
+                (got - expected).abs() < 1e-6,
+                "{got:?} against {expected:?}"
+            );
+        }
+    }
+
     #[test]
     fn every_declared_head_nick_names_a_head() {
         let spec = DETECT_PROPS
@@ -1477,7 +1669,7 @@ mod tests {
             .find(|p| p.name == "head")
             .expect("head is declared");
         let nicks: Vec<&str> = spec.enum_nicks().collect();
-        assert_eq!(nicks.len(), 3);
+        assert_eq!(nicks.len(), 4);
         for nick in nicks {
             assert_eq!(Head::from_name(nick).map(Head::name), Some(nick));
         }
