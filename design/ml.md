@@ -410,6 +410,11 @@ half-frame window. The aux pipe is set with `media-ctl`: enable the link from
 `RGB888_1X24` size, compose it to the model size, and set pad 1 to
 `RGB888_1X24` at the model size. With the aux pipe, 300 of 300 camera frames
 reach `waylandsink`, against 245 with a `tee` and `videoscale` on the CPU.
+With `io-mode=dmabuf` on the main pipe the frame stays in the camera's buffer
+to the display: `analyticsoverlay` draws into it through a CPU mapping and
+`waylandsink` imports it. Over 600 frames none is late-dropped, against 118 when
+the sink converts system-memory NV12 to XRGB on the CPU and misses the 30 fps
+frame period.
 
 ### Microcontrollers
 

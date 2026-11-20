@@ -626,3 +626,30 @@ async fn a_launch_line_joins_a_rate_reduced_detector_branch() {
     assert_eq!(found, expected);
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+// M2473: a capture source exporting its own buffers stalls unless it has one for every frame the join holds
+#[test]
+fn the_video_producer_is_asked_for_a_buffer_per_frame_held_in_the_latency_window() {
+    const LATENCY_FRAMES: u64 = 7;
+    let mut join = AnalyticsJoin::new();
+    join.set_property(
+        "latency",
+        g2g_core::PropValue::Uint(LATENCY_FRAMES * FRAME_PERIOD_NS),
+    )
+    .expect("latency");
+
+    let proposal = join
+        .propose_allocation_for_input(AnalyticsJoin::VIDEO, &rgba())
+        .expect("a known rate gives a buffer count");
+
+    // the frame whose analytics are being decided is held as well
+    assert_eq!(proposal.min_buffers as u64, LATENCY_FRAMES + 1);
+    assert_eq!(
+        proposal.accepts,
+        g2g_core::memory::DomainSet::ALL,
+        "the count must not narrow the producer's memory"
+    );
+    assert!(join
+        .propose_allocation_for_input(AnalyticsJoin::ANALYTICS, &rgba())
+        .is_none());
+}

@@ -188,6 +188,29 @@ impl MultiInputElement for AnalyticsJoin {
         LatencyReport::buffered(self.latency_ns, None)
     }
 
+    /// Asks the video producer for enough buffers to cover the frames held
+    /// across the `latency` window, which a capture source exporting its own
+    /// buffers needs to keep running.
+    fn propose_allocation_for_input(
+        &self,
+        input: usize,
+        caps: &Caps,
+    ) -> Option<g2g_core::AllocationParams> {
+        if input != Self::VIDEO {
+            return None;
+        }
+        let (_, _, g2g_core::Rate::Fixed(framerate_q16)) = caps.dims()? else {
+            return None;
+        };
+        let period_ns = g2g_core::caps::framerate_q16_period_ns(*framerate_q16)?;
+        let waiting = usize::try_from(self.latency_ns.div_ceil(period_ns)).ok()?;
+        Some(g2g_core::AllocationParams {
+            // the frame whose analytics are being decided is held too
+            min_buffers: waiting.checked_add(1)?,
+            ..g2g_core::AllocationParams::meta_demand(g2g_core::meta::MetaRequests::new())
+        })
+    }
+
     fn properties(&self) -> &'static [PropertySpec] {
         ANALYTICSJOIN_PROPS
     }

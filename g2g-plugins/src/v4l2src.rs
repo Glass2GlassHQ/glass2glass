@@ -903,10 +903,11 @@ fn mmap_buffer_arg(index: u32) -> v4l2_buffer {
 /// keeps its own share of every buffer for the whole stream (so an fd is never
 /// closed mid-stream and `VIDIOC_EXPBUF` runs once per buffer, not once per
 /// frame), and [`refill`](Self::refill) re-queues exactly those buffers whose
-/// share count is back to that one reference. With all [`BUFFER_COUNT`] buffers
-/// held downstream there is nothing to dequeue and the capture loop waits, which
-/// is backpressure rather than a deadlock: [`DMABUF_INFLIGHT`] bounds the
-/// pipeline below `BUFFER_COUNT` so it cannot hold them all.
+/// share count is back to that one reference. With every buffer held
+/// downstream there is nothing to dequeue and the capture loop waits, which is
+/// backpressure rather than a deadlock: the queue has [`BUFFER_COUNT`] buffers
+/// plus the frames downstream asked to hold, and [`DMABUF_INFLIGHT`] bounds the
+/// channel below `BUFFER_COUNT`.
 struct ExportedQueue {
     /// The device handle the ioctls go to, kept so the fd outlives the queue.
     handle: Arc<Handle>,
@@ -931,15 +932,15 @@ impl core::fmt::Debug for ExportedQueue {
 }
 
 impl ExportedQueue {
-    /// Allocate the MMAP buffers and export each one as a dma-buf fd. `stride` is
-    /// the driver's `bytesperline` for the negotiated format, carried on every
-    /// exported buffer so a consumer can address rows.
-    fn new(dev: &Device, stride: u32) -> Result<Self, G2gError> {
+    /// Allocate `count` MMAP buffers and export each one as a dma-buf fd.
+    /// `stride` is the driver's `bytesperline` for the negotiated format,
+    /// carried on every exported buffer so a consumer can address rows.
+    fn new(dev: &Device, stride: u32, count: usize) -> Result<Self, G2gError> {
         let handle = dev.handle();
         let fd = handle.fd();
 
         let mut request: v4l2_requestbuffers = zeroed_arg();
-        request.count = BUFFER_COUNT;
+        request.count = u32::try_from(count).map_err(|_| G2gError::CapsMismatch)?;
         request.type_ = Type::VideoCapture as u32;
         request.memory = Memory::Mmap as u32;
         // SAFETY: `v4l2_requestbuffers` is VIDIOC_REQBUFS's argument type.
@@ -1043,6 +1044,7 @@ fn capture_dmabuf(
     device: &str,
     mode: Mode,
     min_bytes: usize,
+    buffer_count: usize,
     tx: &tokio::sync::mpsc::Sender<Captured>,
 ) -> Result<(), G2gError> {
     let dev = Device::with_path(device).map_err(|e| v4l2_err(&e))?;
@@ -1052,7 +1054,7 @@ fn capture_dmabuf(
     let actual = dev.set_format(&format).map_err(|e| v4l2_err(&e))?;
     let _ = dev.set_params(&Parameters::with_fps(mode.fps));
 
-    let mut queue = ExportedQueue::new(&dev, actual.stride)?;
+    let mut queue = ExportedQueue::new(&dev, actual.stride, buffer_count)?;
     queue.start()?;
     loop {
         while queue.refill()? == 0 {
@@ -1124,6 +1126,9 @@ pub struct V4l2Src {
     /// Whether a consumer asked where the rows are, so a driver that
     /// pads them can hand its buffer over as it is instead of packing it tight.
     keep_row_padding: bool,
+    /// Frames downstream asked to hold at once, which dmabuf capture adds to
+    /// its driver buffers.
+    downstream_held_buffers: usize,
     host_allocator: HostAllocator,
     configured: bool,
 }
@@ -1146,6 +1151,7 @@ impl V4l2Src {
             formats: Vec::new(),
             chosen: None,
             keep_row_padding: false,
+            downstream_held_buffers: 0,
             host_allocator: HostAllocator::heap(),
             configured: false,
         }
@@ -1513,6 +1519,7 @@ impl SourceLoop for V4l2Src {
         {
             self.keep_row_padding = params.meta_requests.wants::<g2g_core::meta::PlaneLayout>();
         }
+        self.downstream_held_buffers = params.min_buffers;
         self.host_allocator = params.host_allocator_or_heap();
     }
 
@@ -1553,6 +1560,7 @@ impl SourceLoop for V4l2Src {
             // The dmabuf path bounds it lower, since a queued frame there holds a
             // capture buffer the driver still needs.
             let io_mode = self.io_mode;
+            let dmabuf_buffer_count = BUFFER_COUNT as usize + self.downstream_held_buffers;
             let keep_row_padding = self.keep_row_padding;
             let host_allocator = self.host_allocator.clone();
             let queued_frames = match io_mode {
@@ -1567,7 +1575,7 @@ impl SourceLoop for V4l2Src {
             // In dmabuf mode it exports the buffers instead and copies nothing.
             let handle = std::thread::spawn(move || -> Result<(), G2gError> {
                 if io_mode == IoMode::DmaBuf {
-                    return capture_dmabuf(&device, mode, min_bytes, &tx);
+                    return capture_dmabuf(&device, mode, min_bytes, dmabuf_buffer_count, &tx);
                 }
                 let dev = Device::with_path(&device).map_err(|e| v4l2_err(&e))?;
                 // The driver's own bytesperline for the format it accepted: a

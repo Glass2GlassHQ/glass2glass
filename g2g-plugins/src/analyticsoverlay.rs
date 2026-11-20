@@ -45,6 +45,8 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use g2g_core::memory::{DomainSet, MemoryDomainKind};
+use g2g_core::meta::PlaneLayout;
 use g2g_core::{
     AnalyticsMeta, AnalyticsNode, AsyncElement, BBox, Caps, CapsConstraint, CapsSet,
     Classification, Colorimetry, ConfigureOutcome, Dim, ElementMetadata, G2gError, MemoryDomain,
@@ -54,7 +56,7 @@ use g2g_core::{
 
 use crate::bitmapfont::{glyph, GLYPH_ADVANCE, GLYPH_HEIGHT};
 use crate::paint::{blend_px, blend_u8, Canvas};
-use crate::pixel::{chroma_420_offsets, chroma_420_size, frame_byte_size};
+use crate::pixel::chroma_420_size;
 use crate::yuvmatrix::YuvRgbMatrix;
 
 const DRAWN_FORMATS: [RawVideoFormat; 2] = [RawVideoFormat::Rgba8, RawVideoFormat::Nv12];
@@ -413,6 +415,41 @@ impl AnalyticsOverlay {
         matches!(caps, Caps::RawVideo { format, .. } if DRAWN_FORMATS.contains(format))
     }
 
+    /// Paint every shape onto the frame whose planes `layout` places in `buf`.
+    fn paint(
+        &mut self,
+        buf: &mut [u8],
+        layout: &PlaneLayout,
+        shapes: &AnalyticsShapes,
+    ) -> Result<(), G2gError> {
+        let (width, height) = (self.width as usize, self.height as usize);
+        if self.format == RawVideoFormat::Rgba8 {
+            let row_bytes = width * 4;
+            let plane = layout.plane(0).ok_or(G2gError::CapsMismatch)?;
+            // `render` draws rows packed tight
+            if plane.stride != row_bytes {
+                return Err(G2gError::CapsMismatch);
+            }
+            let last_row = height.checked_sub(1).ok_or(G2gError::CapsMismatch)?;
+            let end = layout
+                .row_range(0, last_row, row_bytes)
+                .ok_or(G2gError::CapsMismatch)?
+                .end;
+            let frame = buf
+                .get_mut(plane.offset..end)
+                .ok_or(G2gError::CapsMismatch)?;
+            self.render(frame, shapes);
+            return Ok(());
+        }
+        let mut layer = core::mem::take(&mut self.nv12_layer);
+        layer.clear();
+        layer.resize(width * height * 4, 0);
+        self.render(&mut layer, shapes);
+        let blended = blend_layer_into_nv12(&layer, buf, layout, (width, height), &self.matrix);
+        self.nv12_layer = layer;
+        blended
+    }
+
     /// Paint every shape onto the RGBA8 `buf` of `self.width` x `self.height`.
     /// Mask fills go down first, so a box or ROI edge stays readable over one.
     fn render(&self, buf: &mut [u8], shapes: &AnalyticsShapes) {
@@ -612,21 +649,31 @@ impl AnalyticsOverlay {
 fn blend_layer_into_nv12(
     layer: &[u8],
     frame: &mut [u8],
+    layout: &PlaneLayout,
     (width, height): (usize, usize),
     matrix: &YuvRgbMatrix,
-) {
+) -> Result<(), G2gError> {
     let unpremultiplied = |sum: u32, alpha: u32| (sum * 255 / alpha) as i32;
-    for (index, pixel) in layer.as_chunks::<4>().0.iter().enumerate() {
-        let alpha = pixel[3];
-        if alpha == 0 {
-            continue;
+    for (y, layer_row) in layer.chunks_exact(width * 4).take(height).enumerate() {
+        let range = layout
+            .row_range(0, y, width)
+            .ok_or(G2gError::CapsMismatch)?;
+        let luma_row = frame.get_mut(range).ok_or(G2gError::CapsMismatch)?;
+        for (luma, pixel) in luma_row.iter_mut().zip(layer_row.as_chunks::<4>().0) {
+            let alpha = pixel[3];
+            if alpha == 0 {
+                continue;
+            }
+            let [r, g, b] = [0, 1, 2].map(|c| unpremultiplied(pixel[c] as u32, alpha as u32));
+            *luma = blend_u8(*luma, matrix.rgb_to_luma(r, g, b) as u8, alpha);
         }
-        let [r, g, b] = [0, 1, 2].map(|c| unpremultiplied(pixel[c] as u32, alpha as u32));
-        frame[index] = blend_u8(frame[index], matrix.rgb_to_luma(r, g, b) as u8, alpha);
     }
     let (chroma_w, chroma_h) = chroma_420_size(width, height);
-    let luma = width * height;
     for chroma_y in 0..chroma_h {
+        let range = layout
+            .row_range(1, chroma_y, 2 * chroma_w)
+            .ok_or(G2gError::CapsMismatch)?;
+        let chroma_row = frame.get_mut(range).ok_or(G2gError::CapsMismatch)?;
         let rows = 2 * chroma_y..(2 * chroma_y + 2).min(height);
         for chroma_x in 0..chroma_w {
             let columns = 2 * chroma_x..(2 * chroma_x + 2).min(width);
@@ -646,16 +693,12 @@ fn blend_layer_into_nv12(
             let alpha = (sums[3] / samples) as u8;
             let [r, g, b] = [0, 1, 2].map(|c| unpremultiplied(sums[c], sums[3]));
             let (_, u, v) = matrix.rgb_to_yuv(r, g, b);
-            let (u_at, v_at) = chroma_420_offsets(
-                luma,
-                chroma_w * chroma_h,
-                chroma_y * chroma_w + chroma_x,
-                true,
-            );
-            frame[u_at] = blend_u8(frame[u_at], u as u8, alpha);
-            frame[v_at] = blend_u8(frame[v_at], v as u8, alpha);
+            let uv = &mut chroma_row[2 * chroma_x..][..2];
+            uv[0] = blend_u8(uv[0], u as u8, alpha);
+            uv[1] = blend_u8(uv[1], v as u8, alpha);
         }
     }
+    Ok(())
 }
 
 /// The pixel rectangle (inclusive) a normalized box covers on a `w` x `h` canvas,
@@ -760,6 +803,18 @@ pub(crate) fn palette_color(index: u32) -> [u8; 4] {
 }
 
 impl AsyncElement for AnalyticsOverlay {
+    fn input_domains(&self) -> DomainSet {
+        let system = DomainSet::only(MemoryDomainKind::System);
+        // linux draws into a dma-buf through a CPU mapping
+        #[cfg(all(target_os = "linux", feature = "std"))]
+        let system = system.with(MemoryDomainKind::DmaBuf);
+        system
+    }
+
+    fn output_domain_follows_input(&self) -> bool {
+        true
+    }
+
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
             "Analytics overlay",
@@ -907,28 +962,26 @@ impl AsyncElement for AnalyticsOverlay {
                     // frame may have something to paint with no shapes of its own.
                     let has_trail = self.show_trail && !self.trails.is_empty();
                     if !shapes.is_empty() || has_trail {
-                        let MemoryDomain::System(slice) = &mut frame.domain else {
-                            return Err(G2gError::UnsupportedDomain);
-                        };
-                        let need = frame_byte_size(self.format, self.width, self.height);
-                        let buf = slice.as_mut_slice();
-                        if buf.len() < need {
-                            return Err(G2gError::CapsMismatch);
-                        }
-                        if self.format == RawVideoFormat::Rgba8 {
-                            self.render(&mut buf[..need], &shapes);
-                        } else {
-                            let mut layer = core::mem::take(&mut self.nv12_layer);
-                            layer.clear();
-                            layer.resize(self.width as usize * self.height as usize * 4, 0);
-                            self.render(&mut layer, &shapes);
-                            blend_layer_into_nv12(
-                                &layer,
-                                &mut buf[..need],
-                                (self.width as usize, self.height as usize),
-                                &self.matrix,
-                            );
-                            self.nv12_layer = layer;
+                        match &mut frame.domain {
+                            MemoryDomain::System(slice) => {
+                                let layout =
+                                    PlaneLayout::tight(self.format, self.width, self.height)
+                                        .ok_or(G2gError::CapsMismatch)?;
+                                self.paint(slice.as_mut_slice(), &layout, &shapes)?;
+                            }
+                            #[cfg(all(target_os = "linux", feature = "std"))]
+                            MemoryDomain::DmaBuf(dmabuf) => {
+                                let (layout, _) = crate::paddedrows::dmabuf_plane_layout(
+                                    dmabuf,
+                                    self.format,
+                                    self.width,
+                                    self.height,
+                                )
+                                .ok_or(G2gError::CapsMismatch)?;
+                                let mut map = crate::dmabufmap::DmaBufWriteMap::write(dmabuf)?;
+                                self.paint(map.from_fd_start_mut(), &layout, &shapes)?;
+                            }
+                            _ => return Err(G2gError::UnsupportedDomain),
                         }
                     }
                     out.push(PipelinePacket::DataFrame(frame)).await?;
@@ -953,6 +1006,7 @@ impl AsyncElement for AnalyticsOverlay {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pixel::frame_byte_size;
     use g2g_core::frame::Frame;
     use g2g_core::memory::SystemSlice;
     use g2g_core::{FrameTiming, Mask, PushOutcome, Rate, Tracking};

@@ -61,6 +61,10 @@ buffer is the frame there, so it goes back to the driver only once every share
 of its fd has dropped: the element holds one share per buffer for the whole
 stream and re-queues when the count falls back to it, and the in-flight bound
 stays below `BUFFER_COUNT` so the driver always has a buffer to fill. An
+element that holds frames, such as `analyticsjoin` across its `latency` window,
+asks for buffers through the allocation cascade's `min_buffers`, and dmabuf
+mode requests that many from the driver on top of `BUFFER_COUNT`, so capture
+keeps running while those frames are held. An
 exported fd carries no payload length, so dmabuf mode advertises only the raw
 formats and MJPEG stays on the copy path.
 
