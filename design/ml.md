@@ -444,6 +444,12 @@ it infers in 17 to 22 ms with 4 to 7 ms of postprocessing, where a 320x320
 export takes the whole 33 ms frame period. On the pedestrian clip it boxes 4 or
 5 people per frame, half what the person-only model finds.
 
+`MODEL=pose` runs ST's 17-keypoint YOLOv8n pose at 256x256 with
+`detectionpostprocess head=pose`, and the overlay draws each skeleton. On the
+camera it infers in 17 to 22 ms with up to 5 ms of postprocessing and presents
+every frame. It needs people that fill a good part of the picture: on the
+pedestrian clip seen from above, its person score never passes 0.33.
+
 ### Microcontrollers
 
 A heap-free int8 model runs on a microcontroller through `g2g-mcu`'s
@@ -1032,9 +1038,13 @@ The visible end of the detector chain reads the `AnalyticsMeta` carried onto the
 display frame through the fan-out path and draws it, so
 `decode -> tee -> {detect, video} -> overlay -> display` works.
 
-There are three shapes in one shared palette: a detection box as a solid outline
+There are four shapes in one shared palette: a detection box as a solid outline
 in its class colour, an instance segmentation as a translucent fill of its mask
-under `mask-alpha`, and a region of interest as a dashed rectangle. A mask spans
+under `mask-alpha`, a region of interest as a dashed rectangle, and a pose as its
+box plus a black or white dot on each keypoint. A 17-keypoint pose is COCO's
+layout, so its keypoints are also joined along COCO's 19 limbs in the box colour.
+A keypoint scored under `keypoint-threshold` (0.25, the Ultralytics plotting
+default) and every limb touching it are left out. A mask spans
 exactly its instance's box at the model's own grid resolution, which is the whole
 placement rule either backend needs, and an ROI takes the palette slot of the
 segmentation that `Contains` it, so a mask and its tight box read as one instance

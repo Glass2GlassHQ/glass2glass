@@ -7,7 +7,7 @@
 # camera and draws the boxes on Weston. MODEL=ssd (the default) is ST's 80-class
 # COCO SSD MobileNet at 256x256, MODEL=person ST's person-only YOLOv8n at 320x320,
 # MODEL=coco80 the 80-class YOLOv8n at 256x256 that stm32mp2-yolov8n-fixture.sh
-# puts beside this script.
+# puts beside this script, MODEL=pose ST's 17-keypoint YOLOv8n pose at 256x256.
 # The main pipe carries 640x480 NV12 to the display in the camera's own buffers,
 # the aux pipe the model's RGB.
 # Given an H.264 MP4 instead of a frame count, it runs the same detection on the
@@ -16,7 +16,7 @@
 # g2g-plugins/v4l2 and g2g-plugins/wayland-sink features, by default ml_launch
 # beside this script, as are the two setup scripts.
 #
-# Usage (on the board): [MODEL=ssd|person|coco80] stm32mp2-imx335-detect.sh FRAMES|CLIP.mp4 [CONFIDENCE]
+# Usage (on the board): [MODEL=ssd|person|coco80|pose] stm32mp2-imx335-detect.sh FRAMES|CLIP.mp4 [CONFIDENCE]
 set -e
 INPUT=$1
 CONFIDENCE=${2:-0.65}
@@ -46,8 +46,14 @@ case ${MODEL:-ssd} in
     HEAD="head=detect input-width=1 input-height=1"
     tail -n +2 $COCO_LABELS > $LABELS
     ;;
+  pose)
+    MODEL_FILE=/usr/local/x-linux-ai/pose-estimation/models/yolov8n_pose/yolov8n_256_quant_pt_uf_pose_coco-st.nb
+    MODEL_SIDE=256
+    HEAD="head=pose input-width=1 input-height=1"
+    printf "person\n" > $LABELS
+    ;;
   *)
-    echo "MODEL must be ssd, person or coco80, not $MODEL" >&2
+    echo "MODEL must be ssd, person, coco80 or pose, not $MODEL" >&2
     exit 1
     ;;
 esac

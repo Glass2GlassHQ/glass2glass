@@ -6,9 +6,12 @@
 //! frame onto its raw RGBA8 pixels, the visible end of a detector -> overlay
 //! pipeline. The `cairooverlay` / `ovrenderhud` analog for ML analytics.
 //!
-//! Three shapes: a detection box as a solid outline in its class colour, an
-//! instance segmentation as a translucent fill of its mask, and a region of
-//! interest as a dashed outline in the colour of the mask that contains it.
+//! Four shapes: a detection box as a solid outline in its class colour, an
+//! instance segmentation as a translucent fill of its mask, a region of
+//! interest as a dashed outline in the colour of the mask that contains it, and
+//! a pose as its box plus a dot on each keypoint, joined into limbs for the 17
+//! COCO body keypoints. `keypoint-threshold` hides keypoints the model scores as
+//! not visible.
 //!
 //! `show-label` / `show-track` / `show-score` add a caption bar above each
 //! detection box with its class name, tracking id and confidence. A node stores
@@ -49,9 +52,9 @@ use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::meta::PlaneLayout;
 use g2g_core::{
     AnalyticsMeta, AnalyticsNode, AsyncElement, BBox, Caps, CapsConstraint, CapsSet,
-    Classification, Colorimetry, ConfigureOutcome, Dim, ElementMetadata, G2gError, MemoryDomain,
-    ObjectDetection, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
-    RawVideoFormat, RelationKind, Roi, Segmentation,
+    Classification, Colorimetry, ConfigureOutcome, Dim, ElementMetadata, G2gError, Keypoint,
+    MemoryDomain, ObjectDetection, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, RawVideoFormat, RelationKind, Roi, Segmentation,
 };
 
 use crate::bitmapfont::{glyph, GLYPH_ADVANCE, GLYPH_HEIGHT};
@@ -69,6 +72,41 @@ pub(crate) const MASK_ALPHA_DEFAULT: u8 = 96;
 /// rectangle keep a common phase.
 pub(crate) const ROI_DASH_PX: i32 = 6;
 
+// coco's limbs as zero-based index pairs into its 17 body keypoints, the order yolo -pose models emit
+pub(crate) const COCO_SKELETON: [(usize, usize); 19] = [
+    (15, 13),
+    (13, 11),
+    (16, 14),
+    (14, 12),
+    (11, 12),
+    (5, 11),
+    (6, 12),
+    (5, 6),
+    (5, 7),
+    (6, 8),
+    (7, 9),
+    (8, 10),
+    (1, 2),
+    (0, 1),
+    (0, 2),
+    (1, 3),
+    (2, 4),
+    (3, 5),
+    (4, 6),
+];
+
+const COCO_KEYPOINTS: usize = 17;
+
+pub(crate) const KEYPOINT_THRESHOLD_DEFAULT: f32 = 0.25;
+
+pub(crate) const KEYPOINT_THRESHOLD_PROPERTY: PropertySpec = PropertySpec::new(
+    "keypoint-threshold",
+    PropKind::Double,
+    "lowest keypoint visibility score a pose keypoint is drawn at (0..1)",
+)
+.with_range("0", "1")
+.with_default("0.25");
+
 /// How many past positions a trail keeps by default, i.e. about a second of
 /// movement at 30 fps.
 const TRAIL_LENGTH_DEFAULT: usize = 30;
@@ -81,7 +119,7 @@ const TRAIL_TTL_FRAMES: u64 = 30;
 /// rather than fading to nothing.
 const TRAIL_MIN_ALPHA: u32 = 40;
 
-/// Draws the detection boxes, segmentation masks and regions of interest of an
+/// Draws the detection boxes, poses, segmentation masks and regions of interest of an
 /// attached [`AnalyticsMeta`] onto an RGBA8 frame. Outline thickness and mask fill
 /// alpha are configurable; colours come from a fixed palette, indexed by class
 /// label for a detection box and by instance for a mask and its ROI.
@@ -107,6 +145,7 @@ pub struct AnalyticsOverlay {
     thickness: u32,
     /// Alpha the mask fill is blended at (0 = invisible, 255 = opaque).
     mask_alpha: u8,
+    keypoint_threshold: f32,
     caption: CaptionParts,
     /// Draw the path each tracked object took.
     show_trail: bool,
@@ -134,6 +173,40 @@ pub(crate) struct PaintedDetection {
     pub track_id: Option<u64>,
 }
 
+#[derive(Debug)]
+pub(crate) struct PaintedPose {
+    pub keypoints: Vec<Keypoint>,
+    pub label: u32,
+}
+
+impl PaintedPose {
+    pub(crate) fn visible_keypoints(
+        &self,
+        threshold: f32,
+    ) -> impl Iterator<Item = (f32, f32)> + '_ {
+        self.keypoints
+            .iter()
+            .filter(move |k| k.confidence >= threshold)
+            .map(|k| (k.x, k.y))
+    }
+
+    pub(crate) fn visible_limbs(
+        &self,
+        threshold: f32,
+    ) -> impl Iterator<Item = ((f32, f32), (f32, f32))> + '_ {
+        let limbs: &[(usize, usize)] = if self.keypoints.len() == COCO_KEYPOINTS {
+            &COCO_SKELETON
+        } else {
+            &[]
+        };
+        limbs.iter().filter_map(move |&(from, to)| {
+            let (from, to) = (self.keypoints[from], self.keypoints[to]);
+            (from.confidence >= threshold && to.confidence >= threshold)
+                .then_some(((from.x, from.y), (to.x, to.y)))
+        })
+    }
+}
+
 /// A segmentation mask to fill, with the palette slot of the instance it belongs
 /// to.
 #[derive(Debug)]
@@ -158,6 +231,7 @@ pub(crate) struct PaintedRoi {
 #[derive(Debug, Default)]
 pub(crate) struct AnalyticsShapes {
     pub detections: Vec<PaintedDetection>,
+    pub poses: Vec<PaintedPose>,
     pub masks: Vec<PaintedMask>,
     pub rois: Vec<PaintedRoi>,
     pub frame_classifications: Vec<Classification>,
@@ -181,6 +255,20 @@ impl AnalyticsShapes {
                     detection: *detection,
                     track_id: meta.tracking_id(index),
                 }),
+                AnalyticsNode::Pose(pose) => {
+                    shapes.detections.push(PaintedDetection {
+                        detection: ObjectDetection {
+                            bbox: pose.bbox,
+                            label: pose.label,
+                            confidence: pose.confidence,
+                        },
+                        track_id: meta.tracking_id(index),
+                    });
+                    shapes.poses.push(PaintedPose {
+                        keypoints: pose.keypoints.clone(),
+                        label: pose.label,
+                    });
+                }
                 AnalyticsNode::Classification(classification)
                     if !meta
                         .relations
@@ -333,6 +421,7 @@ impl AnalyticsOverlay {
             scratch_rgba: Vec::new(),
             thickness: 2,
             mask_alpha: MASK_ALPHA_DEFAULT,
+            keypoint_threshold: KEYPOINT_THRESHOLD_DEFAULT,
             caption: CaptionParts::default(),
             show_trail: false,
             trail_length: TRAIL_LENGTH_DEFAULT,
@@ -382,6 +471,11 @@ impl AnalyticsOverlay {
     /// Set the alpha the segmentation mask fill is blended at (0..=255).
     pub fn with_mask_alpha(mut self, alpha: u8) -> Self {
         self.mask_alpha = alpha;
+        self
+    }
+
+    pub fn with_keypoint_threshold(mut self, threshold: f32) -> Self {
+        self.keypoint_threshold = threshold;
         self
     }
 
@@ -482,6 +576,9 @@ impl AnalyticsOverlay {
         for mask in &shapes.masks {
             self.fill_mask(buf, mask);
         }
+        for pose in &shapes.poses {
+            self.draw_pose(buf, pose);
+        }
         for painted in &shapes.detections {
             let color = palette_color(painted.detection.label);
             self.outline(buf, painted.detection.bbox, color, false);
@@ -523,32 +620,61 @@ impl AnalyticsOverlay {
         self.trails.retain(|_, trail| trail.last_seen >= cutoff);
     }
 
+    fn draw_pose(&self, buf: &mut [u8], pose: &PaintedPose) {
+        let color = palette_color(pose.label);
+        let half = self.thickness as i32 / 2;
+        for (from, to) in pose.visible_limbs(self.keypoint_threshold) {
+            self.segment(
+                buf,
+                self.canvas_point(from),
+                self.canvas_point(to),
+                half,
+                color,
+                255,
+            );
+        }
+        let ink = contrast_ink(color);
+        for point in pose.visible_keypoints(self.keypoint_threshold) {
+            let (x, y) = self.canvas_point(point);
+            self.dot(buf, x, y, self.thickness as i32, ink, 255);
+        }
+    }
+
+    fn canvas_point(&self, (x, y): (f32, f32)) -> (i32, i32) {
+        (
+            (x * self.width as f32 + 0.5) as i32,
+            (y * self.height as f32 + 0.5) as i32,
+        )
+    }
+
     /// Stroke every trail, each in the palette slot of its tracking id so two
     /// objects of the same class still read apart, fading towards its old end.
     fn draw_trails(&self, buf: &mut [u8]) {
+        let half = self.thickness as i32 / 2;
         for (id, trail) in &self.trails {
             let color = palette_color(*id as u32);
             let count = trail.points.len() as u32;
             let mut previous = None;
             for (index, point) in trail.points.iter().enumerate() {
-                let x = (point.0 * self.width as f32 + 0.5) as i32;
-                let y = (point.1 * self.height as f32 + 0.5) as i32;
+                let to = self.canvas_point(*point);
                 if let Some(from) = previous {
                     let ramp = (255 - TRAIL_MIN_ALPHA) * (index as u32 + 1) / count;
-                    self.trail_segment(buf, from, (x, y), color, (TRAIL_MIN_ALPHA + ramp) as u8);
+                    let alpha = (TRAIL_MIN_ALPHA + ramp) as u8;
+                    self.segment(buf, from, to, half, color, alpha);
                 }
-                previous = Some((x, y));
+                previous = Some(to);
             }
         }
     }
 
-    /// Blend a straight run between two canvas points (Bresenham, integer only
-    /// for the `no_std` baseline).
-    fn trail_segment(
+    /// Blend a straight run of `half`-radius squares between two canvas points
+    /// (Bresenham, integer only for the `no_std` baseline).
+    fn segment(
         &self,
         buf: &mut [u8],
         from: (i32, i32),
         to: (i32, i32),
+        half: i32,
         color: [u8; 4],
         alpha: u8,
     ) {
@@ -559,7 +685,7 @@ impl AnalyticsOverlay {
         let sy = if y < to.1 { 1 } else { -1 };
         let mut err = dx + dy;
         loop {
-            self.trail_dot(buf, x, y, color, alpha);
+            self.dot(buf, x, y, half, color, alpha);
             if x == to.0 && y == to.1 {
                 return;
             }
@@ -575,9 +701,9 @@ impl AnalyticsOverlay {
         }
     }
 
-    /// Blend one square of the stroke, `thickness` wide, clipped to the canvas.
-    fn trail_dot(&self, buf: &mut [u8], x: i32, y: i32, color: [u8; 4], alpha: u8) {
-        let half = self.thickness as i32 / 2;
+    /// Blend a square `2 * half + 1` pixels wide centred on a canvas point,
+    /// clipped to the canvas.
+    fn dot(&self, buf: &mut [u8], x: i32, y: i32, half: i32, color: [u8; 4], alpha: u8) {
         let side = 2 * half + 1;
         let mut canvas = Canvas {
             pixels: buf,
@@ -842,7 +968,7 @@ impl AsyncElement for AnalyticsOverlay {
         ElementMetadata::new(
             "Analytics overlay",
             "Filter/Editing/Video",
-            "Draws detection boxes, segmentation masks and regions of interest onto raw video",
+            "Draws detection boxes, poses, segmentation masks and regions of interest onto raw video",
             crate::AARON_BOXER,
         )
     }
@@ -908,6 +1034,7 @@ impl AsyncElement for AnalyticsOverlay {
             )
             .with_range("2", "65535")
             .with_default("30"),
+            KEYPOINT_THRESHOLD_PROPERTY,
         ];
         PROPS
     }
@@ -942,6 +1069,10 @@ impl AsyncElement for AnalyticsOverlay {
                 self.trail_length = (value.as_uint().ok_or(PropError::Type)? as usize).max(2);
                 Ok(())
             }
+            "keypoint-threshold" => {
+                self.keypoint_threshold = value.as_double().ok_or(PropError::Type)? as f32;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -955,6 +1086,7 @@ impl AsyncElement for AnalyticsOverlay {
             "show-track" => Some(PropValue::Bool(self.caption.track)),
             "show-trail" => Some(PropValue::Bool(self.show_trail)),
             "trail-length" => Some(PropValue::Uint(self.trail_length as u64)),
+            "keypoint-threshold" => Some(PropValue::Double(self.keypoint_threshold as f64)),
             _ => None,
         }
     }
@@ -1024,6 +1156,40 @@ impl AsyncElement for AnalyticsOverlay {
             Ok(())
         })
     }
+}
+
+// shoulders are coco keypoints 5 and 6, the only ones visible here
+#[cfg(test)]
+pub(crate) fn shoulders_only_pose() -> AnalyticsMeta {
+    let hidden = Keypoint {
+        x: 0.5,
+        y: 0.25,
+        confidence: 0.1,
+    };
+    let mut keypoints = alloc::vec![hidden; COCO_KEYPOINTS];
+    keypoints[5] = Keypoint {
+        x: 0.25,
+        y: 0.5,
+        confidence: 0.9,
+    };
+    keypoints[6] = Keypoint {
+        x: 0.75,
+        y: 0.5,
+        confidence: 0.9,
+    };
+    let mut meta = AnalyticsMeta::new();
+    meta.push(AnalyticsNode::Pose(g2g_core::Pose {
+        bbox: BBox {
+            x: 0.125,
+            y: 0.125,
+            w: 0.75,
+            h: 0.75,
+        },
+        label: 0,
+        confidence: 0.9,
+        keypoints,
+    }));
+    meta
 }
 
 #[cfg(test)]
@@ -1334,6 +1500,26 @@ mod tests {
             [0, 0, 0, 255],
             "outside the box untouched"
         );
+    }
+
+    #[test]
+    fn render_draws_a_pose_box_with_limbs_between_visible_keypoints_only() {
+        let black = [0, 0, 0, 255];
+        let red = palette_color(0);
+        let shapes = AnalyticsShapes::collect(&shoulders_only_pose());
+        let mut buf = solid(64, 64, black);
+        overlay(64, 64, 1).render(&mut buf, &shapes);
+        assert_eq!(px(&buf, 64, 8, 8), red, "pose box corner");
+        assert_eq!(px(&buf, 64, 32, 32), red, "limb between the shoulders");
+        assert_eq!(px(&buf, 64, 16, 32), contrast_ink(red), "left shoulder dot");
+        assert_eq!(px(&buf, 64, 32, 16), black, "hidden nose");
+
+        let mut buf = solid(64, 64, black);
+        overlay(64, 64, 1)
+            .with_keypoint_threshold(0.95)
+            .render(&mut buf, &shapes);
+        assert_eq!(px(&buf, 64, 32, 32), black, "limb hidden above its score");
+        assert_eq!(px(&buf, 64, 8, 8), red, "box still drawn");
     }
 
     #[test]

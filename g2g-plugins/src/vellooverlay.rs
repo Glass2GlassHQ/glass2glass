@@ -8,9 +8,9 @@
 //! many-box path: stroking dozens of antialiased boxes per frame is a GPU job, and
 //! the result stays on the GPU.
 //!
-//! Same three shapes as the CPU backend, in the same palette: a solid box per
-//! detection, a translucent image fill per segmentation mask, and a dashed
-//! rectangle per region of interest. `show-label` / `show-track` / `show-score`
+//! Same four shapes as the CPU backend, in the same palette: a solid box per
+//! detection, a translucent image fill per segmentation mask, a dashed
+//! rectangle per region of interest, and a box with keypoints and limbs per pose. `show-label` / `show-track` / `show-score`
 //! add the CPU backend's caption bar above each box, its text shaped from the
 //! system fonts and drawn as Vello glyph runs.
 //!
@@ -49,12 +49,12 @@ use g2g_core::{
 
 use crate::analyticsoverlay::{
     caption_bar_origin, contrast_ink, palette_rgb, AnalyticsShapes, CaptionParts, PaintedMask,
-    MASK_ALPHA_DEFAULT, ROI_DASH_PX, SHOW_LABEL_PROPERTY, SHOW_SCORE_PROPERTY, SHOW_TRACK_PROPERTY,
-    WHOLE_FRAME,
+    PaintedPose, KEYPOINT_THRESHOLD_DEFAULT, KEYPOINT_THRESHOLD_PROPERTY, MASK_ALPHA_DEFAULT,
+    ROI_DASH_PX, SHOW_LABEL_PROPERTY, SHOW_SCORE_PROPERTY, SHOW_TRACK_PROPERTY, WHOLE_FRAME,
 };
 use crate::gpu::{gpu_err, GpuContext, WgpuTextureKeepAlive};
 use crate::textshape::{FontId, TextShaper};
-use vello::kurbo::{Affine, Rect, Stroke};
+use vello::kurbo::{Affine, Circle, Line, Point, Rect, Stroke};
 use vello::peniko::{Blob, Color, Fill, FontData, ImageAlphaType, ImageData, ImageFormat};
 use vello::wgpu;
 use vello::Glyph;
@@ -89,6 +89,7 @@ pub struct VelloAnalyticsOverlay {
     thickness: f64,
     /// Alpha the mask fill is drawn at (0 = invisible, 255 = opaque).
     mask_alpha: u8,
+    keypoint_threshold: f32,
     caption: CaptionParts,
     caption_fonts: CaptionFonts,
     configured: bool,
@@ -233,6 +234,7 @@ impl core::fmt::Debug for VelloAnalyticsOverlay {
             .field("height", &self.height)
             .field("thickness", &self.thickness)
             .field("mask_alpha", &self.mask_alpha)
+            .field("keypoint_threshold", &self.keypoint_threshold)
             .field("caption", &self.caption)
             .field("configured", &self.configured)
             .field("drawn", &self.drawn)
@@ -255,6 +257,7 @@ impl VelloAnalyticsOverlay {
             height: 0,
             thickness: 3.0,
             mask_alpha: MASK_ALPHA_DEFAULT,
+            keypoint_threshold: KEYPOINT_THRESHOLD_DEFAULT,
             caption: CaptionParts::default(),
             caption_fonts: CaptionFonts::default(),
             configured: false,
@@ -282,6 +285,11 @@ impl VelloAnalyticsOverlay {
     /// Set the alpha the segmentation mask fill is drawn at (0..=255).
     pub fn with_mask_alpha(mut self, alpha: u8) -> Self {
         self.mask_alpha = alpha;
+        self
+    }
+
+    pub fn with_keypoint_threshold(mut self, threshold: f32) -> Self {
+        self.keypoint_threshold = threshold;
         self
     }
 
@@ -394,6 +402,9 @@ impl VelloAnalyticsOverlay {
         for mask in &shapes.masks {
             draw_mask(&mut scene, mask, w, h, mask_alpha);
         }
+        for pose in &shapes.poses {
+            draw_pose(&mut scene, pose, (w, h), thickness, self.keypoint_threshold);
+        }
         let stroke = Stroke::new(thickness);
         for painted in &shapes.detections {
             let Some(rect) = pixel_rect(painted.detection.bbox, w, h) else {
@@ -487,6 +498,34 @@ fn draw_mask(scene: &mut Scene, painted: &PaintedMask, w: u32, h: u32, mask_alph
     let transform = Affine::translate((rect.x0, rect.y0))
         * Affine::scale_non_uniform(rect.width() / mask_w as f64, rect.height() / mask_h as f64);
     scene.draw_image(&image, transform);
+}
+
+fn draw_pose(
+    scene: &mut Scene,
+    pose: &PaintedPose,
+    (w, h): (u32, u32),
+    thickness: f64,
+    threshold: f32,
+) {
+    let point = |(x, y): (f32, f32)| Point::new(x as f64 * w as f64, y as f64 * h as f64);
+    let color = palette_color(pose.label);
+    let stroke = Stroke::new(thickness);
+    for (from, to) in pose.visible_limbs(threshold) {
+        scene.stroke(
+            &stroke,
+            Affine::IDENTITY,
+            color,
+            None,
+            &Line::new(point(from), point(to)),
+        );
+    }
+    let ink = brush_color(contrast_ink(crate::analyticsoverlay::palette_color(
+        pose.label,
+    )));
+    for keypoint in pose.visible_keypoints(threshold) {
+        let dot = Circle::new(point(keypoint), thickness);
+        scene.fill(Fill::NonZero, Affine::IDENTITY, ink, None, &dot);
+    }
 }
 
 /// The opaque stroke colour of a palette slot, from the shared CPU-overlay palette
@@ -645,7 +684,7 @@ impl AsyncElement for VelloAnalyticsOverlay {
         ElementMetadata::new(
             "Vello analytics overlay",
             "Filter/Editing/Video",
-            "Draws detection boxes, captions, segmentation masks and regions of interest on the GPU, output as a wgpu texture",
+            "Draws detection boxes, captions, poses, segmentation masks and regions of interest on the GPU, output as a wgpu texture",
             crate::AARON_BOXER,
         )
     }
@@ -669,6 +708,7 @@ impl AsyncElement for VelloAnalyticsOverlay {
             SHOW_LABEL_PROPERTY,
             SHOW_SCORE_PROPERTY,
             SHOW_TRACK_PROPERTY,
+            KEYPOINT_THRESHOLD_PROPERTY,
         ];
         PROPS
     }
@@ -695,6 +735,10 @@ impl AsyncElement for VelloAnalyticsOverlay {
                 self.caption.track = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
+            "keypoint-threshold" => {
+                self.keypoint_threshold = value.as_double().ok_or(PropError::Type)? as f32;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -702,6 +746,7 @@ impl AsyncElement for VelloAnalyticsOverlay {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "thickness" => Some(PropValue::Double(self.thickness)),
+            "keypoint-threshold" => Some(PropValue::Double(self.keypoint_threshold as f64)),
             "mask-alpha" => Some(PropValue::Uint(self.mask_alpha as u64)),
             "show-label" => Some(PropValue::Bool(self.caption.label)),
             "show-score" => Some(PropValue::Bool(self.caption.score)),
@@ -1486,6 +1531,63 @@ mod tests {
             "interior is the dark input frame: {interior:?}"
         );
         assert_eq!(ov.drawn_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn renders_pose_limbs_onto_gpu_texture() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
+        let Some(ctx) = shared_ctx().await else {
+            std::eprintln!("no wgpu adapter; skipping Vello GPU pose render test");
+            return;
+        };
+        let (w, h) = (64u32, 64u32);
+        let mut ov = VelloAnalyticsOverlay::new()
+            .with_thickness(4.0)
+            .with_context(ctx);
+        ov.configure_pipeline(&rgba_caps(w, h)).unwrap();
+        let mut frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(
+                [20u8, 20, 20, 255]
+                    .repeat((w * h) as usize)
+                    .into_boxed_slice(),
+            )),
+            FrameTiming::default(),
+            0,
+        );
+        frame
+            .meta
+            .attach(crate::analyticsoverlay::shoulders_only_pose());
+
+        let mut sink = FrameSink::default();
+        ov.process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
+
+        let out = sink.last.expect("frame forwarded");
+        let MemoryDomain::WgpuTexture(owned) = &out.domain else {
+            panic!("output is a GPU texture domain");
+        };
+        let tex = crate::gpu::texture_of(owned).expect("texture keep-alive");
+        let pixels = read_back(ov.gpu.as_ref().unwrap(), tex, w, h);
+        let px = |x: u32, y: u32| {
+            let i = ((y * w + x) * 4) as usize;
+            [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]]
+        };
+        let limb = px(32, 32);
+        assert!(
+            limb[0] > 120 && limb[0] > limb[1] + 40 && limb[0] > limb[2] + 40,
+            "limb between the shoulders is red: {limb:?}"
+        );
+        let shoulder = px(16, 32);
+        assert!(
+            shoulder.iter().take(3).all(|&c| c > 200),
+            "shoulder dot is white: {shoulder:?}"
+        );
+        let nose = px(32, 16);
+        assert!(
+            nose.iter().take(3).all(|&c| c < 70),
+            "hidden nose shows the dark input: {nose:?}"
+        );
     }
 
     #[tokio::test]
