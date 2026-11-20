@@ -123,22 +123,23 @@ async fn no_interval_reports_only_drops() {
     sink.process(frame(0, 0), &mut out).await.unwrap();
     assert_eq!(bus.try_recv(), None, "an on-time frame reports nothing");
 
-    // 5 ms past a zero bound: dropped, reported, and signalled upstream.
-    clock.store(15_000_000, Ordering::Relaxed);
+    // With no duration the frame ends one frame spacing after its start, at 20 ms,
+    // so 25 ms is 5 ms past a zero bound: dropped, reported, and signalled upstream.
+    clock.store(25_000_000, Ordering::Relaxed);
     sink.process(frame(10_000_000, 1), &mut out).await.unwrap();
     assert_eq!(sink.dropped(), 1);
     assert_eq!(
         bus.try_recv(),
         Some(BusMessage::Qos {
             running_time_ns: 10_000_000,
-            jitter_ns: 5_000_000,
+            jitter_ns: 15_000_000,
             processed: 1,
             dropped: 1,
         })
     );
     assert_eq!(
         AsyncElement::take_qos(&mut sink).map(|q| q.jitter_ns),
-        Some(5_000_000),
+        Some(15_000_000),
         "the same lateness travels upstream for load shedding"
     );
 }

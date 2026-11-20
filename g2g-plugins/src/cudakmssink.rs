@@ -233,8 +233,8 @@ impl CudaKmsSink {
     }
 
     /// QoS late-drop bound: once PTS pacing is engaged, a frame past its
-    /// deadline by more than `ns` is dropped instead of presented late, so the
-    /// sink catches up. The default is 20 ms, `u64::MAX` never drops.
+    /// end by more than `ns` is dropped instead of presented late, so the
+    /// sink catches up. The default is 5 ms, `u64::MAX` never drops.
     pub fn with_max_lateness_ns(mut self, ns: u64) -> Self {
         self.pacer.set_max_lateness_ns(ns);
         self
@@ -508,7 +508,7 @@ impl AsyncElement for CudaKmsSink {
                     // QoS bound) or outside the segment. Unpaced without a clock:
                     // scan out as fast as the flip cadence allows.
                     let presented = self.frames_presented.load(Ordering::Relaxed);
-                    if !wait_to_present(self.pacer.judge(timing.pts_ns, presented)).await {
+                    if !wait_to_present(self.pacer.judge(&timing, presented)).await {
                         return Ok(());
                     }
                     let tx = self.cmd_tx.as_ref().ok_or(G2gError::NotConfigured)?;

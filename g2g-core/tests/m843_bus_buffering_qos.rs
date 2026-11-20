@@ -159,7 +159,7 @@ fn periodic_qos_posts_running_stats_between_drops() {
     for i in 0..5u64 {
         let t = i * 10_000_000;
         assert!(
-            qos.judge_frame(t, t, t, i).is_none(),
+            qos.judge_frame(t, None, t, t, i).is_none(),
             "frame {i} is on time"
         );
     }
@@ -186,7 +186,7 @@ fn late_drop_reports_and_hands_back_the_upstream_message() {
     qos.set_max_lateness_ns(0);
 
     let upstream = qos
-        .judge_frame(1_000_000, 1_500_000, 1_000_000, 7)
+        .judge_frame(1_000_000, None, 1_500_000, 1_000_000, 7)
         .expect("half a ms past a zero bound is a drop");
     assert_eq!(upstream.jitter_ns, 500_000);
     assert_eq!(upstream.running_time_ns, 1_000_000);

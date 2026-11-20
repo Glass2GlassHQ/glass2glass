@@ -206,7 +206,7 @@ pub struct KmsSink {
     latency: LatencyHistogram,
     /// PTS pacing + QoS late-drop, on top of the vblank pacing `present()`
     /// already does: idle until the runner hands over a clock, and the default
-    /// lateness bound is 20 ms.
+    /// lateness bound is 5 ms past the frame end.
     pacer: PresentationPacer,
     plane_rotation: Option<PlaneRotation>,
 }
@@ -276,8 +276,8 @@ impl KmsSink {
     }
 
     /// QoS late-drop bound: once PTS pacing is engaged, a frame past its
-    /// deadline by more than `ns` is dropped instead of presented late, so the
-    /// sink catches up. The default is 20 ms, `u64::MAX` never drops.
+    /// end by more than `ns` is dropped instead of presented late, so the
+    /// sink catches up. The default is 5 ms, `u64::MAX` never drops.
     pub fn with_max_lateness_ns(mut self, ns: u64) -> Self {
         self.pacer.set_max_lateness_ns(ns);
         self
@@ -695,7 +695,7 @@ impl AsyncElement for KmsSink {
                     // elected clock, or drop it when it is already too late (the
                     // QoS bound) or outside the segment. Unpaced without a
                     // clock: scan out as fast as the flip cadence allows.
-                    let paced = self.pacer.judge(timing.pts_ns, self.frames_presented);
+                    let paced = self.pacer.judge(&timing, self.frames_presented);
                     if !wait_to_present(paced).await {
                         return Ok(());
                     }

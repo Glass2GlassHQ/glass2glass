@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use g2g_core::log::{self, short_type_name, LogLevel, OwnedLogRecord, RingSink, PACING_CATEGORY};
 use g2g_core::runtime::{block_on, parse_launch, run_graph};
-use g2g_core::{ClockSync, Pace, PipelineClock, PresentationPacer};
+use g2g_core::{ClockSync, FrameTiming, Pace, PipelineClock, PresentationPacer};
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::videoconvert::VideoConvert;
@@ -101,6 +101,13 @@ fn each_element_logs_its_buffers_and_eos_under_its_instance_name() {
     }
 }
 
+fn at(pts_ns: u64) -> FrameTiming {
+    FrameTiming {
+        pts_ns,
+        ..FrameTiming::default()
+    }
+}
+
 #[test]
 fn a_run_of_late_drops_logs_once_when_it_starts_and_once_when_it_ends() {
     let (ring, _guard) = capture("*:debug");
@@ -110,14 +117,17 @@ fn a_run_of_late_drops_logs_once_when_it_starts_and_once_when_it_ends() {
     pacer.set_max_lateness_ns(0);
 
     // The first frame anchors the clock on itself, so it is due at once.
-    assert_eq!(pacer.judge(0, 0), Pace::Now);
-    // Three frame periods later the next two frames are already past due.
-    now.store(3 * FRAME_PERIOD_NS, Ordering::Relaxed);
+    assert_eq!(pacer.judge(&at(0), 0), Pace::Now);
+    // Just past three frame periods the next two frames have already ended.
+    now.store(3 * FRAME_PERIOD_NS + 1, Ordering::Relaxed);
     let late = [FRAME_PERIOD_NS, 2 * FRAME_PERIOD_NS];
     for pts in late {
-        assert_eq!(pacer.judge(pts, 1), Pace::Drop);
+        assert_eq!(pacer.judge(&at(pts), 1), Pace::Drop);
     }
-    assert!(matches!(pacer.judge(4 * FRAME_PERIOD_NS, 1), Pace::Wait(_)));
+    assert!(matches!(
+        pacer.judge(&at(4 * FRAME_PERIOD_NS), 1),
+        Pace::Wait(_)
+    ));
     log::reset();
     let records = ring.drain();
 

@@ -833,7 +833,7 @@ pub struct VulkanHdrPresentSink {
     #[cfg(feature = "metadata")]
     applied_hdr: Option<g2g_core::meta::HdrStaticMeta>,
     /// PTS pacing + QoS late-drop: idle until the runner hands over a clock, and
-    /// the default lateness bound is 20 ms.
+    /// the default lateness bound is 5 ms past the frame end.
     pacer: PresentationPacer,
 }
 
@@ -875,8 +875,8 @@ impl VulkanHdrPresentSink {
     }
 
     /// QoS late-drop bound: once PTS pacing is engaged, a frame past its
-    /// deadline by more than `ns` is dropped instead of presented late, so the
-    /// sink catches up. The default is 20 ms, `u64::MAX` never drops.
+    /// end by more than `ns` is dropped instead of presented late, so the
+    /// sink catches up. The default is 5 ms, `u64::MAX` never drops.
     pub fn with_max_lateness_ns(mut self, ns: u64) -> Self {
         self.pacer.set_max_lateness_ns(ns);
         self
@@ -1010,9 +1010,7 @@ impl AsyncElement for VulkanHdrPresentSink {
                     // elected clock, or drop it when it is already too late (the
                     // QoS bound) or outside the segment. Unpaced without a clock:
                     // present as fast as the producer pushes.
-                    let paced = self
-                        .pacer
-                        .judge(frame.timing.pts_ns, self.presented_count());
+                    let paced = self.pacer.judge(&frame.timing, self.presented_count());
                     if !wait_to_present(paced).await {
                         return Ok(());
                     }

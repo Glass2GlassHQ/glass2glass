@@ -160,7 +160,7 @@ impl CountingFake {
             }
             PipelinePacket::DataFrame(frame) => {
                 let pts_ns = frame.timing.pts_ns;
-                crate::clock::wait_to_present(playout.pacer.judge(pts_ns, received)).await;
+                crate::clock::wait_to_present(playout.pacer.judge(&frame.timing, received)).await;
                 if let Some(position) = &playout.position {
                     position.set_at_pts(playout.pacer.segment().as_ref(), pts_ns);
                 }

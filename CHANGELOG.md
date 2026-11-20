@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2478: sinks measure lateness from a frame's end, and the video sink `max-lateness` default is GStreamer's 5 ms.
 - M2477: synchronizing video sinks add a 15 ms `processing-deadline` to a live path's latency, as GStreamer's do.
 - M2476: `analyticsoverlay` draws onto RGBA frames with padded rows.
 - M2475: `ovxinference` attaches half-precision outputs as `F16` tensors, which `detectionpostprocess` reads in place, 5.4 ms less per SSD frame on the STM32MP257.

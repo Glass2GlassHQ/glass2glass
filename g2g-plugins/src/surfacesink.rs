@@ -299,7 +299,7 @@ impl AsyncElement for SurfaceSink {
                 }
                 PipelinePacket::CapsChanged(_) => return Err(G2gError::CapsMismatch),
                 PipelinePacket::DataFrame(frame) => {
-                    let paced = self.pacer.judge(frame.timing.pts_ns, self.presented);
+                    let paced = self.pacer.judge(&frame.timing, self.presented);
                     if wait_to_present(paced).await {
                         self.present(&frame)?;
                     }

@@ -70,6 +70,8 @@ pub struct QosTracker {
     last_report_ns: Option<u64>,
     dropped: u64,
     last_presented_running_time_ns: Option<u64>,
+    previous_running_time_ns: Option<u64>,
+    average_frame_spacing_ns: Option<u64>,
 }
 
 // gst basesink presents a late frame anyway when nothing has been presented for this long
@@ -90,6 +92,8 @@ impl QosTracker {
             last_report_ns: None,
             dropped: 0,
             last_presented_running_time_ns: None,
+            previous_running_time_ns: None,
+            average_frame_spacing_ns: None,
         }
     }
 
@@ -126,16 +130,20 @@ impl QosTracker {
 
     pub(crate) fn flush(&mut self) {
         self.last_presented_running_time_ns = None;
+        self.previous_running_time_ns = None;
+        self.average_frame_spacing_ns = None;
     }
 
-    /// Whether a frame due at `deadline_ns` is too late to present at clock time
-    /// `now_ns`. Saturating, so the `u64::MAX` default never trips.
-    pub fn is_too_late(&self, deadline_ns: u64, now_ns: u64) -> bool {
-        now_ns > deadline_ns.saturating_add(self.max_lateness_ns)
+    /// Whether a frame whose display ends at clock time `frame_end_ns` is too
+    /// late to present at clock time `now_ns`. Saturating, so the `u64::MAX`
+    /// default never trips.
+    pub fn is_too_late(&self, frame_end_ns: u64, now_ns: u64) -> bool {
+        now_ns > frame_end_ns.saturating_add(self.max_lateness_ns)
     }
 
     /// Verdict for one frame due at clock time `deadline_ns`, whose running
     /// time is `running_time_ns`, `processed` being the sink's presented count.
+    /// `duration_ns` is the frame's running-time duration, `None` when unknown.
     ///
     /// `Some` means the frame is too late and must be dropped: the drop is
     /// counted and reported on the bus, and the returned [`QosMessage`] is the
@@ -145,16 +153,32 @@ impl QosTracker {
     pub fn judge_frame(
         &mut self,
         deadline_ns: u64,
+        duration_ns: Option<u64>,
         now_ns: u64,
         running_time_ns: u64,
         processed: u64,
     ) -> Option<QosMessage> {
+        if let Some(spacing) = self
+            .previous_running_time_ns
+            .and_then(|previous| running_time_ns.checked_sub(previous))
+            .filter(|&spacing| spacing > 0)
+        {
+            // gst basesink's running average over a window of eight frames
+            self.average_frame_spacing_ns =
+                Some(self.average_frame_spacing_ns.map_or(spacing, |average| {
+                    spacing.saturating_add(average.saturating_mul(7)) / 8
+                }));
+        }
+        self.previous_running_time_ns = Some(running_time_ns);
+        // gst basesink measures lateness from a frame's end, its start plus the average spacing when it has no duration
+        let frame_end_ns =
+            deadline_ns.saturating_add(duration_ns.or(self.average_frame_spacing_ns).unwrap_or(0));
         let jitter = jitter_ns(deadline_ns, now_ns);
         let last_presented = *self
             .last_presented_running_time_ns
             .get_or_insert(running_time_ns);
         let starved = running_time_ns.saturating_sub(last_presented) > STARVED_PRESENT_GAP_NS;
-        if self.is_too_late(deadline_ns, now_ns) {
+        if self.is_too_late(frame_end_ns, now_ns) {
             if !starved {
                 self.dropped += 1;
                 self.post(running_time_ns, jitter, processed, now_ns);
@@ -207,7 +231,7 @@ mod tests {
     #[test]
     fn default_bound_never_drops() {
         let mut q = QosTracker::new();
-        assert!(q.judge_frame(0, u64::MAX, 0, 0).is_none());
+        assert!(q.judge_frame(0, None, u64::MAX, 0, 0).is_none());
         assert_eq!(q.dropped(), 0);
     }
 
@@ -218,10 +242,12 @@ mod tests {
         q.set_bus(handle);
         q.set_max_lateness_ns(10);
         assert!(
-            q.judge_frame(100, 105, 100, 3).is_none(),
+            q.judge_frame(100, Some(0), 105, 100, 3).is_none(),
             "within the bound"
         );
-        let upstream = q.judge_frame(200, 215, 200, 3).expect("past the bound");
+        let upstream = q
+            .judge_frame(200, Some(0), 215, 200, 3)
+            .expect("past the bound");
         assert_eq!(upstream.jitter_ns, 15);
         assert_eq!(upstream.running_time_ns, 200);
         assert_eq!(q.dropped(), 1);
@@ -237,6 +263,44 @@ mod tests {
     }
 
     #[test]
+    fn a_frame_is_late_once_its_end_passes_the_bound() {
+        let mut q = QosTracker::new();
+        let max_lateness = 5;
+        let (deadline, duration) = (100, 33);
+        q.set_max_lateness_ns(max_lateness);
+        let last_tolerated = deadline + duration + max_lateness;
+        assert!(q
+            .judge_frame(deadline, Some(duration), last_tolerated, deadline, 0)
+            .is_none());
+        assert!(q
+            .judge_frame(deadline, Some(duration), last_tolerated + 1, deadline, 0)
+            .is_some());
+    }
+
+    #[test]
+    fn a_frame_without_a_duration_ends_after_the_average_spacing() {
+        let mut q = QosTracker::new();
+        q.set_max_lateness_ns(0);
+        let spacing = 40;
+        for i in 0..2 {
+            let on_time = i * spacing;
+            assert!(q.judge_frame(on_time, None, on_time, on_time, i).is_none());
+        }
+        let third = 2 * spacing;
+        assert!(
+            q.judge_frame(third, None, third + spacing, third, 2)
+                .is_none(),
+            "within one average spacing of its start"
+        );
+        let fourth = 3 * spacing;
+        assert!(
+            q.judge_frame(fourth, None, fourth + spacing + 1, fourth, 3)
+                .is_some(),
+            "past one average spacing"
+        );
+    }
+
+    #[test]
     fn late_frame_presents_after_a_second_without_one() {
         let mut q = QosTracker::new();
         q.set_max_lateness_ns(0);
@@ -245,8 +309,14 @@ mod tests {
         let mut presented_at = alloc::vec::Vec::new();
         for i in 0..10u64 {
             let running_time = i * frame_period;
-            if q.judge_frame(running_time, running_time + late_by, running_time, 0)
-                .is_none()
+            if q.judge_frame(
+                running_time,
+                Some(0),
+                running_time + late_by,
+                running_time,
+                0,
+            )
+            .is_none()
             {
                 presented_at.push(i);
             }
@@ -262,10 +332,10 @@ mod tests {
         q.set_bus(handle);
         q.set_report_interval_ns(1_000);
         // t=0 arms the interval, t=500 is inside it, t=1000 reports.
-        assert!(q.judge_frame(0, 0, 0, 0).is_none());
-        assert!(q.judge_frame(500, 500, 500, 1).is_none());
+        assert!(q.judge_frame(0, None, 0, 0, 0).is_none());
+        assert!(q.judge_frame(500, None, 500, 500, 1).is_none());
         assert_eq!(bus.try_recv(), None, "nothing before the interval elapses");
-        assert!(q.judge_frame(1_000, 1_000, 1_000, 2).is_none());
+        assert!(q.judge_frame(1_000, None, 1_000, 1_000, 2).is_none());
         match bus.try_recv() {
             Some(BusMessage::Qos {
                 processed, dropped, ..
@@ -274,7 +344,7 @@ mod tests {
             }
             other => panic!("expected a periodic Qos, got {other:?}"),
         }
-        assert!(q.judge_frame(1_500, 1_500, 1_500, 3).is_none());
+        assert!(q.judge_frame(1_500, None, 1_500, 1_500, 3).is_none());
         assert_eq!(bus.try_recv(), None, "interval restarted from the report");
     }
 
@@ -284,7 +354,9 @@ mod tests {
         let mut q = QosTracker::new();
         q.set_bus(handle);
         for i in 0..10u64 {
-            assert!(q.judge_frame(i * 1_000, i * 1_000, i * 1_000, i).is_none());
+            assert!(q
+                .judge_frame(i * 1_000, None, i * 1_000, i * 1_000, i)
+                .is_none());
         }
         assert_eq!(bus.try_recv(), None);
     }
@@ -295,9 +367,9 @@ mod tests {
         let mut q = QosTracker::new();
         q.set_bus(handle);
         q.set_report_interval_ns(100);
-        q.judge_frame(0, 0, 0, 0);
+        q.judge_frame(0, None, 0, 0, 0);
         // Presented 40ns before its deadline, 200ns after the last report.
-        q.judge_frame(240, 200, 240, 1);
+        q.judge_frame(240, None, 200, 240, 1);
         match bus.try_recv() {
             Some(BusMessage::Qos { jitter_ns, .. }) => assert_eq!(jitter_ns, -40),
             other => panic!("expected a periodic Qos, got {other:?}"),

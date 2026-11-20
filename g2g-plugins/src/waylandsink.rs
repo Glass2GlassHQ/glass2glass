@@ -327,7 +327,7 @@ pub struct WaylandSink {
     /// PTS pacing + QoS late-drop, shared with the other
     /// synchronizing sinks: the elected clock, the segment mapping, the
     /// presentation anchor, and the lateness bound. Idle until the runner hands
-    /// over a clock; the default bound drops a frame more than 20 ms late.
+    /// over a clock; the default bound drops a frame more than 5 ms past its end.
     pacer: PresentationPacer,
     /// Monotonic stamp when the previous frame's present completed, for the
     /// per-frame pacing log (the inter-present gap is what stutter looks like).
@@ -401,9 +401,9 @@ impl WaylandSink {
     }
 
     /// Enable QoS late-drop: once PTS pacing is engaged, a frame already
-    /// past its deadline by more than `ns` is dropped instead of presented late,
+    /// past its end by more than `ns` is dropped instead of presented late,
     /// so the sink catches up rather than accumulating lag. `0` drops any frame
-    /// that arrives after its deadline; the default is 20 ms, `u64::MAX` never drops.
+    /// that arrives after its end; the default is 5 ms, `u64::MAX` never drops.
     pub fn with_max_lateness_ns(mut self, ns: u64) -> Self {
         self.pacer.set_max_lateness_ns(ns);
         self
@@ -790,7 +790,7 @@ impl AsyncElement for WaylandSink {
                     // clock: present immediately (pre-sync).
                     let t_in = monotonic_ns();
                     let presented = self.frames_presented.load(Ordering::Relaxed);
-                    let pace = self.pacer.judge(timing.pts_ns, presented);
+                    let pace = self.pacer.judge(&timing, presented);
                     // Taken here rather than re-derived after the present: the
                     // anchor this frame was judged against is the only one its
                     // error means anything against.
@@ -1772,7 +1772,7 @@ mod tests {
 
     #[test]
     fn qos_lateness_decision_respects_the_bound() {
-        // Default: the 20 ms video-sink bound.
+        // Default: the 5 ms video-sink bound.
         let sink = WaylandSink::new();
         assert!(
             !sink.pacer.is_too_late(0, VIDEO_SINK_MAX_LATENESS_NS),

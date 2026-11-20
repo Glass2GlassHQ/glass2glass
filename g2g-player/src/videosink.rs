@@ -257,7 +257,7 @@ impl AsyncElement for PlayerVideoSink {
                         self.shared.events.push(Event::VideoReconfig);
                         self.caps_reported = true;
                     }
-                    let paced = self.pacer.judge(frame.timing.pts_ns, self.presented);
+                    let paced = self.pacer.judge(&frame.timing, self.presented);
                     if paced == Pace::Drop {
                         self.report_drops();
                         return Ok(());

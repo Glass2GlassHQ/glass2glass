@@ -46,7 +46,7 @@ pub enum Pace {
 pub const MAX_LATENESS_PROPERTY: PropertySpec = PropertySpec::new(
     "max-lateness",
     PropKind::Uint,
-    "QoS drop threshold, nanoseconds past the deadline",
+    "QoS drop threshold, nanoseconds past the frame end",
 );
 
 /// The periodic QoS report cadence, as a runtime property.
@@ -140,7 +140,7 @@ pub struct PresentationPacer {
 }
 
 /// GStreamer's `GstVideoSink` default.
-pub const VIDEO_SINK_MAX_LATENESS_NS: u64 = 20_000_000;
+pub const VIDEO_SINK_MAX_LATENESS_NS: u64 = 5_000_000;
 
 // gstreamer's GstVideoSink default
 pub const VIDEO_SINK_PROCESSING_DEADLINE_NS: u64 = 15_000_000;
@@ -274,7 +274,8 @@ impl PresentationPacer {
     /// Verdict for one frame: how long to hold it, or that it is not to be
     /// presented. `presented` is the sink's running presented count, reported
     /// in [`BusMessage::Qos`](crate::BusMessage::Qos).
-    pub fn judge(&mut self, pts_ns: u64, presented: u64) -> Pace {
+    pub fn judge(&mut self, timing: &FrameTiming, presented: u64) -> Pace {
+        let pts_ns = timing.pts_ns;
         self.last_deadline_ns = None;
         // A frame with no presentation time is due on arrival: never late, so
         // never a QoS drop.
@@ -300,12 +301,25 @@ impl PresentationPacer {
             &mut self.seek_reanchor,
         );
         self.last_deadline_ns = Some(deadline);
+        let duration = (timing.duration_ns > 0).then(|| {
+            // gst basesink clips a frame's end to the segment before taking its running time
+            let end_pts = pts_ns.saturating_add(timing.duration_ns);
+            let end_pts = self
+                .segment
+                .and_then(|segment| segment.stop)
+                .map_or(end_pts, |stop| end_pts.min(stop));
+            self.running_time(end_pts)
+                .map_or(0, |end| end.saturating_sub(running_time))
+        });
         let now = sync.now_ns();
         // A frame already late beyond the bound is dropped, not presented late,
         // so the sink catches up instead of accumulating lag. The same call
         // posts the periodic running-stats report when the frame is on time and
         // the interval has elapsed.
-        if let Some(q) = self.qos.judge_frame(deadline, now, running_time, presented) {
+        if let Some(q) = self
+            .qos
+            .judge_frame(deadline, duration, now, running_time, presented)
+        {
             if self.late_drops_in_a_row == 0 {
                 crate::g2g_debug!(
                     Target::category(PACING_CATEGORY),
@@ -403,10 +417,10 @@ impl PresentationPacer {
         self.qos.dropped()
     }
 
-    /// Whether a frame due at `deadline_ns` is too late at clock time `now_ns`,
-    /// without judging it (no count, no report).
-    pub fn is_too_late(&self, deadline_ns: u64, now_ns: u64) -> bool {
-        self.qos.is_too_late(deadline_ns, now_ns)
+    /// Whether a frame whose display ends at `frame_end_ns` is too late at clock
+    /// time `now_ns`, without judging it (no count, no report).
+    pub fn is_too_late(&self, frame_end_ns: u64, now_ns: u64) -> bool {
+        self.qos.is_too_late(frame_end_ns, now_ns)
     }
 
     /// Handle one of [`PACING_PROPERTIES`]; `None` means the name is not a
@@ -511,6 +525,13 @@ mod tests {
         }
     }
 
+    fn at(pts_ns: u64) -> FrameTiming {
+        FrameTiming {
+            pts_ns,
+            ..FrameTiming::default()
+        }
+    }
+
     fn manual() -> (Arc<AtomicU64>, ClockSync) {
         let t = Arc::new(AtomicU64::new(0));
         let sync = ClockSync::new(Arc::new(ManualClock(t.clone())), 0);
@@ -521,7 +542,7 @@ mod tests {
     fn without_a_clock_every_frame_presents_now() {
         let mut p = PresentationPacer::new();
         assert!(!p.is_paced());
-        assert_eq!(p.judge(5_000_000_000, 0), Pace::Now);
+        assert_eq!(p.judge(&at(5_000_000_000), 0), Pace::Now);
         assert_eq!(p.late_dropped(), 0);
     }
 
@@ -536,15 +557,15 @@ mod tests {
         // Late against the base-time anchor, so it presents immediately
         // rather than becoming the anchor.
         t.store(200_000_000, Ordering::Relaxed);
-        assert_eq!(p.judge(0, 0), Pace::Now);
+        assert_eq!(p.judge(&at(0), 0), Pace::Now);
         // The backlog frame (rt 33 ms) is judged against the base too: still
         // late at 210 ms, presented immediately. Under first-frame anchoring
         // this would have been Wait(23 ms).
         t.store(210_000_000, Ordering::Relaxed);
-        assert_eq!(p.judge(33_000_000, 1), Pace::Now);
+        assert_eq!(p.judge(&at(33_000_000), 1), Pace::Now);
         // Once real time catches up to PTS the pacer holds frames again.
         t.store(220_000_000, Ordering::Relaxed);
-        assert_eq!(p.judge(300_000_000, 2), Pace::Wait(80_000_000));
+        assert_eq!(p.judge(&at(300_000_000), 2), Pace::Wait(80_000_000));
     }
 
     #[test]
@@ -555,7 +576,7 @@ mod tests {
         let mut p = PresentationPacer::new();
         p.set_clock_sync(sync);
         // rt 0 is due at base + declared min latency, not at base.
-        assert_eq!(p.judge(0, 0), Pace::Wait(50_000_000));
+        assert_eq!(p.judge(&at(0), 0), Pace::Wait(50_000_000));
     }
 
     #[test]
@@ -565,8 +586,8 @@ mod tests {
             .with_path_latency(crate::query::LatencyReport::buffered(600_000_000, None));
         let mut p = PresentationPacer::new();
         p.set_clock_sync(sync);
-        assert_eq!(p.judge(0, 0), Pace::Now);
-        assert_eq!(p.judge(40_000_000, 1), Pace::Wait(40_000_000));
+        assert_eq!(p.judge(&at(0), 0), Pace::Now);
+        assert_eq!(p.judge(&at(40_000_000), 1), Pace::Wait(40_000_000));
     }
 
     #[test]
@@ -575,12 +596,12 @@ mod tests {
         let mut p = PresentationPacer::new();
         p.set_clock_sync(sync);
         // First frame anchors at now (0), so it presents immediately.
-        assert_eq!(p.judge(0, 0), Pace::Now);
+        assert_eq!(p.judge(&at(0), 0), Pace::Now);
         // 33 ms of PTS later, with the clock still at 0: hold it 33 ms.
-        assert_eq!(p.judge(33_000_000, 1), Pace::Wait(33_000_000));
+        assert_eq!(p.judge(&at(33_000_000), 1), Pace::Wait(33_000_000));
         // Once the clock reaches the deadline, no wait.
         clock.store(66_000_000, Ordering::Relaxed);
-        assert_eq!(p.judge(66_000_000, 2), Pace::Now);
+        assert_eq!(p.judge(&at(66_000_000), 2), Pace::Now);
     }
 
     #[test]
@@ -593,11 +614,62 @@ mod tests {
             .expect("a pacing property")
             .expect("takes a bool");
         assert_eq!(p.get_property("sync"), Some(PropValue::Bool(false)));
-        assert_eq!(p.judge(0, 0), Pace::Now);
-        assert_eq!(p.judge(33_000_000, 1), Pace::Now, "early, not held");
+        assert_eq!(p.judge(&at(0), 0), Pace::Now);
+        assert_eq!(p.judge(&at(33_000_000), 1), Pace::Now, "early, not held");
         clock.store(1_000_000_000, Ordering::Relaxed);
-        assert_eq!(p.judge(66_000_000, 2), Pace::Now, "late, not dropped");
+        assert_eq!(p.judge(&at(66_000_000), 2), Pace::Now, "late, not dropped");
         assert_eq!(p.late_dropped(), 0);
+    }
+
+    const FRAME_DURATION_NS: u64 = 33_000_000;
+
+    fn lasting(pts_ns: u64) -> FrameTiming {
+        FrameTiming {
+            pts_ns,
+            duration_ns: FRAME_DURATION_NS,
+            ..FrameTiming::default()
+        }
+    }
+
+    fn video_sink_judging_the_first_frame_at(segment: Segment, late_ns: u64) -> Pace {
+        let (clock, sync) = manual();
+        let mut p = PresentationPacer::for_video_sink();
+        p.set_clock_sync(sync);
+        p.set_segment(segment);
+        // the first frame anchors on the clock at zero, so a frame at pts zero is due then
+        assert_eq!(p.judge(&lasting(0), 0), Pace::Now);
+        clock.store(late_ns, Ordering::Relaxed);
+        p.judge(&lasting(0), 1)
+    }
+
+    #[test]
+    fn a_video_sink_presents_a_late_frame_until_its_end_passes_the_bound() {
+        let tolerated = FRAME_DURATION_NS + VIDEO_SINK_MAX_LATENESS_NS;
+        assert_eq!(
+            video_sink_judging_the_first_frame_at(Segment::new(), tolerated),
+            Pace::Now
+        );
+        assert_eq!(
+            video_sink_judging_the_first_frame_at(Segment::new(), tolerated + 1),
+            Pace::Drop
+        );
+    }
+
+    #[test]
+    fn a_double_speed_segment_halves_the_frame_duration() {
+        let double_speed = Segment {
+            rate: 2.0,
+            ..Segment::new()
+        };
+        let tolerated = FRAME_DURATION_NS / 2 + VIDEO_SINK_MAX_LATENESS_NS;
+        assert_eq!(
+            video_sink_judging_the_first_frame_at(double_speed, tolerated),
+            Pace::Now
+        );
+        assert_eq!(
+            video_sink_judging_the_first_frame_at(double_speed, tolerated + 1),
+            Pace::Drop
+        );
     }
 
     #[test]
@@ -610,12 +682,12 @@ mod tests {
         p.set_max_lateness_ns(0);
         // Anchor at clock 10 ms so a deadline and a running time differ.
         clock.store(10_000_000, Ordering::Relaxed);
-        assert_eq!(p.judge(0, 0), Pace::Now);
+        assert_eq!(p.judge(&at(0), 0), Pace::Now);
         assert!(p.take_qos().is_none(), "on-time frame reports nothing");
 
         // The clock jumps 1 ms past the next frame's deadline.
         clock.store(11_000_000, Ordering::Relaxed);
-        assert_eq!(p.judge(0, 1), Pace::Drop);
+        assert_eq!(p.judge(&at(0), 1), Pace::Drop);
         assert_eq!(p.late_dropped(), 1);
         let upstream = p.take_qos().expect("upstream QoS report for the relay");
         assert_eq!(upstream.jitter_ns, 1_000_000);
@@ -640,13 +712,13 @@ mod tests {
         let (clock, sync) = manual();
         let mut p = PresentationPacer::for_video_sink();
         p.set_clock_sync(sync);
-        assert_eq!(p.judge(0, 0), Pace::Now);
+        assert_eq!(p.judge(&at(0), 0), Pace::Now);
         assert!(p.take_qos().is_none(), "the first frame arms the interval");
 
         let half_interval = UPSTREAM_QOS_INTERVAL_NS / 2;
         clock.store(half_interval, Ordering::Relaxed);
         assert_eq!(
-            p.judge(UPSTREAM_QOS_INTERVAL_NS, 1),
+            p.judge(&at(UPSTREAM_QOS_INTERVAL_NS), 1),
             Pace::Wait(half_interval)
         );
         assert!(
@@ -657,14 +729,14 @@ mod tests {
         let early_ns = 5_000_000;
         let running_time = UPSTREAM_QOS_INTERVAL_NS + early_ns;
         clock.store(UPSTREAM_QOS_INTERVAL_NS, Ordering::Relaxed);
-        assert_eq!(p.judge(running_time, 2), Pace::Wait(early_ns));
+        assert_eq!(p.judge(&at(running_time), 2), Pace::Wait(early_ns));
         let report = p.take_qos().expect("a periodic upstream report");
         assert_eq!(report.jitter_ns, -(early_ns as i64), "early is negative");
         assert_eq!(report.running_time_ns, running_time);
         assert_eq!(p.late_dropped(), 0);
 
         assert_eq!(
-            p.judge(running_time + early_ns, 3),
+            p.judge(&at(running_time + early_ns), 3),
             Pace::Wait(2 * early_ns)
         );
         assert!(p.take_qos().is_none(), "the interval restarted");
@@ -675,9 +747,9 @@ mod tests {
         let (clock, sync) = manual();
         let mut p = PresentationPacer::new();
         p.set_clock_sync(sync);
-        assert_eq!(p.judge(0, 0), Pace::Now);
+        assert_eq!(p.judge(&at(0), 0), Pace::Now);
         clock.store(u64::MAX, Ordering::Relaxed);
-        assert_eq!(p.judge(0, 1), Pace::Now, "presented, however late");
+        assert_eq!(p.judge(&at(0), 1), Pace::Now, "presented, however late");
         assert_eq!(p.late_dropped(), 0);
     }
 
@@ -687,14 +759,14 @@ mod tests {
         let mut p = PresentationPacer::new();
         p.set_clock_sync(sync);
         clock.store(10_000_000, Ordering::Relaxed);
-        assert_eq!(p.judge(FrameTiming::PTS_NONE, 0), Pace::Now);
+        assert_eq!(p.judge(&at(FrameTiming::PTS_NONE), 0), Pace::Now);
         assert!(p.anchor_ns.is_none(), "an unset PTS latches no anchor");
         assert_eq!(p.deadline_ns(FrameTiming::PTS_NONE), None);
         assert!(p.anchor_ns.is_none());
 
         // The next real frame is the one that anchors, on itself: it presents
         // immediately rather than waiting out the PTS the no-pts frame skipped.
-        assert_eq!(p.judge(4_000_000, 1), Pace::Now);
+        assert_eq!(p.judge(&at(4_000_000), 1), Pace::Now);
         assert_eq!(p.anchor_ns, Some(6_000_000));
     }
 
@@ -704,9 +776,9 @@ mod tests {
         let mut p = PresentationPacer::new();
         p.set_clock_sync(sync);
         p.set_max_lateness_ns(0);
-        assert_eq!(p.judge(0, 0), Pace::Now);
+        assert_eq!(p.judge(&at(0), 0), Pace::Now);
         clock.store(u64::MAX, Ordering::Relaxed);
-        assert_eq!(p.judge(FrameTiming::PTS_NONE, 1), Pace::Now);
+        assert_eq!(p.judge(&at(FrameTiming::PTS_NONE), 1), Pace::Now);
         assert_eq!(p.late_dropped(), 0);
         assert!(p.take_qos().is_none());
     }
@@ -726,7 +798,7 @@ mod tests {
         // A clipped frame is not presented and is not a QoS drop.
         let (_clock, sync) = manual();
         p.set_clock_sync(sync);
-        assert_eq!(p.judge(66_000_000, 0), Pace::Drop);
+        assert_eq!(p.judge(&at(66_000_000), 0), Pace::Drop);
         assert_eq!(p.late_dropped(), 0);
         assert!(p.take_qos().is_none());
     }
@@ -801,7 +873,7 @@ mod tests {
         let mut p = PresentationPacer::new();
         p.set_clock_sync(sync);
         anchor.stamp(1_000);
-        assert_eq!(p.judge(0, 0), Pace::Now);
+        assert_eq!(p.judge(&at(0), 0), Pace::Now);
 
         let pause_ns = 8_000;
         anchor.pause(1_000);
@@ -809,7 +881,7 @@ mod tests {
         anchor.resume(1_000 + pause_ns);
 
         let next_pts = 500;
-        assert_eq!(p.judge(next_pts, 1), Pace::Wait(next_pts));
+        assert_eq!(p.judge(&at(next_pts), 1), Pace::Wait(next_pts));
     }
 
     #[test]
@@ -824,18 +896,21 @@ mod tests {
         p.set_clock_sync(sync);
 
         let first_pts = 5_286_000_000_000;
-        assert_eq!(p.judge(first_pts, 0), Pace::Now);
+        assert_eq!(p.judge(&at(first_pts), 0), Pace::Now);
         assert_eq!(p.last_deadline_ns(), Some(100_000_000));
         // And the stream paces by PTS deltas from there: 33 ms later is due 33 ms
         // later on the clock.
-        assert_eq!(p.judge(first_pts + 33_000_000, 1), Pace::Wait(33_000_000));
+        assert_eq!(
+            p.judge(&at(first_pts + 33_000_000), 1),
+            Pace::Wait(33_000_000)
+        );
     }
 
     #[test]
     fn judge_records_the_deadline_it_measured_against() {
         let (clock, sync) = manual();
         let mut p = PresentationPacer::new();
-        assert_eq!(p.judge(0, 0), Pace::Now);
+        assert_eq!(p.judge(&at(0), 0), Pace::Now);
         assert_eq!(
             p.last_deadline_ns(),
             None,
@@ -844,9 +919,9 @@ mod tests {
 
         p.set_clock_sync(sync);
         // First frame anchors at clock 0, so PTS 33 ms is due at clock 33 ms.
-        assert_eq!(p.judge(0, 0), Pace::Now);
+        assert_eq!(p.judge(&at(0), 0), Pace::Now);
         assert_eq!(p.last_deadline_ns(), Some(0));
-        assert_eq!(p.judge(33_000_000, 1), Pace::Wait(33_000_000));
+        assert_eq!(p.judge(&at(33_000_000), 1), Pace::Wait(33_000_000));
         assert_eq!(p.last_deadline_ns(), Some(33_000_000));
 
         // The sink reads the clock once the frame is up: 2 ms past its deadline.
@@ -856,7 +931,7 @@ mod tests {
 
         // A frame with no deadline of its own clears it rather than leaving the
         // previous frame's for the sink to misattribute.
-        assert_eq!(p.judge(FrameTiming::PTS_NONE, 2), Pace::Now);
+        assert_eq!(p.judge(&at(FrameTiming::PTS_NONE), 2), Pace::Now);
         assert_eq!(p.last_deadline_ns(), None);
     }
 

@@ -17,7 +17,7 @@ fn main() {
     }
 
     const FRAMES: u64 = 10;
-    // at the default 20 ms max-lateness a ci runner presented 1 of the 10 frames
+    // at a 20 ms max-lateness a ci runner presented 1 of the 10 frames
     const MAX_LATENESS_NS: u64 = 60_000_000_000;
 
     if !MetalVideoSink::device_available() {

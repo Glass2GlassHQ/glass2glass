@@ -55,7 +55,7 @@ pub struct CanvasSink {
     configured: bool,
     presented: u64,
     /// PTS pacing + QoS late-drop: idle until the runner hands over a clock (a
-    /// `WasmClock` in the browser), and the default lateness bound is 20 ms.
+    /// `WasmClock` in the browser), and the default lateness bound is 5 ms past the frame end.
     pacer: PresentationPacer,
 }
 
@@ -92,8 +92,8 @@ impl CanvasSink {
     }
 
     /// QoS late-drop bound: once PTS pacing is engaged, a frame past its
-    /// deadline by more than `ns` is dropped instead of drawn late, so the sink
-    /// catches up. The default is 20 ms, `u64::MAX` never drops.
+    /// end by more than `ns` is dropped instead of drawn late, so the sink
+    /// catches up. The default is 5 ms, `u64::MAX` never drops.
     pub fn with_max_lateness_ns(mut self, ns: u64) -> Self {
         self.pacer.set_max_lateness_ns(ns);
         self
@@ -227,7 +227,7 @@ impl AsyncElement for CanvasSink {
                     // on the elected clock, or drop it when it is already too late
                     // (the QoS bound) or outside the segment. Unpaced without a
                     // clock: draw as fast as frames arrive.
-                    let paced = self.pacer.judge(frame.timing.pts_ns, self.presented);
+                    let paced = self.pacer.judge(&frame.timing, self.presented);
                     if !wait_to_present(paced).await {
                         return Ok(());
                     }

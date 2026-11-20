@@ -262,7 +262,7 @@ where
                     // so the source / decoder sheds load (M174). The same call
                     // posts the periodic running-stats report when a frame is on
                     // time and the interval has elapsed.
-                    let wait_ns = match self.pacer.judge(pts, self.received) {
+                    let wait_ns = match self.pacer.judge(&f.timing, self.received) {
                         Pace::Now => 0,
                         Pace::Wait(ns) => ns,
                         Pace::Drop => return Ok(()),
