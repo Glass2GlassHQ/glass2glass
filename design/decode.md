@@ -141,6 +141,11 @@ picture into its `PictureMeta` and output picture, and turns a picture into the
 output memory domain. The element waits for a free picture buffer before each
 picture and emits what the reorder buffer releases right after it, so a buffer
 holding a whole stream needs no more picture buffers than one picture does.
+Each picture leaving the reorder buffer takes the earliest input PTS still held,
+not the PTS of its own access unit, as gst's video decoder base class does. MP4s
+written with no composition offsets stamp a B-frame stream in decode order, and
+pictures taking their own PTS would leave with timestamps going backwards, which
+a sink drops as late.
 
 `H264DecodeSession` in `h264dpb.rs` is the per-picture reference state both
 backends share: the parameter-set table, the POC state, the `H264References`

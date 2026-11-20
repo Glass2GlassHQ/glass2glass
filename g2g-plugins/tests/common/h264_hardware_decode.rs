@@ -258,8 +258,11 @@ pub(crate) fn high_bit_depth_stream_is_refused<B: H264HardwareDecoder>() {
 
 struct AccessUnitDecode {
     pictures: Vec<Vec<u8>>,
+    presentation_times: Vec<u64>,
     keyframe_requests: Vec<usize>,
 }
+
+const ACCESS_UNIT_PERIOD_NS: u64 = 33_000_000;
 
 fn system_decoder<B: H264HardwareDecoder>(fixture: &Fixture) -> H264HardwareDec<B> {
     let mut decoder = H264HardwareDec::<B>::new();
@@ -286,7 +289,7 @@ fn decode_access_units<B: H264HardwareDecoder>(
     let mut keyframe_requests = Vec::new();
     for (index, access_unit) in access_units.iter().enumerate() {
         let mut frame = system_frame(access_unit);
-        frame.timing.pts_ns = index as u64 * 33_000_000;
+        frame.timing.pts_ns = index as u64 * ACCESS_UNIT_PERIOD_NS;
         block_on(decoder.process(PipelinePacket::DataFrame(frame), &mut collect))
             .expect("decode access unit");
         if decoder.take_reconfigure() == Some(Reconfigure::ForceKeyframe) {
@@ -294,8 +297,8 @@ fn decode_access_units<B: H264HardwareDecoder>(
         }
     }
     block_on(decoder.process(PipelinePacket::Eos, &mut collect)).expect("eos drains the reorder");
-    let pictures = collect
-        .into_frames()
+    let frames = collect.into_frames();
+    let pictures = frames
         .iter()
         .map(|frame| {
             frame
@@ -307,6 +310,7 @@ fn decode_access_units<B: H264HardwareDecoder>(
         .collect();
     AccessUnitDecode {
         pictures,
+        presentation_times: frames.iter().map(|frame| frame.timing.pts_ns).collect(),
         keyframe_requests,
     }
 }
@@ -391,4 +395,15 @@ pub(crate) fn a_flush_resumes_bit_exact_from_a_recovery_point_i_picture<B: H264H
         resumed_pictures == expected,
         "the pictures from the recovery point match a clean decode"
     );
+}
+
+// mp4s with no composition offsets stamp each access unit in decode order
+pub(crate) fn decode_order_timestamps_leave_in_rising_order<B: H264HardwareDecoder>() {
+    let access_units = crate::annexb::access_units(BFRAMES.stream);
+    let count = access_units.len() as u64;
+    let decoded = decode_access_units::<B>(&BFRAMES, access_units);
+    let expected: Vec<u64> = (0..count)
+        .map(|index| index * ACCESS_UNIT_PERIOD_NS)
+        .collect();
+    assert_eq!(decoded.presentation_times, expected);
 }

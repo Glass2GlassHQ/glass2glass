@@ -529,18 +529,40 @@ fn resample_plane(
     rows: &[(usize, usize, u32)],
     channels: usize,
 ) -> Vec<u8> {
-    let dst_w = cols.len();
-    let mut dst = vec![0u8; dst_w * rows.len() * channels];
-    for (oy, &(y0, y1, fy)) in rows.iter().enumerate() {
-        let (row0, row1) = (y0 * src_w, y1 * src_w);
-        for (ox, &(x0, x1, fx)) in cols.iter().enumerate() {
-            let dbase = (oy * dst_w + ox) * channels;
-            for ch in 0..channels {
-                let p00 = src[(row0 + x0) * channels + ch];
-                let p10 = src[(row0 + x1) * channels + ch];
-                let p01 = src[(row1 + x0) * channels + ch];
-                let p11 = src[(row1 + x1) * channels + ch];
-                dst[dbase + ch] = bilerp(p00, p10, p01, p11, fx, fy);
+    match channels {
+        1 => resample_interleaved::<1>(src, src_w, cols, rows),
+        2 => resample_interleaved::<2>(src, src_w, cols, rows),
+        3 => resample_interleaved::<3>(src, src_w, cols, rows),
+        4 => resample_interleaved::<4>(src, src_w, cols, rows),
+        _ => unreachable!("videoscale planes interleave one to four channels"),
+    }
+}
+
+fn resample_interleaved<const CHANNELS: usize>(
+    src: &[u8],
+    src_w: usize,
+    cols: &[(usize, usize, u32)],
+    rows: &[(usize, usize, u32)],
+) -> Vec<u8> {
+    let one = 1u32 << 16;
+    let row_len = src_w * CHANNELS;
+    let mut dst = vec![0u8; cols.len() * rows.len() * CHANNELS];
+    // the two source rows blended by the row weight, at Q16, before the column weights apply
+    let mut blended = vec![0u32; row_len];
+    for (dst_row, &(y0, y1, fy)) in dst.chunks_exact_mut(cols.len() * CHANNELS).zip(rows) {
+        let top = &src[y0 * row_len..][..row_len];
+        let bottom = &src[y1 * row_len..][..row_len];
+        for ((sample, &upper), &lower) in blended.iter_mut().zip(top).zip(bottom) {
+            *sample = u32::from(upper) * (one - fy) + u32::from(lower) * fy;
+        }
+        let (blended_pixels, _) = blended.as_chunks::<CHANNELS>();
+        let (dst_pixels, _) = dst_row.as_chunks_mut::<CHANNELS>();
+        for (out, &(x0, x1, fx)) in dst_pixels.iter_mut().zip(cols) {
+            let (left, right) = (&blended_pixels[x0], &blended_pixels[x1]);
+            for channel in 0..CHANNELS {
+                let value = u64::from(left[channel]) * u64::from(one - fx)
+                    + u64::from(right[channel]) * u64::from(fx);
+                out[channel] = ((value + (1 << 31)) >> 32) as u8;
             }
         }
     }
@@ -899,6 +921,37 @@ mod tests {
             .len(),
             4 * 4 * 3 / 2
         );
+    }
+
+    #[test]
+    fn every_channel_count_matches_the_four_sample_blend() {
+        const SOURCE: (usize, usize) = (37, 23);
+        for channels in 1..=4 {
+            let src: Vec<u8> = (0..SOURCE.0 * SOURCE.1 * channels)
+                .map(|index| (index * 97 % 251) as u8)
+                .collect();
+            for (out_w, out_h) in [(29, 41), (53, 11)] {
+                let cols = axis_samples(SOURCE.0, out_w, 0);
+                let rows = axis_samples(SOURCE.1, out_h, 0);
+                let out = resample_plane(&src, SOURCE.0, &cols, &rows, channels);
+                for (y, &(y0, y1, fy)) in rows.iter().enumerate() {
+                    for (x, &(x0, x1, fx)) in cols.iter().enumerate() {
+                        for channel in 0..channels {
+                            let at = |row: usize, col: usize| {
+                                src[(row * SOURCE.0 + col) * channels + channel]
+                            };
+                            let expected =
+                                bilerp(at(y0, x0), at(y0, x1), at(y1, x0), at(y1, x1), fx, fy);
+                            assert_eq!(
+                                out[(y * out_w + x) * channels + channel],
+                                expected,
+                                "{channels} channels to {out_w}x{out_h}, sample ({x}, {y}) channel {channel}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -14,6 +14,7 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughpu
 
 use g2g_core::{Colorimetry, RawVideoFormat};
 use g2g_plugins::videoconvert::convert;
+use g2g_plugins::videoscale::{scale, ScaleMethod};
 
 const W: usize = 1920;
 const H: usize = 1080;
@@ -58,5 +59,32 @@ fn bench_convert(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_convert);
+// 720p decoded video scaled to the STM32MP257 EV1 panel's 1024x576
+const SCALE_IN: (usize, usize) = (1280, 720);
+const SCALE_OUT: (usize, usize) = (1024, 576);
+
+fn bench_scale(c: &mut Criterion) {
+    let src = src_buf();
+    let mut group = c.benchmark_group("videoscale_720p_to_576p");
+    group.throughput(Throughput::Elements((SCALE_OUT.0 * SCALE_OUT.1) as u64));
+    let methods = [("bilinear", ScaleMethod::Bilinear), ("lanczos", ScaleMethod::Lanczos)];
+    for (name, method) in methods {
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                scale(
+                    black_box(&src),
+                    RawVideoFormat::Nv12,
+                    method,
+                    SCALE_IN.0,
+                    SCALE_IN.1,
+                    SCALE_OUT.0,
+                    SCALE_OUT.1,
+                )
+            })
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_convert, bench_scale);
 criterion_main!(benches);

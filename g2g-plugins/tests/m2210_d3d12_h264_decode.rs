@@ -261,3 +261,10 @@ fn decodebin_offers_it_for_h264_on_a_d3d12_gpu() {
     }
     assert!(D3D12H264Dec::accepts_input(&h264_caps(BFRAMES.picture)));
 }
+
+#[test]
+fn decode_order_timestamps_leave_in_rising_order() {
+    on_a_d3d12_gpu(
+        h264_hardware_decode::decode_order_timestamps_leave_in_rising_order::<D3D12Backend>,
+    );
+}

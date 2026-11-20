@@ -13,7 +13,7 @@ use crate::h264dpb::H264_DAMAGE_REFUSALS;
 use crate::h264parse::{
     h264_parameter_sets_in, sps_reorder_frames, H264Sps, H264StreamRefused, MALFORMED_SPS,
 };
-use crate::inputstamp::{InputStamp, PendingInputStamps};
+use crate::inputstamp::{HeldPictureTimes, InputStamp, PendingInputStamps};
 use g2g_core::frame::Frame;
 use g2g_core::log::{ClockTime, Target};
 use g2g_core::memory::{DomainSet, MemoryDomainKind};
@@ -66,6 +66,7 @@ pub struct H264HardwareDec<B: H264HardwareDecoder> {
     stream_reorder_depth: usize,
     low_latency: bool,
     input_stamps: PendingInputStamps,
+    held_picture_times: HeldPictureTimes,
     recovery: DecodeErrorRecovery,
     segment: Segment,
     last_caps: Option<Caps>,
@@ -129,6 +130,7 @@ impl<B: H264HardwareDecoder> H264HardwareDec<B> {
             stream_reorder_depth: 0,
             low_latency: false,
             input_stamps: PendingInputStamps::default(),
+            held_picture_times: HeldPictureTimes::default(),
             recovery: DecodeErrorRecovery::default(),
             segment: Segment::new(),
             last_caps: None,
@@ -211,9 +213,11 @@ impl<B: H264HardwareDecoder> H264HardwareDec<B> {
                 self.input_stamps
                     .insert(timing.pts_ns, InputStamp::of(&frame));
             }
+            self.held_picture_times.insert(timing.pts_ns);
             let release = self.reorder.push(&meta, (timing, decoded));
-            for (dropped, _) in release.dropped {
-                self.input_stamps.take(dropped.pts_ns);
+            for _ in release.dropped {
+                let pts_ns = self.held_picture_times.take_earliest();
+                self.input_stamps.take(pts_ns);
             }
             self.emit(release.output, out).await?;
         }
@@ -243,6 +247,10 @@ impl<B: H264HardwareDecoder> H264HardwareDec<B> {
         let decoder = self.decoder.as_mut().ok_or(G2gError::NotConfigured)?;
         let (width, height) = decoder.picture_extent();
         for (timing, picture) in pictures {
+            let timing = FrameTiming {
+                pts_ns: self.held_picture_times.take_earliest(),
+                ..timing
+            };
             let input = self.input_stamps.take(timing.pts_ns);
             if !self.segment.presents(timing.pts_ns) {
                 g2g_core::g2g_log!(
@@ -450,6 +458,7 @@ impl<B: H264HardwareDecoder> AsyncElement for H264HardwareDec<B> {
                     }
                     self.reorder.reset();
                     self.input_stamps = PendingInputStamps::default();
+                    self.held_picture_times.clear();
                     self.recovery = DecodeErrorRecovery::default();
                     self.last_caps = None;
                     out.push(PipelinePacket::Flush).await?;

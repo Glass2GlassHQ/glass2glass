@@ -71,3 +71,10 @@ fn a_flush_resumes_bit_exact_from_a_recovery_point_i_picture() {
 fn decodebin_offers_it_for_h264_on_a_v4l2_decoder() {
     on_a_v4l2_decoder(|| assert!(V4l2SlH264Dec::accepts_input(&h264_caps(BFRAMES.picture))));
 }
+
+#[test]
+fn decode_order_timestamps_leave_in_rising_order() {
+    on_a_v4l2_decoder(
+        h264_hardware_decode::decode_order_timestamps_leave_in_rising_order::<V4l2H264Decoder>,
+    );
+}
