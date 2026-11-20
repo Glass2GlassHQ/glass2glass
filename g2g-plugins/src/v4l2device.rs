@@ -341,7 +341,7 @@ fn format_caps(
 /// One enumerated frame size as caps dimensions. `None` for a degenerate
 /// entry (zero or inverted bounds) rather than caps nothing can satisfy. The
 /// stepwise step size has no `Dim` equivalent, so the range is a superset.
-fn size_dims(size: &FrameSizeEnum) -> Option<(Dim, Dim)> {
+pub(crate) fn size_dims(size: &FrameSizeEnum) -> Option<(Dim, Dim)> {
     match size {
         FrameSizeEnum::Discrete(d) => {
             (d.width > 0 && d.height > 0).then_some((Dim::Fixed(d.width), Dim::Fixed(d.height)))

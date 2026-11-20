@@ -174,7 +174,7 @@ async fn advertised_set_leads_with_raw_yuyv() {
     );
     // every alternative must fixate, or pinning one fails negotiation.
     for caps in advertised {
-        assert_eq!(&caps.fixate().expect("fixates"), caps);
+        caps.fixate().expect("fixates");
     }
     eprintln!(
         "{} advertises {} formats: {:?}",
@@ -358,4 +358,93 @@ async fn mjpeg_launch_pipeline_decodes_to_raw() {
         "every decoded frame should reach the sink"
     );
     eprintln!("decoded {} frames via {text}", stats.frames_consumed);
+}
+
+/// A capsfilter that pins a size the probe did not run at selects it from the
+/// sizes the driver enumerates, the way `v4l2src ! video/x-raw,width=W,height=H`
+/// does in GStreamer, and the frames arrive at that size.
+#[tokio::test]
+#[ignore = "needs a real /dev/videoN device with more than one frame size (set G2G_V4L2_DEVICE)"]
+async fn downstream_size_selects_an_enumerated_mode() {
+    let mut probe = V4l2Src::new(device());
+    let CapsConstraint::Produces(set) = SourceLoop::caps_constraint(&mut probe)
+        .await
+        .expect("probe the camera")
+    else {
+        panic!("a source must produce");
+    };
+    let Some(Caps::RawVideo {
+        format,
+        width: probed_width,
+        height: probed_height,
+        ..
+    }) = set.alternatives().first().cloned()
+    else {
+        panic!("the preferred mode must be raw");
+    };
+    let (target_width, target_height) = set
+        .alternatives()
+        .iter()
+        .filter_map(|caps| caps.fixate().ok())
+        .find_map(|caps| match caps {
+            Caps::RawVideo {
+                format: other_format,
+                width: Dim::Fixed(width),
+                height: Dim::Fixed(height),
+                ..
+            } if other_format == format
+                && (Dim::Fixed(width), Dim::Fixed(height))
+                    != (probed_width.clone(), probed_height.clone()) =>
+            {
+                Some((width, height))
+            }
+            _ => None,
+        })
+        .expect("the camera enumerates a second size for its preferred format");
+
+    let mut src = V4l2Src::new(device()).with_frame_limit(3);
+    let mut filter = g2g_plugins::capsfilter::CapsFilter::new(Caps::RawVideo {
+        format,
+        width: Dim::Fixed(target_width),
+        height: Dim::Fixed(target_height),
+        framerate: Rate::Any,
+        interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
+    });
+    let mut sink = FirstFrameSink::default();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        g2g_core::runtime::run_source_transform_sink(
+            &mut src,
+            &mut filter,
+            &mut sink,
+            &ZeroClock,
+            2,
+        ),
+    )
+    .await
+    .expect("capture finishes within 20s")
+    .expect("capture at the pinned size runs");
+
+    let Some(Caps::RawVideo {
+        width: Dim::Fixed(width),
+        height: Dim::Fixed(height),
+        ..
+    }) = sink.caps
+    else {
+        panic!("the link must carry raw video, got {:?}", sink.caps);
+    };
+    assert_eq!((width, height), (target_width, target_height));
+    let expected_bytes = format
+        .unpadded_frame_bytes(target_width, target_height)
+        .expect("frame size");
+    assert_eq!(
+        sink.first.expect("first frame kept").len() as u64,
+        expected_bytes
+    );
+    eprintln!(
+        "{} captured {target_width}x{target_height} {format:?}",
+        device()
+    );
 }

@@ -43,6 +43,16 @@ format means on a link, its `Caps` and its frame size, is in
 `capturepixelformat.rs`, shared with `LibCameraSrc`, which sits on a different
 fourcc registry but agrees on the meaning.
 
+After every probed mode the set lists the other frame sizes the driver
+enumerates for each confirmed format (`VIDIOC_ENUM_FRAMESIZES`): discrete sizes
+as fixed caps, stepwise and continuous ones as `Dim::Range`, all at the probed
+rate. The `width` and `height` properties pick the size when downstream leaves
+it open, since the solver fixes on a producer's first alternative. A capsfilter
+that pins another size, such as `video/x-raw,width=256,height=256`, selects it
+from the enumerated sizes. `configure_pipeline` sets such a size on the device
+and fails negotiation unless the driver keeps it exactly, because a range drops
+the stepwise step size.
+
 `io-mode` selects how a buffer leaves the element. `auto` and `mmap` copy.
 `dmabuf` exports each MMAP buffer once at stream start with `VIDIOC_EXPBUF` and
 emits frames in `MemoryDomain::DmaBuf` carrying a share of the fd their buffer

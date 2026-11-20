@@ -243,6 +243,14 @@ impl Mode {
     }
 }
 
+/// A format the probe confirmed at the requested size, plus every other size
+/// the driver enumerates for it, at the probed rate.
+#[derive(Debug, Clone, PartialEq)]
+struct ProbedFormat {
+    mode: Mode,
+    other_sizes: Vec<Caps>,
+}
+
 /// What the capture loop does with the rows the driver wrote.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowHandling {
@@ -544,12 +552,12 @@ const CAPTURE_PROPS: [PropertySpec; 8] = [
     PropertySpec::new(
         "width",
         PropKind::Uint,
-        "requested capture width (driver may snap)",
+        "capture width when downstream caps leave it open (driver may snap)",
     ),
     PropertySpec::new(
         "height",
         PropKind::Uint,
-        "requested capture height (driver may snap)",
+        "capture height when downstream caps leave it open (driver may snap)",
     ),
     PropertySpec::new(
         "framerate",
@@ -1106,10 +1114,10 @@ pub struct V4l2Src {
     /// `u64::MAX` means run until error or downstream shutdown; otherwise stop
     /// after this many frames and emit EOS (the test / bounded-capture path).
     frame_limit: u64,
-    /// Every mode the device confirmed during the probe, in advertised
+    /// Every format the device confirmed during the probe, in advertised
     /// preference order. Cached: negotiation runs more than once, and each
     /// probe is a round of ioctls. Cleared when a property changes the request.
-    modes: Vec<Mode>,
+    formats: Vec<ProbedFormat>,
     /// The mode negotiation settled on, filled by `configure_pipeline` from the
     /// caps the solver fixed. The capture thread runs exactly this.
     chosen: Option<Mode>,
@@ -1135,7 +1143,7 @@ impl V4l2Src {
             req_fps: DEFAULT_FPS,
             io_mode: IoMode::default(),
             frame_limit: u64::MAX,
-            modes: Vec::new(),
+            formats: Vec::new(),
             chosen: None,
             keep_row_padding: false,
             host_allocator: HostAllocator::heap(),
@@ -1143,12 +1151,13 @@ impl V4l2Src {
         }
     }
 
-    /// Request a capture size. The driver may snap to the nearest supported
-    /// mode; the negotiated caps reflect what it actually chose.
+    /// Request a capture size for when downstream caps leave the size open. The
+    /// driver may snap to the nearest supported mode; the negotiated caps
+    /// reflect what it actually chose.
     pub fn with_size(mut self, width: u32, height: u32) -> Self {
         self.req_width = width;
         self.req_height = height;
-        self.modes.clear();
+        self.formats.clear();
         self
     }
 
@@ -1158,7 +1167,7 @@ impl V4l2Src {
     /// feeds the advertised caps, the latency report, and the fallback period.
     pub fn with_fps(mut self, fps: u32) -> Self {
         self.req_fps = fps;
-        self.modes.clear();
+        self.formats.clear();
         self
     }
 
@@ -1186,7 +1195,7 @@ impl V4l2Src {
     pub fn with_device_id(mut self, id: impl Into<String>) -> Self {
         self.device_id = id.into();
         self.device_resolved = false;
-        self.modes.clear();
+        self.formats.clear();
         self
     }
 
@@ -1206,11 +1215,12 @@ impl V4l2Src {
 
     /// Probe the device: for every fourcc it reports that [`FOURCCS`] covers,
     /// set that format at the requested geometry and read back what the driver
-    /// actually chose. Caches the confirmed modes in preference order; the
-    /// probe device is dropped before `run`.
-    fn probe_modes(&mut self) -> Result<&[Mode], G2gError> {
-        if !self.modes.is_empty() {
-            return Ok(&self.modes);
+    /// actually chose, plus the other sizes the driver enumerates for it.
+    /// Caches the confirmed formats in preference order; the probe device is
+    /// dropped before `run`.
+    fn probe_formats(&mut self) -> Result<&[ProbedFormat], G2gError> {
+        if !self.formats.is_empty() {
+            return Ok(&self.formats);
         }
         self.resolve_device()?;
         let dev = Device::with_path(&self.device).map_err(|e| v4l2_err(&e))?;
@@ -1248,46 +1258,62 @@ impl V4l2Src {
                 Ok(p) if p.interval.numerator > 0 => p.interval.denominator / p.interval.numerator,
                 _ => self.req_fps,
             };
-            self.modes.push(Mode {
+            let mode = Mode {
                 fourcc: *fourcc,
                 format,
                 width: actual.width,
                 height: actual.height,
                 fps,
-            });
+            };
+            // drivers without VIDIOC_ENUM_FRAMESIZES still capture at the probed size
+            let enumerated = dev.enum_framesizes(FourCC::new(fourcc)).unwrap_or_default();
+            let other_sizes = enumerated
+                .iter()
+                .filter_map(|size| crate::v4l2device::size_dims(&size.size))
+                .map(|(width, height)| format.caps_with_dims(width, height, Rate::Fixed(fps << 16)))
+                .filter(|caps| *caps != mode.caps())
+                .collect();
+            self.formats.push(ProbedFormat { mode, other_sizes });
         }
 
-        if self.modes.is_empty() {
+        if self.formats.is_empty() {
             // Either the device refused every format, or it offers nothing this
             // element can carry (a greyscale-only sensor, say).
             return Err(refusal.unwrap_or(G2gError::CapsMismatch));
         }
-        Ok(&self.modes)
+        Ok(&self.formats)
     }
 
-    /// The confirmed modes negotiation may settle on, in preference order: every
-    /// one the device offers, less those the current `io-mode` cannot carry.
-    fn advertised_modes(&mut self) -> Result<Vec<Mode>, G2gError> {
+    /// The confirmed formats negotiation may settle on, in preference order:
+    /// every one the device offers, less those the current `io-mode` cannot
+    /// carry.
+    fn advertised_formats(&mut self) -> Result<Vec<ProbedFormat>, G2gError> {
         let io_mode = self.io_mode;
-        let modes: Vec<Mode> = self
-            .probe_modes()?
+        let formats: Vec<ProbedFormat> = self
+            .probe_formats()?
             .iter()
-            .copied()
-            .filter(|mode| io_mode.carries(mode.format))
+            .filter(|probed| io_mode.carries(probed.mode.format))
+            .cloned()
             .collect();
         // A camera with nothing but an MJPEG mode has no format to export, so
         // dmabuf capture fails negotiation rather than silently copying.
-        if modes.is_empty() {
+        if formats.is_empty() {
             return Err(G2gError::CapsMismatch);
         }
-        Ok(modes)
+        Ok(formats)
     }
 
-    /// Every format the device confirmed, in preference order, as the set the
-    /// solver picks from.
+    /// Every probed mode in preference order, then every other enumerated size,
+    /// as the set the solver picks from. The probed modes come first so the
+    /// requested size wins whenever downstream leaves the size open.
     fn produced_caps(&mut self) -> Result<CapsSet, G2gError> {
+        let formats = self.advertised_formats()?;
+        let probed = formats.iter().map(|probed| probed.mode.caps());
+        let other_sizes = formats
+            .iter()
+            .flat_map(|probed| probed.other_sizes.iter().cloned());
         Ok(CapsSet::from_alternatives(
-            self.advertised_modes()?.iter().map(Mode::caps).collect(),
+            probed.chain(other_sizes).collect(),
         ))
     }
 }
@@ -1307,10 +1333,12 @@ impl SourceLoop for V4l2Src {
         // The probe ioctls are quick and synchronous; no need for an async body.
         // Single-caps callers get the preferred format (YUYV where the device
         // has it); the whole set travels through `caps_constraint`.
-        core::future::ready(
-            self.advertised_modes()
-                .and_then(|modes| modes.first().map(Mode::caps).ok_or(G2gError::CapsMismatch)),
-        )
+        core::future::ready(self.advertised_formats().and_then(|formats| {
+            formats
+                .first()
+                .map(|probed| probed.mode.caps())
+                .ok_or(G2gError::CapsMismatch)
+        }))
     }
 
     /// Produces every format the device confirmed during the ioctl probe, in
@@ -1325,18 +1353,57 @@ impl SourceLoop for V4l2Src {
     }
 
     /// Records which advertised mode the solver fixed, which is what the
-    /// capture thread then runs.
+    /// capture thread then runs. A size from the enumerated ranges is set on
+    /// the device first, and refused unless the driver keeps it exactly.
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        if self.modes.is_empty() {
+        if self.formats.is_empty() {
             return Err(G2gError::NotConfigured);
         }
-        let chosen = self
-            .modes
+        let io_mode = self.io_mode;
+        let carried: Vec<&ProbedFormat> = self
+            .formats
             .iter()
-            .filter(|m| self.io_mode.carries(m.format))
-            .find(|m| m.caps().intersect(absolute_caps).is_ok())
-            .copied()
-            .ok_or(G2gError::CapsMismatch)?;
+            .filter(|probed| io_mode.carries(probed.mode.format))
+            .collect();
+        let probed_match = carried
+            .iter()
+            .find(|probed| probed.mode.caps().intersect(absolute_caps).is_ok());
+        let chosen = match probed_match {
+            Some(probed) => probed.mode,
+            None => {
+                let probed = carried
+                    .iter()
+                    .find(|probed| {
+                        probed
+                            .other_sizes
+                            .iter()
+                            .any(|caps| caps.intersect(absolute_caps).is_ok())
+                    })
+                    .ok_or(G2gError::CapsMismatch)?;
+                let (width, height, _) = absolute_caps.dims().ok_or(G2gError::CapsMismatch)?;
+                let mode = Mode {
+                    width: width.fixed().ok_or(G2gError::CapsMismatch)?,
+                    height: height.fixed().ok_or(G2gError::CapsMismatch)?,
+                    ..probed.mode
+                };
+                let dev = Device::with_path(&self.device).map_err(|e| v4l2_err(&e))?;
+                let actual = dev
+                    .set_format(&Format::new(
+                        mode.width,
+                        mode.height,
+                        FourCC::new(&mode.fourcc),
+                    ))
+                    .map_err(|e| v4l2_err(&e))?;
+                // drivers snap stepwise sizes to a step that caps ranges cannot express
+                if actual.fourcc.repr != mode.fourcc
+                    || actual.width != mode.width
+                    || actual.height != mode.height
+                {
+                    return Err(G2gError::CapsMismatch);
+                }
+                mode
+            }
+        };
         self.chosen = Some(chosen);
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
@@ -1357,8 +1424,8 @@ impl SourceLoop for V4l2Src {
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         // Every property here feeds the probe (which device, which geometry and
-        // rate, which controls), so the cached modes no longer describe it.
-        self.modes.clear();
+        // rate, which controls), so the cached formats no longer describe it.
+        self.formats.clear();
         if let Some(index) = CONTROLS.iter().position(|c| c.name == name) {
             self.controls[index] = Some(match CONTROLS[index].kind {
                 ControlKind::Switch => i64::from(value.as_bool().ok_or(PropError::Type)?),
@@ -1458,7 +1525,7 @@ impl SourceLoop for V4l2Src {
     fn latency(&self) -> LatencyReport {
         let fps = self
             .chosen
-            .or_else(|| self.modes.first().copied())
+            .or_else(|| self.formats.first().map(|probed| probed.mode))
             .map(|m| m.fps)
             .unwrap_or(self.req_fps);
         LatencyReport::live(g2g_core::caps::fps_period_ns(fps), None)
