@@ -6,7 +6,9 @@ use core::fmt::Debug;
 use core::future::Future;
 use core::pin::Pin;
 
-use crate::tensor_bytes::{rgba_to_nchw, tensor_bytes_to_chw};
+use crate::tensor_bytes::{
+    rgb_pixels_in_layout, rgba_to_nchw, tensor_bytes_to_chw, RGBA_BYTES_PER_PIXEL, RGB_CHANNELS,
+};
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::{GpuDevice, OwnedHipBuffer, OwnedWgpuBuffer, SystemSlice};
@@ -70,6 +72,8 @@ pub struct ModelGeometry {
     /// / `I8` (a quantized model, fed an integer tensor straight through, the
     /// `TensorConvert::quantize` output). RGBA mode requires `F32`.
     pub input_dtype: TensorDType,
+    // `Nchw` for `[1, 3, H, W]` or `Nhwc` for `[1, H, W, 3]`, the order `run_int` bytes arrive in
+    pub input_layout: TensorLayout,
     /// Static output shape (a dynamic leading batch dim coerced to 1).
     pub output_shape: TensorShape,
 }
@@ -79,8 +83,11 @@ enum InputEncoding {
     Rgba8,
     // `[1, 3, H, W]` f32, from a tensor or from RGBP_F32LE video
     F32Planes,
-    // `[1, 3, H, W]` u8 or i8 for a quantized model
+    // `[1, 3, H, W]` or `[1, H, W, 3]` u8 or i8 for a quantized model
     IntPlanes,
+    // RGB or RGBA video bytes as the pixel values of a u8 model
+    RgbBytes,
+    RgbaBytes,
 }
 
 #[derive(Debug)]
@@ -214,12 +221,16 @@ impl<B: InferenceBackend> Inference<B> {
                 TensorDType::F32 => InputEncoding::F32Planes,
                 _ => InputEncoding::IntPlanes,
             };
+            let shape = match m.input_layout {
+                TensorLayout::Nhwc => [1, m.height, m.width, INPUT_CHANNELS as u32],
+                _ => [1, INPUT_CHANNELS as u32, m.height, m.width],
+            };
             let tensor = Caps::Tensor {
                 // The model's own input dtype: f32, or u8 / i8 for a quantized
                 // model fed an already-quantized tensor (M442).
                 dtype: m.input_dtype,
-                shape: TensorShape::new([1, 3, m.height, m.width]),
-                layout: TensorLayout::Nchw,
+                shape: TensorShape::new(shape),
+                layout: m.input_layout,
             };
             return Some(Vec::from([(tensor, encoding)]));
         }
@@ -232,10 +243,18 @@ impl<B: InferenceBackend> Inference<B> {
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
             pixel_aspect: g2g_core::PixelAspect::Any,
         };
-        Some(Vec::from([
-            (video(RawVideoFormat::Rgba8), InputEncoding::Rgba8),
-            (video(RawVideoFormat::RgbpF32), InputEncoding::F32Planes),
-        ]))
+        let inputs = match m.input_dtype {
+            TensorDType::F32 => Vec::from([
+                (video(RawVideoFormat::Rgba8), InputEncoding::Rgba8),
+                (video(RawVideoFormat::RgbpF32), InputEncoding::F32Planes),
+            ]),
+            TensorDType::U8 => Vec::from([
+                (video(RawVideoFormat::Rgb8), InputEncoding::RgbBytes),
+                (video(RawVideoFormat::Rgba8), InputEncoding::RgbaBytes),
+            ]),
+            _ => Vec::new(),
+        };
+        Some(inputs)
     }
 
     fn accepted_input(&self, caps: &Caps) -> Result<(Caps, InputEncoding), G2gError> {
@@ -302,12 +321,6 @@ impl<B: InferenceBackend> AsyncElement for Inference<B> {
         // wire. Emitting the tensor as the frame makes the two disagree.
         #[cfg(feature = "analytics")]
         if self.only_on.is_set() && !self.attach_tensor {
-            return Err(G2gError::CapsMismatch);
-        }
-        let geometry = self.geometry().ok_or(G2gError::NotConfigured)?;
-        // RGBA mode normalizes to f32, so it only feeds an f32 model; a quantized
-        // (u8 / i8) model must take a pre-quantized tensor via `with_tensor_input`.
-        if !self.tensor_input && geometry.input_dtype != TensorDType::F32 {
             return Err(G2gError::CapsMismatch);
         }
         let (_, encoding) = self.accepted_input(absolute_caps)?;
@@ -512,6 +525,20 @@ fn infer<M: LoadedModel>(
             model.run_f32(tensor_bytes_to_chw(slice, geometry.width, geometry.height)?)
         }
         InputEncoding::IntPlanes => model.run_int(int_tensor_bytes(slice, &geometry)?),
+        InputEncoding::RgbBytes => model.run_int(&rgb_pixels_in_layout(
+            slice,
+            RGB_CHANNELS,
+            geometry.width,
+            geometry.height,
+            geometry.input_layout,
+        )?),
+        InputEncoding::RgbaBytes => model.run_int(&rgb_pixels_in_layout(
+            slice,
+            RGBA_BYTES_PER_PIXEL,
+            geometry.width,
+            geometry.height,
+            geometry.input_layout,
+        )?),
     }
 }
 
@@ -533,7 +560,7 @@ pub const MODEL_PROP: PropertySpec =
 pub const TENSOR_INPUT_PROP: PropertySpec = PropertySpec::new(
     "tensor-input",
     PropKind::Bool,
-    "take a preprocessed f32 NCHW tensor instead of RGBA video",
+    "take a preprocessed tensor in the model's input layout instead of video",
 );
 #[cfg(feature = "analytics")]
 pub const ATTACH_TENSOR_PROP: PropertySpec = PropertySpec::new(
@@ -580,7 +607,11 @@ impl<B: InferenceBackend> g2g_core::PadTemplates for Inference<B> {
             pixel_aspect: g2g_core::PixelAspect::Any,
         };
         Vec::from([g2g_core::PadTemplate::sink(CapsSet::from_alternatives(
-            Vec::from([video(RawVideoFormat::Rgba8), video(RawVideoFormat::RgbpF32)]),
+            Vec::from([
+                video(RawVideoFormat::Rgba8),
+                video(RawVideoFormat::Rgb8),
+                video(RawVideoFormat::RgbpF32),
+            ]),
         ))])
     }
 }
@@ -675,6 +706,7 @@ mod tests {
                     width: SIDE,
                     height: SIDE,
                     input_dtype: TensorDType::F32,
+                    input_layout: TensorLayout::Nchw,
                     output_shape: TensorShape::from_slice(&[1, OUTPUT.len() as u32]).unwrap(),
                 },
                 ran_on,
@@ -757,6 +789,12 @@ mod tests {
     #[test]
     fn executorch_lists_every_base_property() {
         lists_every_base_property::<crate::executorchinfer::ExecutorchBackend>();
+    }
+
+    #[cfg(all(target_os = "linux", feature = "openvx"))]
+    #[test]
+    fn openvx_lists_every_base_property() {
+        lists_every_base_property::<crate::ovxinfer::OvxBackend>();
     }
 
     /// `only-on` forwards a frame that does not carry the named blob, with
@@ -862,5 +900,11 @@ mod tests {
     #[test]
     fn executorch_only_on_forwards_a_frame_without_the_blob() {
         only_on_forwards_a_frame_without_the_blob::<crate::executorchinfer::ExecutorchBackend>();
+    }
+
+    #[cfg(all(target_os = "linux", feature = "openvx", feature = "analytics"))]
+    #[test]
+    fn openvx_only_on_forwards_a_frame_without_the_blob() {
+        only_on_forwards_a_frame_without_the_blob::<crate::ovxinfer::OvxBackend>();
     }
 }

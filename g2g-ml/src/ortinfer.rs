@@ -59,6 +59,7 @@ use ::ort::value::{Tensor, TensorElementType, ValueType};
 use g2g_core::memory::{GpuDevice, GpuVendor};
 use g2g_core::{
     G2gError, HardwareError, PropError, PropKind, PropValue, PropertySpec, TensorDType,
+    TensorLayout,
 };
 
 /// A loaded session plus the geometry read off it, the state every graph method
@@ -522,6 +523,7 @@ impl OrtModel {
                 width,
                 height,
                 input_dtype,
+                input_layout: TensorLayout::Nchw,
                 output_shape,
             },
             #[cfg(all(

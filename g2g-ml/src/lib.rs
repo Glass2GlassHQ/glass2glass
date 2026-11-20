@@ -25,13 +25,21 @@ pub mod ortinfer;
 
 // The inference element body shared by every model runtime, generic over the
 // runtime that loads and runs the model.
-#[cfg(any(feature = "ort", feature = "executorch"))]
+#[cfg(any(
+    feature = "ort",
+    feature = "executorch",
+    all(target_os = "linux", feature = "openvx")
+))]
 pub mod inference;
 
 // ExecuTorch inference element: a `.pte` program on ExecuTorch's portable CPU
 // kernels, the same element as `ortinfer` on a different runtime.
 #[cfg(feature = "executorch")]
 pub mod executorchinfer;
+
+// VeriSilicon (Vivante) NPU inference element: a network binary graph (`.nb`) through OpenVX.
+#[cfg(all(target_os = "linux", feature = "openvx"))]
+pub mod ovxinfer;
 
 // Speech-to-text on whisper.cpp: 16 kHz mono f32 audio in, timed UTF-8 text
 // frames out.

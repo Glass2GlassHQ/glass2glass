@@ -698,6 +698,7 @@ cargo clippy --workspace --all-targets
 | `VelloTextOverlay` (subtitle cues drawn on the GPU, `WgpuTexture` out) | `vello-text-overlay` | wgpu |
 | `OrtInference` (+ CUDA / TensorRT / DirectML / OpenVINO / ROCm / MIGraphX EPs, `execution-provider=` on the launch line; a GPU tensor from `wgpupreprocess` or `RGBP_F32LE` from `hipconvertscale` on CUDA or MIGraphX) | `ort`, `cuda`, `tensorrt`, `directml`, `openvino`, `rocm`, `migraphx`, `ort-cuda-wgpu`, `ort-hip-wgpu`, `ort-hip` (in `g2g-ml`) | onnxruntime (`openvino` / `rocm` / `migraphx` register only on an ONNX Runtime built with them) |
 | `ExecutorchInference` (a `.pte` model on ExecuTorch's portable CPU kernels) | `executorch` (in `g2g-ml`) | ExecuTorch 1.5.1 static libs (`tools/executorch-build.sh`, `EXECUTORCH_RS_EXECUTORCH_LIB_DIR`) |
+| `OvxInference` (a network binary graph `.nb` on a VeriSilicon NPU, such as the STM32MP257's) | `openvx` (in `g2g-ml`, Linux) | the board's `libOpenVX.so.1`, loaded at run time |
 | `BurnInference` (linear layer, or an ONNX topology imported by `burn-onnx` codegen) | `burn` (in `g2g-ml`) | wgpu (Vulkan / Metal / DX12) |
 | `WhisperTranscribe` (16 kHz mono f32 in, timed text segments out, whisper.cpp) | `whisper`, `whisper-cuda`, `whisper-vulkan` (in `g2g-ml`) | whisper.cpp built from source (cmake, libclang), plus nvcc or the Vulkan headers and `glslc` for the GPU features |
 | `LlamaChat` (one chat turn per text frame on a GGUF model, llama.cpp; `history-turns` keeps a conversation, `reset` clears it) | `llama`, `llama-cuda`, `llama-vulkan` (in `g2g-ml`) | llama.cpp built from source (cmake, libclang), plus nvcc, or the Vulkan headers, `glslc` and SPIRV-Headers, for the GPU features |
@@ -986,7 +987,7 @@ after `decodebin` when pinning a GPU decoder.
 
 The ML elements live in `g2g-ml`, so an app opts in after building the
 registry: `g2g_ml::register(&mut reg)` (the `launch` feature) adds `ortinfer`,
-`executorchinfer`, `wgpupreprocess`, `detectionpostprocess`, `ortsegment` (instance
+`executorchinfer`, `ovxinference`, `wgpupreprocess`, `detectionpostprocess`, `ortsegment` (instance
 segmentation), `whispertranscribe` and `llamachat`, so
 `... ! ortinfer model=yolov8n.onnx ! detectionpostprocess conf-threshold=0.3 ! ...`
 parses. `detectionpostprocess head=pose` or `head=obb` decodes a YOLO `-pose` or

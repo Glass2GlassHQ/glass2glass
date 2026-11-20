@@ -72,6 +72,9 @@ ort = ["std", "dep:ort"]
 # builds, found through EXECUTORCH_RS_EXECUTORCH_LIB_DIR (build.rs adds the
 # kernel libraries the crate leaves out).
 executorch = ["std", "dep:executorch"]
+# OpenVX on a VeriSilicon (Vivante) NPU, the STM32MP2 and i.MX 8M Plus class: OvxInference
+# runs a network binary graph (`.nb`) through libOpenVX.so.1, loaded at run time. Linux only.
+openvx = ["std", "dep:g2g-plugins", "g2g-plugins/openvx"]
 # DirectML execution provider (Windows, any D3D12 GPU). Downloads a
 # DirectML-enabled ONNX Runtime build; registration falls back to CPU at
 # runtime when no device is available.
@@ -223,6 +226,10 @@ required-features = ["ort", "analytics"]
 [[example]]
 name = "vertical_reframe"
 required-features = ["vertical-reframe"]
+
+[[example]]
+name = "ovxinference_bench"
+required-features = ["openvx"]
 
 # `ort` downloads the ONNX Runtime binaries at build time, so it can never build
 # in the docs.rs sandbox; `burn` and the execution-provider features need a GPU /

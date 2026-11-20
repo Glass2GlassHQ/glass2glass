@@ -138,6 +138,8 @@ pub enum HardwareError {
     Hip(i32),
     // `hiprtcResult` or `nvrtcResult` from compiling a kernel, with the compiler log logged
     KernelCompilation(i32),
+    // `vx_status` from an OpenVX call
+    OpenVx(i32),
 }
 
 // the stage at which an HTTP request failed with no response status

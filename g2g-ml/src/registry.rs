@@ -20,6 +20,7 @@
 #[cfg(any(
     feature = "ort",
     feature = "executorch",
+    all(target_os = "linux", feature = "openvx"),
     feature = "wgpu",
     feature = "analytics",
     feature = "whisper",
@@ -29,7 +30,7 @@ use g2g_core::runtime::LaunchFactory;
 use g2g_core::runtime::Registry;
 
 /// Register the text-constructible ML elements under their launch names:
-/// `ortinfer` (`ort`), `executorchinfer` (`executorch`), `wgpupreprocess`
+/// `ortinfer` (`ort`), `executorchinfer` (`executorch`), `ovxinference` (`openvx`), `wgpupreprocess`
 /// (`wgpu`), `detectionpostprocess` (`analytics`), `whispertranscribe`
 /// (`whisper`), `llamachat` (`llama`). Each is present only when the
 /// feature that builds the element is on, so this is a no-op in a build with none
@@ -53,6 +54,15 @@ pub fn register(reg: &mut Registry) -> &mut Registry {
             "executorchinfer",
             // Model-less: the `model` property loads the program.
             || Box::new(crate::executorchinfer::ExecutorchInference::new()),
+        )
+        .with_experimental(),
+    );
+    #[cfg(all(target_os = "linux", feature = "openvx"))]
+    reg.register_launch(
+        LaunchFactory::of::<crate::ovxinfer::OvxInference>(
+            "ovxinference",
+            // Model-less: the `model` property loads the network binary graph.
+            || Box::new(crate::ovxinfer::OvxInference::new()),
         )
         .with_experimental(),
     );

@@ -213,7 +213,7 @@ fn bf16_to_f32(x: u16) -> f32 {
 /// Dequantize one IEEE-754 half (F16) value to f32: rebuild the sign / exponent /
 /// mantissa fields, normalizing subnormals and preserving Inf / NaN. Exact (every
 /// f16 is representable in f32).
-fn f16_to_f32(x: u16) -> f32 {
+pub(crate) fn f16_to_f32(x: u16) -> f32 {
     let sign = ((x >> 15) & 1) as u32;
     let exp = ((x >> 10) & 0x1f) as u32;
     let frac = (x & 0x3ff) as u32;

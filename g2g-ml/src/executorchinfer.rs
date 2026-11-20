@@ -27,7 +27,9 @@ use crate::inference::{Inference, InferenceBackend, LoadedModel, ModelGeometry, 
 use crate::model_dims::{input_geometry, static_output_dims};
 use crate::tensor_bytes::f32_le_bytes;
 
-use g2g_core::{G2gError, HardwareError, PropError, PropValue, PropertySpec, TensorDType};
+use g2g_core::{
+    G2gError, HardwareError, PropError, PropValue, PropertySpec, TensorDType, TensorLayout,
+};
 
 const FORWARD_METHOD: &str = "forward";
 const LOG_CATEGORY: &str = "ExecutorchInference";
@@ -109,6 +111,7 @@ fn model_geometry(module: &mut Module<'static>) -> Result<ModelGeometry, G2gErro
         width,
         height,
         input_dtype,
+        input_layout: TensorLayout::Nchw,
         output_shape: static_output_dims(&output_dims)?,
     })
 }

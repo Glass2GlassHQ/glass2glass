@@ -440,6 +440,9 @@ embassy-link = ["dep:embassy-sync"]
 cuda = ["std", "offload", "dep:libloading"]
 # HIP device memory, streams and events, loaded at run time from libamdhip64 on AMD and libcuda on NVIDIA.
 hip = ["cuda", "offload", "dep:libc"]
+# OpenVX on a VeriSilicon (Vivante) NPU, loading libOpenVX.so.1 at runtime: runs network
+# binary graphs (`.nb`) for the g2g-ml `ovxinference` element. Linux only.
+openvx = ["std", "dep:libloading"]
 # Per-element GPU timings for the placement planner, written by `g2g-launch --profile`.
 placement = ["hip", "multi-thread", "dep:serde", "dep:serde_json"]
 # Local zero-copy IPC over CUDA IPC memory handles (`localipc`, M556): share a

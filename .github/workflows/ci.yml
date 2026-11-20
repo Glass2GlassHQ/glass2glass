@@ -553,6 +553,9 @@ jobs:
           export EXECUTORCH_RS_EXECUTORCH_LIB_DIR="$HOME/executorch/cmake-out"
           cargo test -p g2g-ml --locked --features executorch,analytics,launch --test executorch_inference --test m820_launch_properties
           cargo test -p g2g-ml --locked --features executorch,analytics,launch --lib -- detect:: segmentation::
+      # libOpenVX.so.1 loads at run time, so a runner without an NPU driver skips the board test
+      - name: test g2g-ml (openvx)
+        run: cargo test -p g2g-ml --locked --features openvx,analytics,launch --lib --test openvx_mobilenet -- ovxinfer openvx tensor_bytes npu_scores
       # the execution providers that build against the stock ONNX Runtime
       # download (tensorrt needs the CUDA download); each fails loud at load here.
       - name: test g2g-ml (ort execution providers)

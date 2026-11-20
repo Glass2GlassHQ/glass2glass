@@ -147,12 +147,17 @@ selects, and owns the exportable render-target texture.
 g2g avoids bundling heavy, unsafe proprietary C++ engines. The `g2g-ml` crate
 provides wrapper elements targeting three execution paradigms.
 
-`OrtInference` and `ExecutorchInference` are one element, `Inference<B>`
-(`g2g-ml/src/inference.rs`), over two model runtimes. `Inference` does the caps
-negotiation, the RGBA or tensor input decode, the base properties and the output
-framing. The `InferenceBackend` type loads a model file and handles the runtime's
-own properties, and the `LoadedModel` it returns reports the model geometry and
-runs one `[1, 3, H, W]` input.
+`OrtInference`, `ExecutorchInference` and `OvxInference` are one element,
+`Inference<B>` (`g2g-ml/src/inference.rs`), over three model runtimes. `Inference`
+does the caps negotiation, the video or tensor input decode, the base properties
+and the output framing. The `InferenceBackend` type loads a model file and handles
+the runtime's own properties, and the `LoadedModel` it returns reports the model
+geometry and runs one input. The geometry includes the input layout, `[1, 3, H, W]`
+or `[1, H, W, 3]`, and the input type. An f32 model takes RGBA video normalized to
+0..1 or an f32 tensor. A u8 model takes RGB or RGBA video as its pixel values, in
+its own layout with no normalization, which is how quantized vision models from
+TFLite and ST's tools expect them, or a u8 tensor. RGB video into an NHWC model is
+passed through uncopied.
 
 `OrtInference` takes `only-on=`, which names a blob header, or `detections` for
 any detection, that a frame has to carry to be inferred on. A frame without it is
@@ -352,6 +357,31 @@ same directory as whole archives.
 
 The test fixture `g2g-ml/tests/fixtures/affine_2x_plus_1.pte` is an exported
 `x * 2 + 1` model, checked in next to its generator `export_affine.py`.
+
+### VeriSilicon NPU (OpenVX)
+
+`OvxInference` (`g2g-ml/src/ovxinfer.rs`, `openvx` feature, launch name
+`ovxinference`, Linux) runs a network binary graph (`.nb`), a model compiled for
+a VeriSilicon Vivante NPU such as the STM32MP2's or the i.MX 8M Plus's. ST's model
+optimizer and VeriSilicon's Acuity toolkit produce them. `g2g-plugins/src/openvx.rs`
+imports the graph as one OpenVX node through `vxImportKernelFromURL`, binds a host
+tensor to each parameter and runs it with `vxProcessGraph`. `libOpenVX.so.1` is
+loaded at run time, so the build needs no NPU SDK. The model contract is one RGB
+input, NHWC or NCHW, u8, i8 or f32, and one output, which is dequantized to f32
+(affine u8 and i8, dynamic fixed point i8 and i16, f16).
+
+On an STM32MP257 this is the only path that reaches the NPU with ST's models. ST's
+onnxruntime 1.19.2 has a `VSINPUExecutionProvider`, but it ran ST's per-channel
+SSD MobileNet at 255 ms against 253 ms on the CPU, falling back on per-channel
+`DequantizeLinear` and dynamic shapes, and failed to compile ST's per-tensor
+MobileNet v2. ST's runtime runs the `.nb` form of that MobileNet v2 in 11.8 ms
+against 178 ms on the A35 cores, and TFLite with ST's VX delegate in 27.6 ms after
+a 24 s first-run compile. `tools/stm32mp2-npu-smoke.sh` runs the MobileNet v2
+graph through `ovxinference` on the board and checks its scores against ST's
+`stai_mpu` runtime on the same picture: they match bit for bit. `tools/stm32mp2-npu-bench.sh`
+times it: `ovxinference` takes 11.9 ms per frame (p50), 11.6 ms of it the input
+copy and graph run, against 12.0 ms for `stai_mpu` with the same input and output
+copies.
 
 ### Microcontrollers
 

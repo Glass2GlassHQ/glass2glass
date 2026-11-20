@@ -2080,6 +2080,8 @@ mod hipdeviceid;
 pub mod hipdownload;
 #[cfg(all(target_os = "linux", feature = "hip"))]
 pub mod hipupload;
+#[cfg(all(target_os = "linux", feature = "openvx"))]
+pub mod openvx;
 #[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
 mod pinnedframes;
 #[cfg(all(target_os = "linux", feature = "placement"))]
@@ -2088,7 +2090,12 @@ pub mod placement;
     all(any(target_os = "linux", windows), feature = "cuda"),
     all(
         target_os = "linux",
-        any(feature = "alsa-sink", feature = "alsa-src", feature = "hip")
+        any(
+            feature = "alsa-sink",
+            feature = "alsa-src",
+            feature = "hip",
+            feature = "openvx"
+        )
     )
 ))]
 mod shared_library;
