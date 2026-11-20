@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2490: `analyticsoverlay` skips transparent pixel pairs when blending onto NV12, about three times faster on the STM32MP257.
 - M2489: `stm32mp2-imx335-detect.sh` takes `TRACK=1` for ByteTrack ids and trails.
 - M2488: `analyticsjoin hold-last` keeps the newest earlier detections on frames between detector runs.
 - M2487: `analyticsoverlay` and `vellooverlay` draw pose keypoints and limbs, and `stm32mp2-imx335-detect.sh` takes `MODEL=pose`.

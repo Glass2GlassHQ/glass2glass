@@ -795,6 +795,26 @@ impl AnalyticsOverlay {
     }
 }
 
+// rgba pixels keep alpha in their fourth byte
+const ALPHA_OF_TWO_PIXELS: u64 = u64::from_ne_bytes([0, 0, 0, 0xFF, 0, 0, 0, 0xFF]);
+
+fn transparent_pair(pixels: &[u8; 8]) -> bool {
+    u64::from_ne_bytes(*pixels) & ALPHA_OF_TWO_PIXELS == 0
+}
+
+fn unpremultiplied(sum: u32, alpha: u32) -> i32 {
+    (sum * 255 / alpha) as i32
+}
+
+fn blend_luma(luma: &mut u8, pixel: &[u8; 4], matrix: &YuvRgbMatrix) {
+    let alpha = pixel[3];
+    if alpha == 0 {
+        return;
+    }
+    let [r, g, b] = [0, 1, 2].map(|c| unpremultiplied(pixel[c] as u32, alpha as u32));
+    *luma = blend_u8(*luma, matrix.rgb_to_luma(r, g, b) as u8, alpha);
+}
+
 fn blend_layer_into_nv12(
     layer: &[u8],
     frame: &mut [u8],
@@ -802,19 +822,24 @@ fn blend_layer_into_nv12(
     (width, height): (usize, usize),
     matrix: &YuvRgbMatrix,
 ) -> Result<(), G2gError> {
-    let unpremultiplied = |sum: u32, alpha: u32| (sum * 255 / alpha) as i32;
-    for (y, layer_row) in layer.chunks_exact(width * 4).take(height).enumerate() {
+    let layer_rows: Vec<&[u8]> = layer.chunks_exact(width * 4).take(height).collect();
+    for (y, layer_row) in layer_rows.iter().enumerate() {
         let range = layout
             .row_range(0, y, width)
             .ok_or(G2gError::CapsMismatch)?;
         let luma_row = frame.get_mut(range).ok_or(G2gError::CapsMismatch)?;
-        for (luma, pixel) in luma_row.iter_mut().zip(layer_row.as_chunks::<4>().0) {
-            let alpha = pixel[3];
-            if alpha == 0 {
+        let (luma_pairs, luma_last) = luma_row.as_chunks_mut::<2>();
+        let (layer_pairs, layer_last) = layer_row.as_chunks::<8>();
+        for (luma_pair, layer_pair) in luma_pairs.iter_mut().zip(layer_pairs) {
+            if transparent_pair(layer_pair) {
                 continue;
             }
-            let [r, g, b] = [0, 1, 2].map(|c| unpremultiplied(pixel[c] as u32, alpha as u32));
-            *luma = blend_u8(*luma, matrix.rgb_to_luma(r, g, b) as u8, alpha);
+            for (luma, pixel) in luma_pair.iter_mut().zip(layer_pair.as_chunks::<4>().0) {
+                blend_luma(luma, pixel, matrix);
+            }
+        }
+        for (luma, pixel) in luma_last.iter_mut().zip(layer_last.as_chunks::<4>().0) {
+            blend_luma(luma, pixel, matrix);
         }
     }
     let (chroma_w, chroma_h) = chroma_420_size(width, height);
@@ -823,20 +848,25 @@ fn blend_layer_into_nv12(
             .row_range(1, chroma_y, 2 * chroma_w)
             .ok_or(G2gError::CapsMismatch)?;
         let chroma_row = frame.get_mut(range).ok_or(G2gError::CapsMismatch)?;
-        let rows = 2 * chroma_y..(2 * chroma_y + 2).min(height);
+        let rows = &layer_rows[2 * chroma_y..(2 * chroma_y + 2).min(height)];
         for chroma_x in 0..chroma_w {
             let columns = 2 * chroma_x..(2 * chroma_x + 2).min(width);
+            let drawn = rows
+                .iter()
+                .any(|row| match row.as_chunks::<8>().0.get(chroma_x) {
+                    Some(pair) => !transparent_pair(pair),
+                    None => columns.clone().any(|x| row[x * 4 + 3] != 0),
+                });
+            if !drawn {
+                continue;
+            }
             let mut sums = [0u32; 4];
-            for y in rows.clone() {
+            for row in rows {
                 for x in columns.clone() {
-                    let pixel = &layer[(y * width + x) * 4..][..4];
-                    for (sum, value) in sums.iter_mut().zip(pixel) {
+                    for (sum, value) in sums.iter_mut().zip(&row[x * 4..][..4]) {
                         *sum += *value as u32;
                     }
                 }
-            }
-            if sums[3] == 0 {
-                continue;
             }
             let samples = (rows.len() * columns.len()) as u32;
             let alpha = (sums[3] / samples) as u8;
