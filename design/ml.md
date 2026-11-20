@@ -426,6 +426,11 @@ so both branches read system memory. A 640x360 clip presents 307 of 341 frames.
 A 1080p clip presents 14, since the decoder's copy out of uncached memory, the
 scale and the sink's XRGB conversion take longer than the 40 ms frame period.
 
+`MODEL=person` swaps the SSD for ST's person-only YOLOv8n at 320x320, whose
+`[1, 5, 2100]` output goes through `head=detect` with boxes normalised to 0..1.
+On a pedestrian clip it boxes 8 to 13 people per frame where the SSD boxes one or
+two and captions some seen from above as birds, and 340 of 341 frames present.
+
 ### Microcontrollers
 
 A heap-free int8 model runs on a microcontroller through `g2g-mcu`'s
