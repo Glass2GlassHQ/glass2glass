@@ -376,6 +376,8 @@ silicon and pre-1.0, not a substitute for one.
 
 ## RISC-V and board ports
 
+[MCU_BOARDS.md](../MCU_BOARDS.md) lists the boards g2g has run on.
+
 None of this is ARM-specific. The static element model is ISA-agnostic pure Rust,
 only the QEMU harness bins carrying ARM startup, so the `g2g-core` no-alloc
 subset and `g2g-mcu` build unchanged for `riscv32imafc-unknown-none-elf`, the
