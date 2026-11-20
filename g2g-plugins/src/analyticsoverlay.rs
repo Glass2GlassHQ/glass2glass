@@ -102,7 +102,7 @@ pub struct AnalyticsOverlay {
     height: u32,
     format: RawVideoFormat,
     matrix: YuvRgbMatrix,
-    nv12_layer: Vec<u8>,
+    scratch_rgba: Vec<u8>,
     /// Outline thickness in pixels (>= 1).
     thickness: u32,
     /// Alpha the mask fill is blended at (0 = invisible, 255 = opaque).
@@ -330,7 +330,7 @@ impl AnalyticsOverlay {
             height: 0,
             format: RawVideoFormat::Rgba8,
             matrix: YuvRgbMatrix::new(Colorimetry::UNKNOWN),
-            nv12_layer: Vec::new(),
+            scratch_rgba: Vec::new(),
             thickness: 2,
             mask_alpha: MASK_ALPHA_DEFAULT,
             caption: CaptionParts::default(),
@@ -423,31 +423,54 @@ impl AnalyticsOverlay {
         shapes: &AnalyticsShapes,
     ) -> Result<(), G2gError> {
         let (width, height) = (self.width as usize, self.height as usize);
-        if self.format == RawVideoFormat::Rgba8 {
-            let row_bytes = width * 4;
-            let plane = layout.plane(0).ok_or(G2gError::CapsMismatch)?;
-            // `render` draws rows packed tight
-            if plane.stride != row_bytes {
-                return Err(G2gError::CapsMismatch);
+        let mut scratch = core::mem::take(&mut self.scratch_rgba);
+        scratch.clear();
+        let painted = match self.format {
+            RawVideoFormat::Rgba8 => {
+                self.paint_rgba(buf, layout, shapes, (width, height), &mut scratch)
             }
-            let last_row = height.checked_sub(1).ok_or(G2gError::CapsMismatch)?;
-            let end = layout
-                .row_range(0, last_row, row_bytes)
-                .ok_or(G2gError::CapsMismatch)?
-                .end;
+            _ => {
+                scratch.resize(width * height * 4, 0);
+                self.render(&mut scratch, shapes);
+                blend_layer_into_nv12(&scratch, buf, layout, (width, height), &self.matrix)
+            }
+        };
+        self.scratch_rgba = scratch;
+        painted
+    }
+
+    // `render` draws onto tight rows, so padded ones are drawn in `scratch` and copied back
+    fn paint_rgba(
+        &self,
+        buf: &mut [u8],
+        layout: &PlaneLayout,
+        shapes: &AnalyticsShapes,
+        (width, height): (usize, usize),
+        scratch: &mut Vec<u8>,
+    ) -> Result<(), G2gError> {
+        let row_bytes = width * 4;
+        let rows = |row| {
+            layout
+                .row_range(0, row, row_bytes)
+                .ok_or(G2gError::CapsMismatch)
+        };
+        let last_row = rows(height.checked_sub(1).ok_or(G2gError::CapsMismatch)?)?;
+        let plane = layout.plane(0).ok_or(G2gError::CapsMismatch)?;
+        if plane.stride == row_bytes {
             let frame = buf
-                .get_mut(plane.offset..end)
+                .get_mut(plane.offset..last_row.end)
                 .ok_or(G2gError::CapsMismatch)?;
             self.render(frame, shapes);
             return Ok(());
         }
-        let mut layer = core::mem::take(&mut self.nv12_layer);
-        layer.clear();
-        layer.resize(width * height * 4, 0);
-        self.render(&mut layer, shapes);
-        let blended = blend_layer_into_nv12(&layer, buf, layout, (width, height), &self.matrix);
-        self.nv12_layer = layer;
-        blended
+        for row in 0..height {
+            scratch.extend_from_slice(buf.get(rows(row)?).ok_or(G2gError::CapsMismatch)?);
+        }
+        self.render(scratch, shapes);
+        for (row, pixels) in scratch.chunks_exact(row_bytes).enumerate() {
+            buf[rows(row)?].copy_from_slice(pixels);
+        }
+        Ok(())
     }
 
     /// Paint every shape onto the RGBA8 `buf` of `self.width` x `self.height`.

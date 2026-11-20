@@ -5,7 +5,7 @@
 //! M2473: `analyticsoverlay` draws into a dma-buf frame in place, so a capture
 //! source exporting its buffers reaches `waylandsink` without a copy. The
 //! pixels must match what the same detections draw onto a system-memory frame,
-//! with tight rows and with padded ones.
+//! with tight rows and with padded ones, in NV12 and in RGBA.
 //!
 //! The buffer is a real dma-buf, a sealed memfd exported through
 //! `/dev/udmabuf`. Self-skips where that device is not available (the CI
@@ -30,7 +30,6 @@ use udmabuf::udmabuf_of;
 
 const WIDTH: usize = 64;
 const HEIGHT: usize = 64;
-const PADDED_STRIDE: usize = 128;
 const PADDING_BYTE: u8 = 0xEE;
 // udmabuf exports whole pages only
 const PAGE: usize = 4096;
@@ -51,9 +50,31 @@ impl OutputSink for LastFrame {
     }
 }
 
-fn nv12_caps() -> Caps {
+struct FrameRows {
+    format: RawVideoFormat,
+    row_bytes: usize,
+    rows: usize,
+    padded_stride: usize,
+}
+
+// NV12 rows are luma then interleaved chroma
+const NV12: FrameRows = FrameRows {
+    format: RawVideoFormat::Nv12,
+    row_bytes: WIDTH,
+    rows: HEIGHT * 3 / 2,
+    padded_stride: 128,
+};
+
+const RGBA: FrameRows = FrameRows {
+    format: RawVideoFormat::Rgba8,
+    row_bytes: WIDTH * 4,
+    rows: HEIGHT,
+    padded_stride: 320,
+};
+
+fn caps(rows: &FrameRows) -> Caps {
     Caps::RawVideo {
-        format: RawVideoFormat::Nv12,
+        format: rows.format,
         width: Dim::Fixed(WIDTH as u32),
         height: Dim::Fixed(HEIGHT as u32),
         framerate: Rate::Any,
@@ -64,8 +85,8 @@ fn nv12_caps() -> Caps {
 }
 
 // no run of equal bytes, so a write at the wrong offset cannot match by accident
-fn tight_nv12() -> Vec<u8> {
-    (0..WIDTH * HEIGHT * 3 / 2)
+fn tight(rows: &FrameRows) -> Vec<u8> {
+    (0..rows.row_bytes * rows.rows)
         .map(|i| (i % 251) as u8)
         .collect()
 }
@@ -74,19 +95,17 @@ fn round_up_to_page(len: usize) -> usize {
     len.div_ceil(PAGE) * PAGE
 }
 
-// the tight frame's rows spread `PADDED_STRIDE` apart, luma then interleaved chroma
-fn padded(tight: &[u8]) -> Vec<u8> {
-    let rows = HEIGHT * 3 / 2;
-    let mut out = vec![PADDING_BYTE; round_up_to_page(rows * PADDED_STRIDE)];
-    for (row, pixels) in tight.as_chunks::<WIDTH>().0.iter().enumerate() {
-        out[row * PADDED_STRIDE..][..WIDTH].copy_from_slice(pixels);
+fn padded(rows: &FrameRows, tight: &[u8]) -> Vec<u8> {
+    let mut out = vec![PADDING_BYTE; round_up_to_page(rows.rows * rows.padded_stride)];
+    for (row, pixels) in tight.chunks_exact(rows.row_bytes).enumerate() {
+        out[row * rows.padded_stride..][..rows.row_bytes].copy_from_slice(pixels);
     }
     out
 }
 
-async fn draw(frame: Frame) -> Frame {
+async fn draw(rows: &FrameRows, frame: Frame) -> Frame {
     let mut overlay = AnalyticsOverlay::new().with_thickness(2);
-    overlay.configure_pipeline(&nv12_caps()).expect("nv12");
+    overlay.configure_pipeline(&caps(rows)).expect("configure");
     let mut meta = AnalyticsMeta::new();
     meta.add_detection(ObjectDetection {
         bbox: BBox {
@@ -107,19 +126,19 @@ async fn draw(frame: Frame) -> Frame {
     out.0.expect("frame forwarded")
 }
 
-async fn drawn_on_system_memory() -> Vec<u8> {
+async fn drawn_on_system_memory(rows: &FrameRows) -> Vec<u8> {
     let frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(tight_nv12().into_boxed_slice())),
+        MemoryDomain::System(SystemSlice::from_boxed(tight(rows).into_boxed_slice())),
         FrameTiming::default(),
         0,
     );
-    let drawn = draw(frame).await;
+    let drawn = draw(rows, frame).await;
     let reference = drawn
         .domain
         .as_system_slice()
         .expect("system in, system out")
         .to_vec();
-    assert_ne!(reference, tight_nv12(), "the box must change the frame");
+    assert_ne!(reference, tight(rows), "the box must change the frame");
     reference
 }
 
@@ -135,39 +154,51 @@ fn dmabuf_bytes(frame: &Frame) -> Vec<u8> {
 
 #[tokio::test]
 async fn a_tight_dmabuf_frame_gets_the_system_memory_pixels() {
-    let mut bytes = tight_nv12();
-    bytes.resize(round_up_to_page(bytes.len()), 0);
-    let Some(dmabuf) = udmabuf_of(&bytes) else {
-        eprintln!("SKIP: /dev/udmabuf is not available, so no dma-buf to draw into");
-        return;
-    };
-    let reference = drawn_on_system_memory().await;
+    for rows in [NV12, RGBA] {
+        let mut bytes = tight(&rows);
+        bytes.resize(round_up_to_page(bytes.len()), 0);
+        let Some(dmabuf) = udmabuf_of(&bytes) else {
+            eprintln!("SKIP: /dev/udmabuf is not available, so no dma-buf to draw into");
+            return;
+        };
+        let reference = drawn_on_system_memory(&rows).await;
 
-    let drawn = draw(Frame::new(
-        MemoryDomain::DmaBuf(dmabuf),
-        FrameTiming::default(),
-        0,
-    ))
-    .await;
+        let drawn = draw(
+            &rows,
+            Frame::new(MemoryDomain::DmaBuf(dmabuf), FrameTiming::default(), 0),
+        )
+        .await;
 
-    assert_eq!(&dmabuf_bytes(&drawn)[..reference.len()], &reference[..]);
+        assert_eq!(
+            &dmabuf_bytes(&drawn)[..reference.len()],
+            &reference[..],
+            "{:?}",
+            rows.format
+        );
+    }
 }
 
 #[tokio::test]
 async fn a_padded_dmabuf_frame_gets_the_system_memory_pixels_and_keeps_its_padding() {
-    let Some(mut dmabuf) = udmabuf_of(&padded(&tight_nv12())) else {
-        eprintln!("SKIP: /dev/udmabuf is not available, so no dma-buf to draw into");
-        return;
-    };
-    dmabuf.stride = PADDED_STRIDE as u32;
-    let reference = drawn_on_system_memory().await;
+    for rows in [NV12, RGBA] {
+        let Some(mut dmabuf) = udmabuf_of(&padded(&rows, &tight(&rows))) else {
+            eprintln!("SKIP: /dev/udmabuf is not available, so no dma-buf to draw into");
+            return;
+        };
+        dmabuf.stride = rows.padded_stride as u32;
+        let reference = drawn_on_system_memory(&rows).await;
 
-    let drawn = draw(Frame::new(
-        MemoryDomain::DmaBuf(dmabuf),
-        FrameTiming::default(),
-        0,
-    ))
-    .await;
+        let drawn = draw(
+            &rows,
+            Frame::new(MemoryDomain::DmaBuf(dmabuf), FrameTiming::default(), 0),
+        )
+        .await;
 
-    assert_eq!(dmabuf_bytes(&drawn), padded(&reference));
+        assert_eq!(
+            dmabuf_bytes(&drawn),
+            padded(&rows, &reference),
+            "{:?}",
+            rows.format
+        );
+    }
 }
