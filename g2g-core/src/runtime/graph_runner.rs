@@ -764,13 +764,13 @@ struct Recascade {
 /// Where the coordinator sends a [`Recascade`]'s proposal.
 #[derive(Debug, Clone, Copy)]
 enum RecascadeRoute {
-    /// One hop upstream through the graph topology, to every arm feeding the
-    /// reporting node (the ordinary single-input transform / sink path).
+    /// Up the reporting node's input edge (the ordinary single-input transform /
+    /// sink path).
     Upstream,
-    /// One hop upstream to exactly this arm. A muxer has many inputs, so a change
-    /// on one pad names the arm feeding *that* branch rather than re-cascading to
-    /// all of them (which the node-keyed `upstream_arms` lookup would do).
-    Pad(NodeId),
+    /// Up exactly this input edge of a muxer. A muxer has many inputs, so a
+    /// change on one pad names the edge feeding *that* branch rather than
+    /// re-cascading to all of them.
+    Pad(usize),
     /// Downstream to this consumer arm, as an
     /// [`ArmDirective::ProducerAllocation`]: the pool a muxer settled on for its
     /// merged output, told to the element that reads it.
@@ -810,20 +810,63 @@ pub(crate) fn dead_directives() -> Receiver<ArmDirective> {
 /// Node-keyed β coordinator for the DAG (the DAG analog of the linear
 /// [`Coordinator`](crate::runtime::coordinator::Coordinator)). It owns one
 /// [`ArmDirective`] sender per interruptible arm (transforms, sinks, muxers),
-/// keyed by node id, plus `upstream_arms`: for each reporting node, the nearest
-/// arm feeding each of its inputs (resolved through structural tee nodes; a
-/// source terminates the walk). On each report it forwards an
-/// `ArmDirective::Recascade` one hop upstream to those arms, which re-derive and
-/// report again, so the cascade walks the DAG without a global lock. A report's
-/// [`RecascadeRoute`] overrides that node-keyed walk: `Pad` names one branch of a
-/// muxer, `Consumer` pushes the muxer's settled output pool downstream instead.
-/// The walk is reactive and non-blocking (`try_send`), so it never wedges the
-/// data plane.
+/// keyed by node id, plus what produces each edge. On each report it walks the
+/// proposal up the reporting node's input edge to the nearest arm, which
+/// re-derives and reports again, so the cascade walks the DAG without a global
+/// lock. A tee on the way holds each branch's latest proposal and passes on
+/// their join, so one branch's demand never overrides its siblings'; a source
+/// terminates the walk. A report's [`RecascadeRoute`] overrides the input-edge
+/// walk: `Pad` names one branch of a muxer, `Consumer` pushes the muxer's
+/// settled output pool downstream instead. The walk is reactive and
+/// non-blocking (`try_send`), so it never wedges the data plane.
 #[derive(Debug)]
 struct GraphCoordinator {
     rx: Receiver<Recascade>,
     arm_ctrl: Vec<Option<Sender<ArmDirective>>>,
-    upstream_arms: Vec<Vec<NodeId>>,
+    reporter_input_edges: Vec<Option<usize>>,
+    edge_producers: Vec<EdgeProducer>,
+    tee_branch_proposals: Vec<Option<AllocationParams>>,
+}
+
+#[derive(Debug)]
+enum EdgeProducer {
+    Arm(NodeId),
+    Tee {
+        input_edge: usize,
+        branch_edges: Vec<usize>,
+        accepts: DomainSet,
+    },
+    Source,
+}
+
+fn edge_producer(vg: &ValidatedGraph<GraphNodeRef<'_>>, edge_id: usize) -> EdgeProducer {
+    let src = vg.edge(edge_id).src.node;
+    match vg.kind(src) {
+        NodeKind::Transform | NodeKind::Muxer(_) => EdgeProducer::Arm(src),
+        NodeKind::Tee(_) => EdgeProducer::Tee {
+            input_edge: vg.in_edges(src)[0],
+            branch_edges: vg.out_edges(src).to_vec(),
+            accepts: node_input_domains(vg, src),
+        },
+        _ => EdgeProducer::Source,
+    }
+}
+
+fn join_tee_branches(
+    branches: impl IntoIterator<Item = Option<AllocationParams>>,
+    accepts: DomainSet,
+) -> Result<Option<AllocationParams>, G2gError> {
+    // The first branch seeds the join: a `None` from there on means a
+    // branch that asked for nothing, which is not the same as no
+    // branch yet (it vetoes a demand needing every consumer).
+    let mut joined: Option<AllocationParams> = None;
+    for (i, proposal) in branches.into_iter().enumerate() {
+        joined = match i {
+            0 => proposal,
+            _ => join_alloc(joined, proposal)?,
+        };
+    }
+    Ok(narrow_to_input_domains(joined, accepts))
 }
 
 impl GraphCoordinator {
@@ -833,19 +876,48 @@ impl GraphCoordinator {
         }
     }
 
-    async fn run(self) -> u64 {
+    fn deliver(&mut self, edge: usize, proposal: AllocationParams) {
+        let (input_edge, joined) = match &self.edge_producers[edge] {
+            EdgeProducer::Arm(node) => {
+                self.send_to(*node, ArmDirective::Recascade(proposal));
+                return;
+            }
+            EdgeProducer::Source => return,
+            EdgeProducer::Tee {
+                input_edge,
+                branch_edges,
+                accepts,
+            } => {
+                self.tee_branch_proposals[edge] = Some(proposal);
+                let branches = branch_edges
+                    .iter()
+                    .map(|&branch| self.tee_branch_proposals[branch].clone());
+                (*input_edge, join_tee_branches(branches, *accepts))
+            }
+        };
+        match joined {
+            Ok(Some(p)) => self.deliver(input_edge, p),
+            Ok(None) => {}
+            Err(_) => crate::g2g_error!(
+                crate::log::Target::category(crate::log::RUNTIME_CATEGORY),
+                "a tee's branches no longer share a memory domain, so its producer keeps the allocation it has"
+            ),
+        }
+    }
+
+    async fn run(mut self) -> u64 {
         let mut observed = 0u64;
         while let Some(event) = self.rx.recv().await {
             observed += 1;
             if let Some(p) = event.proposal {
                 match event.route {
-                    RecascadeRoute::Pad(t) => self.send_to(t, ArmDirective::Recascade(p)),
+                    RecascadeRoute::Pad(edge) => self.deliver(edge, p),
                     RecascadeRoute::Consumer(t) => {
                         self.send_to(t, ArmDirective::ProducerAllocation(p))
                     }
                     RecascadeRoute::Upstream => {
-                        for &u in &self.upstream_arms[event.node.0 as usize] {
-                            self.send_to(u, ArmDirective::Recascade(p.clone()));
+                        if let Some(edge) = self.reporter_input_edges[event.node.0 as usize] {
+                            self.deliver(edge, p);
                         }
                     }
                 }
@@ -906,7 +978,7 @@ fn mux_beta<E>(
         .iter()
         .map(|&eid| MuxPad {
             pad: vg.edge(eid).dst.index as usize,
-            upstream: nearest_upstream_arm(vg, eid),
+            upstream_edge: nearest_upstream_arm(vg, eid).is_some().then_some(eid),
             caps: solution[eid].clone(),
             alloc: None,
         })
@@ -1647,6 +1719,7 @@ struct Prepared {
     latency: LatencyReport,
     latency_fold: alloc::sync::Arc<LatencyFold>,
     allocation: Option<AllocationParams>,
+    tee_branch_proposals: Vec<Option<AllocationParams>>,
     clock_priority: ClockPriority,
     base_time_ns: u64,
     /// Every clock the elements offered, kept so the health monitor can re-elect
@@ -1976,7 +2049,7 @@ async fn prepare_graph<'a>(
     let mut source_caps = probe_sources(vg, topo).await?;
 
     let mut attempts = 0u32;
-    let (solution, feasibility, allocation) = loop {
+    let (solution, feasibility, allocation, tee_branch_proposals) = loop {
         attempts += 1;
         if attempts > MAX_FIXATION_ATTEMPTS {
             return Err(G2gError::FixationFailed);
@@ -2008,11 +2081,14 @@ async fn prepare_graph<'a>(
         // is the reported `allocation`. For a linear chain this is byte-for-byte the
         // linear runner's sink->source fold. It runs before Phase 3 so a decoder
         // sizes its pool from the downstream `min_buffers` when it opens.
-        let allocation = cascade_allocation(vg, topo, &solution)?;
+        let CascadeOutcome {
+            allocation,
+            tee_branch_proposals,
+        } = cascade_allocation(vg, topo, &solution)?;
 
         // Phase 3: configure each element with its negotiated caps.
         let Some((proposer, counter)) = configure_nodes(vg, topo, &solution)? else {
-            break (solution, feasibility, allocation);
+            break (solution, feasibility, allocation, tee_branch_proposals);
         };
         // A counter-proposal restarts negotiation with it as the upstream source's produce set.
         let source = upstream_source(vg, proposer).ok_or(G2gError::FixationFailed)?;
@@ -2109,6 +2185,7 @@ async fn prepare_graph<'a>(
             latency,
             latency_fold: alloc::sync::Arc::new(latency_fold),
             allocation,
+            tee_branch_proposals,
             clock_priority,
             base_time_ns,
             clock_candidates,
@@ -2253,6 +2330,7 @@ fn live_topology<'a>(
 fn build_channels<'a>(
     vg: &ValidatedGraph<GraphNodeRef<'a>>,
     topo: &[NodeId],
+    tee_branch_proposals: Vec<Option<AllocationParams>>,
     link_capacity: usize,
     instrument: bool,
     mutable: bool,
@@ -2317,7 +2395,7 @@ fn build_channels<'a>(
     // coordinator ends.
     let mut arm_ctrl: Vec<Option<Sender<ArmDirective>>> = (0..n).map(|_| None).collect();
     let mut arm_ctrl_rx: Vec<Option<Receiver<ArmDirective>>> = (0..n).map(|_| None).collect();
-    let mut upstream_arms: Vec<Vec<NodeId>> = (0..n).map(|_| Vec::new()).collect();
+    let mut reporter_input_edges: Vec<Option<usize>> = (0..n).map(|_| None).collect();
     for &node in topo {
         if matches!(
             vg.kind(node),
@@ -2329,18 +2407,10 @@ fn build_channels<'a>(
         }
     }
     // β reporters are transforms (after a directive) and sinks (on caps change);
-    // each forwards to the nearest interior arm feeding its inputs.
+    // each forwards up its single input edge.
     for &node in topo {
         if matches!(vg.kind(node), NodeKind::Transform | NodeKind::Sink) {
-            let mut ups: Vec<NodeId> = Vec::new();
-            for &ie in vg.in_edges(node) {
-                if let Some(u) = nearest_upstream_arm(vg, ie) {
-                    if !ups.contains(&u) {
-                        ups.push(u);
-                    }
-                }
-            }
-            upstream_arms[node.0 as usize] = ups;
+            reporter_input_edges[node.0 as usize] = vg.in_edges(node).first().copied();
         }
     }
     let (coord_tx, coord_rx) = bounded::<Recascade>(link_capacity);
@@ -2348,7 +2418,9 @@ fn build_channels<'a>(
     let coordinator = GraphCoordinator {
         rx: coord_rx,
         arm_ctrl,
-        upstream_arms,
+        reporter_input_edges,
+        edge_producers: (0..ne).map(|edge| edge_producer(vg, edge)).collect(),
+        tee_branch_proposals,
     };
 
     GraphChannels {
@@ -2936,6 +3008,7 @@ pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
             latency,
             latency_fold,
             allocation,
+            tee_branch_proposals,
             clock_priority,
             base_time_ns,
             clock_candidates,
@@ -2977,6 +3050,7 @@ pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
     } = build_channels(
         &vg,
         &topo,
+        tee_branch_proposals,
         link_capacity,
         observer.is_some() || visit_recorder.is_some(),
         mutation.is_some(),
@@ -3386,6 +3460,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
             latency,
             latency_fold,
             allocation,
+            tee_branch_proposals,
             clock_priority,
             base_time_ns,
             clock_candidates,
@@ -3422,6 +3497,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
     } = build_channels(
         &vg,
         &topo,
+        tee_branch_proposals,
         link_capacity,
         observer.is_some() || visit_recorder.is_some(),
         mutation.is_some(),
@@ -4243,6 +4319,11 @@ pub fn copy_plan(
     crate::copyplan::CopyPlan::analyze(&nodes, &edges)
 }
 
+struct CascadeOutcome {
+    allocation: Option<AllocationParams>,
+    tee_branch_proposals: Vec<Option<AllocationParams>>,
+}
+
 /// Run the allocation cascade over a solved graph, in reverse topo order: each
 /// element absorbs the proposal arriving on its output edge(s)
 /// (`configure_allocation`), then proposes from its output-link caps, and the
@@ -4253,16 +4334,19 @@ pub fn copy_plan(
 /// linear runner's sink->source fold.
 ///
 /// Returns the source's absorbed proposal (what the runner reports as its
-/// `allocation`). Shared with [`negotiate_graph`], which runs it
-/// purely to settle each element's domain so a graph dump reports the negotiated
-/// memory domain rather than every producer's default preference.
+/// `allocation`) and each tee branch's proposal, which the β coordinator joins
+/// again when one branch re-cascades mid-stream. Shared with
+/// [`negotiate_graph`], which runs it purely to settle each element's domain so a
+/// graph dump reports the negotiated memory domain rather than every producer's
+/// default preference.
 fn cascade_allocation(
     vg: &mut ValidatedGraph<GraphNodeRef<'_>>,
     topo: &[NodeId],
     solution: &[Caps],
-) -> Result<Option<AllocationParams>, G2gError> {
+) -> Result<CascadeOutcome, G2gError> {
     let nee = vg.edge_count();
     let mut edge_proposal: Vec<Option<AllocationParams>> = (0..nee).map(|_| None).collect();
+    let mut tee_branch_proposals: Vec<Option<AllocationParams>> = (0..nee).map(|_| None).collect();
     let mut allocation: Option<AllocationParams> = None;
     for &node in topo.iter().rev() {
         match vg.kind(node) {
@@ -4293,20 +4377,17 @@ fn cascade_allocation(
             }
             NodeKind::Tee(_) => {
                 let in_e = vg.in_edges(node)[0];
-                // The first branch seeds the join: a `None` from there on means a
-                // branch that asked for nothing, which is not the same as no
-                // branch yet (it vetoes a demand needing every consumer).
-                let mut joined: Option<AllocationParams> = None;
-                for (i, &oe) in vg.out_edges(node).iter().enumerate() {
-                    joined = match i {
-                        0 => edge_proposal[oe].take(),
-                        _ => join_alloc(joined, edge_proposal[oe].take())?,
-                    };
+                for &oe in vg.out_edges(node) {
+                    tee_branch_proposals[oe] = edge_proposal[oe].take();
                 }
+                let branches = vg
+                    .out_edges(node)
+                    .iter()
+                    .map(|&oe| tee_branch_proposals[oe].clone());
                 // A plain tee carries no element and narrows nothing; a demux
                 // node folds in the domains it declared it can parse, so a
                 // System-only demuxer makes a GPU producer download (M1039).
-                edge_proposal[in_e] = narrow_to_input_domains(joined, node_input_domains(vg, node));
+                edge_proposal[in_e] = join_tee_branches(branches, node_input_domains(vg, node))?;
             }
             NodeKind::Source => {
                 let out_e = vg.out_edges(node)[0];
@@ -4373,7 +4454,25 @@ fn cascade_allocation(
             }
         }
     }
-    Ok(allocation)
+    Ok(CascadeOutcome {
+        allocation,
+        tee_branch_proposals,
+    })
+}
+
+fn upstream_proposal<E: DynAsyncElement + ?Sized>(
+    elem: &E,
+    caps: &Caps,
+    downstream: MetaRequests,
+    forwarded: Option<AllocationParams>,
+) -> Option<AllocationParams> {
+    with_meta_demand(
+        narrow_to_input_domains(
+            elem.propose_allocation(caps).or(forwarded),
+            elem.input_domains(),
+        ),
+        elem.meta_requests().carry_upstream(downstream),
+    )
 }
 
 /// A transform/sink node's allocation proposal from `caps` (its output-link caps
@@ -4388,13 +4487,9 @@ fn element_propose(
     forwarded: Option<AllocationParams>,
 ) -> Option<AllocationParams> {
     match vg.element(node) {
-        Some(GraphNodeRef::Element(elem)) => with_meta_demand(
-            narrow_to_input_domains(
-                elem.propose_allocation(caps).or(forwarded),
-                elem.input_domains(),
-            ),
-            elem.meta_requests().carry_upstream(downstream),
-        ),
+        Some(GraphNodeRef::Element(elem)) => {
+            upstream_proposal(elem.as_ref(), caps, downstream, forwarded)
+        }
         _ => None,
     }
 }
@@ -5096,10 +5191,7 @@ pub(crate) async fn transform_arm_on<E: AsyncElement>(
                     elem.configure_allocation(&params);
                     let downstream = params.meta_requests;
                     let forwarded = elem.output_domain_follows_input().then_some(params);
-                    let proposal = with_meta_demand(
-                        elem.propose_allocation(&out_caps).or(forwarded),
-                        elem.meta_requests().carry_upstream(downstream),
-                    );
+                    let proposal = upstream_proposal(&*elem, &out_caps, downstream, forwarded);
                     coord
                         .report(Recascade {
                             node,
@@ -5512,10 +5604,8 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
                 match log_caps_rejected(instance, &sink_caps, elem.configure_pipeline(&sink_caps))?
                 {
                     ConfigureOutcome::Accepted => {
-                        let proposal = with_meta_demand(
-                            elem.propose_allocation(&sink_caps),
-                            elem.meta_requests(),
-                        );
+                        let proposal =
+                            upstream_proposal(&*elem, &sink_caps, MetaRequests::new(), None);
                         if let Some(p) = &proposal {
                             elem.configure_allocation(p);
                         }
@@ -6312,9 +6402,9 @@ const MAX_RECASCADE_ROUNDS: u32 = 8;
 struct MuxPad {
     /// This slot's pad index on the element (`pad_rxs` order).
     pad: usize,
-    /// The arm feeding this pad's branch, `None` when a source feeds it directly
+    /// The input edge of this pad, `None` when no arm feeds its branch
     /// (nothing interruptible to re-cascade into).
-    upstream: Option<NodeId>,
+    upstream_edge: Option<usize>,
     /// The pad's negotiated caps, refreshed by the MX-1 re-solve.
     caps: Caps,
     /// The demand last cascaded up this branch, so an unchanged one is not
@@ -6404,11 +6494,11 @@ impl MuxBeta {
                 continue;
             }
             self.pads[i].alloc = want.clone();
-            if let (Some(target), Some(p)) = (self.pads[i].upstream, want) {
+            if let (Some(edge), Some(p)) = (self.pads[i].upstream_edge, want) {
                 self.coord
                     .report(Recascade {
                         node: self.node,
-                        route: RecascadeRoute::Pad(target),
+                        route: RecascadeRoute::Pad(edge),
                         proposal: Some(p),
                     })
                     .await;

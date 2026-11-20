@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2483: a mid-stream allocation re-cascade through a tee is joined with the tee's other branches.
 - M2482: `tools/stm32mp2-imx335-detect.sh` runs the STM32MP2 camera detection graph.
 - M2481: audio and DeckLink sinks add a 20 ms `processing-deadline` to a live path's latency, as GStreamer's do.
 - M2480: `H264Picture` is crate-private in builds with no hardware H.264 decoder, so Vulkan-only builds pass clippy.

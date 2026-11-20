@@ -616,6 +616,12 @@ Two fan structures have non-trivial joins:
   pad re-derives that pad's proposal and re-cascades it up *that pad's branch
   alone* via the `RecascadeRoute::Pad` override (the node-keyed walk would hit
   every input).
+- **Crossing a tee mid-stream.** A tee on the walk keeps each branch's latest
+  proposal, seeded from the startup cascade, and passes their join upstream, so
+  one branch's demand cannot drop what a sibling needs: a muxer pad accepting any
+  domain beside a system-only `videoscale` branch leaves the decoder on system
+  memory. Transform and sink re-proposals fold in their `input_domains` as they
+  do at startup.
 - **Walking through the muxer.** A change on one pad does not stop there. The
   merged-output pool is re-derived from every pad
   (`propose_allocation_for_output`, default `None` so a container muxer imposes
