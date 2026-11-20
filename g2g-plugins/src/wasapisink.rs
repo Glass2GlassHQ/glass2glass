@@ -159,6 +159,10 @@ fn wave_format(tag: u16, bits: u16, channels: u16, rate: u32) -> WAVEFORMATEX {
 }
 
 impl AsyncElement for WasapiSink {
+    fn latency(&self) -> g2g_core::LatencyReport {
+        self.link.latency()
+    }
+
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
@@ -247,12 +251,18 @@ impl AsyncElement for WasapiSink {
         if let Some(result) = self.playout.set_property(name, &value) {
             return result;
         }
+        if let Some(result) = self.link.set_property(name, &value) {
+            return result;
+        }
         self.output
             .set_property(name, &value, self.link.is_running())
             .unwrap_or(Err(PropError::Unknown))
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
+        if let Some(value) = self.link.get_property(name) {
+            return Some(value);
+        }
         self.playout
             .get_property(name)
             .or_else(|| self.output.get_property(name))
@@ -299,6 +309,7 @@ static WASAPISINK_PROPS: &[PropertySpec] = &[
         "endpoint id to render on (empty = default endpoint)",
     ),
     crate::audiooutput::CONTINUE_ON_ERROR_PROPERTY,
+    g2g_core::PROCESSING_DEADLINE_PROPERTY,
     crate::audioskew::PROVIDE_CLOCK_PROPERTY,
     crate::audioskew::SLAVE_METHOD_PROPERTY,
     crate::audioskew::DRIFT_TOLERANCE_PROPERTY,

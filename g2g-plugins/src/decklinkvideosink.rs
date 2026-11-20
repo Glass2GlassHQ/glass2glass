@@ -69,7 +69,9 @@ impl DeckLinkVideoSink {
             output: claim_output(device_number, Arc::clone(&opener)),
             opener,
             layout: None,
-            pacer: PresentationPacer::new(),
+            pacer: PresentationPacer::with_processing_deadline_ns(
+                g2g_core::BASE_SINK_PROCESSING_DEADLINE_NS,
+            ),
             last_frame_end_ns: None,
             output_vanc: false,
         }
@@ -178,6 +180,10 @@ impl DeckLinkVideoSink {
 }
 
 impl AsyncElement for DeckLinkVideoSink {
+    fn latency(&self) -> g2g_core::LatencyReport {
+        self.pacer.latency()
+    }
+
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
@@ -265,12 +271,18 @@ impl AsyncElement for DeckLinkVideoSink {
                 "Output the AncillaryMeta packets of input frames as VANC",
             )
             .with_default("false"),
+            g2g_core::PROCESSING_DEADLINE_PROPERTY,
         ];
         PROPS
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         match name {
+            "processing-deadline" => {
+                let ns = value.as_uint().ok_or(PropError::Type)?;
+                self.pacer.set_processing_deadline_ns(ns);
+                Ok(())
+            }
             "device-number" => {
                 let device_number = device_number_from_property(&value)?;
                 if self.layout.is_some() {
@@ -299,6 +311,7 @@ impl AsyncElement for DeckLinkVideoSink {
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
+            "processing-deadline" => self.pacer.get_property(name),
             "device-number" => Some(PropValue::Int(i64::from(self.device_number))),
             "mode" => Some(mode_property_value(self.mode)),
             "output-vanc" => Some(PropValue::Bool(self.output_vanc)),

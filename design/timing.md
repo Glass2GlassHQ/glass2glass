@@ -345,8 +345,10 @@ holds back delay the first frame after a load or seek once, not every deadline.
 A sink that syncs to the clock reports its `processing-deadline` as its own
 latency, `PresentationPacer::latency()`, so on a live path every deadline also
 leaves that much time for upstream processing. The video sinks default to 15 ms,
-GStreamer's `GstVideoSink` value, and other pacer sinks to zero. A sink with
-`sync=false` reports nothing. GStreamer shortens the allowance when it exceeds the
+GStreamer's `GstVideoSink` value. The audio device sinks, through `PlayoutLink`, and
+the DeckLink sinks default to 20 ms, GStreamer's `GstBaseSink` value, and expose
+`processing-deadline` as their only pacing property. `syncsink` defaults to zero. A
+sink with `sync=false` reports nothing. GStreamer shortens the allowance when it exceeds the
 path's maximum latency. g2g does not, since the runner never enforces the maximum.
 
 The DAG runner folds every node that carries an element: sources, transforms, sinks,

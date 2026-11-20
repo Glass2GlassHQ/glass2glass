@@ -147,6 +147,9 @@ pub const VIDEO_SINK_MAX_LATENESS_NS: u64 = 5_000_000;
 // gstreamer's GstVideoSink default
 pub const VIDEO_SINK_PROCESSING_DEADLINE_NS: u64 = 15_000_000;
 
+// gstreamer's GstBaseSink default, which its audio and decklink sinks keep
+pub const BASE_SINK_PROCESSING_DEADLINE_NS: u64 = 20_000_000;
+
 /// How often a sink that presents frames reports its lateness upstream, so a
 /// producer that shed load on a late report also learns when the sink caught up.
 pub const UPSTREAM_QOS_INTERVAL_NS: u64 = 100_000_000;
@@ -157,10 +160,16 @@ impl PresentationPacer {
     }
 
     pub fn for_video_sink() -> Self {
-        let mut pacer = Self::default();
+        let mut pacer = Self::with_processing_deadline_ns(VIDEO_SINK_PROCESSING_DEADLINE_NS);
         pacer.set_max_lateness_ns(VIDEO_SINK_MAX_LATENESS_NS);
-        pacer.processing_deadline_ns = VIDEO_SINK_PROCESSING_DEADLINE_NS;
         pacer
+    }
+
+    pub fn with_processing_deadline_ns(processing_deadline_ns: u64) -> Self {
+        Self {
+            processing_deadline_ns,
+            ..Self::default()
+        }
     }
 
     /// Adopt the elected clock + base time, engaging PTS pacing. The runner
@@ -395,6 +404,10 @@ impl PresentationPacer {
         self.present_on_arrival = !sync;
     }
 
+    pub fn set_processing_deadline_ns(&mut self, ns: u64) {
+        self.processing_deadline_ns = ns;
+    }
+
     pub fn latency(&self) -> LatencyReport {
         // gstreamer adds the processing deadline only for a sink that syncs to the clock
         if self.present_on_arrival {
@@ -448,7 +461,7 @@ impl PresentationPacer {
                     .map(|sync| self.set_sync(sync)),
             ),
             "max-lateness" => Some(ns().map(|n| self.set_max_lateness_ns(n))),
-            "processing-deadline" => Some(ns().map(|n| self.processing_deadline_ns = n)),
+            "processing-deadline" => Some(ns().map(|n| self.set_processing_deadline_ns(n))),
             "qos-interval" => Some(ns().map(|n| self.set_report_interval_ns(n))),
             _ => None,
         }

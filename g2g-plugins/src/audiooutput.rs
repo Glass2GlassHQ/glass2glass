@@ -115,7 +115,10 @@ mod device_worker {
     use g2g_core::frame::Frame;
     use g2g_core::memory::{MemoryDomain, SystemSlice};
     use g2g_core::progress::SinkPosition;
-    use g2g_core::{AudioFormat, Caps, ClockSync, G2gError, PresentationPacer, Segment};
+    use g2g_core::{
+        AudioFormat, Caps, ClockSync, G2gError, LatencyReport, PresentationPacer, PropError,
+        PropValue, Segment, BASE_SINK_PROCESSING_DEADLINE_NS, PROCESSING_DEADLINE_PROPERTY,
+    };
 
     use super::{report_on, OutputDevice};
     use crate::audioconvert::{ns_to_samples, samples_to_ns, silence_byte};
@@ -263,11 +266,23 @@ mod device_worker {
     #[cfg(not(target_os = "windows"))]
     const PAUSE_CHECKS_PER_SECOND: u32 = 50;
 
-    #[derive(Debug, Default)]
+    #[derive(Debug)]
     pub(crate) struct PlayoutStart {
         pacer: PresentationPacer,
         started: bool,
         held: Vec<Frame>,
+    }
+
+    impl Default for PlayoutStart {
+        fn default() -> Self {
+            Self {
+                pacer: PresentationPacer::with_processing_deadline_ns(
+                    BASE_SINK_PROCESSING_DEADLINE_NS,
+                ),
+                started: false,
+                held: Vec::new(),
+            }
+        }
     }
 
     impl PlayoutStart {
@@ -465,6 +480,28 @@ mod device_worker {
 
         pub(crate) fn set_segment(&mut self, segment: Segment) {
             self.start.set_segment(segment);
+        }
+
+        pub(crate) fn latency(&self) -> LatencyReport {
+            self.start.pacer.latency()
+        }
+
+        pub(crate) fn set_property(
+            &mut self,
+            name: &str,
+            value: &PropValue,
+        ) -> Option<Result<(), PropError>> {
+            if name != PROCESSING_DEADLINE_PROPERTY.name {
+                return None;
+            }
+            self.start.pacer.set_property(name, value)
+        }
+
+        pub(crate) fn get_property(&self, name: &str) -> Option<PropValue> {
+            if name != PROCESSING_DEADLINE_PROPERTY.name {
+                return None;
+            }
+            self.start.pacer.get_property(name)
         }
 
         // without a clock the worker never learns when a sample plays
@@ -1648,6 +1685,24 @@ mod tests {
         fn delay_ns(&self) -> Result<u64, G2gError> {
             Ok(self.delay_ns)
         }
+    }
+
+    #[test]
+    fn an_audio_sink_reports_its_processing_deadline_and_no_other_pacing_property() {
+        let mut link = PlayoutLink::new(err());
+        assert_eq!(
+            link.latency().min_ns,
+            g2g_core::BASE_SINK_PROCESSING_DEADLINE_NS
+        );
+
+        let deadline = PropValue::Uint(5_000_000);
+        assert_eq!(
+            link.set_property("processing-deadline", &deadline),
+            Some(Ok(()))
+        );
+        assert_eq!(link.latency().min_ns, 5_000_000);
+        assert_eq!(link.get_property("processing-deadline"), Some(deadline));
+        assert_eq!(link.set_property("sync", &PropValue::Bool(false)), None);
     }
 
     #[cfg(not(target_os = "windows"))]

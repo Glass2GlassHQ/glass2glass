@@ -445,6 +445,7 @@ static RENDER_PROPS: &[PropertySpec] = &[
     crate::audioskew::SLAVE_METHOD_PROPERTY,
     crate::audioskew::DRIFT_TOLERANCE_PROPERTY,
     crate::audiooutput::CONTINUE_ON_ERROR_PROPERTY,
+    g2g_core::PROCESSING_DEADLINE_PROPERTY,
 ];
 
 /// `CoreAudioSrc`'s settable properties. `device` matches gst `osxaudiosrc` (a
@@ -619,6 +620,10 @@ fn open_queue(
 }
 
 impl AsyncElement for CoreAudioSink {
+    fn latency(&self) -> g2g_core::LatencyReport {
+        self.link.latency()
+    }
+
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
@@ -716,12 +721,18 @@ impl AsyncElement for CoreAudioSink {
         if let Some(result) = self.playout.set_property(name, &value) {
             return result;
         }
+        if let Some(result) = self.link.set_property(name, &value) {
+            return result;
+        }
         self.output
             .set_property(name, &value, self.link.is_running())
             .unwrap_or(Err(PropError::Unknown))
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
+        if let Some(value) = self.link.get_property(name) {
+            return Some(value);
+        }
         self.playout
             .get_property(name)
             .or_else(|| self.output.get_property(name))
