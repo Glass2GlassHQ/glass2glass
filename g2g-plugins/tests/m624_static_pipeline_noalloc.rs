@@ -36,6 +36,8 @@ thread_local! {
     /// unscoped counter attributes another thread's allocations to the pipeline.
     /// Const-init and `Drop`-free, so reading it from the allocator cannot
     /// allocate or recurse.
+    // clippy flags this already-const initializer on android targets only
+    #[cfg_attr(target_os = "android", allow(clippy::missing_const_for_thread_local))]
     static MEASURING: Cell<bool> = const { Cell::new(false) };
 }
 

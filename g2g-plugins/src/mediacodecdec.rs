@@ -82,7 +82,6 @@ enum DecodedFrame {
         nv12: Box<[u8]>,
         width: u32,
         height: u32,
-        pts_ns: u64,
     },
     /// An acquired reference to a decoded frame's `AHardwareBuffer`, held so it
     /// outlives the transient `Image`; converted to RGBA on the GPU in `process`.
@@ -91,7 +90,6 @@ enum DecodedFrame {
         ahb: ndk::hardware_buffer::HardwareBufferRef,
         width: u32,
         height: u32,
-        pts_ns: u64,
     },
 }
 
@@ -434,13 +432,11 @@ impl MediaCodecDec {
         if self.state.is_none() {
             return Ok(()); // pre-keyframe: nothing to decode yet
         }
-        let pts_us = pts_ns / 1000;
-        // the decoded image carries the microsecond pts back in nanoseconds
-        self.input_stamps.insert(pts_us * 1000, stamp);
+        self.input_stamps.insert(pts_ns, stamp);
         if pts_ns != FrameTiming::PTS_NONE {
-            self.held.fed(pts_us * 1000);
+            self.held.fed(pts_ns);
         }
-        self.queue_input(au, pts_us, 0)?;
+        self.queue_input(au, pts_ns / 1000, 0)?;
         self.pump_output(out, false)
     }
 
@@ -526,7 +522,6 @@ impl MediaCodecDec {
                     first_ahb = Some(hb.acquire());
                 }
             }
-            let pts_ns = img.timestamp().unwrap_or(0).max(0) as u64;
             // Zero-copy GPU path: hand the decoded AHardwareBuffer downstream as
             // an acquired reference (converted to a wgpu texture in `process`),
             // skipping the CPU NV12 pack.
@@ -539,12 +534,11 @@ impl MediaCodecDec {
                         ahb: hb.acquire(),
                         width: w,
                         height: h,
-                        pts_ns,
                     });
                 }
                 continue;
             }
-            if let Some(frame) = image_to_nv12(&img, pts_ns) {
+            if let Some(frame) = image_to_nv12(&img) {
                 out.push(frame);
             }
         }
@@ -717,36 +711,28 @@ impl AsyncElement for MediaCodecDec {
                 _ => (Rate::Any, g2g_core::PixelAspect::Any),
             };
             for d in decoded {
-                let (new_caps, domain, pts_ns) = match d {
+                let (new_caps, domain) = match d {
                     DecodedFrame::Nv12 {
                         nv12,
                         width,
                         height,
-                        pts_ns,
                     } => (
                         nv12_caps(width, height, out_framerate.clone(), out_pixel_aspect),
                         MemoryDomain::System(SystemSlice::from_boxed(nv12)),
-                        pts_ns,
                     ),
                     // Zero-copy GPU path: convert the decoded AHardwareBuffer to an
                     // RGBA wgpu texture and emit it as MemoryDomain::WgpuTexture.
                     #[cfg(feature = "mediacodec-wgpu")]
-                    DecodedFrame::Ahb {
-                        ahb,
-                        width,
-                        height,
-                        pts_ns,
-                    } => {
+                    DecodedFrame::Ahb { ahb, width, height } => {
                         let domain = self.convert_ahb_to_domain(ahb, width, height).await?;
                         (
                             rgba_caps(width, height, out_framerate.clone(), out_pixel_aspect),
                             domain,
-                            pts_ns,
                         )
                     }
                 };
+                let pts_ns = self.held.take_earliest().unwrap_or(FrameTiming::PTS_NONE);
                 let input = self.input_stamps.take(pts_ns);
-                self.held.output(pts_ns);
                 if !self.segment.presents(pts_ns) {
                     g2g_core::g2g_log!(
                         g2g_core::log::Target::category(g2g_core::AsyncElement::log_category(self)),
@@ -833,13 +819,12 @@ fn annexb_join(nals: &[Vec<u8>]) -> Vec<u8> {
 
 /// Pack a decoded `YUV_420_888` image into a `DecodedFrame::Nv12`; the layout
 /// handling lives in `yuv420::pack_yuv420_to_nv12` (shared with camera2src).
-fn image_to_nv12(img: &Image, pts_ns: u64) -> Option<DecodedFrame> {
+fn image_to_nv12(img: &Image) -> Option<DecodedFrame> {
     let (nv12, width, height) = crate::yuv420::pack_yuv420_to_nv12(img)?;
     Some(DecodedFrame::Nv12 {
         nv12: nv12.into_boxed_slice(),
         width,
         height,
-        pts_ns,
     })
 }
 

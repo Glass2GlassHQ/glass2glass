@@ -724,6 +724,36 @@ impl WindowRenderer for SurfaceRenderer {
     }
 }
 
+fn no_device_reason(instance: &wgpu::Instance, surface: &wgpu::Surface<'static>) -> String {
+    let adapters = g2g_core::runtime::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
+    if adapters.is_empty() {
+        return String::from(
+            "wgpu finds no GPU adapter: this machine has no Vulkan, Metal or DirectX 12 driver",
+        );
+    }
+    let reasons: Vec<String> = adapters
+        .iter()
+        .map(|adapter| {
+            let info = adapter.get_info();
+            let downlevel = adapter.get_downlevel_capabilities();
+            let reason = if !adapter.is_surface_supported(surface) {
+                String::from("cannot present to this window")
+            } else if !downlevel.is_webgpu_compliant() {
+                alloc::format!(
+                    "is not WebGPU compliant (missing {:?}, limits {:?}, shader model {:?})",
+                    wgpu::DownlevelFlags::compliant() - downlevel.flags,
+                    downlevel.limits,
+                    downlevel.shader_model
+                )
+            } else {
+                String::from("fails to open a device")
+            };
+            alloc::format!("{} on {:?} {reason}", info.name.trim(), info.backend)
+        })
+        .collect();
+    alloc::format!("no wgpu device for this window: {}", reasons.join(", "))
+}
+
 /// Build the surface + device + sink on the worker thread (a wgpu device and its
 /// surface are bound to the thread that made them, and device creation is async,
 /// so this blocks rather than spreading the setup back over the pipeline task).
@@ -746,8 +776,8 @@ fn build_renderer(
         None => {
             let instance = present_instance();
             let wgpu_surface = create_surface(&instance)?;
-            let ctx = g2g_core::runtime::block_on(open_device(instance, &wgpu_surface))
-                .map_err(|e| alloc::format!("no wgpu device for this surface: {e:?}"))?;
+            let ctx = g2g_core::runtime::block_on(open_device(instance.clone(), &wgpu_surface))
+                .map_err(|_| no_device_reason(&instance, &wgpu_surface))?;
             let config = wgpu_surface
                 .get_default_config(&ctx.adapter, width, height)
                 .ok_or("no GPU adapter here can present to this window")?;

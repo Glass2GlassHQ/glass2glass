@@ -28,6 +28,8 @@ static ALLOCS: AtomicUsize = AtomicUsize::new(0);
 
 thread_local! {
     // libtest's main thread allocates while it waits for the result.
+    // clippy flags this already-const initializer on android targets only
+    #[cfg_attr(target_os = "android", allow(clippy::missing_const_for_thread_local))]
     static MEASURING: Cell<bool> = const { Cell::new(false) };
 }
 

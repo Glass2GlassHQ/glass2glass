@@ -201,8 +201,7 @@ impl OpenH264Dec {
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
         for picture in pictures {
-            let pts_ns = self.held.earliest().unwrap_or(FrameTiming::PTS_NONE);
-            self.held.output(pts_ns);
+            let pts_ns = self.held.take_earliest().unwrap_or(FrameTiming::PTS_NONE);
             let input = self.input_stamps.take(pts_ns);
             if pts_ns != FrameTiming::PTS_NONE && !self.segment.presents(pts_ns) {
                 continue;

@@ -6,6 +6,9 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2465: `mediacodecdec` emits rising timestamps from streams stamped in decode order.
+- M2464: `wgpusink` names why each GPU adapter it finds cannot present.
+- M2463: `waylandsink` scales the picture into any window size the compositor sets, letterboxed.
 - M2462: `videoscale` bilinear runs 2.4 times faster with the same output.
 - M2461: `v4l2slh264dec` and `d3d12h264dec` emit rising timestamps from streams stamped in decode order.
 - M2460: `v4l2slvp8enc` encodes VP8 at a constant quantizer or bitrate on V4L2 stateless encoders such as Hantro H1.

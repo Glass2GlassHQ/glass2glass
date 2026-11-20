@@ -26,7 +26,7 @@ use collect_sink::CollectSink;
 
 #[path = "common/parsed_access_units.rs"]
 mod parsed_access_units;
-use parsed_access_units::parsed_access_units;
+use parsed_access_units::{parsed_access_units, FRAME_PERIOD_NS};
 
 #[path = "common/android_binder.rs"]
 mod android_binder;
@@ -43,10 +43,17 @@ use g2g_plugins::mediacodecdec::MediaCodecDec;
 /// decoders' graphic-buffer allocators reject sub-minimum dimensions.
 const H264: &[u8] = include_bytes!("fixtures/h264_640x480.h264");
 const H265: &[u8] = include_bytes!("fixtures/h265_640x480.h265");
+const H264_BFRAMES: &[u8] = include_bytes!("fixtures/h264_640x480_bframes.h264");
 
 /// Drive `dec` with the access units of `stream` and assert it emits NV12 frames
 /// of the right geometry. Shared by the H.264 and H.265 tests.
-async fn decode_to_nv12(mut dec: MediaCodecDec, stream: &[u8], codec: VideoCodec, w: u32, h: u32) {
+async fn decode_to_nv12(
+    mut dec: MediaCodecDec,
+    stream: &[u8],
+    codec: VideoCodec,
+    w: u32,
+    h: u32,
+) -> Vec<u64> {
     start_binder_threadpool(1);
 
     // Negotiation surrogate: upstream caps carry the fixture's geometry, as a
@@ -179,6 +186,10 @@ async fn decode_to_nv12(mut dec: MediaCodecDec, stream: &[u8], codec: VideoCodec
         }
         other => panic!("expected NV12 fixed caps, got {:?}", other),
     }
+    data_frames
+        .iter()
+        .map(|frame| frame.timing.pts_ns)
+        .collect()
 }
 
 #[tokio::test]
@@ -189,4 +200,21 @@ async fn mediacodec_decodes_h264_to_nv12() {
 #[tokio::test]
 async fn mediacodec_decodes_h265_to_nv12() {
     decode_to_nv12(MediaCodecDec::h265(), H265, VideoCodec::H265, 640, 480).await;
+}
+
+// parsed_access_units stamps each access unit in decode order, as mp4s with no composition offsets do
+#[tokio::test]
+async fn mediacodec_restores_display_order_timestamps() {
+    let presentation_times = decode_to_nv12(
+        MediaCodecDec::h264(),
+        H264_BFRAMES,
+        VideoCodec::H264,
+        640,
+        480,
+    )
+    .await;
+    let expected: Vec<u64> = (0..presentation_times.len() as u64)
+        .map(|index| index * FRAME_PERIOD_NS)
+        .collect();
+    assert_eq!(presentation_times, expected);
 }

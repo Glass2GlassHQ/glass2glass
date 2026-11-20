@@ -191,7 +191,9 @@ mod displayorder;
 #[cfg(any(
     all(target_os = "android", feature = "mediacodec"),
     all(target_os = "windows", feature = "mf-decode"),
+    all(target_os = "windows", feature = "d3d12-decode"),
     all(target_os = "linux", feature = "openh264"),
+    all(target_os = "linux", feature = "v4l2"),
 ))]
 mod heldpictures;
 // Keeps a hardware decoder going through damaged access units, as gst's videodecoder does.

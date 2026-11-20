@@ -23,7 +23,7 @@ async fn parse<E: AsyncElement>(
 }
 
 // 29.97 fps
-const FRAME_PERIOD_NS: u64 = 33_366_700;
+pub(crate) const FRAME_PERIOD_NS: u64 = 33_366_700;
 
 pub(crate) async fn parsed_access_units(codec: VideoCodec, stream: &[u8]) -> Vec<Frame> {
     let mut sink = CollectSink::default();

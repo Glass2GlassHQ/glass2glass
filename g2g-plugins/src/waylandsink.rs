@@ -48,11 +48,11 @@
 //! - NV12 input only.
 //! - Mid-stream geometry change tears down the existing worker and
 //!   spawns a fresh one. Same-dims `CapsChanged` is a no-op.
-//! - No scaling beyond the display aspect: the window opens at the video's
-//!   display size (`wp_viewporter` scales a non-square-pixel buffer to it)
-//!   and stays there. If the compositor's `configure` event resizes us we
-//!   ignore the new bounds (the video keeps drawing at that size and the
-//!   compositor letterboxes / clips).
+//! - The window opens at the video's display size and follows any size the
+//!   compositor's `configure` sets (fullscreen, maximize, tiling, resize).
+//!   The window surface is a black buffer scaled to that size and the
+//!   picture is a subsurface `wp_viewporter` scales into it, letterboxed
+//!   unless `force-aspect-ratio` is off.
 //! - Once the runner elects a clock, each frame is held until its PTS
 //!   deadline and dropped if it is late beyond the QoS bound. On top of
 //!   that, backpressure is compositor-driven: `process()` blocks until
@@ -63,6 +63,7 @@
 //!   borderless. v1 doesn't carry CSD.
 
 use core::future::Future;
+use core::num::NonZeroU32;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -76,7 +77,7 @@ use alloc::vec::Vec;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_dmabuf, delegate_output, delegate_registry, delegate_shm,
-    delegate_xdg_shell, delegate_xdg_window,
+    delegate_subcompositor, delegate_xdg_shell, delegate_xdg_window,
     dmabuf::{DmabufFeedback, DmabufHandler, DmabufState},
     output::{OutputHandler, OutputState},
     reexports::calloop::{
@@ -87,7 +88,7 @@ use smithay_client_toolkit::{
     reexports::client::{
         delegate_noop,
         globals::registry_queue_init,
-        protocol::{wl_buffer, wl_output, wl_shm, wl_surface},
+        protocol::{wl_buffer, wl_output, wl_shm, wl_subsurface::WlSubsurface, wl_surface},
         Connection, QueueHandle,
     },
     reexports::protocols::wp::linux_dmabuf::zv1::client::{
@@ -109,12 +110,14 @@ use smithay_client_toolkit::{
         slot::{Buffer, SlotPool},
         Shm, ShmHandler,
     },
+    subcompositor::SubcompositorState,
 };
 
 use crate::capsfilter::DRM_FOURCC_FORMATS;
 use crate::clock::wait_to_present;
 use crate::display_aspect::{
-    display_size, letterbox, FORCE_ASPECT_RATIO_NAME, FORCE_ASPECT_RATIO_PROPERTY,
+    display_size, letterbox, ViewportRectangle, FORCE_ASPECT_RATIO_NAME,
+    FORCE_ASPECT_RATIO_PROPERTY,
 };
 use crate::dmabufimport::DmaBufImportCache;
 use crate::paddedrows::dmabuf_plane_layout;
@@ -633,7 +636,7 @@ impl AsyncElement for WaylandSink {
             self.shutdown();
             // fall through to fresh-worker spawn below.
         }
-        let (surface_width, surface_height) = if self.force_aspect_ratio {
+        let (display_width, display_height) = if self.force_aspect_ratio {
             display_size(w, h, pixel_aspect)
         } else {
             (w, h)
@@ -665,8 +668,8 @@ impl AsyncElement for WaylandSink {
                 if let Err(e) = worker_main(
                     w,
                     h,
-                    surface_width,
-                    surface_height,
+                    display_width,
+                    display_height,
                     fullscreen,
                     force_aspect_ratio,
                     title,
@@ -962,16 +965,18 @@ struct WorkerState {
     // held until the compositor sends wl_buffer.release for their buffer
     on_screen: Vec<(wl_buffer::WlBuffer, OwnedDmaBuf)>,
     window: Window,
+    window_viewport: WpViewport,
+    black_buffer: Buffer,
+    picture_surface: wl_surface::WlSurface,
+    picture_subsurface: WlSubsurface,
+    picture_viewport: WpViewport,
     qh: QueueHandle<WorkerState>,
     width: u32,
     height: u32,
-    // the surface size the compositor lays out, the buffer scaled to it when the two differ
-    surface_width: u32,
-    surface_height: u32,
-    viewport: Option<WpViewport>,
-    fullscreen: bool,
+    display_width: u32,
+    display_height: u32,
     force_aspect_ratio: bool,
-    fullscreen_output_size: Option<(u32, u32)>,
+    configured_size: ConfiguredSize,
     configured: bool,
     exit: bool,
     ready: Option<Arc<Handshake>>,
@@ -1002,8 +1007,8 @@ struct WorkerState {
 fn worker_main(
     width: u32,
     height: u32,
-    surface_width: u32,
-    surface_height: u32,
+    display_width: u32,
+    display_height: u32,
     fullscreen: bool,
     force_aspect_ratio: bool,
     title: String,
@@ -1025,6 +1030,9 @@ fn worker_main(
 
     let compositor = CompositorState::bind(&globals, &qh)?;
     let xdg_shell = XdgShell::bind(&globals, &qh)?;
+    let subcompositor =
+        SubcompositorState::bind(compositor.wl_compositor().clone(), &globals, &qh)?;
+    let viewporter: WpViewporter = globals.bind(&qh, 1..=1, ())?;
     let shm = Shm::bind(&globals, &qh)?;
     let dmabuf_state = DmabufState::new(&globals, &qh);
 
@@ -1034,22 +1042,24 @@ fn worker_main(
     window.set_app_id(&app_id);
     if fullscreen {
         window.set_fullscreen(None);
-    } else {
-        window.set_min_size(Some((surface_width, surface_height)));
     }
-    let viewport = if !fullscreen && (surface_width, surface_height) == (width, height) {
-        None
-    } else {
-        let viewporter: WpViewporter = globals.bind(&qh, 1..=1, ())?;
-        let viewport = viewporter.get_viewport(window.wl_surface(), &qh, ());
-        viewport.set_destination(surface_width as i32, surface_height as i32);
-        Some(viewport)
-    };
+    let window_viewport = viewporter.get_viewport(window.wl_surface(), &qh, ());
+    let (picture_subsurface, picture_surface) =
+        subcompositor.create_subsurface(window.wl_surface().clone(), &qh);
+    let picture_viewport = viewporter.get_viewport(&picture_surface, &qh, ());
+    picture_subsurface.set_desync();
     window.commit();
 
     // Allocate enough for a single XRGB8888 buffer at the input dims;
     // SlotPool grows internally if we double-buffer below.
-    let pool = SlotPool::new((width * height * 4) as usize, &shm)?;
+    let mut pool = SlotPool::new((width * height * 4) as usize, &shm)?;
+    let (black_buffer, black_pixel) = pool.create_buffer(
+        1,
+        1,
+        XRGB8888_BYTES_PER_PIXEL as i32,
+        wl_shm::Format::Xrgb8888,
+    )?;
+    black_pixel.fill(0);
 
     let mut state = WorkerState {
         registry_state: RegistryState::new(&globals),
@@ -1061,15 +1071,18 @@ fn worker_main(
         imports: DmaBufImportCache::new(),
         on_screen: Vec::new(),
         window,
+        window_viewport,
+        black_buffer,
+        picture_surface,
+        picture_subsurface,
+        picture_viewport,
         qh: qh.clone(),
         width,
         height,
-        surface_width,
-        surface_height,
-        viewport,
-        fullscreen,
+        display_width,
+        display_height,
         force_aspect_ratio,
-        fullscreen_output_size: None,
+        configured_size: (None, None),
         configured: false,
         exit: false,
         ready: Some(ready),
@@ -1105,41 +1118,60 @@ fn worker_main(
     Ok(())
 }
 
-fn viewport_destination(
-    (surface_width, surface_height): (u32, u32),
+type ConfiguredSize = (Option<NonZeroU32>, Option<NonZeroU32>);
+
+#[derive(Debug, PartialEq, Eq)]
+struct WindowLayout {
+    window_width: u32,
+    window_height: u32,
+    picture: ViewportRectangle,
+}
+
+fn window_layout(
+    (display_width, display_height): (u32, u32),
     orientation: Orientation,
-    fullscreen_output_size: Option<(u32, u32)>,
+    (configured_width, configured_height): ConfiguredSize,
     force_aspect_ratio: bool,
-) -> (u32, u32) {
+) -> WindowLayout {
     let (width, height) = if orientation.swaps_dims() {
-        (surface_height, surface_width)
+        (display_height, display_width)
     } else {
-        (surface_width, surface_height)
+        (display_width, display_height)
     };
-    let Some((output_width, output_height)) = fullscreen_output_size else {
-        return (width, height);
+    let window_width = configured_width.map_or(width, NonZeroU32::get);
+    let window_height = configured_height.map_or(height, NonZeroU32::get);
+    let picture = if force_aspect_ratio {
+        letterbox(
+            width,
+            height,
+            PixelAspect::SQUARE,
+            window_width,
+            window_height,
+        )
+    } else {
+        ViewportRectangle::whole(window_width, window_height)
     };
-    if !force_aspect_ratio {
-        return (output_width, output_height);
+    WindowLayout {
+        window_width,
+        window_height,
+        picture,
     }
-    let fitted = letterbox(
-        width,
-        height,
-        PixelAspect::SQUARE,
-        output_width,
-        output_height,
-    );
-    (fitted.width, fitted.height)
 }
 
 impl WorkerState {
-    fn viewport_destination(&self, orientation: Orientation) -> (u32, u32) {
-        viewport_destination(
-            (self.surface_width, self.surface_height),
+    fn set_layout(&self, orientation: Orientation) {
+        let layout = window_layout(
+            (self.display_width, self.display_height),
             orientation,
-            self.fullscreen_output_size,
+            self.configured_size,
             self.force_aspect_ratio,
-        )
+        );
+        self.window_viewport
+            .set_destination(layout.window_width as i32, layout.window_height as i32);
+        self.picture_subsurface
+            .set_position(layout.picture.x as i32, layout.picture.y as i32);
+        self.picture_viewport
+            .set_destination(layout.picture.width as i32, layout.picture.height as i32);
     }
 
     fn fill_shm_buffer(
@@ -1257,19 +1289,16 @@ impl WorkerState {
             },
         };
 
-        let surface = self.window.wl_surface();
-        if orientation != self.orientation {
+        let surface = &self.picture_surface;
+        let turned = orientation != self.orientation;
+        if turned {
             surface.set_buffer_transform(buffer_transform(orientation));
+            // wayland applies a sync subsurface's state with its parent's next commit
+            self.picture_subsurface.set_sync();
             // The surface is what the compositor lays out, and a turn that
             // transposes the picture transposes it. The buffer, and
             // `damage_buffer` with it, stays in buffer coordinates.
-            let (surface_w, surface_h) = self.viewport_destination(orientation);
-            if !self.fullscreen {
-                self.window.set_min_size(Some((surface_w, surface_h)));
-            }
-            if let Some(viewport) = &self.viewport {
-                viewport.set_destination(surface_w as i32, surface_h as i32);
-            }
+            self.set_layout(orientation);
         }
         // Subscribe to the compositor's `frame` callback for this commit.
         // SCTK's CompositorHandler::frame routes by the WlSurface udata,
@@ -1288,7 +1317,11 @@ impl WorkerState {
                 .attach_to(surface)
                 .expect("attach_to"),
         }
-        self.window.commit();
+        surface.commit();
+        if turned {
+            self.window.commit();
+            self.picture_subsurface.set_desync();
+        }
         self.orientation = orientation;
         self.presented.fetch_add(1, Ordering::Relaxed);
 
@@ -1368,19 +1401,20 @@ impl WindowHandler for WorkerState {
         configure: WindowConfigure,
         _serial: u32,
     ) {
-        // Only a fullscreen window takes the compositor's suggested size.
-        // Otherwise we render at the input video dims and let the compositor
-        // letterbox/clip.
-        if let (true, (Some(bound_width), Some(bound_height))) =
-            (self.fullscreen, configure.new_size)
-        {
-            self.fullscreen_output_size = Some((bound_width.get(), bound_height.get()));
-            let (width, height) = self.viewport_destination(self.orientation);
-            if let Some(viewport) = &self.viewport {
-                viewport.set_destination(width as i32, height as i32);
-            }
-        }
         let was_first = !self.configured;
+        if was_first {
+            let window_surface = self.window.wl_surface();
+            self.black_buffer
+                .attach_to(window_surface)
+                .expect("the black buffer is attached once");
+            window_surface.damage_buffer(0, 0, 1, 1);
+        }
+        self.configured_size = configure.new_size;
+        self.picture_subsurface.set_sync();
+        self.set_layout(self.orientation);
+        self.picture_surface.commit();
+        self.window.commit();
+        self.picture_subsurface.set_desync();
         self.configured = true;
         if was_first {
             // Tell the sink-side handshake that the window is mappable.
@@ -1462,6 +1496,7 @@ impl DmabufHandler for WorkerState {
 }
 
 delegate_compositor!(WorkerState);
+delegate_subcompositor!(WorkerState);
 delegate_dmabuf!(WorkerState);
 delegate_output!(WorkerState);
 delegate_shm!(WorkerState);
@@ -1541,24 +1576,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fullscreen_fits_the_picture_inside_the_output() {
-        const PANEL: (u32, u32) = (1024, 600);
+    fn the_picture_fits_inside_the_configured_window() {
         const PICTURE: (u32, u32) = (1920, 1080);
+        let panel = (NonZeroU32::new(1024), NonZeroU32::new(600));
+        let layout = |orientation, configured_size, force_aspect_ratio| {
+            let layout = window_layout(PICTURE, orientation, configured_size, force_aspect_ratio);
+            (layout.window_width, layout.window_height, layout.picture)
+        };
+        let rectangle = |x, y, width, height| ViewportRectangle {
+            x,
+            y,
+            width,
+            height,
+        };
         assert_eq!(
-            viewport_destination(PICTURE, Orientation::Identity, Some(PANEL), true),
-            (1024, 576)
+            layout(Orientation::Identity, panel, true),
+            (1024, 600, rectangle(0, 12, 1024, 576))
         );
         assert_eq!(
-            viewport_destination(PICTURE, Orientation::Rotate90Cw, Some(PANEL), true),
-            (337, 600)
+            layout(Orientation::Rotate90Cw, panel, true),
+            (1024, 600, rectangle(343, 0, 337, 600))
         );
         assert_eq!(
-            viewport_destination(PICTURE, Orientation::Identity, Some(PANEL), false),
-            PANEL
+            layout(Orientation::Identity, panel, false),
+            (1024, 600, rectangle(0, 0, 1024, 600))
         );
         assert_eq!(
-            viewport_destination(PICTURE, Orientation::Identity, None, true),
-            PICTURE
+            layout(Orientation::Identity, (None, None), true),
+            (1920, 1080, rectangle(0, 0, 1920, 1080))
+        );
+        assert_eq!(
+            layout(Orientation::Rotate90Cw, (None, None), true),
+            (1080, 1920, rectangle(0, 0, 1080, 1920))
+        );
+        assert_eq!(
+            layout(Orientation::Identity, (NonZeroU32::new(800), None), true),
+            (800, 1080, rectangle(0, 315, 800, 450))
         );
     }
     use g2g_core::{BusMessage, Dim, Rate, VideoCodec, VIDEO_SINK_MAX_LATENESS_NS};

@@ -662,8 +662,10 @@ pins one. `wgpusink` opens its window at the display size (gst's rule: keep
 the stored height when the display aspect divides it, else the width) and, with
 `force-aspect-ratio` on (the default),
 letterboxes the picture through the render pass viewport when the window takes
-another shape. `waylandsink` scales its fixed-size surface to the display size
-through `wp_viewporter`. Encoders carry the input ratio to their output caps.
+another shape. `waylandsink` opens at the display size and follows any size the
+compositor configures: its window surface is a black buffer scaled to that
+size and the picture is a subsurface letterboxed inside it, both through
+`wp_viewporter`. Encoders carry the input ratio to their output caps.
 `x264enc` and `ffmpegenc` set libavcodec's `sample_aspect_ratio`, which its encoders
 write as the VUI sample aspect, and `nvenc` sets NVENC's display aspect, from which
 the driver derives it. `openh264enc`, `vpxenc` and `av1enc` carry it on the caps
