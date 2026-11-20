@@ -431,6 +431,19 @@ scale and the sink's XRGB conversion take longer than the 40 ms frame period.
 On a pedestrian clip it boxes 8 to 13 people per frame where the SSD boxes one or
 two and captions some seen from above as birds, and 340 of 341 frames present.
 
+`MODEL=coco80` runs an 80-class COCO YOLOv8n that
+`tools/stm32mp2-yolov8n-fixture.sh` builds without ST's toolchain. Ultralytics
+exports it at 256x256 with boxes normalised to 0..1, onnx2tf quantizes it
+per-tensor to int8 on coco128, and the board's TFLite VX delegate writes the
+network it compiles through its `cache_file_path` option. Per-tensor int8 gives
+a multiply by a constant one scale on both sides, so a box decode in grid units
+followed by the stride multiply steps in 1.6 grid units. The export scales the
+distances and anchors by stride over input size before decoding instead. On
+coco128 the int8 model finds 97% of the float model's detections. On the camera
+it infers in 17 to 22 ms with 4 to 7 ms of postprocessing, where a 320x320
+export takes the whole 33 ms frame period. On the pedestrian clip it boxes 4 or
+5 people per frame, half what the person-only model finds.
+
 ### Microcontrollers
 
 A heap-free int8 model runs on a microcontroller through `g2g-mcu`'s

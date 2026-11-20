@@ -5,7 +5,9 @@
 
 # Runs an ST detection model on an STM32MP2 board's NPU against the IMX335
 # camera and draws the boxes on Weston. MODEL=ssd (the default) is ST's 80-class
-# COCO SSD MobileNet at 256x256, MODEL=person ST's person-only YOLOv8n at 320x320.
+# COCO SSD MobileNet at 256x256, MODEL=person ST's person-only YOLOv8n at 320x320,
+# MODEL=coco80 the 80-class YOLOv8n at 256x256 that stm32mp2-yolov8n-fixture.sh
+# puts beside this script.
 # The main pipe carries 640x480 NV12 to the display in the camera's own buffers,
 # the aux pipe the model's RGB.
 # Given an H.264 MP4 instead of a frame count, it runs the same detection on the
@@ -14,21 +16,22 @@
 # g2g-plugins/v4l2 and g2g-plugins/wayland-sink features, by default ml_launch
 # beside this script, as are the two setup scripts.
 #
-# Usage (on the board): [MODEL=ssd|person] stm32mp2-imx335-detect.sh FRAMES|CLIP.mp4 [CONFIDENCE]
+# Usage (on the board): [MODEL=ssd|person|coco80] stm32mp2-imx335-detect.sh FRAMES|CLIP.mp4 [CONFIDENCE]
 set -e
 INPUT=$1
 CONFIDENCE=${2:-0.65}
 HERE=$(dirname "$0")
 ML_LAUNCH=${ML_LAUNCH:-$HERE/ml_launch}
 LABELS=/tmp/detect_labels.txt
+SSD_DIR=/usr/local/x-linux-ai/object-detection/models/coco_ssd_mobilenet
+# ST's label file starts with the SSD's background class, which detectionpostprocess does not count
+COCO_LABELS=$SSD_DIR/labels_coco_dataset_80.txt
 case ${MODEL:-ssd} in
   ssd)
-    SSD_DIR=/usr/local/x-linux-ai/object-detection/models/coco_ssd_mobilenet
     MODEL_FILE=$SSD_DIR/ssd_mobilenet_v2_fpnlite_10_256_int8_per_tensor.nb
     MODEL_SIDE=256
     HEAD="head=ssd"
-    # ST's label file starts with the SSD's background class, which detectionpostprocess does not count
-    tail -n +2 $SSD_DIR/labels_coco_dataset_80.txt > $LABELS
+    tail -n +2 $COCO_LABELS > $LABELS
     ;;
   person)
     MODEL_FILE=/usr/local/x-linux-ai/people-tracking-heatmap/models/yolov8n_people/yolov8n_320_quant_pt_uf_od_coco-person-st.nb
@@ -37,8 +40,14 @@ case ${MODEL:-ssd} in
     HEAD="head=detect input-width=1 input-height=1"
     printf "person\n" > $LABELS
     ;;
+  coco80)
+    MODEL_FILE=$HERE/yolov8n_256_coco80.nb
+    MODEL_SIDE=256
+    HEAD="head=detect input-width=1 input-height=1"
+    tail -n +2 $COCO_LABELS > $LABELS
+    ;;
   *)
-    echo "MODEL must be ssd or person, not $MODEL" >&2
+    echo "MODEL must be ssd, person or coco80, not $MODEL" >&2
     exit 1
     ;;
 esac

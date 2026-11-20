@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2486: `tools/stm32mp2-yolov8n-fixture.sh` builds an 80-class YOLOv8n for the STM32MP2 NPU, run by `MODEL=coco80`.
 - M2485: `tools/stm32mp2-imx335-detect.sh` takes `MODEL=person` for ST's person YOLOv8n.
 - M2484: `tools/stm32mp2-imx335-detect.sh` runs detection on an H.264 MP4 clip as well as the camera.
 - M2483: a mid-stream allocation re-cascade through a tee is joined with the tee's other branches.
