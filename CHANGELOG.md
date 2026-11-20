@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2474: the STM32MP2 IMX335 main and aux pipe setup scripts are in `tools/`.
 - M2473: `analyticsoverlay` draws into dma-buf frames, and `analyticsjoin` asks `v4l2src` for enough buffers, so camera frames reach `waylandsink` without a copy.
 - M2472: `waylandsink` gets Weston's frame callbacks, so it paces on the compositor instead of counting nearly every frame dropped.
 - M2471: `v4l2src` takes its capture size from downstream caps, so a capsfilter picks any size the driver enumerates.

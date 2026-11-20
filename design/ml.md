@@ -408,7 +408,8 @@ agree to within the scheduling delay between the two sources, inside the join's
 half-frame window. The aux pipe is set with `media-ctl`: enable the link from
 `dcmipp_main_isp` pad 1 to `dcmipp_aux_postproc` pad 0, give that pad the ISP's
 `RGB888_1X24` size, compose it to the model size, and set pad 1 to
-`RGB888_1X24` at the model size. With the aux pipe, 300 of 300 camera frames
+`RGB888_1X24` at the model size, which `tools/stm32mp2-imx335-aux-setup.sh` does
+after `tools/stm32mp2-imx335-setup.sh`. With the aux pipe, 300 of 300 camera frames
 reach `waylandsink`, against 245 with a `tee` and `videoscale` on the CPU.
 With `io-mode=dmabuf` on the main pipe the frame stays in the camera's buffer
 to the display: `analyticsoverlay` draws into it through a CPU mapping and
