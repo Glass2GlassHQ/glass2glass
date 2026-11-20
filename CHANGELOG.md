@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2472: `waylandsink` gets Weston's frame callbacks, so it paces on the compositor instead of counting nearly every frame dropped.
 - M2471: `v4l2src` takes its capture size from downstream caps, so a capsfilter picks any size the driver enumerates.
 - M2470: `v4l2src` captures packed RGB, so the STM32MP257's camera interface scales the NPU input in hardware.
 - M2469: `detectionpostprocess` takes a `label-file` of class names, and the SSD path on the STM32MP257 runs 21 ms faster per frame.

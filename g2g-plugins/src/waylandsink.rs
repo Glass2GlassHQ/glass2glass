@@ -995,6 +995,8 @@ struct WorkerState {
     /// is double-buffered state the compositor keeps, so it is re-issued only
     /// when the descriptor on the frames changes.
     orientation: Orientation,
+    /// Whether the picture surface has had a buffer committed.
+    picture_has_buffer: bool,
     /// Ack for the most recently committed frame plus its source-side
     /// arrival timestamp. Signalled when the compositor's matching
     /// `frame` callback fires, at which point we record the latency.
@@ -1092,6 +1094,7 @@ fn worker_main(
         last_frame_callback_ns,
         pending: None,
         orientation: Orientation::Identity,
+        picture_has_buffer: false,
         pending_ack: None,
     };
 
@@ -1291,10 +1294,14 @@ impl WorkerState {
 
         let surface = &self.picture_surface;
         let turned = orientation != self.orientation;
-        if turned {
-            surface.set_buffer_transform(buffer_transform(orientation));
+        // weston repaints a subsurface for its own commits only once a parent commit has placed it on an output
+        let commit_parent = turned || !self.picture_has_buffer;
+        if commit_parent {
             // wayland applies a sync subsurface's state with its parent's next commit
             self.picture_subsurface.set_sync();
+        }
+        if turned {
+            surface.set_buffer_transform(buffer_transform(orientation));
             // The surface is what the compositor lays out, and a turn that
             // transposes the picture transposes it. The buffer, and
             // `damage_buffer` with it, stays in buffer coordinates.
@@ -1318,11 +1325,12 @@ impl WorkerState {
                 .expect("attach_to"),
         }
         surface.commit();
-        if turned {
+        if commit_parent {
             self.window.commit();
             self.picture_subsurface.set_desync();
         }
         self.orientation = orientation;
+        self.picture_has_buffer = true;
         self.presented.fetch_add(1, Ordering::Relaxed);
 
         // If a prior ack is still outstanding the compositor never sent
