@@ -520,8 +520,10 @@ no-heap targets (MISRA, certification processes).
   `riscv32imafc` (ESP32-P4 class). The symbol proofs and the footprint report
   run on both `thumbv7em` and RISC-V, and the heap-free, panic-free proof also
   runs on the ESP32-S3 (Xtensa). `examples/g2g-esp32s3` runs those graphs on a
-  XIAO ESP32S3 Sense with checksums matching the host. The `alloc` core builds
-  for targets without 64-bit atomics.
+  XIAO ESP32S3 Sense with checksums matching the host.
+  `examples/g2g-stm32mp2-m0plus` runs the heap-free display pipeline on the
+  STM32MP257's Cortex-M0+ (`thumbv6m`), loaded from Linux on the same chip. The
+  `alloc` core builds for targets without 64-bit atomics.
 - **TinyML inference.** `TensorInference` runs a model on each `Caps::Tensor`
   frame through a `TensorModel` backend seam, output into a static ring slot.
   A C runtime links in through `CTensorModel`. On the ESP32-S3 that is TFLite

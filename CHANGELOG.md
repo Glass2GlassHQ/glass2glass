@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2466: the heap-free display pipeline runs on the STM32MP257's Cortex-M0+, loaded through remoteproc.
 - M2465: `mediacodecdec` emits rising timestamps from streams stamped in decode order.
 - M2464: `wgpusink` names why each GPU adapter it finds cannot present.
 - M2463: `waylandsink` scales the picture into any window size the compositor sets, letterboxed.

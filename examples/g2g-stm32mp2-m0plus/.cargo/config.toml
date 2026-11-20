@@ -1,0 +1,6 @@
+[build]
+target = "thumbv6m-none-eabi"
+
+[target.thumbv6m-none-eabi]
+# portable-atomic emulates the missing atomics by masking interrupts, which is sound on the single-core M0+
+rustflags = ["-C", "link-arg=-Tlink.x", "--cfg", "portable_atomic_unsafe_assume_single_core"]

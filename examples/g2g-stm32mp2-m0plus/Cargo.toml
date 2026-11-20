@@ -1,0 +1,21 @@
+# STM32MP257 Cortex-M0+ harness. Not a workspace member (see root `exclude`):
+# a standalone bare-metal binary that Linux on the board loads through
+# remoteproc. See the README.
+[package]
+name = "g2g-stm32mp2-m0plus"
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+publish = false
+
+[workspace]
+
+[dependencies]
+noalloc-pipeline = { path = "../noalloc-pipeline" }
+cortex-m-rt = "0.7.7"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
