@@ -2,41 +2,24 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::future::Future;
 use core::mem::{offset_of, size_of};
-use core::pin::Pin;
-use std::os::fd::{AsRawFd, OwnedFd};
 
-use g2g_core::caps::framerate_q16_to_fraction;
-use g2g_core::g2g_error;
-use g2g_core::log::{short_type_name, Target};
-use g2g_core::memory::{DomainSet, MemoryDomain, MemoryDomainKind, OwnedDmaBuf};
+use g2g_core::memory::MemoryDomain;
 use g2g_core::{
-    AsyncElement, BitstreamAlignment, Caps, CapsConstraint, CapsSet, Colorimetry, ConfigureOutcome,
-    Dim, ElementMetadata, G2gError, HardwareError, Interlace, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, PixelAspect, PropError, PropKind, PropValue, PropertySpec, Rate,
-    RawVideoFormat, VideoCodec,
-};
-use v4l::v4l2::vidioc;
-use v4l::v4l_sys::{
-    v4l2_format, v4l2_memory_V4L2_MEMORY_DMABUF, v4l2_memory_V4L2_MEMORY_MMAP, v4l2_plane,
+    BitstreamAlignment, Colorimetry, ElementMetadata, G2gError, PropError, PropValue, PropertySpec,
+    VideoCodec,
 };
 
 use crate::annexb::{add_emulation_prevention, BitWriter, ANNEX_B_START_CODE};
-use crate::dmabufmap::dmabuf_len;
 use crate::h264dpb::{H264_NAL_IDR_SLICE, H264_NAL_SLICE};
 use crate::h264parse::{
     h264_level_for, H264_MACROBLOCK_SIZE, H264_MAX_QP, H264_NAL_PPS, H264_NAL_SPS,
 };
-use crate::paddedrows::dmabuf_plane_layout;
-use crate::v4l2ioctl::{v4l2_ioctl, zeroed_arg};
-use crate::v4l2stateless::{
-    buffer_arg, buffer_timestamp, control, find_m2m_nodes, open_node, planes_buffer_arg,
-    request_buffers, set_controls, set_stream, timestamp_ns, Mapping, MediaRequest, RequestError,
-    BITSTREAM_BYTES_PER_PIXEL, CAPTURE_TYPE, OUTPUT_TYPE, V4L2_BUF_FLAG_ERROR,
-    V4L2_BUF_FLAG_REQUEST_FD, V4L2_CTRL_WHICH_REQUEST_VAL, V4L2_PIX_FMT_H264_SLICE,
+use crate::v4l2stateless::{control, timestamp_ns, V4L2_PIX_FMT_H264_SLICE};
+use crate::v4l2statelessenc::{
+    v4l2_encoder_properties, EncodeSession, Picture, QuantizerScale, RateControl, RateSettings,
+    SettingTakesEffect, V4l2StatelessEnc, V4l2StatelessEncoder, DEFAULT_KEYFRAME_INTERVAL,
 };
 use crate::vui::{write_vui_head, VideoSignalType, VuiHead};
 
@@ -47,8 +30,6 @@ const V4L2_H264_SLICE_TYPE_P: u8 = 0;
 const V4L2_H264_SLICE_TYPE_I: u8 = 2;
 const V4L2_H264_ENCODE_FLAG_ENTROPY_CABAC: u32 = 0x01;
 const V4L2_H264_ENCODE_FLAG_TRANSFORM_8X8_MODE: u32 = 0x02;
-const V4L2_PIX_FMT_NV12M: u32 = u32::from_le_bytes(*b"NM12");
-const V4L2_PIX_FMT_YUYV: u32 = u32::from_le_bytes(*b"YUYV");
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
@@ -96,7 +77,6 @@ const _: () = assert!(size_of::<V4l2CtrlH264EncodeRc>() == 116);
 const _: () = assert!(offset_of!(V4l2CtrlH264EncodeRc, cp_target) == 24);
 const _: () = assert!(offset_of!(V4l2CtrlH264EncodeRc, cp_qp_delta) == 88);
 
-const ENCODE_TIMEOUT_MS: i32 = 1000;
 // the Hantro H1 writes frame_num in 16 bits and orders pictures by frame_num alone
 const LOG2_MAX_FRAME_NUM_MINUS4: u32 = 12;
 const PIC_ORDER_CNT_TYPE_FROM_FRAME_NUM: u32 = 2;
@@ -104,143 +84,25 @@ const PIC_ORDER_CNT_TYPE_FROM_FRAME_NUM: u32 = 2;
 const CHROMA_QP_INDEX_OFFSET: i32 = 4;
 const PIC_INIT_QP_BASE: i32 = 26;
 const NAL_REF_IDC_HIGHEST: u8 = 3;
-// one buffer slot per dma-buf the source cycles through, past that a slot is remapped
-const IMPORT_SLOTS: usize = 8;
-const MAX_INPUT_PLANES: usize = 2;
 // H.264 E.2.1 defaults, written out because the reorder bound after them must be present
 const MAX_BYTES_PER_PIC_DENOM: u32 = 2;
 const MAX_BITS_PER_MB_DENOM: u32 = 1;
 const LOG2_MAX_MV_LENGTH: u32 = 16;
 
-const DEFAULT_KEYFRAME_INTERVAL: u32 = 30;
-const DEFAULT_QUANTIZER: u8 = 18;
 const MAX_CABAC_INIT_IDC: u8 = 2;
-// gstreamer's v4l2slh264enc defaults
-const DEFAULT_QP_MIN: u8 = 10;
-const DEFAULT_QP_STEP: u8 = 4;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RateControl {
-    ConstantQp,
-    ConstantBitrate,
+// H.264 doubles the quantizer step size every six QP
+const QP_PER_DOUBLING: f64 = 6.0;
+
+fn h264_quantizer_step(qp: u8) -> f64 {
+    (f64::from(qp) / QP_PER_DOUBLING).exp2()
 }
 
-const RATE_CONTROL_NAMES: &[(&str, RateControl)] = &[
-    ("cqp", RateControl::ConstantQp),
-    ("cbr", RateControl::ConstantBitrate),
-];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct Settings {
-    keyframe_interval: u32,
-    quantizer: u8,
-    rate_control: RateControl,
-    bitrate: u32,
-    qp_min: u8,
-    qp_max: u8,
-    qp_step: u8,
     cabac: bool,
     cabac_init_idc: u8,
     dct8x8: bool,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            keyframe_interval: DEFAULT_KEYFRAME_INTERVAL,
-            quantizer: DEFAULT_QUANTIZER,
-            rate_control: RateControl::ConstantQp,
-            bitrate: 0,
-            qp_min: DEFAULT_QP_MIN,
-            qp_max: H264_MAX_QP,
-            qp_step: DEFAULT_QP_STEP,
-            cabac: false,
-            cabac_init_idc: 0,
-            dct8x8: false,
-        }
-    }
-}
-
-// H.264 doubles the quantizer step size every six QP, which halves the coded bits
-const QP_PER_HALVING: f64 = 6.0;
-
-// the smallest share of its budget cbr gives a frame while it pays back an overspend
-const MIN_FRAME_SHARE: f64 = 0.125;
-// IDRs on the 30 fps 1080p clip code 0.8 to 3.4 times the bits of the P frame after them at QP 51, more at lower QP
-const FIRST_IDR_BUDGET_FRAMES: f64 = 4.0;
-
-#[derive(Debug)]
-struct BitrateControl {
-    bits_per_frame: f64,
-    frames_per_second: f64,
-    // the bits coded past the bitrate so far, down to one second of unspent bits
-    excess_bits: f64,
-    // the bits the last P frame and the last IDR took, scaled to QP 0
-    p_frame_complexity: Option<f64>,
-    idr_complexity: Option<f64>,
-    qp: u8,
-}
-
-impl BitrateControl {
-    fn new(settings: &Settings, frames_per_second: f64) -> Self {
-        Self {
-            bits_per_frame: f64::from(settings.bitrate) / frames_per_second,
-            frames_per_second,
-            excess_bits: 0.0,
-            p_frame_complexity: None,
-            idr_complexity: None,
-            qp: settings.quantizer,
-        }
-    }
-
-    fn next_qp(&self, settings: &Settings) -> u8 {
-        let (p_frame, idr) = match (self.p_frame_complexity, self.idr_complexity) {
-            (None, None) => return self.qp,
-            (Some(p_frame), Some(idr)) => (p_frame, idr),
-            (Some(measured), None) | (None, Some(measured)) => (measured, measured),
-        };
-        let interval = f64::from(settings.keyframe_interval);
-        let mean_complexity = if settings.keyframe_interval == 0 {
-            p_frame
-        } else {
-            (p_frame * (interval - 1.0) + idr) / interval
-        };
-        let wanted_bits = (self.bits_per_frame - self.excess_bits / self.frames_per_second)
-            .max(self.bits_per_frame * MIN_FRAME_SHARE);
-        let ideal = QP_PER_HALVING * (mean_complexity / wanted_bits).log2();
-        let qp = f64::from(self.qp);
-        let step = f64::from(settings.qp_step);
-        ideal
-            .round()
-            .clamp(qp - step, qp + step)
-            .clamp(f64::from(settings.qp_min), f64::from(settings.qp_max)) as u8
-    }
-
-    // the QP that fits the first IDR into its budget, from a trial encode of it at `trial_qp`
-    fn first_idr_qp(&self, settings: &Settings, trial_qp: u8, trial_bits: f64) -> Option<u8> {
-        let measured = self.p_frame_complexity.is_some() || self.idr_complexity.is_some();
-        if measured {
-            return None;
-        }
-        let complexity = trial_bits * (f64::from(trial_qp) / QP_PER_HALVING).exp2();
-        let budget = self.bits_per_frame * FIRST_IDR_BUDGET_FRAMES;
-        let qp = (QP_PER_HALVING * (complexity / budget).log2())
-            .round()
-            .clamp(f64::from(settings.qp_min), f64::from(settings.qp_max)) as u8;
-        (qp != trial_qp).then_some(qp)
-    }
-
-    fn record(&mut self, qp: u8, coded_bits: f64, keyframe: bool) {
-        let complexity = Some(coded_bits * (f64::from(qp) / QP_PER_HALVING).exp2());
-        if keyframe {
-            self.idr_complexity = complexity;
-        } else {
-            self.p_frame_complexity = complexity;
-        }
-        let credit_limit = -self.bits_per_frame * self.frames_per_second;
-        self.excess_bits = (self.excess_bits + coded_bits - self.bits_per_frame).max(credit_limit);
-        self.qp = qp;
-    }
 }
 
 struct Profile {
@@ -285,40 +147,6 @@ impl Settings {
             0
         };
         cabac | transform_8x8
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct Picture {
-    format: RawVideoFormat,
-    width: u32,
-    height: u32,
-    framerate: Rate,
-    colorimetry: Colorimetry,
-    pixel_aspect: PixelAspect,
-}
-
-impl Picture {
-    fn frame_rate_fraction(&self) -> Option<(u32, u32)> {
-        match self.framerate {
-            Rate::Fixed(q16) if q16 > 0 => Some(framerate_q16_to_fraction(q16)),
-            _ => None,
-        }
-    }
-
-    fn width_mbs(&self) -> u32 {
-        self.width.div_ceil(H264_MACROBLOCK_SIZE)
-    }
-
-    fn height_mbs(&self) -> u32 {
-        self.height.div_ceil(H264_MACROBLOCK_SIZE)
-    }
-
-    fn v4l2_format(&self) -> u32 {
-        match self.format {
-            RawVideoFormat::Yuyv => V4L2_PIX_FMT_YUYV,
-            _ => V4L2_PIX_FMT_NV12M,
-        }
     }
 }
 
@@ -438,175 +266,116 @@ fn picture_parameter_set(settings: &Settings, pic_init_qp: u8) -> Vec<u8> {
     nal_unit(H264_NAL_PPS, w)
 }
 
-#[derive(Debug)]
-enum RawQueue {
-    // system frames are copied into the driver's own buffer, one mapping per plane
-    Copied(Vec<Mapping>),
-    // the dma-buf fd queued in each buffer slot
-    Imported(Vec<Option<i32>>),
-}
-
-#[derive(Debug)]
-struct EncodeSession {
-    video: OwnedFd,
-    request: MediaRequest,
-    bitstream: Mapping,
-    raw: RawQueue,
-    bytes_per_line: Vec<usize>,
-    // the bytes the H1 reads from each plane, macroblock rows included
-    plane_sizes: Vec<usize>,
-    encoded: u64,
+#[derive(Debug, Default)]
+pub struct V4l2H264Encoder {
+    settings: Settings,
     frame_num: u16,
     idr_pic_id: u16,
     // the pic_init_qp of the PPS the stream carries, which the slice QP is coded against
     pic_init_qp: u8,
 }
 
-fn encoder_refused(reason: &str) -> G2gError {
-    g2g_error!(
-        Target::category(short_type_name::<V4l2SlH264Enc>()),
-        "cannot encode: {reason}"
-    );
-    G2gError::CapsMismatch
-}
+impl V4l2StatelessEncoder for V4l2H264Encoder {
+    const LOG_CATEGORY: &'static str = "V4l2SlH264Enc";
+    const CODEC: VideoCodec = VideoCodec::H264;
+    const ALIGNMENT: BitstreamAlignment = BitstreamAlignment::AccessUnit;
+    const CODED_PIXEL_FORMAT: u32 = V4L2_PIX_FMT_H264_SLICE;
+    const QUANTIZER: QuantizerScale = QuantizerScale {
+        max: H264_MAX_QP,
+        step: h264_quantizer_step,
+    };
+    // gstreamer's v4l2slh264enc defaults, but for the quantizer
+    const RATE_DEFAULTS: RateSettings = RateSettings {
+        keyframe_interval: DEFAULT_KEYFRAME_INTERVAL,
+        quantizer: 18,
+        rate_control: RateControl::ConstantQp,
+        bitrate: 0,
+        qp_min: 10,
+        qp_max: H264_MAX_QP,
+        qp_step: 4,
+    };
 
-impl EncodeSession {
-    fn open(picture: &Picture, memory: u32) -> Result<Self, G2gError> {
-        let nodes = find_m2m_nodes(CAPTURE_TYPE, V4L2_PIX_FMT_H264_SLICE)?.ok_or_else(|| {
-            encoder_refused("no V4L2 stateless H.264 encoder with a media controller was found")
-        })?;
-        let video = open_node(&nodes.video)?;
-        let media = open_node(&nodes.media)?;
+    fn metadata() -> ElementMetadata {
+        ElementMetadata::new(
+            "V4L2 stateless H.264 encoder",
+            "Codec/Encoder/Video/Hardware",
+            "Encodes H.264 on a V4L2 stateless encoder through the media request API",
+            crate::AARON_BOXER,
+        )
+    }
 
-        // the coded format goes first, setting it resets the raw format
-        let mut coded: v4l2_format = zeroed_arg();
-        coded.type_ = CAPTURE_TYPE;
-        // SAFETY: `pix_mp` is the union member multi-plane buffer types use.
-        let pix = unsafe { &mut coded.fmt.pix_mp };
-        pix.width = picture.width;
-        pix.height = picture.height;
-        pix.pixelformat = V4L2_PIX_FMT_H264_SLICE;
-        pix.num_planes = 1;
-        pix.plane_fmt[0].sizeimage = picture.width * picture.height * BITSTREAM_BYTES_PER_PIXEL;
-        // SAFETY: `v4l2_format` is VIDIOC_S_FMT's argument type.
-        unsafe { v4l2_ioctl(video.as_raw_fd(), vidioc::VIDIOC_S_FMT, &mut coded) }?;
+    fn properties() -> &'static [PropertySpec] {
+        v4l2_encoder_properties!(
+            quantizer: "18",
+            quantizer_range: "0..51",
+            qp_min: "10",
+            qp_max: "51",
+            qp_step: "4",
+            codec: [
+                PropertySpec::new(
+                    "cabac",
+                    g2g_core::PropKind::Bool,
+                    "CABAC entropy coding, Main profile",
+                )
+                .with_default("false"),
+                PropertySpec::new("cabac-init-idc", g2g_core::PropKind::Uint, "CABAC init table, 0..2")
+                    .with_default("0"),
+                PropertySpec::new("dct8x8", g2g_core::PropKind::Bool, "8x8 transform, High profile")
+                    .with_default("false"),
+            ]
+        )
+    }
 
-        let plane_count = picture.format.plane_count();
-        let mut raw: v4l2_format = zeroed_arg();
-        raw.type_ = OUTPUT_TYPE;
-        // SAFETY: as for the coded format.
-        let pix = unsafe { &mut raw.fmt.pix_mp };
-        pix.width = picture.width;
-        pix.height = picture.height;
-        pix.pixelformat = picture.v4l2_format();
-        pix.num_planes = plane_count as u8;
-        // SAFETY: as for the coded format.
-        unsafe { v4l2_ioctl(video.as_raw_fd(), vidioc::VIDIOC_S_FMT, &mut raw) }?;
-        // SAFETY: the driver filled `pix_mp` for the multi-plane output queue.
-        let pix = unsafe { raw.fmt.pix_mp };
-        // the H1 reads whole macroblocks, so the driver rounds the raw size up to them
-        let coded_extent = (
-            picture.width_mbs() * H264_MACROBLOCK_SIZE,
-            picture.height_mbs() * H264_MACROBLOCK_SIZE,
-        );
-        if pix.pixelformat != picture.v4l2_format()
-            || (pix.width, pix.height) != coded_extent
-            || usize::from(pix.num_planes) != plane_count
-        {
-            return Err(encoder_refused(
-                "the V4L2 encoder does not take this format and size as it is",
-            ));
+    // settings in the SPS or PPS take effect at the next IDR, which starts at once
+    fn set_codec_property(
+        &mut self,
+        name: &str,
+        value: &PropValue,
+    ) -> Result<SettingTakesEffect, PropError> {
+        let previous = self.settings;
+        let flag = || value.as_bool().ok_or(PropError::Type);
+        match name {
+            "cabac" => self.settings.cabac = flag()?,
+            "cabac-init-idc" => {
+                self.settings.cabac_init_idc = value
+                    .as_uint()
+                    .ok_or(PropError::Type)
+                    .and_then(|number| u8::try_from(number).map_err(|_| PropError::Value))
+                    .and_then(|number| {
+                        (number <= MAX_CABAC_INIT_IDC)
+                            .then_some(number)
+                            .ok_or(PropError::Value)
+                    })?;
+            }
+            "dct8x8" => self.settings.dct8x8 = flag()?,
+            _ => return Err(PropError::Unknown),
         }
-        let plane_formats = &pix.plane_fmt[..plane_count];
-        let bytes_per_line = plane_formats
-            .iter()
-            .map(|plane| plane.bytesperline as usize)
-            .collect();
-        let plane_sizes = plane_formats
-            .iter()
-            .map(|plane| plane.sizeimage as usize)
-            .collect();
-
-        request_buffers(&video, CAPTURE_TYPE, v4l2_memory_V4L2_MEMORY_MMAP, 1)?;
-        let bitstream = Mapping::of_buffer(&video, CAPTURE_TYPE, 0)?;
-        let raw = if memory == v4l2_memory_V4L2_MEMORY_DMABUF {
-            let slots = request_buffers(&video, OUTPUT_TYPE, memory, IMPORT_SLOTS as u32)?;
-            RawQueue::Imported(alloc::vec![None; slots as usize])
+        Ok(if self.settings == previous {
+            SettingTakesEffect::Now
         } else {
-            request_buffers(&video, OUTPUT_TYPE, memory, 1)?;
-            RawQueue::Copied(Mapping::of_planes(&video, OUTPUT_TYPE, 0, plane_count)?)
-        };
-        set_stream(&video, OUTPUT_TYPE, true)?;
-        set_stream(&video, CAPTURE_TYPE, true)?;
-        let request = MediaRequest::alloc(&media)?;
-        Ok(Self {
-            video,
-            request,
-            bitstream,
-            raw,
-            bytes_per_line,
-            plane_sizes,
-            encoded: 0,
-            frame_num: 0,
-            idr_pic_id: 0,
-            pic_init_qp: 0,
+            SettingTakesEffect::AtNextKeyframe
         })
     }
 
-    // copy a tight system frame into the driver's planes, each `bytes_per_line` apart
-    fn copy_frame(&mut self, picture: &Picture, pixels: &[u8]) -> Result<(), G2gError> {
-        let RawQueue::Copied(planes) = &mut self.raw else {
-            return Err(G2gError::UnsupportedDomain);
-        };
-        let format = picture.format;
-        for (index, plane) in planes.iter_mut().enumerate() {
-            let offset = format
-                .plane_offset(index, picture.width, picture.height)
-                .and_then(|offset| usize::try_from(offset).ok());
-            let row_bytes = format.plane_stride(index, picture.width);
-            let rows = format.plane_rows(index, picture.height);
-            let (Some(offset), Some(row_bytes), Some(rows)) = (offset, row_bytes, rows) else {
-                return Err(G2gError::CapsMismatch);
-            };
-            let (row_bytes, stride) = (row_bytes as usize, self.bytes_per_line[index]);
-            let target = plane.bytes_mut();
-            for row in 0..rows as usize {
-                let source = offset + row * row_bytes;
-                let source = pixels
-                    .get(source..source + row_bytes)
-                    .ok_or(G2gError::CapsMismatch)?;
-                target
-                    .get_mut(row * stride..row * stride + row_bytes)
-                    .ok_or(G2gError::CapsMismatch)?
-                    .copy_from_slice(source);
-            }
-        }
-        Ok(())
-    }
-
-    // the buffer slot that last carried this dma-buf, else the next one round-robin
-    fn import_slot(&mut self, dmabuf: &OwnedDmaBuf) -> Result<u32, G2gError> {
-        let RawQueue::Imported(slots) = &mut self.raw else {
-            return Err(G2gError::UnsupportedDomain);
-        };
-        let fd = dmabuf.as_raw();
-        let slot = slots
-            .iter()
-            .position(|queued| *queued == Some(fd))
-            .unwrap_or(self.encoded as usize % slots.len());
-        slots[slot] = Some(fd);
-        Ok(slot as u32)
+    fn get_codec_property(&self, name: &str) -> Option<PropValue> {
+        let settings = &self.settings;
+        Some(match name {
+            "cabac" => PropValue::Bool(settings.cabac),
+            "cabac-init-idc" => PropValue::Uint(u64::from(settings.cabac_init_idc)),
+            "dct8x8" => PropValue::Bool(settings.dct8x8),
+            _ => return None,
+        })
     }
 
     fn encode(
         &mut self,
+        session: &mut EncodeSession,
         picture: &Picture,
-        settings: &Settings,
         keyframe: bool,
         qp: u8,
         input: &MemoryDomain,
     ) -> Result<Vec<u8>, G2gError> {
-        let picture_number = self.encoded;
+        let settings = &self.settings;
         let mut params = V4l2CtrlH264EncodeParams {
             cabac_init_idc: settings.cabac_init_idc,
             chroma_qp_index_offset: CHROMA_QP_INDEX_OFFSET as i8,
@@ -617,8 +386,13 @@ impl EncodeSession {
         let mut parameter_sets = Vec::new();
         if keyframe {
             self.pic_init_qp = qp;
-            parameter_sets = sequence_parameter_set(picture, settings)
-                .ok_or_else(|| encoder_refused("no H.264 level or VUI fits this picture"))?;
+            parameter_sets = sequence_parameter_set(picture, settings).ok_or_else(|| {
+                g2g_core::g2g_error!(
+                    g2g_core::log::Target::category(Self::LOG_CATEGORY),
+                    "cannot encode: no H.264 level or VUI fits this picture"
+                );
+                G2gError::CapsMismatch
+            })?;
             parameter_sets.extend(picture_parameter_set(settings, self.pic_init_qp));
             self.idr_pic_id = self.idr_pic_id.wrapping_add(1);
             self.frame_num = 0;
@@ -628,7 +402,7 @@ impl EncodeSession {
             self.frame_num = self.frame_num.wrapping_add(1);
             params.slice_type = V4L2_H264_SLICE_TYPE_P;
             params.nalu_type = H264_NAL_SLICE;
-            params.reference_ts = timestamp_ns(picture_number - 1);
+            params.reference_ts = timestamp_ns(session.encoded - 1);
         }
         params.frame_num = self.frame_num;
         params.idr_pic_id = self.idr_pic_id;
@@ -637,515 +411,28 @@ impl EncodeSession {
             qp: u32::from(qp),
             ..Default::default()
         };
-
-        let mut planes: [v4l2_plane; MAX_INPUT_PLANES] = [zeroed_arg(), zeroed_arg()];
-        let plane_count = self.bytes_per_line.len();
-        let (memory, index) = match input {
-            MemoryDomain::System(pixels) => {
-                self.copy_frame(picture, pixels.as_slice())?;
-                for (plane, size) in planes.iter_mut().zip(&self.plane_sizes) {
-                    plane.bytesused = *size as u32;
-                }
-                (v4l2_memory_V4L2_MEMORY_MMAP, 0)
-            }
-            MemoryDomain::DmaBuf(dmabuf) => {
-                let (layout, _) =
-                    dmabuf_plane_layout(dmabuf, picture.format, picture.width, picture.height)
-                        .ok_or(G2gError::CapsMismatch)?;
-                let buffer_length = dmabuf_len(dmabuf)?;
-                for (index, plane) in planes[..plane_count].iter_mut().enumerate() {
-                    let source = layout.plane(index).ok_or(G2gError::CapsMismatch)?;
-                    if source.stride != self.bytes_per_line[index] {
-                        return Err(encoder_refused(
-                            "the dma-buf rows are not as far apart as the V4L2 encoder reads them",
-                        ));
-                    }
-                    let end = source.offset + self.plane_sizes[index];
-                    if end > buffer_length {
-                        return Err(encoder_refused(
-                            "the dma-buf ends before the macroblock rows the V4L2 encoder reads",
-                        ));
-                    }
-                    plane.m.fd = dmabuf.as_raw();
-                    // vb2 refuses a dma-buf plane whose length is short of its bytesused
-                    plane.length = buffer_length as u32;
-                    plane.data_offset = source.offset as u32;
-                    plane.bytesused = end as u32;
-                }
-                (v4l2_memory_V4L2_MEMORY_DMABUF, self.import_slot(dmabuf)?)
-            }
-            _ => return Err(G2gError::UnsupportedDomain),
-        };
-
-        self.request.reinit()?;
-        set_controls(
-            &self.video,
-            V4L2_CTRL_WHICH_REQUEST_VAL,
-            self.request.fd(),
+        let coded = session.run(
+            picture,
             &mut [
                 control(V4L2_CID_STATELESS_H264_ENCODE_PARAMS, &mut params),
                 control(V4L2_CID_STATELESS_H264_ENCODE_RC, &mut rate_control),
             ],
+            input,
         )?;
-        let mut coded_plane: v4l2_plane = zeroed_arg();
-        let mut coded = buffer_arg(CAPTURE_TYPE, 0, &mut coded_plane);
-        // SAFETY: `V4l2Buffer` matches the kernel's `v4l2_buffer`, which VIDIOC_QBUF takes.
-        unsafe { v4l2_ioctl(self.video.as_raw_fd(), vidioc::VIDIOC_QBUF, &mut coded) }?;
-        let mut raw = planes_buffer_arg(OUTPUT_TYPE, index, memory, &mut planes[..plane_count]);
-        raw.flags = V4L2_BUF_FLAG_REQUEST_FD;
-        raw.request_fd = self.request.fd();
-        raw.timestamp = buffer_timestamp(picture_number);
-        // SAFETY: as for the coded buffer, and the dma-buf stays open until the dequeue below.
-        unsafe { v4l2_ioctl(self.video.as_raw_fd(), vidioc::VIDIOC_QBUF, &mut raw) }?;
-
-        match self.request.queue_and_wait(ENCODE_TIMEOUT_MS) {
-            Ok(()) => {}
-            Err(RequestError::TimedOut) => {
-                return Err(encoder_refused(
-                    "the V4L2 encoder did not finish a frame within the timeout",
-                ))
-            }
-            Err(RequestError::Device(error)) => return Err(error),
-        }
-        let mut done_planes: [v4l2_plane; MAX_INPUT_PLANES] = [zeroed_arg(), zeroed_arg()];
-        let mut done_raw =
-            planes_buffer_arg(OUTPUT_TYPE, 0, memory, &mut done_planes[..plane_count]);
-        // SAFETY: as for the coded buffer.
-        unsafe { v4l2_ioctl(self.video.as_raw_fd(), vidioc::VIDIOC_DQBUF, &mut done_raw) }?;
-        let mut done_plane: v4l2_plane = zeroed_arg();
-        let mut done = buffer_arg(CAPTURE_TYPE, 0, &mut done_plane);
-        // SAFETY: as for the coded buffer.
-        unsafe { v4l2_ioctl(self.video.as_raw_fd(), vidioc::VIDIOC_DQBUF, &mut done) }?;
-        if done.flags & V4L2_BUF_FLAG_ERROR != 0 {
-            return Err(encoder_refused(
-                "the V4L2 encoder flagged the frame as failed",
-            ));
-        }
-        let coded = self
-            .bitstream
-            .bytes()
-            .get(..done_plane.bytesused as usize)
-            .ok_or(G2gError::Hardware(HardwareError::V4l2(-1)))?;
         let mut access_unit = parameter_sets;
         access_unit.extend_from_slice(coded);
         Ok(access_unit)
     }
 }
 
-#[derive(Debug, Default)]
-pub struct V4l2SlH264Enc {
-    settings: Settings,
-    picture: Option<Picture>,
-    session: Option<EncodeSession>,
-    bitrate_control: Option<BitrateControl>,
-    force_keyframe: bool,
-    emitted: u64,
-    caps_sent: bool,
-}
-
-impl V4l2SlH264Enc {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn is_available() -> bool {
-        find_m2m_nodes(CAPTURE_TYPE, V4L2_PIX_FMT_H264_SLICE).is_ok_and(|nodes| nodes.is_some())
-    }
-
-    fn input_caps_set() -> CapsSet {
-        CapsSet::from_alternatives(
-            [RawVideoFormat::Nv12, RawVideoFormat::Yuyv]
-                .into_iter()
-                .map(|format| Caps::RawVideo {
-                    format,
-                    width: Dim::Any,
-                    height: Dim::Any,
-                    framerate: Rate::Any,
-                    interlace: Interlace::Any,
-                    colorimetry: Colorimetry::UNKNOWN,
-                    pixel_aspect: PixelAspect::Any,
-                })
-                .collect(),
-        )
-    }
-
-    fn output_caps(
-        width: Dim,
-        height: Dim,
-        framerate: Rate,
-        colorimetry: Colorimetry,
-        pixel_aspect: PixelAspect,
-    ) -> Caps {
-        Caps::CompressedVideo {
-            codec: VideoCodec::H264,
-            width,
-            height,
-            framerate,
-            colorimetry,
-            pixel_aspect,
-            alignment: BitstreamAlignment::AccessUnit,
-        }
-    }
-
-    // settings in the SPS or PPS take effect at the next IDR, which starts at once
-    fn set_stream_setting(&mut self, change: impl FnOnce(&mut Settings)) {
-        let previous = self.settings;
-        change(&mut self.settings);
-        self.force_keyframe |= self.settings != previous;
-    }
-
-    fn keyframe_due(&self, encoded: u64) -> bool {
-        let interval = u64::from(self.settings.keyframe_interval);
-        // zero is a multiple of every interval, and the only multiple of a zero interval
-        self.force_keyframe || encoded.is_multiple_of(interval)
-    }
-
-    async fn encode_frame(
-        &mut self,
-        domain: MemoryDomain,
-        pts_ns: u64,
-        out: &mut dyn OutputSink,
-    ) -> Result<(), G2gError> {
-        let picture = self.picture.clone().ok_or(G2gError::NotConfigured)?;
-        if self.session.is_none() {
-            let memory = match domain {
-                MemoryDomain::DmaBuf(_) => v4l2_memory_V4L2_MEMORY_DMABUF,
-                _ => v4l2_memory_V4L2_MEMORY_MMAP,
-            };
-            self.session = Some(EncodeSession::open(&picture, memory)?);
-        }
-        if self.settings.rate_control == RateControl::ConstantBitrate
-            && self.bitrate_control.is_none()
-        {
-            let (numerator, denominator) = picture
-                .frame_rate_fraction()
-                .ok_or_else(|| encoder_refused("rate-control=cbr needs a fixed frame rate"))?;
-            if self.settings.bitrate == 0 {
-                return Err(encoder_refused("rate-control=cbr needs a bitrate"));
-            }
-            let frames_per_second = f64::from(numerator) / f64::from(denominator);
-            self.bitrate_control = Some(BitrateControl::new(&self.settings, frames_per_second));
-        }
-        let mut qp = self
-            .bitrate_control
-            .as_ref()
-            .map_or(self.settings.quantizer, |control| {
-                control.next_qp(&self.settings)
-            });
-        let encoded = self.session.as_ref().map_or(0, |session| session.encoded);
-        let keyframe = self.keyframe_due(encoded);
-        let session = self.session.as_mut().ok_or(G2gError::NotConfigured)?;
-        let mut access_unit = session.encode(&picture, &self.settings, keyframe, qp, &domain)?;
-        // hantro h1 takes the next P frame's reference from the latest encode
-        let first_idr_qp = self
-            .bitrate_control
-            .as_ref()
-            .filter(|_| keyframe)
-            .and_then(|control| {
-                control.first_idr_qp(&self.settings, qp, (access_unit.len() * 8) as f64)
-            });
-        if let Some(fitted) = first_idr_qp {
-            qp = fitted;
-            access_unit = session.encode(&picture, &self.settings, keyframe, qp, &domain)?;
-        }
-        session.encoded += 1;
-        if let Some(control) = self.bitrate_control.as_mut() {
-            control.record(qp, (access_unit.len() * 8) as f64, keyframe);
-            g2g_core::g2g_log!(
-                Target::category(short_type_name::<V4l2SlH264Enc>()),
-                "cbr coded {} bits at qp {qp}, {} bits over the bitrate",
-                access_unit.len() * 8,
-                control.excess_bits as i64
-            );
-        }
-        if keyframe {
-            self.force_keyframe = false;
-        }
-        let caps = Self::output_caps(
-            Dim::Fixed(picture.width),
-            Dim::Fixed(picture.height),
-            picture.framerate.clone(),
-            picture.colorimetry,
-            picture.pixel_aspect,
-        );
-        let feedback = crate::encoder_base::emit_packets(
-            &mut self.caps_sent,
-            &mut self.emitted,
-            Vec::from([(access_unit, pts_ns)]),
-            &caps,
-            out,
-        )
-        .await?;
-        self.force_keyframe |= feedback.force_keyframe;
-        Ok(())
-    }
-}
-
-impl AsyncElement for V4l2SlH264Enc {
-    type ProcessFuture<'a>
-        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
-    where
-        Self: 'a;
-
-    #[cfg(feature = "metadata")]
-    fn meta_transform(&self) -> Option<g2g_core::meta::Transform> {
-        Some(g2g_core::meta::Transform::Encode)
-    }
-
-    fn handles_keyframe_requests(&self) -> bool {
-        true
-    }
-
-    fn input_domains(&self) -> DomainSet {
-        DomainSet::only(MemoryDomainKind::System).with(MemoryDomainKind::DmaBuf)
-    }
-
-    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        Self::input_caps_set()
-            .alternatives()
-            .iter()
-            .find_map(|alternative| upstream_caps.intersect(alternative).ok())
-            .ok_or(G2gError::CapsMismatch)
-    }
-
-    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::RawVideo {
-                format: RawVideoFormat::Nv12 | RawVideoFormat::Yuyv,
-                width,
-                height,
-                framerate,
-                colorimetry,
-                pixel_aspect,
-                ..
-            } => CapsSet::one(Self::output_caps(
-                width.clone(),
-                height.clone(),
-                framerate.clone(),
-                *colorimetry,
-                *pixel_aspect,
-            )),
-            _ => CapsSet::from_alternatives(Vec::new()),
-        }))
-    }
-
-    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let Caps::RawVideo {
-            format: format @ (RawVideoFormat::Nv12 | RawVideoFormat::Yuyv),
-            width: Dim::Fixed(width),
-            height: Dim::Fixed(height),
-            framerate,
-            colorimetry,
-            pixel_aspect,
-            ..
-        } = absolute_caps
-        else {
-            return Err(G2gError::CapsMismatch);
-        };
-        // 4:2:0 and 4:2:2 crop and subsample in pairs of samples
-        if width % 2 != 0 || height % 2 != 0 {
-            return Err(G2gError::CapsMismatch);
-        }
-        let picture = Picture {
-            format: *format,
-            width: *width,
-            height: *height,
-            framerate: framerate.clone(),
-            colorimetry: *colorimetry,
-            pixel_aspect: *pixel_aspect,
-        };
-        if self.picture.as_ref() != Some(&picture) {
-            self.picture = Some(picture);
-            self.session = None;
-            self.bitrate_control = None;
-            self.caps_sent = false;
-        }
-        Ok(ConfigureOutcome::Accepted)
-    }
-
-    fn metadata(&self) -> ElementMetadata {
-        ElementMetadata::new(
-            "V4L2 stateless H.264 encoder",
-            "Codec/Encoder/Video/Hardware",
-            "Encodes H.264 on a V4L2 stateless encoder through the media request API",
-            crate::AARON_BOXER,
-        )
-    }
-
-    fn properties(&self) -> &'static [PropertySpec] {
-        const PROPS: &[PropertySpec] = &[
-            PropertySpec::new(
-                "keyframe-interval",
-                PropKind::Uint,
-                "frames from one IDR to the next, 0 = only the first frame and requested ones",
-            )
-            .with_default("30"),
-            PropertySpec::new(
-                "quantizer",
-                PropKind::Uint,
-                "QP of every frame under cqp, of the first frame under cbr, 0..51",
-            )
-            .with_default("18"),
-            PropertySpec::new("rate-control", PropKind::Str, "rate control: cqp | cbr")
-                .with_default("cqp"),
-            PropertySpec::new(
-                "bitrate",
-                PropKind::Uint,
-                "target bitrate under cbr, bits/second",
-            )
-            .with_default("0"),
-            PropertySpec::new("qp-min", PropKind::Uint, "lowest QP cbr picks, 0..51")
-                .with_default("10"),
-            PropertySpec::new("qp-max", PropKind::Uint, "highest QP cbr picks, 0..51")
-                .with_default("51"),
-            PropertySpec::new(
-                "qp-step",
-                PropKind::Uint,
-                "most cbr changes the QP from one frame to the next",
-            )
-            .with_default("4"),
-            PropertySpec::new(
-                "cabac",
-                PropKind::Bool,
-                "CABAC entropy coding, Main profile",
-            )
-            .with_default("false"),
-            PropertySpec::new("cabac-init-idc", PropKind::Uint, "CABAC init table, 0..2")
-                .with_default("0"),
-            PropertySpec::new("dct8x8", PropKind::Bool, "8x8 transform, High profile")
-                .with_default("false"),
-        ];
-        PROPS
-    }
-
-    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
-        let uint = |value: &PropValue| value.as_uint().ok_or(PropError::Type);
-        let flag = |value: &PropValue| value.as_bool().ok_or(PropError::Type);
-        let bounded = |value: &PropValue, max: u8| {
-            u8::try_from(uint(value)?)
-                .ok()
-                .filter(|&number| number <= max)
-                .ok_or(PropError::Value)
-        };
-        match name {
-            "keyframe-interval" => {
-                self.settings.keyframe_interval =
-                    u32::try_from(uint(&value)?).map_err(|_| PropError::Value)?;
-            }
-            "quantizer" => self.settings.quantizer = bounded(&value, H264_MAX_QP)?,
-            "rate-control" => {
-                let name = value.as_str().ok_or(PropError::Type)?;
-                let (_, mode) = RATE_CONTROL_NAMES
-                    .iter()
-                    .find(|(known, _)| *known == name)
-                    .ok_or(PropError::Value)?;
-                if *mode != self.settings.rate_control {
-                    self.settings.rate_control = *mode;
-                    self.bitrate_control = None;
-                }
-            }
-            "bitrate" => {
-                let bitrate = u32::try_from(uint(&value)?).map_err(|_| PropError::Value)?;
-                if let Some(control) = self.bitrate_control.as_mut() {
-                    if bitrate == 0 {
-                        return Err(PropError::Value);
-                    }
-                    control.bits_per_frame = f64::from(bitrate) / control.frames_per_second;
-                }
-                self.settings.bitrate = bitrate;
-            }
-            "qp-min" => {
-                let qp_min = bounded(&value, self.settings.qp_max)?;
-                self.settings.qp_min = qp_min;
-            }
-            "qp-max" => {
-                let qp_max = bounded(&value, H264_MAX_QP)?;
-                if qp_max < self.settings.qp_min {
-                    return Err(PropError::Value);
-                }
-                self.settings.qp_max = qp_max;
-            }
-            "qp-step" => self.settings.qp_step = bounded(&value, H264_MAX_QP)?,
-            "cabac" => {
-                let cabac = flag(&value)?;
-                self.set_stream_setting(|settings| settings.cabac = cabac);
-            }
-            "cabac-init-idc" => {
-                let cabac_init_idc = bounded(&value, MAX_CABAC_INIT_IDC)?;
-                self.set_stream_setting(|settings| settings.cabac_init_idc = cabac_init_idc);
-            }
-            "dct8x8" => {
-                let dct8x8 = flag(&value)?;
-                self.set_stream_setting(|settings| settings.dct8x8 = dct8x8);
-            }
-            _ => return Err(PropError::Unknown),
-        }
-        Ok(())
-    }
-
-    fn get_property(&self, name: &str) -> Option<PropValue> {
-        let settings = &self.settings;
-        Some(match name {
-            "keyframe-interval" => PropValue::Uint(u64::from(settings.keyframe_interval)),
-            "quantizer" => PropValue::Uint(u64::from(settings.quantizer)),
-            "rate-control" => {
-                let (name, _) = RATE_CONTROL_NAMES
-                    .iter()
-                    .find(|(_, mode)| *mode == settings.rate_control)?;
-                PropValue::Str((*name).into())
-            }
-            "bitrate" => PropValue::Uint(u64::from(settings.bitrate)),
-            "qp-min" => PropValue::Uint(u64::from(settings.qp_min)),
-            "qp-max" => PropValue::Uint(u64::from(settings.qp_max)),
-            "qp-step" => PropValue::Uint(u64::from(settings.qp_step)),
-            "cabac" => PropValue::Bool(settings.cabac),
-            "cabac-init-idc" => PropValue::Uint(u64::from(settings.cabac_init_idc)),
-            "dct8x8" => PropValue::Bool(settings.dct8x8),
-            _ => return None,
-        })
-    }
-
-    fn process<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-        out: &'a mut dyn OutputSink,
-    ) -> Self::ProcessFuture<'a> {
-        Box::pin(async move {
-            match packet {
-                PipelinePacket::DataFrame(frame) => {
-                    let pts_ns = frame.timing.pts_ns;
-                    self.encode_frame(frame.domain, pts_ns, out).await?;
-                }
-                PipelinePacket::CapsChanged(_) => {}
-                other => {
-                    out.push(other).await?;
-                }
-            }
-            Ok(())
-        })
-    }
-}
-
-impl PadTemplates for V4l2SlH264Enc {
-    fn pad_templates() -> Vec<PadTemplate> {
-        Vec::from([
-            PadTemplate::sink(Self::input_caps_set()),
-            PadTemplate::source(CapsSet::one(Self::output_caps(
-                Dim::Any,
-                Dim::Any,
-                Rate::Any,
-                Colorimetry::UNKNOWN,
-                PixelAspect::Any,
-            ))),
-        ])
-    }
-}
+pub type V4l2SlH264Enc = V4l2StatelessEnc<V4l2H264Encoder>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::annexb::strip_emulation_prevention;
     use crate::h264parse::{parse_h264_pps, parse_h264_sps};
+    use g2g_core::{AsyncElement, PixelAspect, Rate, RawVideoFormat};
 
     const FRAMES_PER_SECOND: u32 = 30;
 
@@ -1228,104 +515,5 @@ mod tests {
             .set_property("cabac", PropValue::Bool(true))
             .unwrap();
         assert!(encoder.keyframe_due(mid_gop));
-    }
-
-    // a stand-in for the H1: an IDR codes this many times the bits of a P frame of the same content
-    const IDR_TO_P_BITS: f64 = 6.0;
-    const TARGET_BITRATE: u32 = 4_000_000;
-    const SECONDS: u64 = 10;
-    const SCENE_CHANGE_SECOND: u64 = 5;
-    // P frame bits at QP 0, which settle near QP 25 and QP 37 at the target bitrate
-    const EASY_SCENE_BITS: f64 = 2.0e6;
-    const HARD_SCENE_BITS: f64 = 8.0e6;
-
-    fn modelled_bits(qp: u8, scene_bits: f64, keyframe: bool) -> f64 {
-        let frame_bits = if keyframe {
-            scene_bits * IDR_TO_P_BITS
-        } else {
-            scene_bits
-        };
-        frame_bits / (f64::from(qp) / QP_PER_HALVING).exp2()
-    }
-
-    fn bits_per_second_under_cbr() -> Vec<f64> {
-        let settings = Settings {
-            rate_control: RateControl::ConstantBitrate,
-            bitrate: TARGET_BITRATE,
-            ..Settings::default()
-        };
-        let frames_per_second = u64::from(FRAMES_PER_SECOND);
-        let mut control = BitrateControl::new(&settings, f64::from(FRAMES_PER_SECOND));
-        let mut seconds = alloc::vec![0.0; SECONDS as usize];
-        for frame in 0..SECONDS * frames_per_second {
-            let second = frame / frames_per_second;
-            let scene_bits = if second < SCENE_CHANGE_SECOND {
-                EASY_SCENE_BITS
-            } else {
-                HARD_SCENE_BITS
-            };
-            let keyframe = frame.is_multiple_of(u64::from(settings.keyframe_interval));
-            let mut qp = control.next_qp(&settings);
-            let mut bits = modelled_bits(qp, scene_bits, keyframe);
-            if let Some(fitted) = control
-                .first_idr_qp(&settings, qp, bits)
-                .filter(|_| keyframe)
-            {
-                qp = fitted;
-                bits = modelled_bits(qp, scene_bits, keyframe);
-            }
-            control.record(qp, bits, keyframe);
-            seconds[second as usize] += bits;
-        }
-        seconds
-    }
-
-    // the model codes 0.95 of the bitrate in the first second, then settles within 0.5% from the second second
-    const FIRST_SECOND_TOLERANCE: f64 = 0.1;
-    const START_SETTLE_SECONDS: u64 = 1;
-    // and settles within 0.5% four seconds after the scene change
-    const SCENE_CHANGE_SETTLE_SECONDS: u64 = 4;
-    const SETTLED_TOLERANCE: f64 = 0.01;
-    // the model's ten seconds measure 0.995 of the bitrate, the rest of the scene change second's overshoot unpaid
-    const WHOLE_RUN_TOLERANCE: f64 = 0.01;
-
-    #[test]
-    fn cbr_holds_each_second_near_the_bitrate_across_a_scene_change() {
-        let target = f64::from(TARGET_BITRATE);
-        let seconds = bits_per_second_under_cbr();
-        let first_second = seconds[0] / target;
-        assert!(
-            (first_second - 1.0).abs() < FIRST_SECOND_TOLERANCE,
-            "the first second coded {first_second} of the bitrate"
-        );
-        let settled = (START_SETTLE_SECONDS..SCENE_CHANGE_SECOND)
-            .chain(SCENE_CHANGE_SECOND + SCENE_CHANGE_SETTLE_SECONDS..SECONDS);
-        for second in settled {
-            let ratio = seconds[second as usize] / target;
-            assert!(
-                (ratio - 1.0).abs() < SETTLED_TOLERANCE,
-                "second {second} coded {ratio} of the bitrate"
-            );
-        }
-        let whole_run = seconds.iter().sum::<f64>() / (target * SECONDS as f64);
-        assert!(
-            (whole_run - 1.0).abs() < WHOLE_RUN_TOLERANCE,
-            "the run coded {whole_run} of the bitrate"
-        );
-    }
-
-    #[test]
-    fn keyframes_follow_the_interval() {
-        let mut encoder = V4l2SlH264Enc::new();
-        encoder
-            .set_property("keyframe-interval", PropValue::Uint(10))
-            .unwrap();
-        let keyframes: Vec<u64> = (0..25).filter(|&n| encoder.keyframe_due(n)).collect();
-        assert_eq!(keyframes, [0, 10, 20]);
-        encoder
-            .set_property("keyframe-interval", PropValue::Uint(0))
-            .unwrap();
-        let keyframes: Vec<u64> = (0..25).filter(|&n| encoder.keyframe_due(n)).collect();
-        assert_eq!(keyframes, [0]);
     }
 }

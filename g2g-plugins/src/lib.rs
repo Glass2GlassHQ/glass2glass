@@ -1902,9 +1902,13 @@ pub mod v4l2src;
 // media request API.
 #[cfg(all(target_os = "linux", feature = "v4l2"))]
 pub mod v4l2h264dec;
-// V4L2 stateless H.264 encoder (Hantro H1 on STMicroelectronics' kernel controls).
+// V4L2 stateless H.264 and VP8 encoders (Hantro H1 on STMicroelectronics' kernel controls).
 #[cfg(all(target_os = "linux", feature = "v4l2"))]
 pub mod v4l2h264enc;
+#[cfg(all(target_os = "linux", feature = "v4l2"))]
+pub mod v4l2statelessenc;
+#[cfg(all(target_os = "linux", feature = "v4l2"))]
+pub mod v4l2vp8enc;
 // The media request plumbing the V4L2 stateless decoder and encoder share.
 #[cfg(all(target_os = "linux", feature = "v4l2"))]
 mod v4l2stateless;

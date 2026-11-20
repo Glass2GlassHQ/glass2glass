@@ -187,12 +187,16 @@ heap buffer. Only 8-bit 4:2:0 is accepted, and the SPS scaling matrices
 
 ## V4L2 stateless encode (Linux)
 
-`V4l2SlH264Enc` (`g2g-plugins/src/v4l2h264enc.rs`, launch name `v4l2slh264enc`,
-feature `v4l2`, `cfg(target_os = "linux")`) encodes H.264 on a V4L2 stateless
-encoder, such as the STM32MP257's Hantro H1, as ST's patched gst
-`v4l2slh264enc` does. It sets the `V4L2_CID_STATELESS_H264_ENCODE_PARAMS` and
-`_ENCODE_RC` controls from ST's kernel patches in one media request per frame. The request plumbing it
-shares with `v4l2slh264dec` is in `v4l2stateless.rs`.
+`V4l2SlH264Enc` (`g2g-plugins/src/v4l2h264enc.rs`, launch name `v4l2slh264enc`)
+and `V4l2SlVp8Enc` (`v4l2vp8enc.rs`, `v4l2slvp8enc`), both feature `v4l2` and
+`cfg(target_os = "linux")`, encode H.264 and VP8 on a V4L2 stateless encoder,
+such as the STM32MP257's Hantro H1, as ST's patched gst elements of the same
+names do. Each sets its codec's encode controls from ST's kernel patches in one
+media request per frame. Both are `V4l2StatelessEnc<C>` (`v4l2statelessenc.rs`),
+which holds the request session, the raw frame import, the rate control and the
+element, with the codec's controls and headers behind the `V4l2StatelessEncoder`
+trait. The request plumbing they share with `v4l2slh264dec` is in
+`v4l2stateless.rs`.
 
 Input is NV12 or YUY2. NV12 goes to the driver as two-plane NV12M, because the
 H1 has no single-plane NV12 input. A system frame is copied into one MMAP raw
@@ -216,7 +220,7 @@ budget, and only the second encode is sent. The H1 takes the next P frame's
 reference from its latest encode, so the second encode is the reference. On
 1080p the trial costs one more encode, about 30 ms, at stream start. Later
 frames take their QP from the bits the last P frame and the
-last IDR took, scaled to QP 0 by halving the bits every six QP. The QP is the one
+last IDR took, times the quantizer step size, which doubles every six QP. The QP is the one
 at which a whole keyframe interval averages the bitrate, less the bits coded over
 the bitrate so far spread across one second. Unspent bits carry over up to one
 second's worth. `qp-min` and `qp-max` (defaults 10 and 51) bound the QP and
@@ -244,6 +248,28 @@ excludes the sensor exposure, the ISP and the display.
 On an STM32MP257F-EV1, the 300-frame 1080p clip decoded by `v4l2slh264dec`
 and encoded at QP 18 matches ST's element within 0.005 dB PSNR and 0.2% in size
 in all three profiles. The size difference is the parameter sets g2g repeats.
+
+When `cbr` sits at `qp-max` with the stream a second's worth of bits over the
+bitrate, the element logs one warning that the bitrate cannot be reached.
+
+The H1 driver writes the whole VP8 frame, frame tag and header included, and
+keeps the last, golden and altref references itself. `v4l2slvp8enc` sends
+`V4L2_CID_STATELESS_VP8_ENCODE_PARAMS` and the `_ENCODE_QP` quantizer index,
+0..127. The driver refuses loop filter levels other than 26 on keyframes and 12
+on inter frames, and it codes no golden or altref refresh whatever the flags
+say, so every inter frame references the last frame. The element sends the
+inter-frame probabilities 63 for intra, 255 for the last frame and 128 for
+golden, where ST's element sends zeros. At the same quantizer that codes the
+1080p clip 4 to 11% smaller at the same PSNR (43.45 dB at 20, 41.10 dB at 40).
+Rate control is the H.264 one, with the quantizer step taken from RFC 6386's AC
+table, and the defaults are `quantizer` 10 (45.4 dB on the clip, near H.264
+QP 18's 46.0 dB), `qp-min` 0, `qp-max` 127 and `qp-step` 20, which spans the
+same step ratio as four H.264 QP in the middle of the table. At 1080p even
+quantizer 127 codes 4.6 Mb/s, with inter frames larger than keyframes in both
+g2g's and ST's encodes. So `cbr` reaches 8 Mb/s (7.97 to 8.03 Mb/s every
+second) but not 4 Mb/s, where it warns. ST's element at `bitrate=4000000`
+codes 17 Mb/s, as its quantizer stops at 63. The camera's 720p NV12 dma-bufs
+encode at 4 Mb/s with no copy, 3.84 to 4.17 Mb/s per second after the first.
 
 ## FfmpegH264Dec (ffmpeg / libavcodec)
 

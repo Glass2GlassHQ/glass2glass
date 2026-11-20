@@ -333,8 +333,8 @@ pub(crate) fn control<T>(id: u32, payload: &mut T) -> V4l2ExtControl {
     }
 }
 
-// a menu control carries its value in the union, with no payload size
-pub(crate) fn menu_control(id: u32, value: i32) -> V4l2ExtControl {
+// integer and menu controls carry their value in the union, with no payload size
+pub(crate) fn scalar_control(id: u32, value: i32) -> V4l2ExtControl {
     V4l2ExtControl {
         id,
         size: 0,

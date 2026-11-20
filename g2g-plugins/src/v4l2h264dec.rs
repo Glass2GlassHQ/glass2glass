@@ -28,8 +28,8 @@ use crate::h264hardwaredec::{H264HardwareDec, H264HardwareDecoder};
 use crate::h264parse::{H264Pps, H264Sps, H264StreamRefused, MALFORMED_SLICE_HEADER};
 use crate::v4l2ioctl::{export_buffer, v4l2_ioctl, zeroed_arg};
 use crate::v4l2stateless::{
-    buffer_arg, buffer_timestamp, control, find_m2m_nodes, menu_control, open_node,
-    request_buffers, set_controls, set_stream, timestamp_ns, Mapping, MediaRequest, RequestError,
+    buffer_arg, buffer_timestamp, control, find_m2m_nodes, open_node, request_buffers,
+    scalar_control, set_controls, set_stream, timestamp_ns, Mapping, MediaRequest, RequestError,
     BITSTREAM_BYTES_PER_PIXEL, CAPTURE_TYPE, OUTPUT_TYPE, V4L2_BUF_FLAG_ERROR,
     V4L2_BUF_FLAG_REQUEST_FD, V4L2_CTRL_WHICH_CUR_VAL, V4L2_CTRL_WHICH_REQUEST_VAL,
     V4L2_PIX_FMT_H264_SLICE,
@@ -468,11 +468,11 @@ impl V4l2Session {
             V4L2_CTRL_WHICH_CUR_VAL,
             0,
             &mut [
-                menu_control(
+                scalar_control(
                     V4L2_CID_STATELESS_H264_DECODE_MODE,
                     V4L2_STATELESS_H264_DECODE_MODE_FRAME_BASED,
                 ),
-                menu_control(
+                scalar_control(
                     V4L2_CID_STATELESS_H264_START_CODE,
                     V4L2_STATELESS_H264_START_CODE_ANNEX_B,
                 ),

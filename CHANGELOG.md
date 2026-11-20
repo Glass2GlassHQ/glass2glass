@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2460: `v4l2slvp8enc` encodes VP8 at a constant quantizer or bitrate on V4L2 stateless encoders such as Hantro H1.
+- M2459: `v4l2slh264enc` warns once when `rate-control=cbr` cannot reach the bitrate at `qp-max`.
 - M2458: `timestampburn` takes the 8-bit YUV formats and burns dma-bufs in place.
 - M2457: `udpsink` keeps sending while its receiver is down.
 - M2456: `v4l2slh264enc` holds a constant bitrate with `rate-control=cbr`.

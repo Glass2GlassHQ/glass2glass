@@ -365,7 +365,7 @@ libraries installed.
 
 - **V4L2 mem2mem decode and encode**, the hardware codec path on Raspberry Pi
   and most ARM SoCs: stateful decode and encode (gst `v4l2h264dec`,
-  `v4l2h264enc`), stateless H.265 and VP8 decode, and stateless VP8 encode.
+  `v4l2h264enc`), and stateless H.265 and VP8 decode.
 - Run `vaav1enc` on a GPU with VA-API AV1 encode (AMD RDNA3, Intel Arc).
 - **Pure-Rust / wasm decode** to drop the ffmpeg FFI: VP8 / VP9 decode and a
   pure-Rust Opus path (see the roadmap for why both are blocked).

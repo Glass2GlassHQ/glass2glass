@@ -2698,6 +2698,13 @@ fn register_autoplug_candidates(reg: &mut Registry) {
         })
         .with_experimental(),
     );
+    #[cfg(all(target_os = "linux", feature = "v4l2"))]
+    reg.register_launch(
+        LaunchFactory::of::<crate::v4l2vp8enc::V4l2SlVp8Enc>("v4l2slvp8enc", || {
+            Box::new(crate::v4l2vp8enc::V4l2SlVp8Enc::new())
+        })
+        .with_experimental(),
+    );
     #[cfg(all(target_os = "windows", feature = "mf-encode"))]
     reg.register_launch(
         LaunchFactory::of::<crate::mfencode::MfEncode>("mfh264enc", || {
@@ -3238,6 +3245,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "v4l2src" => "v4l2" on "linux";
         "v4l2slh264dec" => "v4l2" on "linux";
         "v4l2slh264enc" => "v4l2" on "linux";
+        "v4l2slvp8enc" => "v4l2" on "linux";
         "libcamerasrc" => "libcamera" on "linux";
         "ffmpegdec" => "ffmpeg" on "linux" | "macos" | "windows";
         "ffmpegaudiodec" => "ffmpeg" on "linux" | "macos" | "windows";
