@@ -25,6 +25,7 @@ pub enum CapturePixelFormat {
     /// downstream.
     Mjpeg,
     Bayer(BayerFormat),
+    Rgb,
 }
 
 impl CapturePixelFormat {
@@ -82,6 +83,7 @@ impl CapturePixelFormat {
             CapturePixelFormat::I420 => Some(RawVideoFormat::I420),
             CapturePixelFormat::Mjpeg => None,
             CapturePixelFormat::Bayer(bayer) => Some(RawVideoFormat::Bayer(bayer)),
+            CapturePixelFormat::Rgb => Some(RawVideoFormat::Rgb8),
         }
     }
 
@@ -95,6 +97,7 @@ impl CapturePixelFormat {
                 RawVideoFormat::Yuyv => Some(CapturePixelFormat::Yuyv),
                 RawVideoFormat::I420 => Some(CapturePixelFormat::I420),
                 RawVideoFormat::Bayer(bayer) => Some(CapturePixelFormat::Bayer(*bayer)),
+                RawVideoFormat::Rgb8 => Some(CapturePixelFormat::Rgb),
                 _ => None,
             },
             Caps::CompressedVideo {

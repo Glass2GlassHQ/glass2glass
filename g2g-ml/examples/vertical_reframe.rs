@@ -2,20 +2,18 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
+mod launch_line;
+
 use std::future::Future;
 use std::pin::Pin;
-use std::process;
 
 use g2g_core::element::{AsyncElement, OutputSink};
 use g2g_core::frame::PipelinePacket;
-use g2g_core::runtime::{parse_launch, run_graph_threaded, LaunchFactory};
+use g2g_core::runtime::LaunchFactory;
 use g2g_core::{
     AnalyticsMeta, AnalyticsNode, BBox, Caps, ConfigureOutcome, ElementMetadata, G2gError,
     ObjectDetection, PropError, PropKind, PropValue, PropertySpec, Roi,
 };
-use g2g_plugins::clock::WallClock;
-use g2g_plugins::registry::default_registry;
-use g2g_plugins::TokioThreadSpawner;
 
 const NO_LABEL: i64 = -1;
 const LINK_CAPACITY: usize = 4;
@@ -196,28 +194,9 @@ impl AsyncElement for FollowTarget {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    g2g_core::log::init_from_env();
-    let line = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
-    if line.is_empty() {
-        eprintln!("usage: vertical_reframe <launch line>");
-        process::exit(2);
-    }
-    let mut registry = default_registry();
-    g2g_ml::register(&mut registry);
+    let mut registry = launch_line::registry_with_ml_elements();
     registry.register_launch(LaunchFactory::new("followtarget", Vec::new(), || {
         Box::new(FollowTarget::default())
     }));
-    let graph = match parse_launch(&registry, &line) {
-        Ok(graph) => graph,
-        Err(error) => {
-            eprintln!("vertical_reframe: {error:?}");
-            process::exit(1);
-        }
-    };
-    let clock = WallClock::new();
-    if let Err(error) = run_graph_threaded(graph, &clock, LINK_CAPACITY, &TokioThreadSpawner).await
-    {
-        eprintln!("vertical_reframe: {error:?}");
-        process::exit(1);
-    }
+    launch_line::run_from_command_line("vertical_reframe", &registry, LINK_CAPACITY).await;
 }

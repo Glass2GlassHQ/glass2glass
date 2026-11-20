@@ -399,6 +399,18 @@ rest of it the f16 to f32 conversion of 607k output values, and
 `detectionpostprocess` takes 2.8 ms, reading the scores straight from the tensor
 bytes.
 
+On the STM32MP257 the camera interface (DCMIPP) scales the ISP output on its aux
+pipe, so the model input costs no CPU. One `v4l2src` reads the 640x480 NV12 main
+pipe for display, a second reads 256x256 RGB (`RGB3`) from the aux pipe, and
+`analyticsjoin` puts the detections back on the main frames. Each source's PTS
+counts from the arrival of its first buffer, so frames of the same exposure
+agree to within the scheduling delay between the two sources, inside the join's
+half-frame window. The aux pipe is set with `media-ctl`: enable the link from
+`dcmipp_main_isp` pad 1 to `dcmipp_aux_postproc` pad 0, give that pad the ISP's
+`RGB888_1X24` size, compose it to the model size, and set pad 1 to
+`RGB888_1X24` at the model size. With the aux pipe, 300 of 300 camera frames
+reach `waylandsink`, against 245 with a `tee` and `videoscale` on the CPU.
+
 ### Microcontrollers
 
 A heap-free int8 model runs on a microcontroller through `g2g-mcu`'s

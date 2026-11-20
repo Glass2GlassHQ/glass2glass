@@ -100,10 +100,11 @@ const fn bayer(pattern: BayerPattern, sample: BayerSampleFormat) -> CapturePixel
 /// pins nothing takes the first alternative. MJPEG and then the Bayer formats
 /// come last because they need a decoder or `bayer2rgb` downstream. A device format missing from this table is skipped,
 /// since there is no `Caps` to carry it on.
-pub(crate) const FOURCCS: [(&[u8; 4], CapturePixelFormat); 24] = [
+pub(crate) const FOURCCS: [(&[u8; 4], CapturePixelFormat); 25] = [
     (b"YUYV", CapturePixelFormat::Yuyv),
     (b"NV12", CapturePixelFormat::Nv12),
     (b"YU12", CapturePixelFormat::I420),
+    (b"RGB3", CapturePixelFormat::Rgb),
     (b"MJPG", CapturePixelFormat::Mjpeg),
     // V4L2 stores the 10- to 16-bit Bayer samples little-endian in 16-bit words
     (b"BA81", bayer(BayerPattern::Bggr, BayerSampleFormat::Bits8)),
