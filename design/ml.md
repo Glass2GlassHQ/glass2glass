@@ -420,6 +420,12 @@ to the display: `analyticsoverlay` draws into it through a CPU mapping and
 the sink converts system-memory NV12 to XRGB on the CPU and misses the 30 fps
 frame period.
 
+Given an H.264 MP4 instead of a frame count, the script decodes it on the Hantro
+and splits it with a `tee`, with `videoscale` making the model input on the CPU,
+so both branches read system memory. A 640x360 clip presents 307 of 341 frames.
+A 1080p clip presents 14, since the decoder's copy out of uncached memory, the
+scale and the sink's XRGB conversion take longer than the 40 ms frame period.
+
 ### Microcontrollers
 
 A heap-free int8 model runs on a microcontroller through `g2g-mcu`'s
