@@ -510,15 +510,31 @@ pub(crate) fn h264_picture_meta(header: &H264SliceHeader, order: &H264PictureOrd
     }
 }
 
-/// One primary coded picture of a stream: its first slice header, its slice
-/// NALs (borrowing the input stream), and the parameter sets it was coded with.
-#[derive(Debug)]
-pub struct H264Picture<'s> {
-    pub(crate) header: H264SliceHeader,
-    pub(crate) slices: alloc::vec::Vec<&'s [u8]>,
-    pub(crate) sps: H264Sps,
-    pub(crate) pps: H264Pps,
+macro_rules! h264_picture {
+    ($visibility:vis) => {
+        /// One primary coded picture of a stream: its first slice header, its slice
+        /// NALs (borrowing the input stream), and the parameter sets it was coded with.
+        #[derive(Debug)]
+        $visibility struct H264Picture<'s> {
+            pub(crate) header: H264SliceHeader,
+            pub(crate) slices: alloc::vec::Vec<&'s [u8]>,
+            pub(crate) sps: H264Sps,
+            pub(crate) pps: H264Pps,
+        }
+    };
 }
+
+// `H264HardwareDecoder` is public and takes it, and only these builds compile that trait
+#[cfg(any(
+    all(target_os = "windows", feature = "d3d12-decode"),
+    all(target_os = "linux", feature = "v4l2")
+))]
+h264_picture!(pub);
+#[cfg(not(any(
+    all(target_os = "windows", feature = "d3d12-decode"),
+    all(target_os = "linux", feature = "v4l2")
+)))]
+h264_picture!(pub(crate));
 
 pub(crate) type PictureUnits<'s> = alloc::vec::Vec<H264Picture<'s>>;
 
