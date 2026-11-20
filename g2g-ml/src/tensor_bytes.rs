@@ -4,9 +4,12 @@
 
 use std::borrow::Cow;
 
-use g2g_core::{G2gError, TensorLayout};
+use g2g_core::{G2gError, TensorDType, TensorLayout};
+
+use crate::safetensors::f16_to_f32;
 
 pub const F32_BYTES: usize = core::mem::size_of::<f32>();
+pub const F16_BYTES: usize = core::mem::size_of::<u16>();
 pub const RGBA_BYTES_PER_PIXEL: usize = 4;
 pub const RGB_CHANNELS: usize = 3;
 const U8_FULL_SCALE: f32 = 255.0;
@@ -29,6 +32,104 @@ pub fn finite_f32_words(bytes: &[u8]) -> Result<&[[u8; F32_BYTES]], G2gError> {
         return Err(G2gError::CapsMismatch);
     }
     Ok(words)
+}
+
+// half's exponent bits all set is infinity or NaN
+const F16_EXPONENT: u16 = 0x7c00;
+const F16_SIGN: u16 = 0x8000;
+
+pub fn finite_f16_words(bytes: &[u8]) -> Result<&[[u8; F16_BYTES]], G2gError> {
+    let (words, rest) = bytes.as_chunks::<F16_BYTES>();
+    let finite = words.iter().fold(true, |finite, word| {
+        finite & (u16::from_le_bytes(*word) & F16_EXPONENT != F16_EXPONENT)
+    });
+    if !rest.is_empty() || !finite {
+        return Err(G2gError::CapsMismatch);
+    }
+    Ok(words)
+}
+
+pub fn f16_le_to_f32_le_bytes(bytes: &[u8]) -> Vec<u8> {
+    f32_le_bytes(
+        bytes
+            .as_chunks::<F16_BYTES>()
+            .0
+            .iter()
+            .map(|word| f16_to_f32(u16::from_le_bytes(*word))),
+    )
+}
+
+// finite halves compare as these keys do
+fn f16_order_key(bits: u16) -> u16 {
+    match bits & F16_SIGN {
+        0 => bits | F16_SIGN,
+        _ => !bits,
+    }
+}
+
+/// A tensor's finite little-endian values, read where they lie.
+#[derive(Debug, Clone, Copy)]
+pub enum TensorWords<'a> {
+    F32(&'a [[u8; F32_BYTES]]),
+    F16(&'a [[u8; F16_BYTES]]),
+}
+
+impl<'a> TensorWords<'a> {
+    pub fn new(dtype: TensorDType, bytes: &'a [u8]) -> Result<Self, G2gError> {
+        match dtype {
+            TensorDType::F32 => finite_f32_words(bytes).map(Self::F32),
+            TensorDType::F16 => finite_f16_words(bytes).map(Self::F16),
+            _ => Err(G2gError::CapsMismatch),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Self::F32(words) => words.len(),
+            Self::F16(words) => words.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn value(&self, index: usize) -> f32 {
+        match self {
+            Self::F32(words) => f32::from_le_bytes(words[index]),
+            Self::F16(words) => f16_to_f32(u16::from_le_bytes(words[index])),
+        }
+    }
+
+    pub fn to_f32_vec(&self) -> Vec<f32> {
+        (0..self.len()).map(|index| self.value(index)).collect()
+    }
+
+    /// The largest value in `range` and the first index holding it, as numpy's
+    /// `argmax` picks. Halves are compared by their bits, so only the winner
+    /// is converted.
+    pub fn argmax(&self, range: core::ops::Range<usize>) -> Option<(usize, f32)> {
+        let start = range.start;
+        match self {
+            Self::F32(words) => {
+                let row = words.get(range)?;
+                let values = || row.iter().map(|word| f32::from_le_bytes(*word));
+                let max = values().fold(f32::MIN, f32::max);
+                let index = values().position(|value| value == max)?;
+                Some((start + index, max))
+            }
+            Self::F16(words) => {
+                let row = words.get(range)?;
+                let keys = || {
+                    row.iter()
+                        .map(|word| f16_order_key(u16::from_le_bytes(*word)))
+                };
+                let max = keys().max()?;
+                let index = keys().position(|key| key == max)?;
+                Some((start + index, f16_to_f32(u16::from_le_bytes(row[index]))))
+            }
+        }
+    }
 }
 
 pub fn finite_f32_from_le_bytes(bytes: &[u8]) -> Result<Vec<f32>, G2gError> {
@@ -118,6 +219,7 @@ pub fn tensor_bytes_to_chw(bytes: &[u8], width: u32, height: u32) -> Result<Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use g2g_plugins::tensorconvert::f32_to_f16_bits;
 
     // two pixels, each red, green, blue then alpha
     const TWO_RGBA_PIXELS: [u8; 8] = [1, 2, 3, 255, 4, 5, 6, 255];
@@ -192,5 +294,35 @@ mod tests {
             finite_f32_from_le_bytes(&f32_le_bytes([1.5, -2.0].into_iter())).unwrap(),
             [1.5, -2.0]
         );
+    }
+
+    // the f16 argmax compares raw bits, which must order like the values even below zero
+    #[test]
+    fn half_argmax_picks_what_the_f32_argmax_picks() {
+        let rows: [&[f32]; 3] = [
+            &[-2.0, -0.5, 1.5, 1.5, -3.0],
+            &[-4.0, -0.25, -1.0],
+            &[0.0, 0.125, 0.0625, 0.125],
+        ];
+        for row in rows {
+            let f32_bytes = f32_le_bytes(row.iter().copied());
+            let f16_bytes: Vec<u8> = row
+                .iter()
+                .flat_map(|&value| f32_to_f16_bits(value).to_le_bytes())
+                .collect();
+            let f32_words = TensorWords::new(TensorDType::F32, &f32_bytes).unwrap();
+            let f16_words = TensorWords::new(TensorDType::F16, &f16_bytes).unwrap();
+            assert_eq!(
+                f16_words.argmax(0..row.len()),
+                f32_words.argmax(0..row.len()),
+                "{row:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_half_infinity_fails_validation() {
+        let infinity = f32_to_f16_bits(f32::INFINITY).to_le_bytes();
+        assert!(TensorWords::new(TensorDType::F16, &infinity).is_err());
     }
 }

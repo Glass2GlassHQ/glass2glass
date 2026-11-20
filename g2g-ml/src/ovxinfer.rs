@@ -9,7 +9,6 @@ use g2g_plugins::openvx::{
 use crate::inference::{
     Inference, InferenceBackend, LoadedModel, ModelGeometry, ModelOutput, BASE_PROPERTIES,
 };
-use crate::safetensors::f16_to_f32;
 use crate::tensor_bytes::{f32_le_bytes, RGB_CHANNELS};
 
 use g2g_core::{
@@ -103,7 +102,11 @@ fn model_geometry(
     })
 }
 
-fn dequantize(bytes: Vec<u8>, info: &OpenVxTensorInfo) -> Result<Vec<u8>, G2gError> {
+// quantized outputs become f32, halves stay halves for the consumer to read in place
+fn output_values(
+    bytes: Vec<u8>,
+    info: &OpenVxTensorInfo,
+) -> Result<(Vec<u8>, TensorDType), G2gError> {
     let pairs = || bytes.as_chunks::<2>().0.iter();
     let f32_bytes = match (info.data_type, info.quantization) {
         (OpenVxDataType::U8, OpenVxQuantization::Affine { scale, zero_point }) => f32_le_bytes(
@@ -128,13 +131,11 @@ fn dequantize(bytes: Vec<u8>, info: &OpenVxTensorInfo) -> Result<Vec<u8>, G2gErr
                 f32::from(i16::from_le_bytes(*pair)) / 2f32.powi(i32::from(fraction_bits))
             }))
         }
-        (OpenVxDataType::F16, OpenVxQuantization::None) => {
-            f32_le_bytes(pairs().map(|pair| f16_to_f32(u16::from_le_bytes(*pair))))
-        }
+        (OpenVxDataType::F16, OpenVxQuantization::None) => return Ok((bytes, TensorDType::F16)),
         (OpenVxDataType::F32, OpenVxQuantization::None) => bytes,
         _ => return Err(G2gError::CapsMismatch),
     };
-    Ok(f32_bytes)
+    Ok((f32_bytes, TensorDType::F32))
 }
 
 impl OvxModel {
@@ -145,9 +146,11 @@ impl OvxModel {
             .zip(&self.output_dims)
             .enumerate()
             .map(|(index, (info, dims))| {
+                let (data, dtype) = output_values(self.graph.output(index)?, info)?;
                 Ok(ModelOutput {
-                    data: dequantize(self.graph.output(index)?, info)?.into_boxed_slice(),
+                    data: data.into_boxed_slice(),
                     dims: dims.clone(),
+                    dtype,
                 })
             })
             .collect()
@@ -184,7 +187,7 @@ impl LoadedModel for OvxModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tensor_bytes::finite_f32_from_le_bytes;
+    use crate::tensor_bytes::TensorWords;
 
     fn tensor(
         dims: &[usize],
@@ -236,12 +239,16 @@ mod tests {
         );
     }
 
-    fn dequantized(bytes: &[u8], info: &OpenVxTensorInfo) -> Vec<f32> {
-        finite_f32_from_le_bytes(&dequantize(bytes.to_vec(), info).unwrap()).unwrap()
+    fn output_f32(bytes: &[u8], info: &OpenVxTensorInfo) -> (Vec<f32>, TensorDType) {
+        let (values, dtype) = output_values(bytes.to_vec(), info).unwrap();
+        (
+            TensorWords::new(dtype, &values).unwrap().to_f32_vec(),
+            dtype,
+        )
     }
 
     #[test]
-    fn quantized_outputs_dequantize_to_f32() {
+    fn quantized_outputs_dequantize_to_f32_and_halves_stay_halves() {
         let affine = tensor(
             &[2],
             OpenVxDataType::U8,
@@ -250,15 +257,24 @@ mod tests {
                 zero_point: 10,
             },
         );
-        assert_eq!(dequantized(&[10, 14], &affine), [0.0, 2.0]);
+        assert_eq!(
+            output_f32(&[10, 14], &affine),
+            (vec![0.0, 2.0], TensorDType::F32)
+        );
         let fixed_point = tensor(
             &[2],
             OpenVxDataType::I8,
             OpenVxQuantization::DynamicFixedPoint { fraction_bits: 2 },
         );
-        assert_eq!(dequantized(&[4, (-8i8) as u8], &fixed_point), [1.0, -2.0]);
+        assert_eq!(
+            output_f32(&[4, (-8i8) as u8], &fixed_point),
+            (vec![1.0, -2.0], TensorDType::F32)
+        );
         // 0x3c00 is 1.0 and 0xc000 is -2.0 in IEEE half precision
         let half = tensor(&[2], OpenVxDataType::F16, OpenVxQuantization::None);
-        assert_eq!(dequantized(&[0x00, 0x3c, 0x00, 0xc0], &half), [1.0, -2.0]);
+        assert_eq!(
+            output_f32(&[0x00, 0x3c, 0x00, 0xc0], &half),
+            (vec![1.0, -2.0], TensorDType::F16)
+        );
     }
 }

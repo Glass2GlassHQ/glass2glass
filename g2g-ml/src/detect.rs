@@ -28,7 +28,7 @@ use core::future::Future;
 use core::pin::Pin;
 use std::sync::Arc;
 
-use crate::tensor_bytes::{finite_f32_words, F32_BYTES};
+use crate::tensor_bytes::TensorWords;
 
 use g2g_core::log::path_io_err;
 use g2g_core::{
@@ -261,29 +261,23 @@ impl DetectionPostprocess {
         Self::parse_shape(head, caps).is_some() || matches!(caps, Caps::RawVideo { .. })
     }
 
-    /// The `channels * anchors` little-endian f32 values of a model output.
+    /// The `channels * anchors` little-endian `dtype` values of a model output.
     /// Sizes with `checked_mul`, so an overflowing product fails the length
     /// check instead of panicking (debug) or wrapping to a small value that
     /// would admit a bogus payload.
-    fn read_f32(bytes: &[u8], channels: usize, anchors: usize) -> Result<Vec<f32>, G2gError> {
-        Ok(Self::f32_words(bytes, channels, anchors)?
-            .iter()
-            .map(|word| f32::from_le_bytes(*word))
-            .collect())
-    }
-
-    fn f32_words(
+    fn tensor_words(
+        dtype: TensorDType,
         bytes: &[u8],
         channels: usize,
         anchors: usize,
-    ) -> Result<&[[u8; F32_BYTES]], G2gError> {
+    ) -> Result<TensorWords<'_>, G2gError> {
         let expected = channels
             .checked_mul(anchors)
-            .and_then(|n| n.checked_mul(TensorDType::F32.size()));
+            .and_then(|n| n.checked_mul(dtype.size()));
         if expected != Some(bytes.len()) {
             return Err(G2gError::CapsMismatch);
         }
-        finite_f32_words(bytes)
+        TensorWords::new(dtype, bytes)
     }
 
     /// Decode a flat channel-major YOLOv8 output tensor `[1, 4 + C, A]` (as f32
@@ -406,7 +400,6 @@ impl DetectionPostprocess {
         let output = |index| {
             tensors
                 .get(&output_tensor_name(&self.tensor_name, index))
-                .filter(|tensor| tensor.dtype == TensorDType::F32)
                 .ok_or(G2gError::CapsMismatch)
         };
         let (scores, box_offsets, anchor_boxes) = (output(0)?, output(1)?, output(2)?);
@@ -422,10 +415,26 @@ impl DetectionPostprocess {
         }
         let anchors = anchors as usize;
         let outputs = SsdOutputs {
-            scores: Self::f32_words(&scores.data, score_columns as usize, anchors)?,
+            anchors,
+            scores: Self::tensor_words(
+                scores.dtype,
+                &scores.data,
+                score_columns as usize,
+                anchors,
+            )?,
             score_columns: score_columns as usize,
-            box_offsets: Self::f32_words(&box_offsets.data, BOX_CHANNELS, anchors)?,
-            anchor_boxes: Self::f32_words(&anchor_boxes.data, BOX_CHANNELS, anchors)?,
+            box_offsets: Self::tensor_words(
+                box_offsets.dtype,
+                &box_offsets.data,
+                BOX_CHANNELS,
+                anchors,
+            )?,
+            anchor_boxes: Self::tensor_words(
+                anchor_boxes.dtype,
+                &anchor_boxes.data,
+                BOX_CHANNELS,
+                anchors,
+            )?,
         };
         let (input_w, input_h) = self.normalize_size();
         let picture = self.picture_mapping();
@@ -621,13 +630,14 @@ pub(crate) fn decode_anchors(
 
 #[derive(Debug)]
 struct SsdOutputs<'a> {
+    anchors: usize,
     // per anchor, background first
-    scores: &'a [[u8; F32_BYTES]],
+    scores: TensorWords<'a>,
     score_columns: usize,
     // ST's model zoo encodes each corner as an offset scaled by the anchor's size from the anchor's same corner
-    box_offsets: &'a [[u8; F32_BYTES]],
+    box_offsets: TensorWords<'a>,
     // normalized xmin, ymin, xmax, ymax
-    anchor_boxes: &'a [[u8; F32_BYTES]],
+    anchor_boxes: TensorWords<'a>,
 }
 
 fn decode_ssd(
@@ -636,20 +646,21 @@ fn decode_ssd(
     input_w: f32,
     input_h: f32,
 ) -> Vec<AnchorBox> {
-    outputs
-        .scores
-        .chunks_exact(outputs.score_columns)
-        .zip(outputs.box_offsets.as_chunks::<BOX_CHANNELS>().0)
-        .zip(outputs.anchor_boxes.as_chunks::<BOX_CHANNELS>().0)
-        .filter_map(|((scores, offset), anchor)| {
-            let class_scores = || scores[1..].iter().map(|word| f32::from_le_bytes(*word));
-            let confidence = class_scores().fold(f32::MIN, f32::max);
+    (0..outputs.anchors)
+        .filter_map(|index| {
+            let row = index * outputs.score_columns;
+            let (best, confidence) = outputs
+                .scores
+                .argmax(row + 1..row + outputs.score_columns)?;
             if confidence <= conf_threshold {
                 return None;
             }
-            let column = 1 + class_scores().position(|score| score == confidence)?;
-            let offset = offset.map(f32::from_le_bytes);
-            let anchor = anchor.map(f32::from_le_bytes);
+            let column = best - row;
+            let corners = |words: &TensorWords<'_>| -> [f32; BOX_CHANNELS] {
+                core::array::from_fn(|corner| words.value(index * BOX_CHANNELS + corner))
+            };
+            let offset = corners(&outputs.box_offsets);
+            let anchor = corners(&outputs.anchor_boxes);
             let anchor_w = anchor[2] - anchor[0];
             let anchor_h = anchor[3] - anchor[1];
             let x0 = offset[0] * anchor_w + anchor[0];
@@ -918,12 +929,11 @@ impl AsyncElement for DetectionPostprocess {
                             tensors.get(&self.tensor_name)
                         }
                         .ok_or(G2gError::CapsMismatch)?;
-                        if tensor.dtype != TensorDType::F32 {
-                            return Err(G2gError::CapsMismatch);
-                        }
                         let (channels, anchors) = Self::parse_dims(self.head, tensor.shape.dims())
                             .ok_or(G2gError::CapsMismatch)?;
-                        let values = Self::read_f32(&tensor.data, channels, anchors)?;
+                        let values =
+                            Self::tensor_words(tensor.dtype, &tensor.data, channels, anchors)?
+                                .to_f32_vec();
                         self.channels = channels;
                         self.anchors = anchors;
                         let analytics = self.analyze(&values)?;
@@ -935,7 +945,9 @@ impl AsyncElement for DetectionPostprocess {
                     let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let values = Self::read_f32(slice, self.channels, self.anchors)?;
+                    let values =
+                        Self::tensor_words(TensorDType::F32, slice, self.channels, self.anchors)?
+                            .to_f32_vec();
                     let analytics = self.analyze(&values)?;
                     // Attach the graph and forward the (unchanged) tensor frame.
                     frame.meta.attach(analytics);
@@ -1042,6 +1054,7 @@ impl g2g_core::PadTemplates for DetectionPostprocess {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::safetensors::f16_to_f32;
     use crate::tensor_bytes::f32_le_bytes;
     use g2g_core::frame::Frame;
     use g2g_core::memory::{MemoryDomain, SystemSlice};
@@ -1636,9 +1649,33 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn decodes_ssd_outputs_attached_by_index() {
-        const ANCHORS: u32 = 3;
+    const SSD_ANCHORS: u32 = 3;
+    // background, class 0, class 1 per anchor
+    const SSD_SCORES: [f32; 9] = [0.1, 0.9, 0.0, 0.2, 0.0, 0.8, 0.9, 0.05, 0.05];
+    const SSD_BOX_OFFSETS: [f32; 12] = [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    const SSD_ANCHOR_BOXES: [f32; 12] =
+        [0.1, 0.1, 0.3, 0.3, 0.12, 0.1, 0.32, 0.3, 0.6, 0.6, 0.8, 0.8];
+
+    // the three SSD outputs, each encoded by `encode`
+    fn ssd_tensors(encode: impl Fn(&[f32]) -> (TensorDType, Vec<u8>)) -> g2g_core::TensorMeta {
+        let output = |index: usize, columns: u32, values: &[f32]| {
+            let (dtype, data) = encode(values);
+            g2g_core::NamedTensor {
+                name: output_tensor_name("ssd", index),
+                dtype,
+                shape: TensorShape::new([1, SSD_ANCHORS, columns]),
+                layout: TensorLayout::Nchw,
+                data,
+            }
+        };
+        let mut tensors = g2g_core::TensorMeta::new();
+        tensors.push(output(0, 3, &SSD_SCORES));
+        tensors.push(output(1, 4, &SSD_BOX_OFFSETS));
+        tensors.push(output(2, 4, &SSD_ANCHOR_BOXES));
+        tensors
+    }
+
+    async fn ssd_analytics_of(tensors: g2g_core::TensorMeta) -> AnalyticsMeta {
         let mut det = DetectionPostprocess::new(0.5, 0.45);
         det.set_property("head", PropValue::Str(String::from("ssd")))
             .unwrap();
@@ -1652,31 +1689,6 @@ mod tests {
         )
         .unwrap();
         det.configure_pipeline(&rgba_caps(256, 256)).unwrap();
-
-        let output = |index: usize, columns: u32, values: &[f32]| g2g_core::NamedTensor {
-            name: output_tensor_name("ssd", index),
-            dtype: TensorDType::F32,
-            shape: TensorShape::new([1, ANCHORS, columns]),
-            layout: TensorLayout::Nchw,
-            data: f32_le_bytes(values.iter().copied()),
-        };
-        let mut tensors = g2g_core::TensorMeta::new();
-        // background, class 0, class 1 per anchor
-        tensors.push(output(
-            0,
-            3,
-            &[0.1, 0.9, 0.0, 0.2, 0.0, 0.8, 0.9, 0.05, 0.05],
-        ));
-        tensors.push(output(
-            1,
-            4,
-            &[0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        ));
-        tensors.push(output(
-            2,
-            4,
-            &[0.1, 0.1, 0.3, 0.3, 0.12, 0.1, 0.32, 0.3, 0.6, 0.6, 0.8, 0.8],
-        ));
         let mut frame = Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(vec![0u8; 4].into_boxed_slice())),
             timing: FrameTiming::default(),
@@ -1684,13 +1696,26 @@ mod tests {
             meta: Default::default(),
         };
         frame.meta.attach(tensors);
-
         let mut sink = PixelAndMetaSink::default();
         det.process(PipelinePacket::DataFrame(frame), &mut sink)
             .await
             .unwrap();
+        sink.meta.expect("frame carries AnalyticsMeta")
+    }
 
-        let meta = sink.meta.expect("frame carries AnalyticsMeta");
+    fn f32_tensor(values: &[f32]) -> (TensorDType, Vec<u8>) {
+        (TensorDType::F32, f32_le_bytes(values.iter().copied()))
+    }
+
+    fn f16_bits(values: &[f32]) -> impl Iterator<Item = u16> + '_ {
+        values
+            .iter()
+            .map(|&value| g2g_plugins::tensorconvert::f32_to_f16_bits(value))
+    }
+
+    #[tokio::test]
+    async fn decodes_ssd_outputs_attached_by_index() {
+        let meta = ssd_analytics_of(ssd_tensors(f32_tensor)).await;
         let detections: Vec<&ObjectDetection> = meta.detections().collect();
         let [only] = detections[..] else {
             panic!("the class 1 box overlaps the class 0 box and the background anchor stays out");
@@ -1705,6 +1730,24 @@ mod tests {
                 "{got:?} against {expected:?}"
             );
         }
+    }
+
+    // halves are read where they lie, so they must decode to what their f32 values decode to
+    #[tokio::test]
+    async fn half_precision_ssd_outputs_decode_like_their_f32_values() {
+        let halves = ssd_analytics_of(ssd_tensors(|values| {
+            let bytes = f16_bits(values).flat_map(u16::to_le_bytes).collect();
+            (TensorDType::F16, bytes)
+        }))
+        .await;
+        let widened = ssd_analytics_of(ssd_tensors(|values| {
+            f32_tensor(&f16_bits(values).map(f16_to_f32).collect::<Vec<_>>())
+        }))
+        .await;
+
+        let detections = |meta: &AnalyticsMeta| meta.detections().cloned().collect::<Vec<_>>();
+        assert!(!detections(&halves).is_empty());
+        assert_eq!(detections(&halves), detections(&widened));
     }
 
     #[test]

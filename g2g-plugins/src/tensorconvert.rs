@@ -102,7 +102,7 @@ pub fn dequantize_to_f32(
 /// overflow to +/-inf, underflow to a subnormal or signed zero. Pure bit
 /// manipulation, no `std`/libm (the affine int quantization above is lossy by
 /// design; this is its lossy *float* narrowing sibling).
-fn f32_to_f16_bits(value: f32) -> u16 {
+pub fn f32_to_f16_bits(value: f32) -> u16 {
     let x = value.to_bits();
     let sign = x & 0x8000_0000;
     let exp = x & 0x7F80_0000;

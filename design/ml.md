@@ -394,10 +394,12 @@ The smoke script also runs ST's SSD MobileNet v2 (256x256, three outputs) throug
 `ovxinference attach-tensor=true` and `detectionpostprocess head=ssd`, and
 checks the detections against ST's `ssd_mobilenet_pp.py` on the same picture:
 the labels and scores match exactly and the boxes are within one f16 step. Its
-NPU graph runs in 27 ms. On an idle board the element takes 34 ms per frame, the
-rest of it the f16 to f32 conversion of 607k output values, and
-`detectionpostprocess` takes 2.8 ms, reading the scores straight from the tensor
-bytes.
+NPU graph runs in 27 ms. On an idle board the element takes 28.4 ms per frame and
+`detectionpostprocess` 2.8 ms. A half-precision output stays half precision: the
+attached tensor is `F16`, and `detectionpostprocess` reads it in place, picking
+each anchor's class by comparing the halves' bits and converting only the
+winning score. A tensor sent as the frame is still converted to f32, the dtype
+the element's output caps declare.
 
 On the STM32MP257 the camera interface (DCMIPP) scales the ISP output on its aux
 pipe, so the model input costs no CPU. One `v4l2src` reads the 640x480 NV12 main

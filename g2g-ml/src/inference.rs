@@ -9,7 +9,8 @@ use core::pin::Pin;
 #[cfg(feature = "analytics")]
 use crate::detect::output_tensor_name;
 use crate::tensor_bytes::{
-    rgb_pixels_in_layout, rgba_to_nchw, tensor_bytes_to_chw, RGBA_BYTES_PER_PIXEL, RGB_CHANNELS,
+    f16_le_to_f32_le_bytes, rgb_pixels_in_layout, rgba_to_nchw, tensor_bytes_to_chw,
+    RGBA_BYTES_PER_PIXEL, RGB_CHANNELS,
 };
 
 use g2g_core::frame::Frame;
@@ -80,9 +81,10 @@ pub struct ModelGeometry {
 
 #[derive(Debug)]
 pub struct ModelOutput {
-    // little-endian f32 values
+    // little-endian values of `dtype`
     pub data: Box<[u8]>,
     pub dims: Vec<u32>,
+    pub dtype: TensorDType,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -450,7 +452,7 @@ impl<B: InferenceBackend> AsyncElement for Inference<B> {
                                     } else {
                                         self.tensor_name.clone()
                                     },
-                                    dtype: TensorDType::F32,
+                                    dtype: output.dtype,
                                     shape: TensorShape::from_slice(&output.dims)
                                         .ok_or(G2gError::CapsMismatch)?,
                                     layout: TensorLayout::Nchw,
@@ -474,6 +476,12 @@ impl<B: InferenceBackend> AsyncElement for Inference<B> {
                     }
                     let [output]: [ModelOutput; 1] =
                         outputs.try_into().map_err(|_| G2gError::CapsMismatch)?;
+                    // the output caps declare f32
+                    let data = match output.dtype {
+                        TensorDType::F32 => output.data,
+                        TensorDType::F16 => f16_le_to_f32_le_bytes(&output.data).into_boxed_slice(),
+                        _ => return Err(G2gError::CapsMismatch),
+                    };
                     let shape =
                         TensorShape::from_slice(&output.dims).ok_or(G2gError::CapsMismatch)?;
                     let new_caps = Caps::Tensor {
@@ -487,7 +495,7 @@ impl<B: InferenceBackend> AsyncElement for Inference<B> {
                         self.last_caps = Some(new_caps);
                     }
                     let tensor_frame = Frame {
-                        domain: MemoryDomain::System(SystemSlice::from_boxed(output.data)),
+                        domain: MemoryDomain::System(SystemSlice::from_boxed(data)),
                         // inference is per-frame: the tensor inherits the
                         // source frame's timing so latency stays traceable.
                         timing: frame.timing,
@@ -728,6 +736,7 @@ mod tests {
                 .map(|_| ModelOutput {
                     data: Box::new(OUTPUT),
                     dims: vec![1, OUTPUT.len() as u32],
+                    dtype: TensorDType::F32,
                 })
                 .collect())
         }

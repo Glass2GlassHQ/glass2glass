@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2475: `ovxinference` attaches half-precision outputs as `F16` tensors, which `detectionpostprocess` reads in place, 5.4 ms less per SSD frame on the STM32MP257.
 - M2474: the STM32MP2 IMX335 main and aux pipe setup scripts are in `tools/`.
 - M2473: `analyticsoverlay` draws into dma-buf frames, and `analyticsjoin` asks `v4l2src` for enough buffers, so camera frames reach `waylandsink` without a copy.
 - M2472: `waylandsink` gets Weston's frame callbacks, so it paces on the compositor instead of counting nearly every frame dropped.

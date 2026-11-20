@@ -563,6 +563,7 @@ impl OrtModel {
                 Ok(ModelOutput {
                     data: f32_le_bytes(data.iter().copied()).into_boxed_slice(),
                     dims: shape.iter().map(|d| (*d).max(0) as u32).collect(),
+                    dtype: g2g_core::TensorDType::F32,
                 })
             })
             .collect()
