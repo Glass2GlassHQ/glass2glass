@@ -74,7 +74,7 @@ use g2g_core::{
     ClockSync, ConfigureOutcome, ElementMetadata, G2gError, HardwareError, MemoryDomain,
     OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PresentationPacer,
     PropError, PropKind, PropValue, PropertySpec, RawVideoFormat, MAX_LATENESS_PROPERTY,
-    QOS_INTERVAL_PROPERTY, SYNC_PROPERTY,
+    PROCESSING_DEADLINE_PROPERTY, QOS_INTERVAL_PROPERTY, SYNC_PROPERTY,
 };
 
 use crate::clock::wait_to_present;
@@ -233,6 +233,10 @@ impl PipelineClock for D3D11Clock {
 }
 
 impl AsyncElement for D3D11Sink {
+    fn latency(&self) -> g2g_core::LatencyReport {
+        self.pacer.latency()
+    }
+
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
@@ -287,6 +291,7 @@ impl AsyncElement for D3D11Sink {
         const PROPS: &[PropertySpec] = &[
             PropertySpec::new("title", PropKind::Str, "window title").with_default("glass2glass"),
             MAX_LATENESS_PROPERTY,
+            PROCESSING_DEADLINE_PROPERTY,
             QOS_INTERVAL_PROPERTY,
             SYNC_PROPERTY,
         ];

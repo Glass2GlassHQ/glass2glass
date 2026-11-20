@@ -337,6 +337,13 @@ is zero there, as GStreamer configures latency only on a live pipeline. The sink
 preroll before `Playing` instead, so the pictures a frame-threaded `ffmpegdec`
 holds back delay the first frame after a load or seek once, not every deadline.
 
+A sink that syncs to the clock reports its `processing-deadline` as its own
+latency, `PresentationPacer::latency()`, so on a live path every deadline also
+leaves that much time for upstream processing. The video sinks default to 15 ms,
+GStreamer's `GstVideoSink` value, and other pacer sinks to zero. A sink with
+`sync=false` reports nothing. GStreamer shortens the allowance when it exceeds the
+path's maximum latency. g2g does not, since the runner never enforces the maximum.
+
 The DAG runner folds every node that carries an element: sources, transforms, sinks,
 fan-ins and demuxes. A fan-in contributes `MultiInputElement::latency()` the way a
 transform contributes its own, so a `fallbackswitch` declares its stall slack there.

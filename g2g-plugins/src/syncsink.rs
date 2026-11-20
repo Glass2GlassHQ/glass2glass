@@ -196,6 +196,10 @@ impl<C> AsyncElement for SyncSink<C>
 where
     C: AsyncClock + ElementBound + Send + Sync + 'static,
 {
+    fn latency(&self) -> g2g_core::LatencyReport {
+        self.pacer.latency()
+    }
+
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where

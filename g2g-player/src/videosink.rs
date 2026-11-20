@@ -168,6 +168,10 @@ impl PadTemplates for PlayerVideoSink {
 }
 
 impl AsyncElement for PlayerVideoSink {
+    fn latency(&self) -> g2g_core::LatencyReport {
+        self.pacer.latency()
+    }
+
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where

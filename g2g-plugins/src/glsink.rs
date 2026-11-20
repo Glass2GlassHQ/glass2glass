@@ -72,7 +72,7 @@ use g2g_core::{
     ClockSync, Colorimetry, ConfigureOutcome, Dim, ElementMetadata, Frame, G2gError, HardwareError,
     OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PresentationPacer,
     PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, MAX_LATENESS_PROPERTY,
-    QOS_INTERVAL_PROPERTY, SYNC_PROPERTY,
+    PROCESSING_DEADLINE_PROPERTY, QOS_INTERVAL_PROPERTY, SYNC_PROPERTY,
 };
 
 /// Worker thread name, also the prefix on the worker's error lines.
@@ -247,6 +247,10 @@ impl PadTemplates for GlSink {
 }
 
 impl AsyncElement for GlSink {
+    fn latency(&self) -> g2g_core::LatencyReport {
+        self.pacer.latency()
+    }
+
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
@@ -314,6 +318,7 @@ impl AsyncElement for GlSink {
             PropertySpec::new("app-id", PropKind::Str, "Wayland xdg app id")
                 .with_default("io.glass2glass.GlSink"),
             MAX_LATENESS_PROPERTY,
+            PROCESSING_DEADLINE_PROPERTY,
             QOS_INTERVAL_PROPERTY,
             SYNC_PROPERTY,
         ];

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2477: synchronizing video sinks add a 15 ms `processing-deadline` to a live path's latency, as GStreamer's do.
 - M2476: `analyticsoverlay` draws onto RGBA frames with padded rows.
 - M2475: `ovxinference` attaches half-precision outputs as `F16` tensors, which `detectionpostprocess` reads in place, 5.4 ms less per SSD frame on the STM32MP257.
 - M2474: the STM32MP2 IMX335 main and aux pipe setup scripts are in `tools/`.

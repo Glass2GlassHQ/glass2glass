@@ -39,7 +39,7 @@ use g2g_core::{
     AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockSync, Colorimetry,
     ConfigureOutcome, G2gError, MemoryDomain, OutputSink, PipelinePacket, PixelAspect,
     PresentationPacer, PropError, PropValue, PropertySpec, RawVideoFormat, MAX_LATENESS_PROPERTY,
-    QOS_INTERVAL_PROPERTY, SYNC_PROPERTY,
+    PROCESSING_DEADLINE_PROPERTY, QOS_INTERVAL_PROPERTY, SYNC_PROPERTY,
 };
 
 use crate::clock::wait_to_present;
@@ -1526,6 +1526,10 @@ impl WgpuSink {
 const RGBA_BYTES_PER_PIXEL: u32 = 4;
 
 impl AsyncElement for WgpuSink {
+    fn latency(&self) -> g2g_core::LatencyReport {
+        self.pacer.latency()
+    }
+
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
@@ -1576,6 +1580,7 @@ impl AsyncElement for WgpuSink {
     fn properties(&self) -> &'static [PropertySpec] {
         &[
             MAX_LATENESS_PROPERTY,
+            PROCESSING_DEADLINE_PROPERTY,
             QOS_INTERVAL_PROPERTY,
             SYNC_PROPERTY,
             FORCE_ASPECT_RATIO_PROPERTY,

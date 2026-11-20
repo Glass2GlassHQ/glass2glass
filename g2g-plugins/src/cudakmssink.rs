@@ -81,7 +81,7 @@ use g2g_core::{
     ClockPriority, ClockSync, Colorimetry, ConfigureOutcome, Dim, Frame, G2gError, HardwareError,
     MemoryDomain, OutputSink, PipelineClock, PipelinePacket, PresentationPacer, PropError,
     PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, MAX_LATENESS_PROPERTY,
-    QOS_INTERVAL_PROPERTY, SYNC_PROPERTY,
+    PROCESSING_DEADLINE_PROPERTY, QOS_INTERVAL_PROPERTY, SYNC_PROPERTY,
 };
 
 use crate::clock::wait_to_present;
@@ -296,6 +296,10 @@ impl PipelineClock for CudaKmsClock {
 }
 
 impl AsyncElement for CudaKmsSink {
+    fn latency(&self) -> g2g_core::LatencyReport {
+        self.pacer.latency()
+    }
+
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
@@ -366,6 +370,7 @@ impl AsyncElement for CudaKmsSink {
             )
             .with_default("/dev/dri/card0"),
             MAX_LATENESS_PROPERTY,
+            PROCESSING_DEADLINE_PROPERTY,
             QOS_INTERVAL_PROPERTY,
             SYNC_PROPERTY,
         ];

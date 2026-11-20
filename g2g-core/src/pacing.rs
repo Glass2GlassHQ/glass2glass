@@ -24,6 +24,7 @@ use crate::frame::FrameTiming;
 use crate::log::{ClockTime, Target, PACING_CATEGORY};
 use crate::property::{PropError, PropKind, PropValue, PropertySpec};
 use crate::qos::{upstream_report, QosTracker};
+use crate::query::LatencyReport;
 use crate::segment::Segment;
 
 /// What a sink does with the frame it just asked [`PresentationPacer::judge`]
@@ -55,6 +56,12 @@ pub const QOS_INTERVAL_PROPERTY: PropertySpec = PropertySpec::new(
     "periodic QoS report interval in nanoseconds, 0 to report drops only",
 );
 
+pub const PROCESSING_DEADLINE_PROPERTY: PropertySpec = PropertySpec::new(
+    "processing-deadline",
+    PropKind::Uint,
+    "nanoseconds a live pipeline may take to process a frame, added to the latency",
+);
+
 pub const SYNC_PROPERTY: PropertySpec = PropertySpec::new(
     "sync",
     PropKind::Bool,
@@ -63,12 +70,17 @@ pub const SYNC_PROPERTY: PropertySpec = PropertySpec::new(
 .with_default("true");
 
 /// The pacing knobs a synchronizing sink exposes, so a `gst-launch` line can
-/// turn clock sync off and tune the late-drop bound and the report cadence. The
-/// whole table for a sink with no properties of its own; one that has others
-/// lists the three consts alongside them. Handled by [`PresentationPacer::set_property`] /
+/// turn clock sync off and tune the late-drop bound, the processing allowance
+/// and the report cadence. The whole table for a sink with no properties of its
+/// own; one that has others lists the four consts alongside them. Handled by
+/// [`PresentationPacer::set_property`] /
 /// [`get_property`](PresentationPacer::get_property).
-pub const PACING_PROPERTIES: &[PropertySpec] =
-    &[SYNC_PROPERTY, MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY];
+pub const PACING_PROPERTIES: &[PropertySpec] = &[
+    SYNC_PROPERTY,
+    MAX_LATENESS_PROPERTY,
+    PROCESSING_DEADLINE_PROPERTY,
+    QOS_INTERVAL_PROPERTY,
+];
 
 /// A clock reading or running time as a signed nanosecond count, so anchor
 /// arithmetic can go below zero. Saturates rather than wrapping: a PTS past
@@ -124,10 +136,14 @@ pub struct PresentationPacer {
     last_deadline_ns: Option<u64>,
     // Late drops since the last presented frame, so a run of them logs once at each end.
     late_drops_in_a_row: u64,
+    processing_deadline_ns: u64,
 }
 
 /// GStreamer's `GstVideoSink` default.
 pub const VIDEO_SINK_MAX_LATENESS_NS: u64 = 20_000_000;
+
+// gstreamer's GstVideoSink default
+pub const VIDEO_SINK_PROCESSING_DEADLINE_NS: u64 = 15_000_000;
 
 /// How often a sink that presents frames reports its lateness upstream, so a
 /// producer that shed load on a late report also learns when the sink caught up.
@@ -141,6 +157,7 @@ impl PresentationPacer {
     pub fn for_video_sink() -> Self {
         let mut pacer = Self::default();
         pacer.set_max_lateness_ns(VIDEO_SINK_MAX_LATENESS_NS);
+        pacer.processing_deadline_ns = VIDEO_SINK_PROCESSING_DEADLINE_NS;
         pacer
     }
 
@@ -351,6 +368,14 @@ impl PresentationPacer {
         self.present_on_arrival = !sync;
     }
 
+    pub fn latency(&self) -> LatencyReport {
+        // gstreamer adds the processing deadline only for a sink that syncs to the clock
+        if self.present_on_arrival {
+            return LatencyReport::ZERO;
+        }
+        LatencyReport::buffered(self.processing_deadline_ns, Some(0))
+    }
+
     /// Drop a frame past its deadline by more than `ns`. `0` drops any late
     /// frame; the default (`u64::MAX`) never drops, presenting every frame
     /// however late.
@@ -396,6 +421,7 @@ impl PresentationPacer {
                     .map(|sync| self.set_sync(sync)),
             ),
             "max-lateness" => Some(ns().map(|n| self.set_max_lateness_ns(n))),
+            "processing-deadline" => Some(ns().map(|n| self.processing_deadline_ns = n)),
             "qos-interval" => Some(ns().map(|n| self.set_report_interval_ns(n))),
             _ => None,
         }
@@ -407,6 +433,7 @@ impl PresentationPacer {
         match name {
             "sync" => Some(PropValue::Bool(!self.present_on_arrival)),
             "max-lateness" => Some(PropValue::Uint(self.max_lateness_ns())),
+            "processing-deadline" => Some(PropValue::Uint(self.processing_deadline_ns)),
             "qos-interval" => Some(PropValue::Uint(self.report_interval_ns())),
             _ => None,
         }

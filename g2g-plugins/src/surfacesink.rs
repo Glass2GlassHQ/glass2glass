@@ -18,7 +18,7 @@ use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome, Dim, G2gError,
     HardwareError, Interlace, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
     PresentationPacer, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
-    MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY, SYNC_PROPERTY,
+    MAX_LATENESS_PROPERTY, PROCESSING_DEADLINE_PROPERTY, QOS_INTERVAL_PROPERTY, SYNC_PROPERTY,
 };
 use ndk::hardware_buffer_format::HardwareBufferFormat;
 use ndk::native_window::NativeWindow;
@@ -226,6 +226,10 @@ fn new_wgpu_presenter(
 }
 
 impl AsyncElement for SurfaceSink {
+    fn latency(&self) -> g2g_core::LatencyReport {
+        self.pacer.latency()
+    }
+
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
@@ -334,6 +338,7 @@ static SURFACESINK_PROPS: &[PropertySpec] = &[
         "name the application attaches its Surface under (default \"default\")",
     ),
     MAX_LATENESS_PROPERTY,
+    PROCESSING_DEADLINE_PROPERTY,
     QOS_INTERVAL_PROPERTY,
     SYNC_PROPERTY,
 ];

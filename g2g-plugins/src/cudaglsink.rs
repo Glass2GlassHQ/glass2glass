@@ -77,8 +77,8 @@ use g2g_core::{
     AllocationParams, AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate,
     ClockPriority, ClockSync, Colorimetry, ConfigureOutcome, Dim, Frame, G2gError, HardwareError,
     MemoryDomain, OutputSink, PipelineClock, PipelinePacket, PresentationPacer, PropError,
-    PropValue, PropertySpec, Rate, RawVideoFormat, MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
-    SYNC_PROPERTY,
+    PropValue, PropertySpec, Rate, RawVideoFormat, MAX_LATENESS_PROPERTY,
+    PROCESSING_DEADLINE_PROPERTY, QOS_INTERVAL_PROPERTY, SYNC_PROPERTY,
 };
 
 use crate::clock::wait_to_present;
@@ -248,6 +248,10 @@ impl PipelineClock for CudaGlClock {
 }
 
 impl AsyncElement for CudaGlSink {
+    fn latency(&self) -> g2g_core::LatencyReport {
+        self.pacer.latency()
+    }
+
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
@@ -305,6 +309,7 @@ impl AsyncElement for CudaGlSink {
     fn properties(&self) -> &'static [PropertySpec] {
         const PROPS: &[PropertySpec] = &[
             MAX_LATENESS_PROPERTY,
+            PROCESSING_DEADLINE_PROPERTY,
             QOS_INTERVAL_PROPERTY,
             SYNC_PROPERTY,
             CUDA_DEVICE_ID_PROP,

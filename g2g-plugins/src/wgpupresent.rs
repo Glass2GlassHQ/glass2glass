@@ -80,8 +80,8 @@ use g2g_core::{
     g2g_error, AsyncElement, BusHandle, Caps, CapsConstraint, ClockCandidate, ClockPriority,
     ClockSync, ConfigureOutcome, ElementMetadata, Frame, G2gError, HardwareError, OutputSink,
     PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PixelAspect, PresentationPacer,
-    PropError, PropKind, PropValue, PropertySpec, MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
-    SYNC_PROPERTY,
+    PropError, PropKind, PropValue, PropertySpec, MAX_LATENESS_PROPERTY,
+    PROCESSING_DEADLINE_PROPERTY, QOS_INTERVAL_PROPERTY, SYNC_PROPERTY,
 };
 
 /// Worker thread name, also the prefix on the worker's error lines.
@@ -458,6 +458,10 @@ impl PadTemplates for WgpuPresentSink {
 }
 
 impl AsyncElement for WgpuPresentSink {
+    fn latency(&self) -> g2g_core::LatencyReport {
+        self.pacer.latency()
+    }
+
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
@@ -548,6 +552,7 @@ impl AsyncElement for WgpuPresentSink {
                 .with_default(FIFO_PRESENT_MODE)
                 .with_enum_values("fifo | mailbox"),
             MAX_LATENESS_PROPERTY,
+            PROCESSING_DEADLINE_PROPERTY,
             QOS_INTERVAL_PROPERTY,
             SYNC_PROPERTY,
         ];

@@ -931,6 +931,10 @@ fn present_err(e: VulkanVideoError) -> G2gError {
 }
 
 impl AsyncElement for VulkanHdrPresentSink {
+    fn latency(&self) -> g2g_core::LatencyReport {
+        self.pacer.latency()
+    }
+
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where

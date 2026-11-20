@@ -71,7 +71,8 @@ use g2g_core::{
     AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
     ClockSync, ConfigureOutcome, ElementMetadata, G2gError, HardwareError, OutputSink, PadTemplate,
     PadTemplates, PipelineClock, PipelinePacket, PresentationPacer, PropError, PropKind, PropValue,
-    PropertySpec, RawVideoFormat, MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY, SYNC_PROPERTY,
+    PropertySpec, RawVideoFormat, MAX_LATENESS_PROPERTY, PROCESSING_DEADLINE_PROPERTY,
+    QOS_INTERVAL_PROPERTY, SYNC_PROPERTY,
 };
 
 use crate::clock::wait_to_present;
@@ -538,6 +539,10 @@ impl PadTemplates for KmsSink {
 }
 
 impl AsyncElement for KmsSink {
+    fn latency(&self) -> g2g_core::LatencyReport {
+        self.pacer.latency()
+    }
+
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
@@ -645,6 +650,7 @@ impl AsyncElement for KmsSink {
             )
             .with_default("/dev/dri/card0"),
             MAX_LATENESS_PROPERTY,
+            PROCESSING_DEADLINE_PROPERTY,
             QOS_INTERVAL_PROPERTY,
             SYNC_PROPERTY,
         ];

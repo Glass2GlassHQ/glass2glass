@@ -235,3 +235,53 @@ async fn elements_without_override_report_zero_latency() {
 
     assert_eq!(stats.latency, LatencyReport::ZERO);
 }
+
+#[cfg(feature = "std")]
+impl g2g_core::AsyncClock for ZeroClock {
+    type SleepFuture<'a> = core::future::Ready<()>;
+    fn sleep_until_ns(&self, _deadline_ns: u64) -> Self::SleepFuture<'_> {
+        core::future::ready(())
+    }
+}
+
+#[cfg(feature = "std")]
+async fn live_path_into_sync_sink(
+    sink_properties: &[(&str, g2g_core::PropValue)],
+) -> LatencyReport {
+    let mut src = LatencySrc {
+        frames: 2,
+        latency: LatencyReport::live(8 * MS, None),
+    };
+    let mut sink = g2g_plugins::syncsink::SyncSink::new(ZeroClock);
+    for (name, value) in sink_properties {
+        sink.set_property(name, value.clone())
+            .expect("pacing property");
+    }
+    run_simple_pipeline(&mut src, &mut sink, &ZeroClock, 4)
+        .await
+        .expect("pipeline should complete")
+        .latency
+}
+
+#[cfg(feature = "std")]
+#[tokio::test]
+async fn a_syncing_sink_adds_its_processing_deadline_to_the_path() {
+    let latency =
+        live_path_into_sync_sink(&[("processing-deadline", g2g_core::PropValue::Uint(20 * MS))])
+            .await;
+
+    assert_eq!(latency.min_ns, 8 * MS + 20 * MS);
+    assert_eq!(latency.max_ns, None);
+}
+
+#[cfg(feature = "std")]
+#[tokio::test]
+async fn a_sink_that_does_not_sync_adds_no_processing_deadline() {
+    let latency = live_path_into_sync_sink(&[
+        ("processing-deadline", g2g_core::PropValue::Uint(20 * MS)),
+        ("sync", g2g_core::PropValue::Bool(false)),
+    ])
+    .await;
+
+    assert_eq!(latency.min_ns, 8 * MS);
+}
