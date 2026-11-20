@@ -2,7 +2,6 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::collections::btree_map::OccupiedEntry;
 use alloc::collections::BTreeMap;
 
 #[derive(Debug, Default)]
@@ -74,7 +73,7 @@ impl HeldPictures {
     all(target_os = "windows", feature = "d3d12-decode"),
     all(target_os = "linux", feature = "v4l2")
 ))]
-fn take_one(mut entry: OccupiedEntry<'_, u64, usize>) {
+fn take_one(mut entry: alloc::collections::btree_map::OccupiedEntry<'_, u64, usize>) {
     *entry.get_mut() -= 1;
     if *entry.get() == 0 {
         entry.remove();

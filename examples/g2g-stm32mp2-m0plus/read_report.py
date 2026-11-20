@@ -1,3 +1,7 @@
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 import mmap, os, struct, sys
 SHARED_REPORT_ADDRESS = 0x200C6000
 fd = os.open("/dev/mem", os.O_RDONLY | os.O_SYNC)
