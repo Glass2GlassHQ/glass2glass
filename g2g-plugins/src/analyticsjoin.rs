@@ -52,14 +52,23 @@ pub struct AnalyticsJoin {
     latest_analytics_pts_ns: Option<u64>,
     analytics_ended: bool,
     latency_ns: u64,
+    hold_last_ns: u64,
 }
 
-static ANALYTICSJOIN_PROPS: &[PropertySpec] = &[PropertySpec::new(
-    "latency",
-    PropKind::Uint,
-    "nanoseconds a video frame waits for the analytics branch, added to the pipeline latency so synchronized sinks allow for it",
-)
-.with_default("0")];
+static ANALYTICSJOIN_PROPS: &[PropertySpec] = &[
+    PropertySpec::new(
+        "latency",
+        PropKind::Uint,
+        "nanoseconds a video frame waits for the analytics branch, added to the pipeline latency so synchronized sinks allow for it",
+    )
+    .with_default("0"),
+    PropertySpec::new(
+        "hold-last",
+        PropKind::Uint,
+        "nanoseconds a video frame with no analytics at its time takes the newest earlier analytics, 0 for never",
+    )
+    .with_default("0"),
+];
 
 impl AnalyticsJoin {
     pub const VIDEO: usize = 0;
@@ -79,12 +88,11 @@ impl AnalyticsJoin {
     fn attach_nearest(&mut self, frame: &mut Frame) -> Result<(), G2gError> {
         let pts_ns = frame.timing.pts_ns;
         let tolerance_ns = frame_match_tolerance_ns(frame.timing.duration_ns);
+        let kept_ns = tolerance_ns.max(self.hold_last_ns);
         while self
             .unmatched_analytics
             .front()
-            .is_some_and(|(analytics_pts_ns, _)| {
-                analytics_pts_ns.saturating_add(tolerance_ns) < pts_ns
-            })
+            .is_some_and(|(analytics_pts_ns, _)| analytics_pts_ns.saturating_add(kept_ns) < pts_ns)
         {
             self.unmatched_analytics.pop_front();
         }
@@ -93,7 +101,14 @@ impl AnalyticsJoin {
             .iter()
             .filter(|(analytics_pts_ns, _)| analytics_pts_ns.abs_diff(pts_ns) <= tolerance_ns)
             .min_by_key(|(analytics_pts_ns, _)| analytics_pts_ns.abs_diff(pts_ns));
-        let Some((_, analytics)) = nearest else {
+        let held = || {
+            self.unmatched_analytics
+                .iter()
+                .rev()
+                .find(|(analytics_pts_ns, _)| *analytics_pts_ns <= pts_ns)
+                .filter(|(analytics_pts_ns, _)| pts_ns - analytics_pts_ns <= self.hold_last_ns)
+        };
+        let Some((_, analytics)) = nearest.or_else(held) else {
             return Ok(());
         };
         match frame.meta.get_mut::<AnalyticsMeta>() {
@@ -218,6 +233,7 @@ impl MultiInputElement for AnalyticsJoin {
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         match name {
             "latency" => self.latency_ns = value.as_uint().ok_or(PropError::Type)?,
+            "hold-last" => self.hold_last_ns = value.as_uint().ok_or(PropError::Type)?,
             _ => return Err(PropError::Unknown),
         }
         Ok(())
@@ -226,6 +242,7 @@ impl MultiInputElement for AnalyticsJoin {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "latency" => Some(PropValue::Uint(self.latency_ns)),
+            "hold-last" => Some(PropValue::Uint(self.hold_last_ns)),
             _ => None,
         }
     }

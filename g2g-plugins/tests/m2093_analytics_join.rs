@@ -108,11 +108,9 @@ fn detection_x_for_index(index: u64) -> f32 {
     index as f32 / VIDEO_FRAMES as f32
 }
 
-#[tokio::test]
-async fn detections_land_on_the_video_frames_at_their_time() {
-    let mut join = configured_join();
+// video runs ahead of the detector branch, as it does behind inference
+async fn join_strided_detections(mut join: AnalyticsJoin) -> Vec<Option<f32>> {
     let mut sink = CollectSink::default();
-    // video runs ahead of the detector branch, as it does behind inference
     for index in 0..VIDEO_FRAMES {
         push(
             &mut join,
@@ -145,18 +143,47 @@ async fn detections_land_on_the_video_frames_at_their_time() {
     .await;
 
     let frames = data_frames(&sink);
-    assert_eq!(frames.len() as u64, VIDEO_FRAMES);
     for (index, frame) in frames.iter().enumerate() {
-        let index = index as u64;
         assert_eq!(
             frame.timing.pts_ns,
-            index * FRAME_PERIOD_NS,
+            index as u64 * FRAME_PERIOD_NS,
             "video keeps its order"
         );
-        let expected = index
-            .is_multiple_of(DETECTION_STRIDE)
-            .then(|| detection_x_for_index(index));
-        assert_eq!(detection_x(frame), expected, "frame {index}");
+    }
+    frames.into_iter().map(detection_x).collect()
+}
+
+#[tokio::test]
+async fn detections_land_on_the_video_frames_at_their_time() {
+    let found = join_strided_detections(configured_join()).await;
+    let expected: Vec<Option<f32>> = (0..VIDEO_FRAMES)
+        .map(|index| {
+            index
+                .is_multiple_of(DETECTION_STRIDE)
+                .then(|| detection_x_for_index(index))
+        })
+        .collect();
+    assert_eq!(found, expected);
+}
+
+#[tokio::test]
+async fn hold_last_carries_a_detection_onto_the_frames_up_to_its_age() {
+    use g2g_core::MultiInputElement as _;
+    for held_frames in [DETECTION_STRIDE - 1, 1] {
+        let mut join = configured_join();
+        join.set_property(
+            "hold-last",
+            g2g_core::PropValue::Uint(held_frames * FRAME_PERIOD_NS),
+        )
+        .unwrap();
+        let found = join_strided_detections(join).await;
+        let expected: Vec<Option<f32>> = (0..VIDEO_FRAMES)
+            .map(|index| {
+                let detected = index - index % DETECTION_STRIDE;
+                (index - detected <= held_frames).then(|| detection_x_for_index(detected))
+            })
+            .collect();
+        assert_eq!(found, expected, "held for {held_frames} frames");
     }
 }
 

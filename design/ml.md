@@ -723,8 +723,11 @@ takes the meta of the analytics frame closest in time within half its duration
 already carries `AnalyticsMeta` keeps it and gains the branch's nodes, so two
 joins in a row put two detectors' results on one frame, and two different
 class-name tables fail the run with `CapsMismatch`. A frame with no match passes
-through unchanged, and when the analytics pad ends the held video is released in
-order. A mid-stream caps change on the video pad is queued with the held frames,
+through unchanged, unless `hold-last` (nanoseconds, default 0) is set: then it
+takes the newest earlier analytics no older than that, so boxes from a detector
+at a lower rate stay on every frame in between instead of flickering, at the
+cost of lagging the picture by up to one detection stride. When the analytics
+pad ends the held video is released in order. A mid-stream caps change on the video pad is queued with the held frames,
 so it reaches downstream after the frames that came before it. The wait adds one
 detection stride plus inference time of latency. The element cannot measure that
 wait ahead of time, so the `latency` property (nanoseconds, default 0) states it
