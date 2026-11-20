@@ -394,9 +394,10 @@ The smoke script also runs ST's SSD MobileNet v2 (256x256, three outputs) throug
 `ovxinference attach-tensor=true` and `detectionpostprocess head=ssd`, and
 checks the detections against ST's `ssd_mobilenet_pp.py` on the same picture:
 the labels and scores match exactly and the boxes are within one f16 step. Its
-NPU graph runs in 27 ms. The element takes 42 ms per frame on an idle board, about
-15 ms of it the f16 to f32 conversion, and 63 to 111 ms beside a live camera
-pipeline, where `detectionpostprocess` takes 15 to 33 ms.
+NPU graph runs in 27 ms. On an idle board the element takes 34 ms per frame, the
+rest of it the f16 to f32 conversion of 607k output values, and
+`detectionpostprocess` takes 2.8 ms, reading the scores straight from the tensor
+bytes.
 
 ### Microcontrollers
 
@@ -590,6 +591,11 @@ channel-major with the four box channels `cx, cy, w, h` first:
 
 A channel count the head cannot read (a pose width where `ch - 5` is not a
 positive multiple of 3, an OBB width with no class channel) fails negotiation.
+
+`label-file` names a text file whose line N is the name of label N, read when the
+property is set and published as the meta's class-name table, so the overlays'
+`show-label` captions show names. ST ships its SSD labels with `background` on
+the first line, which `head=ssd` leaves out, so that line comes off first.
 
 Coordinates leave the decoder normalised to the picture. With `picture-width`
 and `picture-height` at 0 the model input is taken as a plain stretch of the

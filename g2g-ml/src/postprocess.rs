@@ -177,7 +177,7 @@ impl AsyncElement for TensorPostprocess {
                             .await?;
                         self.last_caps = Some(new_caps);
                     }
-                    let out_bytes = f32_le_bytes(&result);
+                    let out_bytes = f32_le_bytes(result.iter().copied());
                     let out_frame = Frame {
                         domain: MemoryDomain::System(SystemSlice::from_boxed(
                             out_bytes.into_boxed_slice(),

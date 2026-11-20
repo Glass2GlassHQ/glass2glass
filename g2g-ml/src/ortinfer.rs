@@ -561,7 +561,7 @@ impl OrtModel {
                     .ok_or(G2gError::Hardware(HardwareError::Other))?;
                 let (shape, data) = value.try_extract_tensor::<f32>().map_err(ort_err)?;
                 Ok(ModelOutput {
-                    data: f32_le_bytes(data).into_boxed_slice(),
+                    data: f32_le_bytes(data.iter().copied()).into_boxed_slice(),
                     dims: shape.iter().map(|d| (*d).max(0) as u32).collect(),
                 })
             })

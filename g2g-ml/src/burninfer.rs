@@ -221,7 +221,7 @@ impl BurnInference {
         if values.len() != self.num_outputs {
             return Err(G2gError::CapsMismatch);
         }
-        Ok(f32_le_bytes(&values).into_boxed_slice())
+        Ok(f32_le_bytes(values.iter().copied()).into_boxed_slice())
     }
 }
 

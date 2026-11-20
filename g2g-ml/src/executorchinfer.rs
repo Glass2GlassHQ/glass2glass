@@ -148,9 +148,8 @@ impl ExecutorchModel {
                     .map_err(|_| G2gError::CapsMismatch)?
                     .try_into_typed::<f32>()
                     .map_err(|_| G2gError::CapsMismatch)?;
-                let values: Vec<f32> = output.as_array_dyn().iter().copied().collect();
                 Ok(ModelOutput {
-                    data: f32_le_bytes(&values).into_boxed_slice(),
+                    data: f32_le_bytes(output.as_array_dyn().iter().copied()).into_boxed_slice(),
                     dims: output.sizes().iter().map(|&d| d.max(0) as u32).collect(),
                 })
             })

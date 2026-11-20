@@ -214,33 +214,21 @@ fn bf16_to_f32(x: u16) -> f32 {
 /// mantissa fields, normalizing subnormals and preserving Inf / NaN. Exact (every
 /// f16 is representable in f32).
 pub(crate) fn f16_to_f32(x: u16) -> f32 {
-    let sign = ((x >> 15) & 1) as u32;
-    let exp = ((x >> 10) & 0x1f) as u32;
-    let frac = (x & 0x3ff) as u32;
-    let bits = if exp == 0 {
-        if frac == 0 {
-            // Signed zero.
-            sign << 31
-        } else {
-            // Subnormal: normalize into the f32 exponent range.
-            let mut e: i32 = 127 - 15 + 1;
-            let mut f = frac;
-            while f & 0x400 == 0 {
-                f <<= 1;
-                e -= 1;
-            }
-            f &= 0x3ff;
-            (sign << 31) | ((e as u32) << 23) | (f << 13)
-        }
-    } else if exp == 0x1f {
-        // Inf (frac == 0) or NaN (frac != 0); shift the mantissa into place.
-        (sign << 31) | 0x7f80_0000 | (frac << 13)
+    const EXPONENT_MASK: u32 = 0x7c00 << 13;
+    // 2^-14, the smallest normal half, which a subnormal half gains when given an implicit leading bit
+    const SUBNORMAL_OFFSET: f32 = f32::from_bits(113 << 23);
+    let mut bits = (u32::from(x) & 0x7fff) << 13;
+    let exponent = bits & EXPONENT_MASK;
+    bits += (127 - 15) << 23;
+    let magnitude = if exponent == EXPONENT_MASK {
+        // inf and nan keep an all-ones exponent in f32
+        f32::from_bits(bits + ((128 - 16) << 23))
+    } else if exponent == 0 {
+        f32::from_bits(bits + (1 << 23)) - SUBNORMAL_OFFSET
     } else {
-        // Normal: rebias the exponent (15 -> 127) and widen the mantissa.
-        let e = exp + (127 - 15);
-        (sign << 31) | (e << 23) | (frac << 13)
+        f32::from_bits(bits)
     };
-    f32::from_bits(bits)
+    f32::from_bits(magnitude.to_bits() | ((u32::from(x) & 0x8000) << 16))
 }
 
 impl<'a> SafeTensors<'a> {

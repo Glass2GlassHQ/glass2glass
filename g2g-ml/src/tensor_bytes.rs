@@ -6,30 +6,36 @@ use std::borrow::Cow;
 
 use g2g_core::{G2gError, TensorLayout};
 
-const F32_BYTES: usize = core::mem::size_of::<f32>();
+pub const F32_BYTES: usize = core::mem::size_of::<f32>();
 pub const RGBA_BYTES_PER_PIXEL: usize = 4;
 pub const RGB_CHANNELS: usize = 3;
 const U8_FULL_SCALE: f32 = 255.0;
 
-pub fn f32_le_bytes(values: &[f32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(values.len() * F32_BYTES);
-    for value in values {
-        bytes.extend_from_slice(&value.to_le_bytes());
+pub fn f32_le_bytes(values: impl ExactSizeIterator<Item = f32>) -> Vec<u8> {
+    let mut bytes = vec![0u8; values.len() * F32_BYTES];
+    for (slot, value) in bytes.as_chunks_mut::<F32_BYTES>().0.iter_mut().zip(values) {
+        *slot = value.to_le_bytes();
     }
     bytes
 }
 
 // a model that diverged to NaN or infinity yields meaningless results, so it fails here
-pub fn finite_f32_from_le_bytes(bytes: &[u8]) -> Result<Vec<f32>, G2gError> {
+pub fn finite_f32_words(bytes: &[u8]) -> Result<&[[u8; F32_BYTES]], G2gError> {
     let (words, rest) = bytes.as_chunks::<F32_BYTES>();
-    if !rest.is_empty() {
+    let finite = words.iter().fold(true, |finite, word| {
+        finite & f32::from_le_bytes(*word).is_finite()
+    });
+    if !rest.is_empty() || !finite {
         return Err(G2gError::CapsMismatch);
     }
-    let values: Vec<f32> = words.iter().map(|word| f32::from_le_bytes(*word)).collect();
-    if values.iter().any(|value| !value.is_finite()) {
-        return Err(G2gError::CapsMismatch);
-    }
-    Ok(values)
+    Ok(words)
+}
+
+pub fn finite_f32_from_le_bytes(bytes: &[u8]) -> Result<Vec<f32>, G2gError> {
+    Ok(finite_f32_words(bytes)?
+        .iter()
+        .map(|word| f32::from_le_bytes(*word))
+        .collect())
 }
 
 // RGBA8 to `value / 255` f32 in plane order: the R plane, then G, then B
@@ -180,10 +186,10 @@ mod tests {
 
     #[test]
     fn a_non_finite_value_fails() {
-        let bytes = f32_le_bytes(&[1.0, f32::NAN]);
+        let bytes = f32_le_bytes([1.0, f32::NAN].into_iter());
         assert!(finite_f32_from_le_bytes(&bytes).is_err());
         assert_eq!(
-            finite_f32_from_le_bytes(&f32_le_bytes(&[1.5, -2.0])).unwrap(),
+            finite_f32_from_le_bytes(&f32_le_bytes([1.5, -2.0].into_iter())).unwrap(),
             [1.5, -2.0]
         );
     }

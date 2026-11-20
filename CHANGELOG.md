@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2469: `detectionpostprocess` takes a `label-file` of class names, and the SSD path on the STM32MP257 runs 21 ms faster per frame.
 - M2468: `detectionpostprocess head=ssd` decodes ST's SSD MobileNet, inference elements attach every model output, `analyticsoverlay` draws on NV12 and `analyticsjoin` reports a `latency`.
 - M2467: `ovxinference` runs network binary graphs on VeriSilicon NPUs such as the STM32MP257's, and u8 models take RGB video as pixel values.
 - M2466: the heap-free display pipeline runs on the STM32MP257's Cortex-M0+, loaded through remoteproc.

@@ -1757,7 +1757,7 @@ impl WgpuInference {
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            queue.write_buffer(&weight_buf, 0, &f32_le_bytes(&self.weights));
+            queue.write_buffer(&weight_buf, 0, &f32_le_bytes(self.weights.iter().copied()));
 
             let bias_buf = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("infer-bias"),
@@ -1765,7 +1765,7 @@ impl WgpuInference {
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            queue.write_buffer(&bias_buf, 0, &f32_le_bytes(&self.bias));
+            queue.write_buffer(&bias_buf, 0, &f32_le_bytes(self.bias.iter().copied()));
             (Some(weight_buf), Some(bias_buf))
         } else {
             (None, None)

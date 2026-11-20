@@ -26,9 +26,11 @@
 
 use core::future::Future;
 use core::pin::Pin;
+use std::sync::Arc;
 
-use crate::tensor_bytes::finite_f32_from_le_bytes;
+use crate::tensor_bytes::{finite_f32_words, F32_BYTES};
 
+use g2g_core::log::path_io_err;
 use g2g_core::{
     AnalyticsMeta, AnalyticsNode, AsyncElement, BBox, Caps, CapsConstraint, CapsSet,
     ConfigureOutcome, G2gError, Keypoint, ObjectDetection, OrientedDetection, OutputSink,
@@ -124,6 +126,8 @@ pub struct DetectionPostprocess {
     /// means the input was a plain stretch of the picture.
     picture_w: u32,
     picture_h: u32,
+    label_file: String,
+    class_names: Option<Arc<[Box<str>]>>,
     input_caps: Option<Caps>,
     configured: bool,
     emitted: u64,
@@ -152,6 +156,8 @@ impl DetectionPostprocess {
             head: Head::Detect,
             picture_w: 0,
             picture_h: 0,
+            label_file: String::new(),
+            class_names: None,
             input_caps: None,
             configured: false,
             emitted: 0,
@@ -260,13 +266,24 @@ impl DetectionPostprocess {
     /// check instead of panicking (debug) or wrapping to a small value that
     /// would admit a bogus payload.
     fn read_f32(bytes: &[u8], channels: usize, anchors: usize) -> Result<Vec<f32>, G2gError> {
+        Ok(Self::f32_words(bytes, channels, anchors)?
+            .iter()
+            .map(|word| f32::from_le_bytes(*word))
+            .collect())
+    }
+
+    fn f32_words(
+        bytes: &[u8],
+        channels: usize,
+        anchors: usize,
+    ) -> Result<&[[u8; F32_BYTES]], G2gError> {
         let expected = channels
             .checked_mul(anchors)
             .and_then(|n| n.checked_mul(TensorDType::F32.size()));
         if expected != Some(bytes.len()) {
             return Err(G2gError::CapsMismatch);
         }
-        finite_f32_from_le_bytes(bytes)
+        finite_f32_words(bytes)
     }
 
     /// Decode a flat channel-major YOLOv8 output tensor `[1, 4 + C, A]` (as f32
@@ -359,7 +376,10 @@ impl DetectionPostprocess {
             classes,
             extra,
         };
-        let mut analytics = AnalyticsMeta::new();
+        let mut analytics = AnalyticsMeta {
+            class_names: self.class_names.clone(),
+            ..AnalyticsMeta::new()
+        };
         match self.head {
             Head::Detect => {
                 for d in self.detect(values) {
@@ -402,14 +422,17 @@ impl DetectionPostprocess {
         }
         let anchors = anchors as usize;
         let outputs = SsdOutputs {
-            scores: &Self::read_f32(&scores.data, score_columns as usize, anchors)?,
+            scores: Self::f32_words(&scores.data, score_columns as usize, anchors)?,
             score_columns: score_columns as usize,
-            box_offsets: &Self::read_f32(&box_offsets.data, BOX_CHANNELS, anchors)?,
-            anchor_boxes: &Self::read_f32(&anchor_boxes.data, BOX_CHANNELS, anchors)?,
+            box_offsets: Self::f32_words(&box_offsets.data, BOX_CHANNELS, anchors)?,
+            anchor_boxes: Self::f32_words(&anchor_boxes.data, BOX_CHANNELS, anchors)?,
         };
         let (input_w, input_h) = self.normalize_size();
         let picture = self.picture_mapping();
-        let mut analytics = AnalyticsMeta::new();
+        let mut analytics = AnalyticsMeta {
+            class_names: self.class_names.clone(),
+            ..AnalyticsMeta::new()
+        };
         for kept in suppress_overlaps(
             decode_ssd(&outputs, self.conf_threshold, input_w, input_h),
             self.iou_threshold,
@@ -599,12 +622,12 @@ pub(crate) fn decode_anchors(
 #[derive(Debug)]
 struct SsdOutputs<'a> {
     // per anchor, background first
-    scores: &'a [f32],
+    scores: &'a [[u8; F32_BYTES]],
     score_columns: usize,
     // ST's model zoo encodes each corner as an offset scaled by the anchor's size from the anchor's same corner
-    box_offsets: &'a [f32],
+    box_offsets: &'a [[u8; F32_BYTES]],
     // normalized xmin, ymin, xmax, ymax
-    anchor_boxes: &'a [f32],
+    anchor_boxes: &'a [[u8; F32_BYTES]],
 }
 
 fn decode_ssd(
@@ -619,15 +642,14 @@ fn decode_ssd(
         .zip(outputs.box_offsets.as_chunks::<BOX_CHANNELS>().0)
         .zip(outputs.anchor_boxes.as_chunks::<BOX_CHANNELS>().0)
         .filter_map(|((scores, offset), anchor)| {
-            let (column, confidence) = scores
-                .iter()
-                .copied()
-                .enumerate()
-                .skip(1)
-                .max_by(|(_, a), (_, b)| a.total_cmp(b))?;
+            let class_scores = || scores[1..].iter().map(|word| f32::from_le_bytes(*word));
+            let confidence = class_scores().fold(f32::MIN, f32::max);
             if confidence <= conf_threshold {
                 return None;
             }
+            let column = 1 + class_scores().position(|score| score == confidence)?;
+            let offset = offset.map(f32::from_le_bytes);
+            let anchor = anchor.map(f32::from_le_bytes);
             let anchor_w = anchor[2] - anchor[0];
             let anchor_h = anchor[3] - anchor[1];
             let x0 = offset[0] * anchor_w + anchor[0];
@@ -825,6 +847,15 @@ impl AsyncElement for DetectionPostprocess {
                 }
                 Ok(())
             }
+            "label-file" => {
+                let path = value.as_str().ok_or(PropError::Type)?;
+                let text = std::fs::read_to_string(path)
+                    .map_err(|error| path_io_err("DetectionPostprocess", "read", path, error))
+                    .map_err(|_| PropError::Value)?;
+                self.class_names = Some(text.lines().map(Box::from).collect());
+                self.label_file = String::from(path);
+                Ok(())
+            }
             "input-width" | "input-height" => {
                 let v = value.as_uint().ok_or(PropError::Type)?;
                 // The size divides the box coordinates, so zero has no meaning.
@@ -850,6 +881,7 @@ impl AsyncElement for DetectionPostprocess {
             "input-height" => Some(PropValue::Uint(self.normalize_size().1 as u64)),
             "tensor-name" => Some(PropValue::Str(self.tensor_name.clone())),
             "head" => Some(PropValue::Str(String::from(self.head.name()))),
+            "label-file" => Some(PropValue::Str(self.label_file.clone())),
             "picture-width" => Some(PropValue::Uint(self.picture_w as u64)),
             "picture-height" => Some(PropValue::Uint(self.picture_h as u64)),
             _ => None,
@@ -990,6 +1022,11 @@ static DETECT_PROPS: &[PropertySpec] = &[
         "height of the picture the model input was letterboxed from, 0 for a plain stretch",
     )
     .with_default("0"),
+    PropertySpec::new(
+        "label-file",
+        PropKind::Str,
+        "text file of class names, line N naming label N, read when set",
+    ),
 ];
 
 /// A tensor caps carries a concrete shape (the model's `[1, 4 + C, A]`), so
@@ -1043,7 +1080,7 @@ mod tests {
 
     /// Channel-major [1, ch, a] tensor from per-channel rows, as LE f32 bytes.
     fn tensor_frame(channels: &[[f32; 3]]) -> Frame {
-        let bytes = f32_le_bytes(channels.as_flattened());
+        let bytes = f32_le_bytes(channels.as_flattened().iter().copied());
         Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
             timing: FrameTiming::default(),
@@ -1056,7 +1093,7 @@ mod tests {
     /// video frame as a `TensorMeta` the way `ortinfer attach-tensor=true`
     /// delivers it.
     fn video_frame_with_tensor(channels: &[[f32; 3]], pixels: usize) -> Frame {
-        let bytes = f32_le_bytes(channels.as_flattened());
+        let bytes = f32_le_bytes(channels.as_flattened().iter().copied());
         let mut frame = Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(
                 vec![7u8; pixels * 4].into_boxed_slice(),
@@ -1083,7 +1120,7 @@ mod tests {
 
     /// Channel-major rows as little-endian f32 bytes.
     fn tensor_bytes(channels: &[[f32; 3]]) -> Vec<u8> {
-        f32_le_bytes(channels.as_flattened())
+        f32_le_bytes(channels.as_flattened().iter().copied())
     }
 
     fn rgba_caps(w: u32, h: u32) -> Caps {
@@ -1607,6 +1644,13 @@ mod tests {
             .unwrap();
         det.set_property("tensor-name", PropValue::Str(String::from("ssd")))
             .unwrap();
+        let label_file = std::env::temp_dir().join("g2g_detect_ssd_labels.txt");
+        std::fs::write(&label_file, "person\nbicycle\n").unwrap();
+        det.set_property(
+            "label-file",
+            PropValue::Str(label_file.to_string_lossy().into_owned()),
+        )
+        .unwrap();
         det.configure_pipeline(&rgba_caps(256, 256)).unwrap();
 
         let output = |index: usize, columns: u32, values: &[f32]| g2g_core::NamedTensor {
@@ -1614,7 +1658,7 @@ mod tests {
             dtype: TensorDType::F32,
             shape: TensorShape::new([1, ANCHORS, columns]),
             layout: TensorLayout::Nchw,
-            data: f32_le_bytes(values),
+            data: f32_le_bytes(values.iter().copied()),
         };
         let mut tensors = g2g_core::TensorMeta::new();
         // background, class 0, class 1 per anchor
@@ -1651,6 +1695,7 @@ mod tests {
         let [only] = detections[..] else {
             panic!("the class 1 box overlaps the class 0 box and the background anchor stays out");
         };
+        assert_eq!(meta.class_name(only.label), Some("person"));
         assert_eq!((only.label, only.confidence), (0, 0.9));
         let expected = [0.2, 0.1, 0.1, 0.2];
         let got = [only.bbox.x, only.bbox.y, only.bbox.w, only.bbox.h];
