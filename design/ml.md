@@ -450,6 +450,13 @@ camera it infers in 17 to 22 ms with up to 5 ms of postprocessing and presents
 every frame. It needs people that fill a good part of the picture: on the
 pedestrian clip seen from above, its person score never passes 0.33.
 
+`TRACK=1` adds `tracker` after the postprocess, the same CPU ByteTrack ST's
+people-tracking demo runs on its person model, and has the overlay draw ids and
+trails. It costs 0.5 ms per frame at the median on the pedestrian clip. With the
+camera, every model with or without tracking holds the camera's 30 fps over 450
+frames. The SSD is at the limit, its inference taking about 33 ms, and drops 3
+of 450 frames when tracking.
+
 ### Microcontrollers
 
 A heap-free int8 model runs on a microcontroller through `g2g-mcu`'s

@@ -10,13 +10,15 @@
 # puts beside this script, MODEL=pose ST's 17-keypoint YOLOv8n pose at 256x256.
 # The main pipe carries 640x480 NV12 to the display in the camera's own buffers,
 # the aux pipe the model's RGB.
+# TRACK=1 gives each detection a ByteTrack id on the CPU and draws its id and
+# trail, for the detection models only.
 # Given an H.264 MP4 instead of a frame count, it runs the same detection on the
 # clip, decoded on the Hantro and scaled for the model on the CPU, fullscreen.
 # ML_LAUNCH is g2g-ml's ml_launch example built with the openvx,
 # g2g-plugins/v4l2 and g2g-plugins/wayland-sink features, by default ml_launch
 # beside this script, as are the two setup scripts.
 #
-# Usage (on the board): [MODEL=ssd|person|coco80|pose] stm32mp2-imx335-detect.sh FRAMES|CLIP.mp4 [CONFIDENCE]
+# Usage (on the board): [MODEL=ssd|person|coco80|pose] [TRACK=1] stm32mp2-imx335-detect.sh FRAMES|CLIP.mp4 [CONFIDENCE]
 set -e
 INPUT=$1
 CONFIDENCE=${2:-0.65}
@@ -57,6 +59,16 @@ case ${MODEL:-ssd} in
     exit 1
     ;;
 esac
+TRACKER=
+OVERLAY="analyticsoverlay show-label=true"
+if [ "${TRACK:-0}" = 1 ]; then
+  if [ "$MODEL" = pose ]; then
+    echo "TRACK=1 tracks detection boxes, not poses" >&2
+    exit 1
+  fi
+  TRACKER="! tracker"
+  OVERLAY="$OVERLAY show-track=true show-trail=true"
+fi
 MODEL_CAPS="video/x-raw,format=RGB,width=$MODEL_SIDE,height=$MODEL_SIDE"
 # one frame period of waiting for the detector plus its inference and postprocessing
 JOIN_LATENCY_NS=70000000
@@ -78,8 +90,8 @@ else
    v4l2src device=/dev/video2 num-buffers=$INPUT ! $MODEL_CAPS"
 fi
 XDG_RUNTIME_DIR=/run/user/1001 WAYLAND_DISPLAY=wayland-0 "$ML_LAUNCH" \
-  "analyticsjoin name=j latency=$JOIN_LATENCY_NS ! analyticsoverlay show-label=true ! $DISPLAY_SINK \
+  "analyticsjoin name=j latency=$JOIN_LATENCY_NS ! $OVERLAY ! $DISPLAY_SINK \
    $SOURCES \
    ! ovxinference model=$MODEL_FILE attach-tensor=true tensor-name=detector \
-   ! detectionpostprocess $HEAD tensor-name=detector conf-threshold=$CONFIDENCE iou-threshold=0.45 label-file=$LABELS \
+   ! detectionpostprocess $HEAD tensor-name=detector conf-threshold=$CONFIDENCE iou-threshold=0.45 label-file=$LABELS $TRACKER \
    ! j.analytics"
