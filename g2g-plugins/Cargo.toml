@@ -134,7 +134,7 @@ dtls-srtp = ["srtp", "std", "dep:dimpl", "dep:base64"]
 # UDP egress sink (M47): drives the sans-IO RtpH264Packetizer (M46) and sends
 # the RTP packets over a tokio UdpSocket. The I/O half of the live-egress path;
 # implies std and adds tokio's net feature. RTCP + RTSP ANNOUNCE/RECORD owed.
-udp-egress = ["std", "tokio/net"]
+udp-egress = ["std", "tokio/net", "dep:uas-cot"]
 # RTMP ingest source (RtmpSrc): accepts one RTMP publisher (ffmpeg/OBS) over TCP
 # and streams the demuxed FLV byte stream for `flvdemux`. The `rtmp` sans-IO
 # protocol module is pure no_std and always compiled; only the tokio TCP element
@@ -1054,6 +1054,8 @@ getrandom = { version = "0.2", optional = true }
 # PEM bodies the DTLS-SRTP certificate properties carry (dtls-srtp feature).
 base64 = { version = "0.22", optional = true }
 tokio = { version = "1", features = ["rt", "time", "sync"], optional = true }
+# ST 0601 sensor height above the ellipsoid (tags 104 / 75) for the CoT sink (udp-egress feature).
+uas-cot = { version = "0.4.0", optional = true, default-features = false, features = ["misb"] }
 retina = { version = "0.4", optional = true, default-features = false, features = ["h265"] }
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["std", "async-await"] }
 # WebSocket transport for the distributed-graph primitive (remote-ws feature).
