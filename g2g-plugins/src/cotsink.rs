@@ -65,6 +65,9 @@ pub struct CotOptions<'a> {
     pub cot_type: &'a str,
     /// Seconds after the event time at which a client drops the track.
     pub stale_secs: u32,
+    /// Platform height above the WGS-84 ellipsoid (ST 0601 tag 104 / 75),
+    /// used as `hae` in place of the tag 15 MSL altitude when present.
+    pub ellipsoid_hae_m: Option<f64>,
 }
 
 impl Default for CotOptions<'_> {
@@ -73,6 +76,7 @@ impl Default for CotOptions<'_> {
             uid: DEFAULT_UID,
             cot_type: DEFAULT_COT_TYPE,
             stale_secs: DEFAULT_STALE_SECS,
+            ellipsoid_hae_m: None,
         }
     }
 }
@@ -91,11 +95,11 @@ pub fn cot_event(ls: &UasDatalink, opts: CotOptions<'_>) -> Option<String> {
     let stale_us = time_us.saturating_add((opts.stale_secs as u64).saturating_mul(1_000_000));
     let time = iso8601_utc_us(time_us);
 
-    // ST 0601 tag 15 is altitude above mean sea level, CoT hae is above the
-    // WGS-84 ellipsoid: they differ by the local geoid undulation (tens of
-    // meters). No geoid model here, so the MSL value is passed through.
-    let hae = ls
-        .sensor_alt_m
+    // CoT hae is above the WGS-84 ellipsoid. Tag 104 / 75 carry exactly that;
+    // tag 15 is MSL (off by the geoid undulation) and is only the fallback.
+    let hae = opts
+        .ellipsoid_hae_m
+        .or(ls.sensor_alt_m)
         .map_or_else(|| String::from(UNKNOWN), |v| format!("{v:.1}"));
 
     let mut detail = String::new();
@@ -384,11 +388,6 @@ mod element {
 
         /// The events one KLV frame's packets produce, in order.
         fn events(&self, buf: &[u8]) -> Vec<String> {
-            let opts = CotOptions {
-                uid: &self.uid,
-                cot_type: &self.cot_type,
-                stale_secs: self.stale_secs,
-            };
             split_klv_packets(buf)
                 .into_iter()
                 .flat_map(|pkt| {
@@ -396,6 +395,12 @@ mod element {
                         UasDatalink::parse(pkt)
                     } else {
                         UasDatalink::parse_lenient(pkt)
+                    };
+                    let opts = CotOptions {
+                        uid: &self.uid,
+                        cot_type: &self.cot_type,
+                        stale_secs: self.stale_secs,
+                        ellipsoid_hae_m: ellipsoid_hae(pkt, self.verify_checksum),
                     };
                     let mut events = Vec::new();
                     if let Some(ls) = ls {
@@ -444,6 +449,20 @@ mod element {
             self.events_sent += 1;
             Ok(())
         }
+    }
+
+    /// Sensor height above the WGS-84 ellipsoid (tag 104, else tag 75) when
+    /// the local set carries one, as uas-cot's ST 0601 platform builder reads it.
+    pub(crate) fn ellipsoid_hae(pkt: &[u8], verify_checksum: bool) -> Option<f64> {
+        use uas_cot::misb::st0601::Packet;
+        let parsed = if verify_checksum {
+            Packet::parse(pkt)
+        } else {
+            Packet::parse_unverified(pkt)
+        };
+        let (packet, _) = parsed.ok()?;
+        let air = uas_cot::fmv::platform(&packet, &uas_cot::fmv::Options::default())?;
+        matches!(&air.precision_location, Some((_, alt)) if alt == "GPS").then_some(air.point.hae)
     }
 
     impl AsyncElement for CotSink {
@@ -786,6 +805,34 @@ mod tests {
         assert!(cot_event(&minimal(), CotOptions::default())
             .expect("event")
             .contains("<contact callsign=\"g2g-uas\"/>"));
+    }
+
+    /// A set carrying tag 104 puts the ellipsoid height on the map, not the
+    /// tag 15 MSL altitude; without it tag 15 is still the fallback.
+    #[cfg(feature = "udp-egress")]
+    #[test]
+    fn hae_comes_from_ellipsoid_height_not_msl() {
+        use uas_cot::misb::st0601::{Builder, Tag};
+        let mut b = Builder::new(T);
+        b.float(Tag::SensorLatitude, 60.176822)
+            .unwrap()
+            .float(Tag::SensorLongitude, 24.828835)
+            .unwrap()
+            .float(Tag::SensorTrueAltitude, 1200.0)
+            .unwrap();
+        let msl_only = b.finish();
+        b.float(Tag::SensorEllipsoidHeightExtended, 1218.5).unwrap();
+        let with_hae = b.finish();
+
+        for (pkt, hae) in [(&with_hae, "hae=\"1218.5\""), (&msl_only, "hae=\"1200.")] {
+            let ls = UasDatalink::parse(pkt).expect("local set");
+            let opts = CotOptions {
+                ellipsoid_hae_m: element::ellipsoid_hae(pkt, true),
+                ..CotOptions::default()
+            };
+            let event = cot_event(&ls, opts).expect("event");
+            assert!(event.contains(hae), "{event}");
+        }
     }
 
     #[test]

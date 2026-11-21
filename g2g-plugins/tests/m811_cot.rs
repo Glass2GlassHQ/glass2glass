@@ -347,6 +347,7 @@ mod sink {
                 cot_type: "a-u-A-M-H-Q",
                 uid: "drone-7",
                 stale_secs: 90,
+                ..CotOptions::default()
             },
         )
         .expect("event");
