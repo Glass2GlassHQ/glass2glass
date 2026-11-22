@@ -3592,7 +3592,6 @@ dependencies = [
  "libloading",
  "md-5",
  "memchr",
- "miniz_oxide",
  "pkg-config",
  "rcgen",
  "reed-solomon-simd",

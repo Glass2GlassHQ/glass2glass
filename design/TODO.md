@@ -468,7 +468,8 @@ unless it says otherwise.
   `vp8alphadecodebin`), `jp2kdecimator`.
 - **Lossless compression:** compress and decompress frames on a worker pool so
   4K capture keeps up (one core compresses 4K NV12 at level 6 in about 180 ms);
-  read tiled `uncv`, word-aligned mixed interleave and additional multi-Y layouts.
+  read tiled `uncv`, multi-Y 4:2:2 with sample blocks or higher bit depths,
+  and multi-Y 4:1:1.
 - **Bayer:** Bayer formats from `libcamerasrc`, and `v4l2src` Bayer capture
   when the driver row stride is under the width rounded up to four pixels.
 - **Containers:** `mxfmux`, `asfdemux` / `asfmux` / `asfparse`,

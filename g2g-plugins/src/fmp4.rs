@@ -46,8 +46,7 @@ use crate::opusparse::{opus_head_from_dops, parse_opus_head};
 use crate::pcmclip::clip_pcm_to_segment;
 use crate::pcmendian::convert_wire_layout;
 use crate::uncompressedvideo::{
-    aligned_rows_are_tight, copy_raw_video_frame, quicktime_raw_video, warn_short_raw_video_frame,
-    RawVideoStorage,
+    aligned_rows_are_tight, copy_raw_video_frame, quicktime_raw_video, RawVideoStorage,
 };
 
 #[derive(Debug)]
@@ -1378,10 +1377,16 @@ fn raw_video_sample(stored: &[u8], framing: RawVideoFraming) -> Option<Vec<u8>> 
     copy_raw_video_frame(format, storage, width, height, stored).or_else(|| {
         if matches!(
             storage,
-            RawVideoStorage::AlignedRows { .. } | RawVideoStorage::MixedChromaRows { .. }
+            RawVideoStorage::AlignedRows { .. }
+                | RawVideoStorage::MixedChromaRows(_)
+                | RawVideoStorage::PackedYuv422Rows { .. }
         ) {
-            // A short stored sample can still be larger than its decoded frame.
-            warn_short_raw_video_frame("qtdemux", format, width, height, stored.len());
+            g2g_warn!(
+                Target::category("qtdemux"),
+                "dropped a {}-byte {} sample with invalid storage for {width}x{height} pixels",
+                stored.len(),
+                format.gst_name()
+            );
             return None;
         }
         Some(stored.to_vec())

@@ -1463,7 +1463,6 @@ dependencies = [
  "libc",
  "md-5",
  "memchr",
- "miniz_oxide 0.8.9",
  "pkg-config",
  "sha1",
  "sha2",

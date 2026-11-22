@@ -6,6 +6,9 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2502: `qtdemux` reads alternate 8-bit multi-Y `uncv` component orders.
+- M2501: Restore NV12 conversion throughput and refresh standalone lockfiles.
+- M2500: `qtdemux` reads word-aligned 10- and 12-bit mixed-interleave `uncv` tracks.
 - M2499: `qtdemux` unpacks 10- and 12-bit mixed-interleave `uncv` tracks.
 - M2498: `qtdemux` reads 8-bit mixed-interleave `uncv` with either chroma order.
 - M2497: `qtdemux` reads row-interleaved RGB and 4:4:4 YUV in `uncv` tracks.

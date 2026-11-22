@@ -169,6 +169,45 @@ async fn chroma_first_uncv_decodes_to_graph_formats() {
 }
 
 #[tokio::test]
+async fn word_aligned_mixed_uncv_decodes_in_either_byte_order() {
+    // Repack the libheif samples into 16-bit big-endian words with padded rows
+    // and little-endian words with tight rows.
+    for (name, reference, stream) in [
+        (
+            "uncv_mixed_vuy420p10_words_be_6x4",
+            "uncv_libheif_packed_vyu10_6x4.raw",
+            "raw-i420_10le",
+        ),
+        (
+            "uncv_mixed_yuv422p12_words_le_6x4",
+            "uncv_mixed_uvy422p12_6x4.raw",
+            "raw-i422_12le",
+        ),
+    ] {
+        let source = format!(
+            "filesrc location={}",
+            fixture(&format!("{name}.mp4")).display()
+        );
+        let output = output_of(&source, &format!("qtdemux stream={stream}"), name).await;
+        assert_eq!(output, std::fs::read(fixture(reference)).unwrap(), "{name}");
+    }
+}
+
+#[tokio::test]
+async fn multi_y_uncv_reorders_packed_422_groups() {
+    // The YVYU fixture has implicit group size. VYUY pads each group and row.
+    let expected = std::fs::read(fixture("uncv_multiy_yuy2_16x4.raw")).unwrap();
+    for name in ["uncv_multiy_yvyu_4_16x4", "uncv_multiy_vyuy_6_16x4"] {
+        let source = format!(
+            "filesrc location={}",
+            fixture(&format!("{name}.mp4")).display()
+        );
+        let output = output_of(&source, "qtdemux stream=raw-yuy2", name).await;
+        assert_eq!(output, expected, "{name}");
+    }
+}
+
+#[tokio::test]
 async fn raw_and_compressed_video_round_trip_through_mp4() {
     for (name, caps, wrap, unwrap) in [
         (

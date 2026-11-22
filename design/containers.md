@@ -165,8 +165,12 @@ rows and removes row padding.
 For 8-bit mixed interleave in a single tile without tile padding, `qtdemux`
 reads UV or VU pairs before or after the luma plane. It strips row padding
 and emits NV12 for 4:2:0 and I422 for 4:2:2.
-For 10- and 12-bit mixed interleave it reads bit-packed rows in the same
-orders and emits planar 4:2:0 or 4:2:2 with little-endian samples.
+For 10- and 12-bit mixed interleave it reads bit-packed rows or rows of
+16-bit words in either byte order. It emits planar 4:2:0 or 4:2:2 with
+little-endian samples.
+For 8-bit multi-Y 4:2:2 in a single tile without tile padding, a pixel
+group holds two Y samples and a U/V pair. `qtdemux` preserves native YUY2
+and UYVY layouts, and repacks other component orders and padded groups as YUY2.
 `tools/uncv-fixtures.sh` writes GStreamer reference files and
 `tools/uncv-gst-check.sh` reads `mp4mux` output back through GStreamer's qtdemux.
 

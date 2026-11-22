@@ -10,7 +10,7 @@ use g2g_core::{
 };
 
 use crate::mp4box::{be32, find_entry_child, full_box, mp4_box};
-use crate::uncompressedvideo::RawVideoStorage;
+use crate::uncompressedvideo::{MixedChromaLayout, MixedSamplePacking, RawVideoStorage};
 
 // ISO/IEC 23001-17 component types
 const MONOCHROME: u16 = 0;
@@ -594,6 +594,7 @@ fn parse_frames(
     let mut components = Vec::new();
     let mut bit_depths = Vec::new();
     let mut plain = true;
+    let mut word_aligned = true;
     for _ in 0..count {
         let index = usize::from(reader.u16()?);
         let bit_depth = reader.u8()?.checked_add(1).ok_or(G2gError::CapsMismatch)?;
@@ -601,6 +602,7 @@ fn parse_frames(
         components.push(*types.get(index).ok_or(G2gError::CapsMismatch)?);
         bit_depths.push(bit_depth);
         plain &= component_format == 0 && component_align == 0;
+        word_aligned &= component_format == 0 && component_align == 2;
     }
     let (sampling, interleave, block_size, flags) =
         (reader.u8()?, reader.u8()?, reader.u8()?, reader.u8()?);
@@ -609,7 +611,13 @@ fn parse_frames(
     let tile_align = reader.u32()?;
     let (tile_columns, tile_rows) = (reader.u32()?, reader.u32()?);
     let bit_depth = bit_depths[0];
-    if !plain || tile_columns != 0 || tile_rows != 0 || bit_depths.iter().any(|d| *d != bit_depth) {
+    let mixed_words =
+        interleave == INTERLEAVE_MIXED && word_aligned && matches!(bit_depth, 10 | 12);
+    if !(plain || mixed_words)
+        || tile_columns != 0
+        || tile_rows != 0
+        || bit_depths.iter().any(|d| *d != bit_depth)
+    {
         return Ok(None);
     }
     let row_interleaved = interleave == INTERLEAVE_ROW;
@@ -671,15 +679,19 @@ fn parse_frames(
         return Ok(packed_planar_format(&components, bit_depth, sampling)
             .map(|(format, order)| describe(format, Some(order), true)));
     }
-    // Without a pixel size, byte-aligned pixel interleave stores the listed components contiguously.
-    let pixel_size = if interleave == INTERLEAVE_PIXEL && bit_depth == 8 && pixel_size == 0 {
+    // Without a pixel size, byte-aligned pixel groups store the listed components contiguously.
+    let pixel_size = if matches!(interleave, INTERLEAVE_PIXEL | INTERLEAVE_MULTI_Y)
+        && bit_depth == 8
+        && pixel_size == 0
+    {
         count
     } else {
         pixel_size
     };
     let matching_layouts = || {
         UNCV_LAYOUTS.iter().filter(move |layout| {
-            layout.bit_depth == bit_depth
+            plain
+                && layout.bit_depth == bit_depth
                 && layout.sampling == sampling
                 && layout.interleave == interleave
                 && layout.block_size == block_size
@@ -690,14 +702,37 @@ fn parse_frames(
     if let Some(layout) = matching_layouts().find(|layout| layout.components == components) {
         return Ok(Some(describe(layout.format, None, false)));
     }
-    if interleave == INTERLEAVE_MIXED
+    if interleave == INTERLEAVE_MULTI_Y
+        && sampling == SAMPLING_422
+        && bit_depth == 8
         && block_size == 0
         && flags == 0
-        && pixel_size == 0
+        && pixel_size >= 4
         && tile_align == 0
     {
         return Ok(
-            mixed_chroma_layout(&components, sampling, bit_depth, row_align).map(
+            yuyv_component_order(&components).map(|component_order| UncvFrames {
+                format: RawVideoFormat::Yuyv,
+                storage: RawVideoStorage::PackedYuv422Rows {
+                    row_align,
+                    group_bytes: pixel_size,
+                    component_order,
+                },
+                compression,
+            }),
+        );
+    }
+    if interleave == INTERLEAVE_MIXED && block_size == 0 && pixel_size == 0 && tile_align == 0 {
+        let packing = match (mixed_words, bit_depth, flags) {
+            (false, 8, 0) => MixedSamplePacking::Bytes,
+            (false, 10 | 12, 0) => MixedSamplePacking::PackedBits,
+            (true, _, 0 | COMPONENTS_LITTLE_ENDIAN) => MixedSamplePacking::Words {
+                little_endian: flags == COMPONENTS_LITTLE_ENDIAN,
+            },
+            _ => return Ok(None),
+        };
+        return Ok(
+            mixed_chroma_layout(&components, sampling, bit_depth, row_align, packing).map(
                 |(format, storage)| UncvFrames {
                     format,
                     storage,
@@ -715,11 +750,23 @@ fn parse_frames(
     }))
 }
 
+fn yuyv_component_order(components: &[u16]) -> Option<[usize; 4]> {
+    let components: &[u16; 4] = components.try_into().ok()?;
+    let y0 = components.iter().position(|&component| component == LUMA)?;
+    let y1 = components
+        .iter()
+        .rposition(|&component| component == LUMA)?;
+    let u = components.iter().position(|&component| component == CB)?;
+    let v = components.iter().position(|&component| component == CR)?;
+    (y0 != y1).then_some([y0, u, y1, v])
+}
+
 fn mixed_chroma_layout(
     components: &[u16],
     sampling: u8,
     bit_depth: u8,
     row_align: u32,
+    packing: MixedSamplePacking,
 ) -> Option<(RawVideoFormat, RawVideoStorage)> {
     let format = match (sampling, bit_depth) {
         (SAMPLING_420, 8) => RawVideoFormat::Nv12,
@@ -740,11 +787,12 @@ fn mixed_chroma_layout(
     };
     Some((
         format,
-        RawVideoStorage::MixedChromaRows {
+        RawVideoStorage::MixedChromaRows(MixedChromaLayout {
             row_align,
             chroma_first,
             vu,
-        },
+            packing,
+        }),
     ))
 }
 

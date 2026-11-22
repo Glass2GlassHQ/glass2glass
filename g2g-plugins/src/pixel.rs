@@ -126,12 +126,13 @@ pub(crate) fn chroma_420_offsets(
 }
 
 /// Write one interleaved chroma plane into successive U and V planes.
-pub(crate) fn deinterleave_chroma<T: Copy>(src: &[[T; 2]], output: &mut [T], vu: bool) {
-    let (u, v) = output.split_at_mut(src.len());
-    let (first, second) = if vu { (v, u) } else { (u, v) };
-    for (pair, (a, b)) in src.iter().zip(first.iter_mut().zip(second)) {
-        *a = pair[0];
-        *b = pair[1];
+#[inline]
+pub(crate) fn deinterleave_chroma<T: Copy>(src: &[T], output: &mut [T], vu: bool) {
+    let chroma = src.len() / 2;
+    let (first, second) = if vu { (chroma, 0) } else { (0, chroma) };
+    for i in 0..chroma {
+        output[first + i] = src[2 * i];
+        output[second + i] = src[2 * i + 1];
     }
 }
 

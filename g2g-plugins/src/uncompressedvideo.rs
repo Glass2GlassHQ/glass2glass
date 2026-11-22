@@ -83,11 +83,30 @@ pub(crate) enum RawVideoStorage {
         row_interleaved: bool,
     },
     #[cfg(feature = "std")]
-    MixedChromaRows {
+    MixedChromaRows(MixedChromaLayout),
+    #[cfg(feature = "std")]
+    PackedYuv422Rows {
         row_align: u32,
-        chroma_first: bool,
-        vu: bool,
+        group_bytes: u32,
+        component_order: [usize; 4],
     },
+}
+
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MixedChromaLayout {
+    pub row_align: u32,
+    pub chroma_first: bool,
+    pub vu: bool,
+    pub packing: MixedSamplePacking,
+}
+
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MixedSamplePacking {
+    Bytes,
+    PackedBits,
+    Words { little_endian: bool },
 }
 
 const AVI_ROW_ALIGN: usize = 4;
@@ -193,11 +212,22 @@ pub(crate) fn copy_raw_video_frame(
             )
         }
         #[cfg(feature = "std")]
-        RawVideoStorage::MixedChromaRows {
+        RawVideoStorage::MixedChromaRows(layout) => {
+            copy_mixed_chroma_rows(format, columns, rows, stored, layout)
+        }
+        #[cfg(feature = "std")]
+        RawVideoStorage::PackedYuv422Rows {
             row_align,
-            chroma_first,
-            vu,
-        } => copy_mixed_chroma_rows(format, columns, rows, row_align, stored, chroma_first, vu),
+            group_bytes,
+            component_order,
+        } => copy_packed_yuv422_rows(
+            columns,
+            rows,
+            row_align,
+            group_bytes,
+            component_order,
+            stored,
+        ),
     }
 }
 
@@ -262,16 +292,42 @@ fn aligned_stride(row: usize, align: usize) -> Option<usize> {
 }
 
 #[cfg(feature = "std")]
+fn copy_packed_yuv422_rows(
+    columns: usize,
+    rows: usize,
+    row_align: u32,
+    group_bytes: u32,
+    component_order: [usize; 4],
+    stored: &[u8],
+) -> Option<Vec<u8>> {
+    if columns == 0 || !columns.is_multiple_of(2) {
+        return None;
+    }
+    let group_bytes = usize::try_from(group_bytes).ok()?;
+    let input_row = (columns / 2).checked_mul(group_bytes)?;
+    let stride = aligned_stride(input_row, usize::try_from(row_align).ok()?)?;
+    let stored = stored.get(..stride.checked_mul(rows)?)?;
+    let mut frame = Vec::new();
+    frame
+        .try_reserve_exact(columns.checked_mul(rows)?.checked_mul(2)?)
+        .ok()?;
+    for row in stored.chunks_exact(stride) {
+        for group in row[..input_row].chunks_exact(group_bytes) {
+            frame.extend_from_slice(&component_order.map(|index| group[index]));
+        }
+    }
+    Some(frame)
+}
+
+#[cfg(feature = "std")]
 fn copy_mixed_chroma_rows(
     format: RawVideoFormat,
     columns: usize,
     rows: usize,
-    row_align: u32,
     stored: &[u8],
-    chroma_first: bool,
-    vu: bool,
+    layout: MixedChromaLayout,
 ) -> Option<Vec<u8>> {
-    let align = usize::try_from(row_align).ok()?;
+    let align = usize::try_from(layout.row_align).ok()?;
     let (_, y_row, y_rows) = tight_plane(format, 0, columns, rows)?;
     let (_, chroma_row, chroma_rows) = tight_plane(format, 1, columns, rows)?;
     let pair_row = match format {
@@ -284,21 +340,21 @@ fn copy_mixed_chroma_rows(
         _ => return None,
     };
     let bits = format.bit_depth();
-    let bit_packed = bits > 8;
+    let bit_packed = layout.packing == MixedSamplePacking::PackedBits;
     let luma_plane = aligned_plane(format, y_row, y_row, y_rows, align, bit_packed)?;
     let chroma_plane = aligned_plane(format, pair_row, pair_row, chroma_rows, align, bit_packed)?;
     let y_len = luma_plane.stride.checked_mul(y_rows)?;
     let pair_len = chroma_plane.stride.checked_mul(chroma_rows)?;
     let stored = stored.get(..y_len.checked_add(pair_len)?)?;
-    let (y, pairs) = match chroma_first {
+    let (y, pairs) = match layout.chroma_first {
         true => (&stored[pair_len..], &stored[..pair_len]),
         false => stored.split_at(y_len),
     };
-    let mut frame = copy_mixed_plane(y, &luma_plane, bits)?;
-    let mut pairs = copy_mixed_plane(pairs, &chroma_plane, bits)?;
+    let mut frame = copy_mixed_plane(y, &luma_plane, bits, layout.packing)?;
+    let mut pairs = copy_mixed_plane(pairs, &chroma_plane, bits, layout.packing)?;
     frame.try_reserve_exact(pairs.len()).ok()?;
     if format == RawVideoFormat::Nv12 {
-        if vu {
+        if layout.vu {
             for pair in pairs.as_chunks_mut::<2>().0 {
                 pair.swap(0, 1);
             }
@@ -308,22 +364,26 @@ fn copy_mixed_chroma_rows(
         let y_len = frame.len();
         frame.resize(y_len.checked_add(pairs.len())?, 0);
         let chroma = &mut frame[y_len..];
-        if bit_packed {
-            let samples = pairs.as_chunks::<2>().0;
+        if bits > 8 {
             crate::pixel::deinterleave_chroma(
-                samples.as_chunks::<2>().0,
+                pairs.as_chunks::<2>().0,
                 chroma.as_chunks_mut::<2>().0,
-                vu,
+                layout.vu,
             );
         } else {
-            crate::pixel::deinterleave_chroma(pairs.as_chunks::<2>().0, chroma, vu);
+            crate::pixel::deinterleave_chroma(&pairs, chroma, layout.vu);
         }
     }
     Some(frame)
 }
 
 #[cfg(feature = "std")]
-fn copy_mixed_plane(input: &[u8], plane: &AlignedPlane, bits: u8) -> Option<Vec<u8>> {
+fn copy_mixed_plane(
+    input: &[u8],
+    plane: &AlignedPlane,
+    bits: u8,
+    packing: MixedSamplePacking,
+) -> Option<Vec<u8>> {
     if let Some(samples) = plane.packed_samples {
         let mut plane_data = Vec::new();
         plane_data
@@ -332,14 +392,30 @@ fn copy_mixed_plane(input: &[u8], plane: &AlignedPlane, bits: u8) -> Option<Vec<
         unpack_plane(&mut plane_data, input, plane, plane.stride, samples, bits)?;
         return Some(plane_data);
     }
-    copy_rows(
+    let mut data = copy_rows(
         input,
         plane.input_row,
         plane.frame_row,
         plane.stride,
         plane.rows,
         false,
-    )
+    )?;
+    if let MixedSamplePacking::Words { little_endian } = packing {
+        if !little_endian {
+            crate::pcmendian::swap_endian(&mut data, 2);
+        }
+        // ISO/IEC 23001-17 stores the value in the low bits and requires zero padding.
+        let limit = 1u16.checked_shl(u32::from(bits))?;
+        if data
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .any(|&word| u16::from_le_bytes(word) >= limit)
+        {
+            return None;
+        }
+    }
+    Some(data)
 }
 
 fn stored_planes_len(planes: &[AlignedPlane]) -> Option<usize> {
@@ -698,12 +774,30 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn mixed_chroma_rows_require_a_complete_padded_frame() {
-        let storage = RawVideoStorage::MixedChromaRows {
+        let storage = RawVideoStorage::MixedChromaRows(MixedChromaLayout {
             row_align: 8,
             chroma_first: true,
             vu: true,
-        };
+            packing: MixedSamplePacking::Bytes,
+        });
         assert!(copy_raw_video_frame(RawVideoFormat::Nv12, storage, 6, 4, &[0; 47]).is_none());
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn mixed_chroma_words_require_zero_padding_bits() {
+        let storage = RawVideoStorage::MixedChromaRows(MixedChromaLayout {
+            row_align: 0,
+            chroma_first: false,
+            vu: false,
+            packing: MixedSamplePacking::Words {
+                little_endian: false,
+            },
+        });
+        let mut stored = [0; 12];
+        assert!(copy_raw_video_frame(RawVideoFormat::I420p10, storage, 2, 2, &stored).is_some());
+        stored[0] = 4;
+        assert!(copy_raw_video_frame(RawVideoFormat::I420p10, storage, 2, 2, &stored).is_none());
     }
 
     #[test]
