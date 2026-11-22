@@ -27,8 +27,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::rtp::{CaptureTimeExtensionIds, RtpHeader};
 use g2g_core::{
-    Caps, Colorimetry, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Rate, VideoCodec,
+    BitstreamAlignment, Caps, Colorimetry, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, VideoCodec,
 };
 
 use crate::filesink::io_err;
@@ -97,7 +97,7 @@ impl Default for RtpRecvConfig {
     }
 }
 
-/// Refine video caps from H.26x parameter sets, VP8/VP9 keyframes, or AV1 sequence headers.
+/// Refine video caps from the coded stream's headers.
 /// The caller emits `CapsChanged` before forwarding a frame with new caps.
 #[derive(Debug)]
 pub struct VideoCapsRefiner {
@@ -126,6 +126,7 @@ impl VideoCapsRefiner {
             return None;
         };
         let (codec, framerate) = (*codec, framerate.clone());
+        let mut alignment = BitstreamAlignment::Unspecified;
         let (width, height, rate, colorimetry) = match codec {
             VideoCodec::H264 | VideoCodec::H265 => {
                 let sps = if codec == VideoCodec::H264 {
@@ -140,7 +141,7 @@ impl VideoCapsRefiner {
                 (info.width, info.height, None, Colorimetry::UNKNOWN)
             }
             VideoCodec::Vp9 => {
-                let info = crate::vp9parse::parse_keyframe(au)?;
+                let info = crate::vp9parse::parse_key_picture(au)?;
                 (info.width, info.height, None, info.colorimetry)
             }
             VideoCodec::Av1 => {
@@ -152,6 +153,17 @@ impl VideoCapsRefiner {
                     info.colorimetry,
                 )
             }
+            VideoCodec::Mjpeg => {
+                use crate::stillframe::{jpeg_field_pair, jpeg_geometry};
+                let (width, mut height) = jpeg_geometry(au)?;
+                if jpeg_field_pair(au)
+                    .is_some_and(|(_, second)| jpeg_geometry(second) == Some((width, height)))
+                {
+                    height *= 2;
+                    alignment = BitstreamAlignment::FieldPair;
+                }
+                (width, height, None, Colorimetry::UNKNOWN)
+            }
             _ => return None,
         };
         let refined = Caps::CompressedVideo {
@@ -162,7 +174,7 @@ impl VideoCapsRefiner {
             framerate: rate.map_or(framerate, Rate::Fixed),
             colorimetry,
             pixel_aspect: g2g_core::PixelAspect::Any,
-            alignment: g2g_core::BitstreamAlignment::Unspecified,
+            alignment,
         };
         if refined == self.current {
             return None;

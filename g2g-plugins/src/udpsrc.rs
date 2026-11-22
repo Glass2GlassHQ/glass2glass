@@ -2,10 +2,11 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
-//! UDP ingress source for H.264, H.265, VP8, VP9, AV1, Opus and AAC over RTP.
+//! UDP ingress source for H.264, H.265, VP8, VP9, AV1, JPEG, Opus and AAC over RTP.
 //! It binds a UDP socket and depayloads each codec's access units via
-//! [`rtpdepay`](crate::rtpdepay). H.26x is Annex-B, and VP8 and VP9 are
-//! one coded frame per buffer. AV1 is one low-overhead temporal unit per buffer.
+//! [`rtpdepay`](crate::rtpdepay). H.26x is Annex-B, VP8 is one coded frame per
+//! buffer, and VP9 is one picture per buffer. AV1 carries low-overhead temporal
+//! units, and JPEG carries complete images.
 //! `encoding-name=OPUS`, or an SDP with an `opus` rtpmap, selects Opus instead:
 //! each RTP payload goes downstream as one Opus packet, PTS from the 48 kHz RTP
 //! timestamp. An SDP with an `mpeg4-generic` rtpmap in AAC-hbr or AAC-lbr mode
@@ -14,9 +15,8 @@
 //! Caps come from three places. The `sdp` property takes the description a
 //! sender publishes (`ffmpeg -sdp_file`, an RTSP `DESCRIBE` body) and sets the
 //! codec, geometry, frame rate and receive port from it ([`crate::sdp`]), so
-//! negotiation runs on real values. The stream's SPS, VP8/VP9 keyframe header,
-//! or AV1 sequence header then supplies the actual geometry in a `CapsChanged`
-//! before the frame it describes. The declared hint
+//! negotiation runs on real values. The stream's video headers then supply the
+//! actual geometry in a `CapsChanged` before the frame they describe. The declared hint
 //! (`with_video_size` / `with_framerate`, default 1280x720@30) is the fallback
 //! until one of those lands, and stays in force for the fields neither supplies.
 //!
@@ -83,12 +83,13 @@ fn read_sdp(value: &str) -> Result<String, G2gError> {
 const DEFAULT_WIDTH: u32 = 1280;
 const DEFAULT_HEIGHT: u32 = 720;
 const DEFAULT_FPS: u32 = 30;
-const RTP_VIDEO_ENCODINGS: [RtpEncoding; 5] = [
+const RTP_VIDEO_ENCODINGS: [RtpEncoding; 6] = [
     RtpEncoding::H264,
     RtpEncoding::H265,
     RtpEncoding::Vp8,
     RtpEncoding::Vp9,
     RtpEncoding::Av1,
+    RtpEncoding::Jpeg,
 ];
 /// gst `udpsrc auto-multicast` default: join the group named by `address`.
 const DEFAULT_AUTO_MULTICAST: bool = true;
@@ -600,7 +601,7 @@ impl SourceLoop for UdpSrc {
                 "RTP payload format to depayload, as in gst application/x-rtp caps",
             )
             .with_default("H264")
-            .with_enum_values("H264 | H265 | VP8 | VP9 | AV1 | OPUS"),
+            .with_enum_values("H264 | H265 | VP8 | VP9 | AV1 | JPEG | OPUS"),
             PropertySpec::new(
                 "bytestream-format",
                 PropKind::Str,

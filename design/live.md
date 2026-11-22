@@ -580,16 +580,29 @@ closes an access unit. A sequence-number gap drops the in-flight reassembly, so
 loss or reorder never welds two access units together.
 
 `udpsrc` takes the RTP codec and optional geometry hints from its properties
-or SDP. H.26x parameter sets, VP8/VP9 keyframe headers and AV1 sequence headers
-supply the actual dimensions, which the source sends in `CapsChanged` before
-the affected frame. `encoding-name=VP8` (RFC 7741) and `encoding-name=VP9` (RFC 9628,
-single spatial layer) join consecutive fragments into one coded frame per
-buffer and discard an incomplete frame after a gap.
+or SDP. Coded video headers supply the actual dimensions, which the source
+sends in `CapsChanged` before the affected frame. `encoding-name=VP8` (RFC 7741)
+joins consecutive fragments into one coded frame per buffer.
+
+`encoding-name=VP9` (RFC 9628) collects spatial-layer frames until the RTP
+marker closes the picture. It adds a VP9 superframe index to multilayer
+pictures and announces the highest layer geometry it can read from the key
+picture. A sequence gap drops an incomplete picture.
 
 `encoding-name=AV1` or an SDP with an `AV1/90000` rtpmap selects the AV1
 depayloader. It rejoins OBU fragments, restores OBU size fields, and emits
 one low-overhead temporal unit per buffer. The RTP marker or a timestamp
 change closes the unit. A sequence gap drops the in-flight unit.
+
+`encoding-name=JPEG` or SDP payload type 26 selects RTP/JPEG (RFC 2435).
+The depayloader reassembles each 4:2:0 or 4:2:2 scan into a
+standalone JPEG image. It reconstructs the headers from the JPEG type
+and quantization data, retains static tables by SSRC and quality ID,
+and preserves restart intervals. Consecutive odd and even fields form one
+top-field-first access unit at the odd field's RTP timestamp. A single-field
+picture supplies both fields. The source announces the full height and
+`FieldPair` alignment, which `jpegparse` preserves and `mjpegdec` uses to
+weave alternate rows.
 
 `encoding-name=OPUS` (`RtpEncoding::Opus`), or an SDP whose first mappable
 section has an `opus` rtpmap, switches the source to Opus. Each RTP payload goes

@@ -6,6 +6,9 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2512: `udpsrc` reassembles interlaced JPEG fields over RTP.
+- M2511: `udpsrc` receives progressive Motion JPEG over RTP.
+- M2510: `udpsrc` receives spatially scalable VP9 over RTP.
 - M2509: The SSD label tests can run in parallel.
 - M2508: `udpsrc` receives AV1 over RTP.
 - M2507: `udpsrc` receives VP8 and single-spatial-layer VP9 over RTP.

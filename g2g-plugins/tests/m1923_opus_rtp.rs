@@ -29,6 +29,10 @@ use g2g_plugins::sdp::{OPUS_CLOCK_HZ, OPUS_RTPMAP_CHANNELS};
 use g2g_plugins::udpsink::UdpSink;
 use g2g_plugins::udpsrc::UdpSrc;
 
+#[path = "common/gstreamer_tool.rs"]
+mod gstreamer_tool;
+use gstreamer_tool::have_gstreamer_elements;
+
 // a whole number of 20 ms Opus frames, so opusenc pads no tail
 const SOURCE_BUFFERS: u64 = 100;
 const SOURCE_CHANNELS: u8 = 2;
@@ -294,7 +298,7 @@ async fn encoding_name_defaults_to_h264_and_opus_refuses_geometry() {
         "Opus has no geometry to hint"
     );
     assert!(src
-        .set_property("encoding-name", PropValue::Str("VP8".into()))
+        .set_property("encoding-name", PropValue::Str("unsupported-codec".into()))
         .is_err());
 }
 
@@ -313,15 +317,6 @@ fn opus_rtp_launch_lines_build() {
 }
 
 // ---- GStreamer reference peer ----
-
-fn have_gstreamer_elements(elements: &[&str]) -> bool {
-    elements.iter().all(|element| {
-        Command::new("gst-inspect-1.0")
-            .args(["--exists", element])
-            .status()
-            .is_ok_and(|status| status.success())
-    })
-}
 
 fn read_on_thread(mut pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
     std::thread::spawn(move || {

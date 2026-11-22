@@ -36,9 +36,9 @@ use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    g2g_warn, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
-    FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    Rate, VideoCodec,
+    g2g_warn, AsyncElement, BitstreamAlignment, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
+    Dim, ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate,
+    PadTemplates, PipelinePacket, Rate, VideoCodec,
 };
 
 use crate::compositor::frame_period_ns;
@@ -117,11 +117,12 @@ pub struct StillImageParse<F: StillImageFormat> {
     assembler: ImageAssembler,
     /// The framerate negotiation fixed, which the timestamps step by.
     framerate: Rate,
-    /// The geometry of the last image emitted, so caps are re-declared only on a
+    /// The geometry and alignment last emitted, so caps are re-declared only on a
     /// real change.
-    declared: Option<(u32, u32)>,
+    declared: Option<(u32, u32, BitstreamAlignment)>,
     // the frame height upstream declares, a container header's
     container_height: Option<u32>,
+    alignment: BitstreamAlignment,
     // the first field of an interlaced frame, held until the second arrives
     first_field: Option<Vec<u8>>,
     /// A presentation time from upstream, applied to the next image emitted.
@@ -153,6 +154,7 @@ impl<F: StillImageFormat> StillImageParse<F> {
             framerate: Rate::Any,
             declared: None,
             container_height: None,
+            alignment: BitstreamAlignment::Unspecified,
             first_field: None,
             pending_pts: None,
             base_ns: 0,
@@ -172,7 +174,12 @@ impl<F: StillImageFormat> StillImageParse<F> {
     /// What the element accepts and produces: the format's codec at any
     /// geometry. The output is the same media type, framed, so the caps differ
     /// only once the header's geometry is known.
-    fn stream_caps(width: Dim, height: Dim, framerate: Rate) -> Caps {
+    fn stream_caps(
+        width: Dim,
+        height: Dim,
+        framerate: Rate,
+        alignment: BitstreamAlignment,
+    ) -> Caps {
         Caps::CompressedVideo {
             codec: F::CODEC,
             width,
@@ -180,29 +187,38 @@ impl<F: StillImageFormat> StillImageParse<F> {
             framerate,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
             pixel_aspect: g2g_core::PixelAspect::Any,
-            alignment: g2g_core::BitstreamAlignment::Unspecified,
+            alignment,
         }
     }
 
     fn adopt_upstream_caps(&mut self, caps: &Caps) {
         if let Caps::CompressedVideo {
-            framerate, height, ..
+            framerate,
+            height,
+            alignment,
+            ..
         } = caps
         {
             self.framerate = framerate.clone();
-            self.container_height = match height {
+            let new_height = match height {
                 Dim::Fixed(height) => Some(*height),
                 _ => None,
             };
+            if self.alignment != *alignment || self.container_height != new_height {
+                self.drop_unpaired_field();
+            }
+            self.container_height = new_height;
+            self.alignment = *alignment;
         }
     }
 
     // the threshold ffmpeg and GStreamer use: a field image is under three quarters of the frame height
     fn is_field(&self, image_height: u32) -> bool {
         F::CARRIES_FIELD_PAIRS
-            && self.container_height.is_some_and(|frame_height| {
-                u64::from(image_height) * 4 < u64::from(frame_height) * 3
-            })
+            && (self.alignment == BitstreamAlignment::FieldPair
+                || self.container_height.is_some_and(|frame_height| {
+                    u64::from(image_height) * 4 < u64::from(frame_height) * 3
+                }))
     }
 
     // an image that is one field waits for the second, then both go out as one access unit
@@ -242,14 +258,20 @@ impl<F: StillImageFormat> StillImageParse<F> {
         height: u32,
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
-        if self.declared != Some((width, height)) {
+        let alignment = if self.alignment == BitstreamAlignment::FieldPair {
+            self.alignment
+        } else {
+            BitstreamAlignment::Unspecified
+        };
+        if self.declared != Some((width, height, alignment)) {
             out.push(PipelinePacket::CapsChanged(Self::stream_caps(
                 Dim::Fixed(width),
                 Dim::Fixed(height),
                 self.framerate.clone(),
+                alignment,
             )))
             .await?;
-            self.declared = Some((width, height));
+            self.declared = Some((width, height, alignment));
         }
         if let Some(pts) = self.pending_pts.take() {
             self.base_ns = pts;
@@ -302,7 +324,12 @@ impl<F: StillImageFormat> AsyncElement for StillImageParse<F> {
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        upstream_caps.intersect(&Self::stream_caps(Dim::Any, Dim::Any, Rate::Any))
+        upstream_caps.intersect(&Self::stream_caps(
+            Dim::Any,
+            Dim::Any,
+            Rate::Any,
+            BitstreamAlignment::Unspecified,
+        ))
     }
 
     /// Pass-through identity: the media type is unchanged and the geometry is
@@ -582,12 +609,14 @@ mod tests {
                 StillImageParse::<Png>::stream_caps(
                     Dim::Fixed(WIDTH),
                     Dim::Fixed(HEIGHT),
-                    rate.clone()
+                    rate.clone(),
+                    BitstreamAlignment::Unspecified,
                 ),
                 StillImageParse::<Png>::stream_caps(
                     Dim::Fixed(WIDTH / 2),
                     Dim::Fixed(HEIGHT / 2),
-                    rate
+                    rate,
+                    BitstreamAlignment::Unspecified,
                 ),
             ]
         );
@@ -653,7 +682,8 @@ mod tests {
             vec![StillImageParse::<Jpeg>::stream_caps(
                 Dim::Fixed(WIDTH),
                 Dim::Fixed(HEIGHT),
-                Rate::Fixed(FRAMERATE_FPS << 16)
+                Rate::Fixed(FRAMERATE_FPS << 16),
+                BitstreamAlignment::Unspecified,
             )]
         );
     }
@@ -702,6 +732,7 @@ mod tests {
             Dim::Fixed(WIDTH),
             Dim::Fixed(frame_height),
             Rate::Fixed(FRAMERATE_FPS << 16),
+            BitstreamAlignment::Unspecified,
         );
         let mut parser = JpegParse::new();
         parser
@@ -721,7 +752,8 @@ mod tests {
             vec![StillImageParse::<Jpeg>::stream_caps(
                 Dim::Fixed(WIDTH),
                 Dim::Fixed(frame_height),
-                Rate::Fixed(FRAMERATE_FPS << 16)
+                Rate::Fixed(FRAMERATE_FPS << 16),
+                BitstreamAlignment::Unspecified,
             )]
         );
     }

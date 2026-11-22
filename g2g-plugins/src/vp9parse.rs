@@ -128,7 +128,7 @@ impl AsyncElement for Vp9Parse {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     if let g2g_core::MemoryDomain::System(slice) = &frame.domain {
-                        if let Some(info) = parse_keyframe(slice.as_slice()) {
+                        if let Some(info) = parse_key_picture(slice.as_slice()) {
                             let new_caps = Caps::CompressedVideo {
                                 codec: VideoCodec::Vp9,
                                 width: Dim::Fixed(info.width),
@@ -201,6 +201,26 @@ pub struct Vp9KeyFrame {
 /// Whether `packet` is a shown VP9 key frame with a readable header.
 pub(crate) fn is_keyframe(packet: &[u8]) -> bool {
     parse_keyframe(packet).is_some()
+}
+
+/// A key picture opens with a keyframe and can include higher spatial layers.
+pub(crate) fn parse_key_picture(packet: &[u8]) -> Option<Vp9KeyFrame> {
+    let mut info = parse_keyframe(packet)?;
+    for frame in superframe_frames(packet).into_iter().skip(1) {
+        if let Some(Vp9FrameHeader {
+            kind:
+                Vp9FrameKind::Decoded {
+                    coded_size: Some((width, height)),
+                    ..
+                },
+            ..
+        }) = frame_header(frame)
+        {
+            info.width = width;
+            info.height = height;
+        }
+    }
+    Some(info)
 }
 
 /// Decode a VP9 key-frame uncompressed header. `None` when the marker / sync
@@ -314,7 +334,6 @@ pub(crate) fn keyframe_color_config(packet: &[u8]) -> Option<Vp9ColorConfig> {
     read_keyframe_head(&mut BitReader::new(packet))
 }
 
-#[cfg(all(any(target_os = "linux", windows), feature = "nvdec"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Vp9FrameKind {
     // repeats the frame held in reference slot `slot`
@@ -331,7 +350,6 @@ pub(crate) enum Vp9FrameKind {
     },
 }
 
-#[cfg(all(any(target_os = "linux", windows), feature = "nvdec"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Vp9FrameHeader {
     pub(crate) profile: u8,
@@ -344,7 +362,6 @@ fn read_frame_size(br: &mut BitReader) -> Option<(u32, u32)> {
 }
 
 // frame_size_with_refs, after the reference indices and sign biases
-#[cfg(all(any(target_os = "linux", windows), feature = "nvdec"))]
 fn inter_frame_size(br: &mut BitReader) -> Option<(u32, u32)> {
     const REFS_PER_FRAME: u32 = 3;
     br.read_bits(REFS_PER_FRAME * 4)?; // ref_frame_idx and ref_frame_sign_bias
@@ -357,7 +374,6 @@ fn inter_frame_size(br: &mut BitReader) -> Option<(u32, u32)> {
 }
 
 // the uncompressed header up to the frame size
-#[cfg(all(any(target_os = "linux", windows), feature = "nvdec"))]
 pub(crate) fn frame_header(frame: &[u8]) -> Option<Vp9FrameHeader> {
     const KEY_FRAME_REFRESHES_EVERY_SLOT: u8 = 0xFF;
     let mut br = BitReader::new(frame);
@@ -416,20 +432,38 @@ pub(crate) fn frame_header(frame: &[u8]) -> Option<Vp9FrameHeader> {
     })
 }
 
+const SUPERFRAME_MARKER: u8 = 0b1100_0000;
+const SUPERFRAME_MARKER_BITS: u8 = 0b1110_0000;
+const SUPERFRAME_COUNT_BITS: u8 = 0b111;
+const SUPERFRAME_SIZE_SHIFT: u8 = 3;
+pub(crate) const MAX_SPATIAL_LAYERS: usize = SUPERFRAME_COUNT_BITS as usize + 1;
+
+/// Append the VP9 superframe index for two or more concatenated frames.
+pub(crate) fn append_superframe_index(packet: &mut Vec<u8>, sizes: &[u32]) {
+    debug_assert!((2..=MAX_SPATIAL_LAYERS).contains(&sizes.len()));
+    let largest = sizes.iter().copied().max().unwrap_or(1).max(1);
+    let size_bytes = (u32::BITS - largest.leading_zeros()).div_ceil(8) as usize;
+    let marker = SUPERFRAME_MARKER
+        | ((size_bytes as u8 - 1) << SUPERFRAME_SIZE_SHIFT)
+        | (sizes.len() as u8 - 1);
+    packet.push(marker);
+    for &size in sizes {
+        packet.extend_from_slice(&size.to_le_bytes()[..size_bytes]);
+    }
+    packet.push(marker);
+}
+
 // the frames of a superframe, or the whole packet when it carries no valid index
-#[cfg(all(any(target_os = "linux", windows), feature = "nvdec"))]
 pub(crate) fn superframe_frames(packet: &[u8]) -> Vec<&[u8]> {
-    const MARKER_BITS: u8 = 0b1110_0000;
-    const MARKER: u8 = 0b1100_0000;
     let whole = || Vec::from([packet]);
     let Some(&last) = packet.last() else {
         return whole();
     };
-    if last & MARKER_BITS != MARKER {
+    if last & SUPERFRAME_MARKER_BITS != SUPERFRAME_MARKER {
         return whole();
     }
-    let frames = usize::from(last & 0b111) + 1;
-    let size_bytes = usize::from((last >> 3) & 0b11) + 1;
+    let frames = usize::from(last & SUPERFRAME_COUNT_BITS) + 1;
+    let size_bytes = usize::from((last >> SUPERFRAME_SIZE_SHIFT) & 0b11) + 1;
     let index_len = 2 + size_bytes * frames;
     let Some(index_start) = packet.len().checked_sub(index_len) else {
         return whole();
@@ -447,13 +481,18 @@ pub(crate) fn superframe_frames(packet: &[u8]) -> Vec<&[u8]> {
         let Some(frame) = offset
             .checked_add(size)
             .and_then(|end| packet[..index_start].get(offset..end))
+            .filter(|frame| !frame.is_empty())
         else {
             return whole();
         };
         out.push(frame);
         offset += size;
     }
-    out
+    if offset == index_start {
+        out
+    } else {
+        whole()
+    }
 }
 
 /// Fuzzing entry: parse a VP9 keyframe's uncompressed header (frame-marker /
@@ -787,7 +826,6 @@ mod tests {
         assert_eq!(kind(&[0]), None, "no frame marker");
     }
 
-    #[cfg(all(any(target_os = "linux", windows), feature = "nvdec"))]
     #[test]
     fn superframe_frames_splits_by_the_trailing_index() {
         // two frames of 3 and 2 bytes, then an index of one-byte sizes

@@ -198,7 +198,6 @@ libraries installed.
   - AV1 and VP9 on `mediacodecdec`.
   - HEVC 4:4:4 and 12-bit on `nvdec`.
 - **RTP receive:**
-  - JPEG RTP payloads and spatially scalable VP9 in `udpsrc`.
   - RED (RFC 2198) receive.
 - **RTSP:**
   - retina joins an absolute `a=control:/path` onto the base URL. Report it

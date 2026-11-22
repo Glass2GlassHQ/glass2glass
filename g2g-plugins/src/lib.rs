@@ -612,6 +612,7 @@ pub mod sdp;
 pub mod rtppay;
 // Sans-IO H.264 RTP depayloader, the receive-side inverse of rtppay.
 pub mod rtpdepay;
+mod rtpjpeg;
 // Sans-IO KLV metadata RTP payloader / depayloader (RFC 6597, SMPTE ST 336).
 pub mod rtpklv;
 

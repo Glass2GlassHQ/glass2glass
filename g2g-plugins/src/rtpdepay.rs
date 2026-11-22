@@ -11,7 +11,9 @@
 //! datagrams a socket receives. Opus (RFC 7587) needs no reassembly: each RTP
 //! payload is one Opus packet. VP8 (RFC 7741) and VP9 (RFC 9628) strip their
 //! payload descriptors and join consecutive fragments of each coded frame.
+//! VP9 spatial layers in the same picture are emitted as one superframe.
 //! AV1 RTP reassembles size-delimited OBUs into temporal units.
+//! JPEG RTP reassembles scans into standalone JPEG images.
 //!
 //! Packets arrive in order from the jitter buffer. A sequence gap resets
 //! in-flight reassembly so fragments on either side are never joined.
@@ -22,16 +24,19 @@ use g2g_core::mediaclock::MediaClock;
 use g2g_core::rtp::RtpHeader;
 use g2g_core::VideoCodec;
 
+pub use crate::rtpjpeg::RtpJpegDepayloader;
 use crate::rtppay::{FU_A_TYPE, FU_END_BIT, FU_START_BIT, H265_FU_TYPE, H265_NAL_HEADER_LEN};
 use crate::sdp::OPUS_CLOCK_HZ;
+use crate::vp9parse::{append_superframe_index, MAX_SPATIAL_LAYERS};
 
 /// RFC 6184 aggregation packet NAL type.
 const STAP_A_TYPE: u8 = 24;
 const ANNEX_B_START_CODE: [u8; 4] = [0, 0, 0, 1];
 
 /// One depayloaded access unit with the RTP timestamp shared by its packets.
-/// H.26x is Annex-B, VP8 and VP9 each carry one coded frame, AV1 carries a
-/// low-overhead temporal unit, and Opus carries one Opus packet.
+/// H.26x is Annex-B, VP8 carries one coded frame, VP9 carries one picture,
+/// AV1 carries a low-overhead temporal unit, JPEG carries one image, and Opus
+/// carries one Opus packet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessUnit {
     pub data: Vec<u8>,
@@ -43,7 +48,7 @@ pub struct AccessUnit {
 /// would otherwise grow without bound on untrusted RTP; past this we drop the
 /// in-flight data and resync at the next start-of-AU. 8 MiB covers a large
 /// keyframe.
-const MAX_ASSEMBLY_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_ASSEMBLY_BYTES: usize = 8 * 1024 * 1024;
 
 // RFC 3640 `mpeg4-generic` AAC in AAC-hbr or AAC-lbr mode, as its SDP fmtp declares it
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +91,7 @@ pub enum RtpEncoding {
     Vp8,
     Vp9,
     Av1,
+    Jpeg,
     Aac(Mpeg4GenericAac),
     AacLatm(Mp4aLatmAac),
 }
@@ -99,6 +105,7 @@ impl RtpEncoding {
             "VP8" => Some(RtpEncoding::Vp8),
             "VP9" => Some(RtpEncoding::Vp9),
             "AV1" => Some(RtpEncoding::Av1),
+            "JPEG" => Some(RtpEncoding::Jpeg),
             _ => None,
         }
     }
@@ -111,6 +118,7 @@ impl RtpEncoding {
             RtpEncoding::Vp8 => "VP8",
             RtpEncoding::Vp9 => "VP9",
             RtpEncoding::Av1 => "AV1",
+            RtpEncoding::Jpeg => "JPEG",
             RtpEncoding::Aac(_) => "MPEG4-GENERIC",
             RtpEncoding::AacLatm(_) => "MP4A-LATM",
         }
@@ -122,7 +130,8 @@ impl RtpEncoding {
             | RtpEncoding::H265
             | RtpEncoding::Vp8
             | RtpEncoding::Vp9
-            | RtpEncoding::Av1 => MediaClock::VIDEO_RATE_HZ,
+            | RtpEncoding::Av1
+            | RtpEncoding::Jpeg => MediaClock::VIDEO_RATE_HZ,
             RtpEncoding::Opus => OPUS_CLOCK_HZ,
             RtpEncoding::Aac(format) => format.clock_rate_hz,
             RtpEncoding::AacLatm(format) => format.clock_rate_hz,
@@ -136,11 +145,12 @@ impl RtpEncoding {
             RtpEncoding::Vp8 => Some(VideoCodec::Vp8),
             RtpEncoding::Vp9 => Some(VideoCodec::Vp9),
             RtpEncoding::Av1 => Some(VideoCodec::Av1),
+            RtpEncoding::Jpeg => Some(VideoCodec::Mjpeg),
             RtpEncoding::Opus | RtpEncoding::Aac(_) | RtpEncoding::AacLatm(_) => None,
         }
     }
 
-    // every Opus packet and AAC frame decodes without the ones before it
+    // JPEG, Opus and AAC access units decode independently of earlier units.
     pub fn is_keyframe(&self, unit: &[u8]) -> bool {
         match self {
             RtpEncoding::H264 => crate::annexb::au_is_keyframe(VideoCodec::H264, unit),
@@ -148,7 +158,10 @@ impl RtpEncoding {
             RtpEncoding::Vp8 => crate::vp8parse::is_keyframe(unit),
             RtpEncoding::Vp9 => crate::vp9parse::is_keyframe(unit),
             RtpEncoding::Av1 => crate::av1parse::av1_keyframe(unit),
-            RtpEncoding::Opus | RtpEncoding::Aac(_) | RtpEncoding::AacLatm(_) => true,
+            RtpEncoding::Jpeg
+            | RtpEncoding::Opus
+            | RtpEncoding::Aac(_)
+            | RtpEncoding::AacLatm(_) => true,
         }
     }
 }
@@ -163,6 +176,7 @@ pub enum RtpDepayloader {
     H265(RtpH265Depayloader),
     Vp(RtpVpDepayloader),
     Av1(RtpAv1Depayloader),
+    Jpeg(RtpJpegDepayloader),
     Aac(RtpAacDepayloader),
     AacLatm(RtpLatmDepayloader),
 }
@@ -176,6 +190,7 @@ impl RtpDepayloader {
             RtpEncoding::Vp8 => RtpDepayloader::Vp(RtpVpDepayloader::new(vp8_fragment)),
             RtpEncoding::Vp9 => RtpDepayloader::Vp(RtpVpDepayloader::new(vp9_fragment)),
             RtpEncoding::Av1 => RtpDepayloader::Av1(RtpAv1Depayloader::default()),
+            RtpEncoding::Jpeg => RtpDepayloader::Jpeg(RtpJpegDepayloader::default()),
             RtpEncoding::Aac(format) => RtpDepayloader::Aac(RtpAacDepayloader::new(format.clone())),
             RtpEncoding::AacLatm(format) => {
                 RtpDepayloader::AacLatm(RtpLatmDepayloader::new(format.clone()))
@@ -192,6 +207,9 @@ impl RtpDepayloader {
                 depayloader.depacketize(packet).into_iter().collect()
             }
             RtpDepayloader::Av1(depayloader) => depayloader.depacketize(packet).collect(),
+            RtpDepayloader::Jpeg(depayloader) => {
+                depayloader.depacketize(packet).into_iter().collect()
+            }
             RtpDepayloader::Opus => depacketize_opus(packet).into_iter().collect(),
             RtpDepayloader::Aac(depayloader) => depayloader.depacketize(packet),
             RtpDepayloader::AacLatm(depayloader) => depayloader.depacketize(packet),
@@ -327,6 +345,9 @@ impl Av1TemporalUnit {
 struct VpFragment<'a> {
     start: bool,
     end: bool,
+    picture_id: Option<u16>,
+    spatial_id: Option<u8>,
+    depends_on_lower: bool,
     bytes: &'a [u8],
 }
 
@@ -334,26 +355,96 @@ struct VpFragment<'a> {
 struct VpAssembly {
     unit: AccessUnit,
     next_sequence: u16,
+    ssrc: u32,
+    picture_id: Option<u16>,
+    spatial_id: u8,
+    layer_end: usize,
+    layer_count: usize,
+    layer_sizes: [u32; MAX_SPATIAL_LAYERS],
 }
 
-/// Reassembles the payloads of consecutive packets into one VP8 or VP9 frame.
+impl VpAssembly {
+    fn new(header: RtpHeader, fragment: &VpFragment<'_>) -> Self {
+        Self {
+            unit: AccessUnit {
+                data: Vec::new(),
+                rtp_timestamp: header.timestamp,
+            },
+            next_sequence: header.sequence,
+            ssrc: header.ssrc,
+            picture_id: fragment.picture_id,
+            spatial_id: fragment.spatial_id.unwrap_or_default(),
+            layer_end: 0,
+            layer_count: 0,
+            layer_sizes: [0; MAX_SPATIAL_LAYERS],
+        }
+    }
+
+    fn matches_picture(&self, header: RtpHeader, fragment: &VpFragment<'_>) -> bool {
+        self.unit.rtp_timestamp == header.timestamp
+            && self.ssrc == header.ssrc
+            && self
+                .picture_id
+                .zip(fragment.picture_id)
+                .is_none_or(|(previous, current)| previous == current)
+    }
+
+    fn append(&mut self, fragment: VpFragment<'_>) -> Option<()> {
+        let at_layer_start = self.unit.data.len() == self.layer_end;
+        let new_layer = fragment.start && self.layer_count != 0;
+        let spatial_id = fragment
+            .spatial_id
+            .unwrap_or(self.spatial_id + u8::from(new_layer));
+        if fragment.start != at_layer_start
+            || usize::from(spatial_id) >= MAX_SPATIAL_LAYERS
+            || (!fragment.start && spatial_id != self.spatial_id)
+            || (new_layer && spatial_id <= self.spatial_id)
+            || (fragment.depends_on_lower
+                && fragment.start
+                && (!new_layer || spatial_id != self.spatial_id + 1))
+            || self.unit.data.len().saturating_add(fragment.bytes.len()) > MAX_ASSEMBLY_BYTES
+        {
+            return None;
+        }
+        self.picture_id = self.picture_id.or(fragment.picture_id);
+        self.spatial_id = spatial_id;
+        self.unit.data.extend_from_slice(fragment.bytes);
+        if fragment.end {
+            let end = self.unit.data.len();
+            *self.layer_sizes.get_mut(self.layer_count)? =
+                u32::try_from(end - self.layer_end).ok()?;
+            self.layer_count += 1;
+            self.layer_end = end;
+        }
+        Some(())
+    }
+
+    fn finish(mut self) -> AccessUnit {
+        if self.layer_count > 1 {
+            append_superframe_index(&mut self.unit.data, &self.layer_sizes[..self.layer_count]);
+        }
+        self.unit
+    }
+}
+
+/// Reassembles consecutive packets into one VP8 frame or VP9 picture.
 #[derive(Debug)]
 pub struct RtpVpDepayloader {
     parse_fragment: fn(&[u8], bool) -> Option<VpFragment<'_>>,
-    frame: Option<VpAssembly>,
+    picture: Option<VpAssembly>,
 }
 
 impl RtpVpDepayloader {
     fn new(parse_fragment: fn(&[u8], bool) -> Option<VpFragment<'_>>) -> Self {
         Self {
             parse_fragment,
-            frame: None,
+            picture: None,
         }
     }
 
     pub fn depacketize(&mut self, packet: &[u8]) -> Option<AccessUnit> {
         // A malformed packet breaks the run. Only a subsequent frame start can reopen it.
-        let mut frame = self.frame.take();
+        let previous = self.picture.take();
         let parsed = RtpHeader::parse(packet)?;
         let header = parsed.header;
         let payload =
@@ -362,37 +453,33 @@ impl RtpVpDepayloader {
         if fragment.bytes.is_empty() {
             return None;
         }
-        if fragment.start {
-            frame = Some(VpAssembly {
-                unit: AccessUnit {
-                    data: Vec::new(),
-                    rtp_timestamp: header.timestamp,
-                },
-                next_sequence: header.sequence,
-            });
-        }
-        let mut frame = frame?;
-        if frame.unit.rtp_timestamp != header.timestamp
-            || frame.next_sequence != header.sequence
-            || frame.unit.data.len().saturating_add(fragment.bytes.len()) > MAX_ASSEMBLY_BYTES
-        {
-            return None;
-        }
-        frame.unit.data.extend_from_slice(fragment.bytes);
-        if fragment.end {
-            return Some(frame.unit);
+        let mut frame = match previous.filter(|frame| frame.matches_picture(header, &fragment)) {
+            Some(frame) if frame.next_sequence == header.sequence => frame,
+            None if fragment.start && !fragment.depends_on_lower => {
+                VpAssembly::new(header, &fragment)
+            }
+            _ => return None,
+        };
+        frame.append(fragment)?;
+        if header.marker {
+            return Some(frame.finish());
         }
         frame.next_sequence = header.sequence.wrapping_add(1);
-        self.frame = Some(frame);
+        self.picture = Some(frame);
         None
     }
 }
 
 // Both payload descriptors use the high bit of the first PictureID octet
 // to indicate the 15-bit rather than the 7-bit form.
-fn after_picture_id(body: &[u8]) -> Option<&[u8]> {
-    let id_bytes = if body.first()? & 0x80 != 0 { 2 } else { 1 };
-    body.get(id_bytes..)
+fn split_picture_id(body: &[u8]) -> Option<(u16, &[u8])> {
+    let (&first, rest) = body.split_first()?;
+    let id = u16::from(first & 0x7f);
+    if first & 0x80 == 0 {
+        return Some((id, rest));
+    }
+    let (&second, rest) = rest.split_first()?;
+    Some(((id << 8) | u16::from(second), rest))
 }
 
 // RFC 7741 section 4.2: S at partition zero starts the frame, the RTP marker ends it.
@@ -407,7 +494,7 @@ fn vp8_fragment(payload: &[u8], marker: bool) -> Option<VpFragment<'_>> {
     if descriptor & X != 0 {
         let (&extension, rest) = body.split_first()?;
         body = if extension & I != 0 {
-            after_picture_id(rest)?
+            split_picture_id(rest)?.1
         } else {
             rest
         };
@@ -417,12 +504,15 @@ fn vp8_fragment(payload: &[u8], marker: bool) -> Option<VpFragment<'_>> {
     Some(VpFragment {
         start: descriptor & (START | PARTITION) == START,
         end: marker,
+        picture_id: None,
+        spatial_id: Some(0),
+        depends_on_lower: false,
         bytes: body,
     })
 }
 
 // RFC 9628 sections 4.2 and 4.3: B/E delimit one spatial layer's coded frame.
-// A single-layer picture also has the RTP marker set on its final packet.
+// The RTP marker closes the picture after its last spatial layer.
 fn vp9_fragment(payload: &[u8], marker: bool) -> Option<VpFragment<'_>> {
     const I: u8 = 0x80;
     const P: u8 = 0x40;
@@ -435,19 +525,24 @@ fn vp9_fragment(payload: &[u8], marker: bool) -> Option<VpFragment<'_>> {
     let (&descriptor, mut body) = payload.split_first()?;
     let flexible = descriptor & F != 0;
     let end = descriptor & E != 0;
-    if end != marker || (flexible && descriptor & I == 0) {
+    if (marker && !end) || (flexible && descriptor & I == 0) {
         return None;
     }
-    if descriptor & I != 0 {
-        body = after_picture_id(body)?;
-    }
-    if descriptor & L != 0 {
-        if body.first()? & SID != 0 {
-            return None;
-        }
+    let picture_id = if descriptor & I != 0 {
+        let (id, rest) = split_picture_id(body)?;
+        body = rest;
+        Some(id)
+    } else {
+        None
+    };
+    let (spatial_id, depends_on_lower) = if descriptor & L != 0 {
+        let indices = *body.first()?;
         // In non-flexible mode the layer indices are followed by TL0PICIDX.
         body = body.get(if flexible { 1 } else { 2 }..)?;
-    }
+        (Some((indices & SID) >> 1), indices & 1 != 0)
+    } else {
+        (None, false)
+    };
     if flexible && descriptor & P != 0 {
         body = after_vp9_references(body)?;
     }
@@ -457,6 +552,9 @@ fn vp9_fragment(payload: &[u8], marker: bool) -> Option<VpFragment<'_>> {
     Some(VpFragment {
         start: descriptor & B != 0,
         end,
+        picture_id,
+        spatial_id,
+        depends_on_lower,
         bytes: body,
     })
 }
@@ -475,11 +573,9 @@ fn after_vp9_references(mut body: &[u8]) -> Option<&[u8]> {
 
 fn after_vp9_scalability(body: &[u8]) -> Option<&[u8]> {
     let (&scalability, mut body) = body.split_first()?;
-    if scalability >> 5 != 0 {
-        return None;
-    }
     if scalability & 0x10 != 0 {
-        body = body.get(4..)?; // optional width and height, one pair for the single spatial layer
+        let layers = usize::from(scalability >> 5) + 1;
+        body = body.get(4 * layers..)?; // optional width and height for each layer
     }
     if scalability & 0x08 != 0 {
         let (&pictures, rest) = body.split_first()?;
@@ -1187,9 +1283,9 @@ mod tests {
             }]
         );
         let too_many_references = rtp_packet(10, 270, true, &[0xfc, 9, 0, 3, 5, 7, 8, 0xdd]);
-        let multiple_layers = rtp_packet(11, 360, true, &[0x0e, 0x20, 0xdd]);
+        let truncated_layer_sizes = rtp_packet(11, 360, true, &[0x0e, 0x30, 0xdd]);
         assert!(depay.depacketize(&too_many_references).is_empty());
-        assert!(depay.depacketize(&multiple_layers).is_empty());
+        assert!(depay.depacketize(&truncated_layer_sizes).is_empty());
     }
 
     #[test]
@@ -1218,6 +1314,35 @@ mod tests {
     }
 
     #[test]
+    fn vp9_drops_a_picture_with_a_missing_or_invalid_layer() {
+        for (sequence, descriptor, picture_id, layer) in [
+            (3, 0xac, 7, 0x03), // loss between layers
+            (2, 0xa8, 7, 0x03), // marker before the layer ends
+            (2, 0xac, 8, 0x03), // a layer from another picture
+            (2, 0xac, 7, 0x05), // dependent layer 2 without layer 1
+            (2, 0xac, 7, 0x00), // repeated layer 0
+        ] {
+            let mut depay = RtpDepayloader::new(&RtpEncoding::Vp9);
+            let base = rtp_packet(1, 90, false, &[0xac, 7, 0, 7, 0xaa]);
+            let upper = rtp_packet(
+                sequence,
+                90,
+                true,
+                &[descriptor, picture_id, layer, 7, 0xbb],
+            );
+            assert!(depay.depacketize(&base).is_empty());
+            assert!(depay.depacketize(&upper).is_empty());
+            assert_eq!(
+                depay.depacketize(&rtp_packet(sequence + 1, 180, true, &[0x0c, 0xcc])),
+                [AccessUnit {
+                    data: alloc::vec![0xcc],
+                    rtp_timestamp: 180
+                }]
+            );
+        }
+    }
+
+    #[test]
     fn av1_rejoins_obu_fragments_and_normalizes_both_aggregation_forms() {
         let mut depay = RtpDepayloader::new(&RtpEncoding::Av1);
         // W=2: sequence header then the start of an extended frame OBU.
@@ -1239,6 +1364,90 @@ mod tests {
                 rtp_timestamp: 90
             }]
         );
+    }
+
+    #[test]
+    fn jpeg_reassembles_a_scan_with_restart_markers_and_generated_quantizers() {
+        let mut depay = RtpDepayloader::new(&RtpEncoding::Jpeg);
+        let start = rtp_packet(
+            u16::MAX,
+            180,
+            false,
+            &[0, 0, 0, 0, 65, 50, 8, 6, 0, 2, 0xff, 0xff, 0x11, 0xff, 0xd0],
+        );
+        let end = rtp_packet(
+            0,
+            180,
+            true,
+            &[0, 0, 0, 3, 65, 50, 8, 6, 0, 2, 0xff, 0xff, 0x22],
+        );
+        assert!(depay.depacketize(&start).is_empty());
+        let units = depay.depacketize(&end);
+        let [unit] = units.as_slice() else {
+            panic!("expected one JPEG image");
+        };
+        assert_eq!(unit.rtp_timestamp, 180);
+        assert_eq!(crate::stillframe::jpeg_geometry(&unit.data), Some((64, 48)));
+        assert_eq!(&unit.data[2..11], &[0xff, 0xdb, 0, 132, 0, 16, 11, 12, 14]);
+        assert!(unit
+            .data
+            .windows(6)
+            .any(|bytes| bytes == [0xff, 0xdd, 0, 4, 0, 2]));
+        assert!(unit.data.ends_with(&[0x11, 0xff, 0xd0, 0x22, 0xff, 0xd9]));
+    }
+
+    #[test]
+    fn jpeg_reuses_static_quantizers_and_resynchronizes_after_bad_offsets() {
+        let mut depay = RtpDepayloader::new(&RtpEncoding::Jpeg);
+        let mut payload = alloc::vec![0, 0, 0, 0, 0, 128, 8, 6, 0, 0, 0, 128];
+        payload.extend(core::iter::repeat_n(3, 128));
+        payload.extend_from_slice(&[0xaa, 0xff, 0xd9, 0x88]);
+        let first = depay.depacketize(&rtp_packet(1, 90, true, &payload));
+        let [unit] = first.as_slice() else {
+            panic!("expected one JPEG image with custom quantizers");
+        };
+        assert!(unit.data.ends_with(&[0xaa, 0xff, 0xd9]));
+
+        let cached = [0, 0, 0, 0, 0, 128, 8, 6, 0, 0, 0, 0, 0xaa];
+        let bad_offset = [0, 0, 0, 2, 0, 128, 8, 6, 0xbb];
+        assert!(depay
+            .depacketize(&rtp_packet(2, 180, false, &cached))
+            .is_empty());
+        assert!(depay
+            .depacketize(&rtp_packet(3, 180, true, &bad_offset))
+            .is_empty());
+        assert_eq!(
+            depay.depacketize(&rtp_packet(4, 270, true, &cached)),
+            [AccessUnit {
+                data: unit.data.clone(),
+                rtp_timestamp: 270
+            }]
+        );
+
+        let mut other_source = rtp_packet(5, 360, true, &cached);
+        other_source[8..12].copy_from_slice(&2_u32.to_be_bytes());
+        assert!(depay.depacketize(&other_source).is_empty());
+        assert!(depay
+            .depacketize(&rtp_packet(6, 450, true, &payload[..13]))
+            .is_empty());
+    }
+
+    #[test]
+    fn jpeg_does_not_pair_fields_across_loss_sources_or_sizes() {
+        for (sequence, ssrc, width) in [(3, 1, 8), (2, 2, 8), (2, 1, 9)] {
+            let mut depay = RtpDepayloader::new(&RtpEncoding::Jpeg);
+            let odd = rtp_packet(1, 90, true, &[1, 0, 0, 0, 1, 50, 8, 6, 0xaa]);
+            let mut even = rtp_packet(sequence, 90, true, &[2, 0, 0, 0, 1, 50, width, 6, 0xbb]);
+            even[8..12].copy_from_slice(&u32::to_be_bytes(ssrc));
+            assert!(depay.depacketize(&odd).is_empty());
+            assert!(depay.depacketize(&even).is_empty());
+            let progressive = rtp_packet(sequence + 1, 180, true, &[0, 0, 0, 0, 1, 50, 8, 6, 0xcc]);
+            let units = depay.depacketize(&progressive);
+            let [unit] = units.as_slice() else {
+                panic!("the next complete frame must be emitted");
+            };
+            assert!(crate::stillframe::jpeg_field_pair(&unit.data).is_none());
+        }
     }
 
     #[test]

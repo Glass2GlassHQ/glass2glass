@@ -14,6 +14,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[path = "ffmpeg_mjpeg.rs"]
+mod ffmpeg_mjpeg;
+
 const FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/h265_640x480.h265"
@@ -68,22 +71,7 @@ pub(crate) fn serve_h265_fixture(early_ends: &[EarlyEnd], range: Option<&str>) -
 
 pub(crate) fn serve_mjpeg() -> RtspRelay {
     let mut ffmpeg = ffmpeg_command();
-    ffmpeg.args([
-        "-f",
-        "lavfi",
-        "-i",
-        "testsrc2=size=64x48:rate=25",
-        "-c:v",
-        "mjpeg",
-        "-pix_fmt",
-        "yuvj420p",
-        "-huffman",
-        "default",
-        "-force_duplicated_matrix",
-        "1",
-        "-threads:v",
-        "1",
-    ]);
+    ffmpeg_mjpeg::mjpeg_source(&mut ffmpeg);
     // FFmpeg uses static payload type 26 and sends no rtpmap for it.
     serve_ffmpeg_rtp(ffmpeg, |sdp| sdp.contains("RTP/AVP 26"), &[], None)
 }

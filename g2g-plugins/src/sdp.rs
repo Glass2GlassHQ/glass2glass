@@ -210,7 +210,8 @@ fn scan_one(lines: &[&str]) -> Option<SdpSection> {
 }
 
 // the RFC 3551 static payload types g2g has caps for, which need no `a=rtpmap`
-const STATIC_PAYLOAD_TYPES: [(u8, &str); 2] = [(0, "PCMU/8000/1"), (8, "PCMA/8000/1")];
+const STATIC_PAYLOAD_TYPES: [(u8, &str); 3] =
+    [(0, "PCMU/8000/1"), (8, "PCMA/8000/1"), (26, "JPEG/90000")];
 
 /// The text after `<pt> ` of an `a=rtpmap:` / `a=fmtp:` value, when `<pt>` is
 /// `payload_type`.
@@ -518,6 +519,7 @@ fn encoding_kind(name: &str) -> Option<Encoding> {
         _ if eq("VP8") => Encoding::Video(VideoCodec::Vp8),
         _ if eq("VP9") => Encoding::Video(VideoCodec::Vp9),
         _ if eq("AV1") || eq("AV1X") => Encoding::Video(VideoCodec::Av1),
+        _ if eq("JPEG") => Encoding::Video(VideoCodec::Mjpeg),
         _ if eq("opus") => Encoding::Audio(AudioFormat::Opus),
         _ if eq("mpeg4-generic") || eq("MP4A-LATM") => Encoding::Audio(AudioFormat::Aac),
         _ if eq("PCMU") => Encoding::Audio(AudioFormat::Mulaw),
