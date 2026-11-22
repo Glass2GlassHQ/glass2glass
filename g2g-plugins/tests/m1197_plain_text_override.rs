@@ -35,23 +35,22 @@ async fn filesrc_runs_a_markdown_file_as_plain_text() {
     let registry = default_registry();
 
     // Prose sniffs as nothing, so without the override the `.md` file has no type.
-    let untyped = text_pipeline(&path, "");
-    let untyped_fails = match parse_launch(&registry, &untyped) {
-        Ok(graph) => run_graph(graph, &ZeroClock, LINK_CAPACITY).await.is_err(),
-        Err(_) => true,
-    };
+    let untyped = format!("filesrc location={} ! fakesink", path.display());
+    let graph = parse_launch(&registry, &untyped).expect("parses without a caps override");
+    assert!(run_graph(graph, &ZeroClock, LINK_CAPACITY).await.is_err());
 
-    let line = text_pipeline(&path, "bytestream-format=text");
-    let graph = parse_launch(&registry, &line).unwrap_or_else(|e| panic!("parses `{line}`: {e}"));
-    let consumed = run_graph(graph, &ZeroClock, LINK_CAPACITY)
-        .await
-        .unwrap_or_else(|e| panic!("runs `{line}`: {e:?}"))
-        .frames_consumed;
+    for properties in ["", "bytestream-format=text"] {
+        let line = text_pipeline(&path, properties);
+        let graph =
+            parse_launch(&registry, &line).unwrap_or_else(|e| panic!("parses `{line}`: {e}"));
+        let consumed = run_graph(graph, &ZeroClock, LINK_CAPACITY)
+            .await
+            .unwrap_or_else(|e| panic!("runs `{line}`: {e:?}"))
+            .frames_consumed;
+        assert_eq!(consumed, 1, "the text chunk reached the sink");
+    }
+    let conflicting = text_pipeline(&path, "bytestream-format=raw");
+    let graph = parse_launch(&registry, &conflicting).expect("parses conflicting caps");
+    assert!(run_graph(graph, &ZeroClock, LINK_CAPACITY).await.is_err());
     std::fs::remove_file(&path).ok();
-
-    assert!(
-        untyped_fails,
-        "an unsniffable .md file should not negotiate as text on its own"
-    );
-    assert!(consumed >= 1, "the text chunk reached the sink: {consumed}");
 }

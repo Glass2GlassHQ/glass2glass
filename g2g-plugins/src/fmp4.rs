@@ -46,7 +46,8 @@ use crate::opusparse::{opus_head_from_dops, parse_opus_head};
 use crate::pcmclip::clip_pcm_to_segment;
 use crate::pcmendian::convert_wire_layout;
 use crate::uncompressedvideo::{
-    aligned_rows_are_tight, copy_raw_video_frame, quicktime_raw_video, RawVideoStorage,
+    aligned_rows_are_tight, copy_raw_video_frame, quicktime_raw_video, warn_short_raw_video_frame,
+    RawVideoStorage,
 };
 
 #[derive(Debug)]
@@ -1315,16 +1316,21 @@ fn uncv_track(fourcc: &[u8; 4], entry: &[u8]) -> Result<Option<TrackKind>, G2gEr
         return Ok(None);
     };
     let (width, height) = entry_dimensions(entry)?;
-    let tight = aligned_rows_are_tight(frames.format, width, height, frames.row_align)
-        .ok_or(G2gError::CapsMismatch)?;
-    let storage = match tight {
-        true => RawVideoStorage::Tight,
-        false => RawVideoStorage::AlignedRows {
-            row_align: frames.row_align,
-        },
+    let storage = match frames.storage {
+        RawVideoStorage::AlignedRows {
+            row_align,
+            plane_order: None,
+            bit_packed: false,
+            row_interleaved: false,
+        } if aligned_rows_are_tight(frames.format, width, height, row_align)
+            .ok_or(G2gError::CapsMismatch)? =>
+        {
+            RawVideoStorage::Tight
+        }
+        storage => storage,
     };
-    // compressed padded rows can only be repacked after a decompressor restores them
-    if frames.compression.is_some() && !tight {
+    // Compressed layouts can only be repacked after a decompressor restores the bytes.
+    if frames.compression.is_some() && storage != RawVideoStorage::Tight {
         return Ok(None);
     }
     raw_video_track(frames.format, storage, frames.compression, entry).map(Some)
@@ -1361,15 +1367,25 @@ fn raw_video_track(
     })
 }
 
-// a sample as the graph's tight top-down frame, one too short for that left as stored for the demuxer to drop
-fn raw_video_sample(stored: &[u8], framing: RawVideoFraming) -> Vec<u8> {
+// Repack the sample, leaving short legacy samples for the demuxer to drop.
+fn raw_video_sample(stored: &[u8], framing: RawVideoFraming) -> Option<Vec<u8>> {
     let RawVideoFraming {
         format,
         storage,
         width,
         height,
     } = framing;
-    copy_raw_video_frame(format, storage, width, height, stored).unwrap_or_else(|| stored.to_vec())
+    copy_raw_video_frame(format, storage, width, height, stored).or_else(|| {
+        if matches!(
+            storage,
+            RawVideoStorage::AlignedRows { .. } | RawVideoStorage::MixedChromaRows { .. }
+        ) {
+            // A short stored sample can still be larger than its decoded frame.
+            warn_short_raw_video_frame("qtdemux", format, width, height, stored.len());
+            return None;
+        }
+        Some(stored.to_vec())
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2498,7 +2514,10 @@ pub(crate) fn parse_fragments_multi(
                     width: *width,
                     height: *height,
                 };
-                (raw_video_sample(&bytes, framing), true)
+                let Some(frame) = raw_video_sample(&bytes, framing) else {
+                    continue;
+                };
+                (frame, true)
             }
             // Audio access units are stored verbatim; each is a sync point.
             TrackKind::Audio {
@@ -2987,10 +3006,9 @@ impl ProgressiveTrackIndex {
                 .ok()
                 .and_then(|offset| data.get(offset..))
                 .unwrap_or_default();
-            let Some(sample) = self.unpack(stored, bytes)? else {
-                break;
-            };
-            samples.push(sample);
+            if let Some(sample) = self.unpack(stored, bytes)? {
+                samples.push(sample);
+            }
             if (bytes.len() as u64) < stored.len {
                 break;
             }
@@ -3037,7 +3055,10 @@ impl ProgressiveTrackIndex {
             SampleFraming::Tx3gText => deframe_tx3g(raw),
             SampleFraming::WvttText => deframe_wvtt(raw),
             SampleFraming::ClosedCaption(format) => deframe_cc(raw, format),
-            SampleFraming::RawVideo(framing) => raw_video_sample(raw, framing),
+            SampleFraming::RawVideo(framing) => match raw_video_sample(raw, framing) {
+                Some(frame) => frame,
+                None => return Ok(None),
+            },
             SampleFraming::Pcm(_) => unreachable!("PCM tracks return per chunk above"),
             #[cfg(feature = "ffmpeg-long-tail")]
             SampleFraming::QuickTimeChunks(_) => raw.to_vec(),
@@ -5585,6 +5606,52 @@ mod tests {
         assert_eq!((width, height), (CODED_WIDTH.into(), CODED_HEIGHT.into()));
         let no_geometry = crate::mp4box::mp4_box(b"2vuy", &[0; VISUAL_SAMPLE_ENTRY_LEN]);
         assert!(parse_video_entry(&no_geometry, 640, 480).is_err());
+    }
+
+    #[test]
+    fn a_short_reordered_raw_sample_does_not_end_the_progressive_track() {
+        // I420 at 6x2, stored V, Y, U with each row padded to four bytes.
+        let y = [[1, 2, 3, 4, 5, 6, 0, 0], [7, 8, 9, 10, 11, 12, 0, 0]];
+        let (u, v) = ([21, 22, 23, 0], [31, 32, 33, 0]);
+        let stored = [v.as_slice(), &y.concat(), &u].concat();
+        let expected = [&y[0][..6], &y[1][..6], &u[..3], &v[..3]].concat();
+        // Short of the aligned layout, but long enough to look like tight I420.
+        let short = &stored[..stored.len() - 2];
+        assert!(short.len() > expected.len());
+        let index = ProgressiveTrackIndex {
+            framing: SampleFraming::RawVideo(RawVideoFraming {
+                format: RawVideoFormat::I420,
+                storage: RawVideoStorage::AlignedRows {
+                    row_align: 4,
+                    plane_order: Some([2, 0, 1]),
+                    bit_packed: false,
+                    row_interleaved: false,
+                },
+                width: 6,
+                height: 2,
+            }),
+            timescale: 1_000,
+            samples: [(0, short.len()), (short.len(), stored.len())]
+                .into_iter()
+                .enumerate()
+                .map(|(i, (offset, len))| StoredSample {
+                    offset: offset as u64,
+                    len: len as u64,
+                    pts_ns: i as u64 * 1_000_000,
+                    dts_ns: i as u64 * 1_000_000,
+                    duration_ns: 1_000_000,
+                    keyframe: true,
+                    first_sample: i,
+                    switched_description: None,
+                })
+                .collect(),
+            description_param_sets: Vec::new(),
+            stts_runs: Vec::new(),
+        };
+        let samples = index.unpack_all(&[short, &stored].concat()).unwrap();
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].pts_ns, 1_000_000);
+        assert_eq!(samples[0].annexb, expected);
     }
 
     #[test]

@@ -894,13 +894,9 @@ spin = { version = "0.9", default-features = false, features = ["mutex", "spin_m
 # The GL ES wrapper the GL renderer (`gl-render`) draws with, in a host's GL
 # context on any OS.
 glow = { version = "0.17", optional = true }
-# zlib inflate for Matroska `ContentEncoding` blocks (M910). Pure Rust,
-# `forbid(unsafe_code)`, and no_std with `with-alloc` alone, so it fits the
-# baseline; default-features off keeps its `std` off.
-miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
-# zlib and raw deflate for the `zlibcompress` / `deflatecompress` family. Pure Rust
-# and no_std with only its Rust-allocator feature. 3x faster than miniz_oxide at
-# level 6 on 4K NV12 frames.
+# zlib and raw deflate for the lossless elements, Matroska ContentEncoding
+# and RTSP metadata. Pure Rust and no_std with only its Rust-allocator feature.
+# 3x faster than miniz_oxide at level 6 on 4K NV12 frames.
 zlib-rs = { version = "0.6", default-features = false, features = ["rust-allocator"] }
 # brotli for `brotlicompress` / `brotlidecompress`, the crate gst uses. Pure Rust
 # and no_std with default-features off, given a heap allocator.
@@ -1445,6 +1441,8 @@ pkg-config = "0.3"
 bindgen = { version = "0.73", optional = true }
 
 [dev-dependencies]
+# Generate test streams with an independent zlib and deflate implementation.
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
 tokio = { version = "1", features = ["rt", "macros", "time", "sync", "net"] }
 # Enables the dynamic-slot path (ElementSlot/SwapHandle) for the m8_slot_swap
 # integration test only. Feature unification keeps the lib build at `runtime`.

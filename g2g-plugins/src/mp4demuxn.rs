@@ -1351,7 +1351,7 @@ impl Mp4DemuxN {
                 break;
             }
             let sample = index.unpack(stored, available)?;
-            stream.ended[track] = !complete || sample.is_none();
+            stream.ended[track] = !complete;
             stream.next += 1;
             let Some(sample) = sample else {
                 continue;

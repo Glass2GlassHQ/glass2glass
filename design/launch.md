@@ -64,6 +64,9 @@ A bare `media/type,field=value,...` stage is the inline caps-filter shorthand.
 `videotestsrc ! video/x-raw,format=nv12,width=320 ! ...` pins a format and
 geometry as text.
 
+A caps filter on the sole link out of `filesrc` also supplies the source's caps
+when the launch line omits both `caps` and `bytestream-format` on the source.
+
 A bare `scheme://...` stage names an element by its URI, as gst-launch does
 with an element's URI handler. `Registry::register_uri_scheme` maps a scheme to
 an element, and the parser builds that element with the URI as its `location`.

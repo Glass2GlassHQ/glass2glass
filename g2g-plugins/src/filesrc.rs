@@ -18,11 +18,14 @@
 //! container directly, and `auto` sniffs the file header at negotiation (the one
 //! case `FileSrc` does I/O before `run`) so `filesrc location=x.webm
 //! bytestream-format=auto ! matroskademux` works without naming the container.
+//! The `caps` property declares any supported media type. A caps filter
+//! connected to the source's only output link supplies its default value.
 
 use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::string::String;
 
 use std::fs::File;
 use std::io::{Read, Seek as _, SeekFrom};
@@ -63,6 +66,8 @@ const DEFAULT_CHUNK_SIZE: usize = 64 * 1024;
 pub struct FileSrc {
     path: PathBuf,
     caps: Caps,
+    /// The caps property and its preference-ordered alternatives.
+    caps_override: Option<(String, CapsSet)>,
     /// `bytestream-format=auto`: sniff the container from the file header at
     /// negotiation, replacing `caps` with the detected `ByteStream{..}`.
     auto_detect: bool,
@@ -73,7 +78,7 @@ pub struct FileSrc {
     /// it too, carrying the picture size its SPS gives.
     verify_extension: bool,
     /// `true` once the media type is pinned explicitly (the `new` caps argument or
-    /// a `bytestream-format` property). While `false` (a bare launch `filesrc`),
+    /// a `caps` or `bytestream-format` property). While `false` (a bare launch `filesrc`),
     /// setting `location` derives the type from the file extension, so
     /// `filesrc location=movie.mp4` / `subs.vtt` types without an explicit format.
     format_explicit: bool,
@@ -97,6 +102,7 @@ impl FileSrc {
         Self {
             path: path.into(),
             caps,
+            caps_override: None,
             auto_detect: false,
             verify_extension: false,
             // The caller pinned the caps, so `location` must not re-type it.
@@ -119,6 +125,7 @@ impl FileSrc {
             caps: Caps::ByteStream {
                 encoding: ByteStreamEncoding::MpegTs,
             },
+            caps_override: None,
             auto_detect: false,
             verify_extension: false,
             format_explicit: false,
@@ -188,6 +195,13 @@ impl FileSrc {
         self.chunk_size = bytes.max(1);
         self
     }
+
+    fn stated_caps(&self) -> &Caps {
+        match &self.caps_override {
+            Some((_, set)) => &set.alternatives()[0],
+            None => &self.caps,
+        }
+    }
 }
 
 impl SourceLoop for FileSrc {
@@ -205,7 +219,7 @@ impl SourceLoop for FileSrc {
         if let Err(e) = self.resolve_auto_caps() {
             return core::future::ready(Err(e));
         }
-        core::future::ready(Ok(self.caps.clone()))
+        core::future::ready(Ok(self.stated_caps().clone()))
     }
 
     /// Produces the declared caps (or, in `auto` mode, the sniffed container).
@@ -215,7 +229,10 @@ impl SourceLoop for FileSrc {
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
         let result = match self.resolve_auto_caps() {
-            Ok(()) => Ok(CapsConstraint::Produces(CapsSet::one(self.caps.clone()))),
+            Ok(()) => Ok(CapsConstraint::Produces(match &self.caps_override {
+                Some((_, set)) => set.clone(),
+                None => CapsSet::one(self.caps.clone()),
+            })),
             Err(e) => Err(e),
         };
         core::future::ready(result)
@@ -239,7 +256,7 @@ impl SourceLoop for FileSrc {
     /// `bytestream-format=auto` mode, where the container is only known after
     /// sniffing the file header at run time.
     fn configured_output_caps(&self) -> Option<Caps> {
-        (!self.auto_detect).then(|| self.caps.clone())
+        (!self.auto_detect).then(|| self.stated_caps().clone())
     }
 
     /// Parse-time caps for `decodebin`: sniff a `bytestream-format=auto`
@@ -368,26 +385,40 @@ impl SourceLoop for FileSrc {
                             self.caps = caps;
                             self.auto_detect = false;
                         }
-                        None => self.auto_detect = true,
+                        None => {
+                            self.verify_extension = false;
+                            self.auto_detect = true;
+                        }
                     }
                 }
                 Ok(())
             }
+            "caps" => {
+                let text = value.as_str().ok_or(PropError::Type)?;
+                let set = crate::capsfilter::parse_caps_set(text)
+                    .filter(|set| !set.alternatives().is_empty())
+                    .ok_or(PropError::Value)?;
+                self.caps_override = Some((text.into(), set));
+                self.format_explicit = true;
+                self.verify_extension = false;
+                self.auto_detect = false;
+                Ok(())
+            }
             "bytestream-format" => {
+                let caps = match value.as_str().ok_or(PropError::Type)? {
+                    "auto" => None,
+                    PLAIN_TEXT_FORMAT => Some(PLAIN_TEXT_CAPS),
+                    s => Some(Caps::ByteStream {
+                        encoding: encoding_from_str(s).ok_or(PropError::Value)?,
+                    }),
+                };
                 // An explicit format pins the type; a later `location` won't re-type.
                 self.format_explicit = true;
                 self.verify_extension = false;
-                match value.as_str().ok_or(PropError::Type)? {
-                    "auto" => self.auto_detect = true,
-                    PLAIN_TEXT_FORMAT => {
-                        self.caps = PLAIN_TEXT_CAPS;
-                        self.auto_detect = false;
-                    }
-                    s => {
-                        let encoding = encoding_from_str(s).ok_or(PropError::Value)?;
-                        self.caps = Caps::ByteStream { encoding };
-                        self.auto_detect = false;
-                    }
+                self.caps_override = None;
+                self.auto_detect = caps.is_none();
+                if let Some(caps) = caps {
+                    self.caps = caps;
                 }
                 Ok(())
             }
@@ -409,11 +440,15 @@ impl SourceLoop for FileSrc {
             "location" => Some(PropValue::Str(self.path.to_string_lossy().into_owned())),
             "blocksize" => Some(PropValue::Uint(self.chunk_size as u64)),
             "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.target_chunks)),
+            "caps" => self
+                .caps_override
+                .as_ref()
+                .map(|(text, _)| PropValue::Str(text.clone())),
             "bytestream-format" => {
                 if self.auto_detect {
                     return Some(PropValue::Str("auto".into()));
                 }
-                match &self.caps {
+                match self.stated_caps() {
                     Caps::ByteStream { encoding } => {
                         Some(PropValue::Str(encoding_to_str(*encoding).into()))
                     }
@@ -440,6 +475,7 @@ const PLAIN_TEXT_CAPS: Caps = Caps::Text {
 /// container of a raw byte stream (so a text pipeline can feed a demuxer).
 static FILESRC_PROPS: &[PropertySpec] = &[
     PropertySpec::new("location", PropKind::Str, "input file path"),
+    PropertySpec::new("caps", PropKind::Str, "output caps in gst-launch syntax"),
     PropertySpec::new(
         "bytestream-format",
         PropKind::Str,

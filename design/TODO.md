@@ -468,11 +468,7 @@ unless it says otherwise.
   `vp8alphadecodebin`), `jp2kdecimator`.
 - **Lossless compression:** compress and decompress frames on a worker pool so
   4K capture keeps up (one core compresses 4K NV12 at level 6 in about 180 ms);
-  move Matroska `ContentEncoding` inflate from `miniz_oxide` to `zlib-rs` so one
-  zlib implementation remains; let `filesrc` emit a stream a capsfilter types
-  with any caps, for a compressed file read without a container; write
-  ISO/IEC 23001-17 `uncv` from `fmp4mux`; read the `uncv` layouts other writers
-  use (`cpat` indices into `cmpd`, other component orders and pixel sizes).
+  read tiled `uncv`, word-aligned mixed interleave and additional multi-Y layouts.
 - **Bayer:** Bayer formats from `libcamerasrc`, and `v4l2src` Bayer capture
   when the driver row stride is under the width rounded up to four pixels.
 - **Containers:** `mxfmux`, `asfdemux` / `asfmux` / `asfparse`,

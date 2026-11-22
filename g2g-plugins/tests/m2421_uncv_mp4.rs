@@ -75,6 +75,100 @@ async fn gstreamer_uncv_files_demux_to_their_frames() {
 }
 
 #[tokio::test]
+async fn libheif_planes_decode_to_the_graph_layout() {
+    // libheif 1.23.7 writes uncC entries and planes in addition order and
+    // bit-packs high depths by row. The raw references hold the original
+    // frames as graph buffers, with LE words and padding for Bayer rows.
+    for (name, stream) in [
+        ("uncv_libheif_brg_6x4", "raw-rgbp"),
+        ("uncv_libheif_vyu_6x4", "raw-i420"),
+        ("uncv_libheif_packed_rggb12_5x3", "raw-rggb12le"),
+        ("uncv_libheif_packed_vyu10_6x4", "raw-i420_10le"),
+        ("uncv_libheif_packed_brg10_5x3", "raw-gbr_10le"),
+    ] {
+        let source = format!(
+            "filesrc location={}",
+            fixture(&format!("{name}.mp4")).display()
+        );
+        let output = output_of(&source, &format!("qtdemux stream={stream}"), name).await;
+        let reference = std::fs::read(fixture(&format!("{name}.raw"))).expect("fixture frames");
+        assert_eq!(output, reference, "{name}");
+    }
+}
+
+#[tokio::test]
+async fn subsampled_packed_rows_accept_both_chroma_alignments() {
+    // Both clips use the libheif V,Y,U fixture's samples with row_align_size=16.
+    // The ISO clip pads chroma rows to 8 bytes. The libheif clip uses 16 bytes.
+    let reference = std::fs::read(fixture("uncv_libheif_packed_vyu10_6x4.raw")).unwrap();
+    for layout in ["iso", "libheif"] {
+        let name = format!("uncv_padded_vyu10_{layout}");
+        let source = format!(
+            "filesrc location={}",
+            fixture(&format!("{name}.mp4")).display()
+        );
+        let output = output_of(&source, "qtdemux stream=raw-i420_10le", &name).await;
+        assert_eq!(output, reference, "{layout}");
+    }
+}
+
+#[tokio::test]
+async fn row_interleaved_uncv_decodes_to_planar_frames() {
+    // The libheif BRG samples are interleaved one component row at a time,
+    // padded to eight bytes per row, and checked with libheif's row decoder.
+    for (name, reference, stream) in [
+        ("uncv_row_brg_6x4", "uncv_libheif_brg_6x4.raw", "raw-rgbp"),
+        (
+            "uncv_row_brg10_5x3",
+            "uncv_libheif_packed_brg10_5x3.raw",
+            "raw-gbr_10le",
+        ),
+    ] {
+        let source = format!(
+            "filesrc location={}",
+            fixture(&format!("{name}.mp4")).display()
+        );
+        let output = output_of(&source, &format!("qtdemux stream={stream}"), name).await;
+        assert_eq!(output, std::fs::read(fixture(reference)).unwrap(), "{name}");
+    }
+}
+
+#[tokio::test]
+async fn chroma_first_uncv_decodes_to_graph_formats() {
+    // The fixtures put UV or VU first, with padded 8- and 10-bit rows and
+    // unpadded 12-bit rows. Libheif's mixed decoder verifies the source samples.
+    for (name, reference, stream) in [
+        (
+            "uncv_mixed_vuy420_6x4",
+            "uncv_mixed_vuy420_6x4.raw",
+            "raw-nv12",
+        ),
+        (
+            "uncv_mixed_uvy422_6x4",
+            "uncv_mixed_uvy422_6x4.raw",
+            "raw-y42b",
+        ),
+        (
+            "uncv_mixed_vuy420p10_6x4",
+            "uncv_libheif_packed_vyu10_6x4.raw",
+            "raw-i420_10le",
+        ),
+        (
+            "uncv_mixed_uvy422p12_6x4",
+            "uncv_mixed_uvy422p12_6x4.raw",
+            "raw-i422_12le",
+        ),
+    ] {
+        let source = format!(
+            "filesrc location={}",
+            fixture(&format!("{name}.mp4")).display()
+        );
+        let output = output_of(&source, &format!("qtdemux stream={stream}"), name).await;
+        assert_eq!(output, std::fs::read(fixture(reference)).unwrap(), "{name}");
+    }
+}
+
+#[tokio::test]
 async fn raw_and_compressed_video_round_trip_through_mp4() {
     for (name, caps, wrap, unwrap) in [
         (
@@ -104,20 +198,27 @@ async fn raw_and_compressed_video_round_trip_through_mp4() {
     ] {
         let source = format!("videotestsrc num-buffers=3 pattern=ball ! {caps}");
         let direct = output_of(&source, "identity", &format!("{name}.raw")).await;
-        let file = scratch(&format!("{name}.mp4"));
-        run(&format!(
-            "{source} ! {wrap} ! mp4mux ! filesink location={}",
-            file.display()
-        ))
-        .await;
-        let read_back = output_of(
-            &format!("filesrc location={}", file.display()),
-            unwrap,
-            &format!("{name}.read.raw"),
-        )
-        .await;
-        std::fs::remove_file(&file).ok();
         assert!(!direct.is_empty(), "{name}");
-        assert!(direct == read_back, "{name} changed through mp4");
+        for fragmented in [true, false] {
+            let file = scratch(&format!("{name}-{fragmented}.mp4"));
+            run(&format!(
+                "{source} ! {wrap} ! mp4mux fragmented={fragmented} ! filesink location={}",
+                file.display()
+            ))
+            .await;
+            let bytes = std::fs::read(&file).expect("MP4 output");
+            assert_eq!(bytes.windows(4).any(|fourcc| fourcc == b"moof"), fragmented);
+            let read_back = output_of(
+                &format!("filesrc location={}", file.display()),
+                unwrap,
+                &format!("{name}-{fragmented}.read.raw"),
+            )
+            .await;
+            std::fs::remove_file(&file).ok();
+            assert!(
+                direct == read_back,
+                "{name} changed through mp4 (fragmented={fragmented})"
+            );
+        }
     }
 }

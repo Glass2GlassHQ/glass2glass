@@ -612,11 +612,7 @@ fn nv12_to_i420(nv12: Nv12Frame) -> Vec<u8> {
     let luma_len = nv12.luma().len();
     let mut i420 = nv12.into_data().into_vec();
     // NV12 chroma is Cb,Cr interleaved (U then V per pair) -> split into planes.
-    let (u, v) = i420[luma_len..].split_at_mut(interleaved.len() / 2);
-    for ((pair, u), v) in interleaved.as_chunks::<2>().0.iter().zip(u).zip(v) {
-        *u = pair[0];
-        *v = pair[1];
-    }
+    crate::pixel::deinterleave_chroma(interleaved.as_chunks::<2>().0, &mut i420[luma_len..], false);
     i420
 }
 

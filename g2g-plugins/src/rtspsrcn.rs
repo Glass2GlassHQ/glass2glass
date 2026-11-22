@@ -738,7 +738,7 @@ fn inflate_gzip(data: &[u8]) -> Option<Vec<u8>> {
         pos = pos.checked_add(2)?;
     }
     let deflate = data.get(pos..)?;
-    miniz_oxide::inflate::decompress_to_vec_with_limit(deflate, MAX_INFLATED_METADATA_LEN).ok()
+    crate::losslesscompress::inflate_bounded(deflate, false, MAX_INFLATED_METADATA_LEN)
 }
 
 fn audio_params_for(streams: &[retina::client::Stream], idx: usize) -> Option<&AudioParameters> {

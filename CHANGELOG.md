@@ -6,6 +6,15 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2499: `qtdemux` unpacks 10- and 12-bit mixed-interleave `uncv` tracks.
+- M2498: `qtdemux` reads 8-bit mixed-interleave `uncv` with either chroma order.
+- M2497: `qtdemux` reads row-interleaved RGB and 4:4:4 YUV in `uncv` tracks.
+- M2496: `qtdemux` reads padded bit-packed chroma rows in `uncv` tracks.
+- M2495: `qtdemux` unpacks high-bit-depth Bayer and planar `uncv` tracks.
+- M2494: `qtdemux` reads reordered 8-bit planar YUV and RGB in `uncv` tracks.
+- M2493: `qtdemux` reads indexed Bayer patterns and implicit pixel sizes in `uncv` tracks.
+- M2492: `filesrc` takes its output caps from a downstream caps filter.
+- M2491: Matroska and RTSP metadata inflation use `zlib-rs`.
 - M2490: `analyticsoverlay` skips transparent pixel pairs when blending onto NV12, about three times faster on the STM32MP257.
 - M2489: `stm32mp2-imx335-detect.sh` takes `TRACK=1` for ByteTrack ids and trails.
 - M2488: `analyticsjoin hold-last` keeps the newest earlier detections on frames between detector runs.

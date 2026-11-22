@@ -1773,10 +1773,11 @@ fn nv12_to_i420(src: &[u8], w: usize, h: usize) -> Box<[u8]> {
     let chroma = cw * ch;
     let mut dst = vec![0u8; luma + 2 * chroma];
     dst[..luma].copy_from_slice(&src[..luma]);
-    for i in 0..chroma {
-        dst[luma + i] = src[luma + 2 * i];
-        dst[luma + chroma + i] = src[luma + 2 * i + 1];
-    }
+    crate::pixel::deinterleave_chroma(
+        src[luma..][..2 * chroma].as_chunks::<2>().0,
+        &mut dst[luma..],
+        false,
+    );
     dst.into_boxed_slice()
 }
 

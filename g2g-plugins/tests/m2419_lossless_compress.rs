@@ -289,3 +289,31 @@ async fn decodebin_demosaics_a_bayer_dump() {
     std::fs::remove_file(&output).ok();
     assert!(written == read_fixture("bayer_12x8_rggb_to_bgra.raw"));
 }
+
+#[tokio::test]
+async fn filesrc_declares_caps_for_a_compressed_dump() {
+    let registry = default_registry();
+    let input = fixture("nv12_64x48.zlib");
+    let output = std::env::temp_dir().join(format!("g2g-m2492-{}.raw", std::process::id()));
+    let original =
+        format!("application/x-zlib-compressed,original-caps=(caps)[{NV12_CAPS},framerate=30/1]");
+    let file = format!("location=\"{}\" blocksize=97", input.display());
+    for head in [
+        format!("filesrc {file} ! {original}"),
+        format!("rsfilesrc {file} name=src src. ! capsfilter caps=\"{original}\""),
+        format!("filesrc caps=\"{original}\" {file}"),
+    ] {
+        let line = format!(
+            "{head} ! decodebin ! filesink location=\"{}\"",
+            output.display()
+        );
+        let graph =
+            parse_launch(&registry, &line).unwrap_or_else(|e| panic!("parses `{line}`: {e}"));
+        run_graph(graph, &ZeroClock, 4)
+            .await
+            .unwrap_or_else(|e| panic!("runs `{line}`: {e:?}"));
+        let decoded = std::fs::read(&output).expect("the sink wrote a file");
+        std::fs::remove_file(&output).expect("remove the output");
+        assert_eq!(decoded, read_fixture("nv12_64x48.raw"), "{line}");
+    }
+}

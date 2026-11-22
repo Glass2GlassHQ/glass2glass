@@ -1131,6 +1131,7 @@ mod factory {
         // the first alternative is the declared output, the rest what negotiation may pick
         outputs: CapsSet,
         build: fn() -> Box<dyn DynSourceLoop>,
+        caps_from_filter: bool,
         experimental: bool,
     }
 
@@ -1145,8 +1146,16 @@ mod factory {
                 name,
                 outputs: CapsSet::one(output),
                 build,
+                caps_from_filter: false,
                 experimental: false,
             }
+        }
+
+        /// In launch lines, use the sole downstream caps filter's description
+        /// as the default for this source's string `caps` property.
+        pub fn with_caps_from_filter(mut self) -> Self {
+            self.caps_from_filter = true;
+            self
         }
 
         pub fn with_template_outputs<S: PadTemplates>(mut self) -> Self {
@@ -2417,6 +2426,14 @@ mod factory {
                 .iter()
                 .find(|s| s.name == name)
                 .map(|s| (s.build)())
+        }
+
+        pub(crate) fn source_takes_caps_from_filter(&self, name: &str) -> bool {
+            let name = self.resolve_alias(name);
+            self.sources
+                .iter()
+                .find(|s| s.name == name)
+                .is_some_and(|s| s.caps_from_filter)
         }
 
         /// Construct a registered transform / sink by name (a parser interior or

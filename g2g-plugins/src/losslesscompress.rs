@@ -351,6 +351,49 @@ struct DecodeStep {
     stream_end: bool,
 }
 
+fn inflate_step(inflate: &mut Inflate, input: &[u8], output: &mut [u8]) -> Option<DecodeStep> {
+    let (in_before, out_before) = (inflate.total_in(), inflate.total_out());
+    let status = inflate
+        .decompress(input, output, InflateFlush::NoFlush)
+        .ok()?;
+    Some(DecodeStep {
+        consumed: (inflate.total_in() - in_before) as usize,
+        produced: (inflate.total_out() - out_before) as usize,
+        stream_end: status == Status::StreamEnd,
+    })
+}
+
+/// Inflate one complete stream with a caller-supplied limit on its decoded size.
+pub(crate) fn inflate_bounded(
+    mut input: &[u8],
+    expect_zlib_header: bool,
+    limit: usize,
+) -> Option<Vec<u8>> {
+    let mut inflate = Inflate::new(expect_zlib_header, WINDOW_BITS);
+    // Leave one extra byte to distinguish exact-limit output from overflow.
+    let capacity = limit.checked_add(1)?;
+    let mut output = vec![0; input.len().saturating_mul(2).clamp(1, capacity)];
+    let mut written = 0;
+    loop {
+        let step = inflate_step(&mut inflate, input, &mut output[written..])?;
+        written += step.produced;
+        if written > limit {
+            return None;
+        }
+        if step.stream_end {
+            output.truncate(written);
+            return Some(output);
+        }
+        if step.consumed == 0 && step.produced == 0 {
+            return None;
+        }
+        input = &input[step.consumed..];
+        if written == output.len() {
+            output.resize(output.len().saturating_mul(2).min(capacity), 0);
+        }
+    }
+}
+
 impl StreamDecoder {
     fn new(compression: LosslessCompression) -> Self {
         match compression {
@@ -368,15 +411,7 @@ impl StreamDecoder {
     fn decode(&mut self, input: &[u8], output: &mut [u8]) -> Result<DecodeStep, G2gError> {
         match self {
             StreamDecoder::Zlib(inflate) => {
-                let (in_before, out_before) = (inflate.total_in(), inflate.total_out());
-                let status = inflate
-                    .decompress(input, output, InflateFlush::NoFlush)
-                    .map_err(|_| G2gError::CapsMismatch)?;
-                Ok(DecodeStep {
-                    consumed: (inflate.total_in() - in_before) as usize,
-                    produced: (inflate.total_out() - out_before) as usize,
-                    stream_end: status == Status::StreamEnd,
-                })
+                inflate_step(inflate, input, output).ok_or(G2gError::CapsMismatch)
             }
             StreamDecoder::Brotli(state) => {
                 let (mut available_in, mut consumed) = (input.len(), 0);

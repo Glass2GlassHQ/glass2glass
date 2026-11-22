@@ -419,7 +419,7 @@ impl ContentCompression {
     fn decode(&self, stored: &[u8], limit: usize) -> Option<Vec<u8>> {
         match self {
             ContentCompression::Zlib => {
-                miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(stored, limit).ok()
+                crate::losslesscompress::inflate_bounded(stored, true, limit)
             }
             #[cfg(feature = "matroska-compression")]
             ContentCompression::Bzip2 => bunzip(stored, limit),
@@ -4228,6 +4228,23 @@ mod tests {
             d.take_frames().is_empty(),
             "a block that does not inflate is dropped"
         );
+    }
+
+    #[test]
+    fn zlib_at_the_output_limit_still_checks_the_trailer() {
+        let payload = b"subtitle".repeat(1024);
+        let mut block = miniz_oxide::deflate::compress_to_vec_zlib(&payload, 6);
+        let limit = payload.len();
+        assert_eq!(
+            ContentCompression::Zlib.decode(&block, limit),
+            Some(payload)
+        );
+        assert_eq!(
+            ContentCompression::Zlib.decode(&block[..block.len() - 1], limit),
+            None
+        );
+        *block.last_mut().unwrap() ^= 1;
+        assert_eq!(ContentCompression::Zlib.decode(&block, limit), None);
     }
 
     /// A crafted block whose output runs past the inflate bound fails rather

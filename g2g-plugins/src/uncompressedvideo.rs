@@ -5,8 +5,10 @@
 use alloc::vec::Vec;
 
 use g2g_core::log::Target;
+use g2g_core::meta::MAX_PLANES;
 use g2g_core::{g2g_warn, Caps, Dim, Interlace, Rate, RawVideoFormat};
 
+use crate::annexb::BitReader;
 use crate::pixel::{frame_byte_size, row_bytes, tight_plane};
 use crate::typefind::{PLACEHOLDER_FRAMERATE, PLACEHOLDER_MIN_DIMENSION};
 
@@ -73,6 +75,18 @@ pub(crate) enum RawVideoStorage {
     #[cfg(feature = "std")]
     AlignedRows {
         row_align: u32,
+        // For reordered three-plane formats, the output plane at each stored position.
+        plane_order: Option<[u8; 3]>,
+        // Unsigned MSB-first samples, byte-aligned at the start of each row.
+        bit_packed: bool,
+        // One row from every plane in file order before the next row group.
+        row_interleaved: bool,
+    },
+    #[cfg(feature = "std")]
+    MixedChromaRows {
+        row_align: u32,
+        chroma_first: bool,
+        vu: bool,
     },
 }
 
@@ -150,29 +164,50 @@ pub(crate) fn copy_raw_video_frame(
             copy_rows(stored, row, row, stride, rows, false)
         }
         RawVideoStorage::AviPlaneRows => {
-            let planes = aligned_planes(format, columns, rows, AVI_ROW_ALIGN)?;
+            let planes = aligned_planes(format, columns, rows, AVI_ROW_ALIGN, false)?;
             if stored.len() != stored_planes_len(&planes)? {
                 return copy_raw_video_frame(format, RawVideoStorage::Tight, width, height, stored);
             }
-            copy_planes(format, width, height, &planes, stored)
+            copy_planes(format, width, height, &planes, stored, None, false)
         }
         #[cfg(feature = "std")]
-        RawVideoStorage::AlignedRows { row_align } => {
-            let planes = aligned_planes(format, columns, rows, usize::try_from(row_align).ok()?)?;
-            if stored.len() < stored_planes_len(&planes)? {
-                return None;
+        RawVideoStorage::AlignedRows {
+            row_align,
+            plane_order,
+            bit_packed,
+            row_interleaved,
+        } => {
+            let align = usize::try_from(row_align).ok()?;
+            let mut planes = aligned_planes(format, columns, rows, align, bit_packed)?;
+            if bit_packed && align != 0 && matches!(format.chroma_shift(), Some((1, _))) {
+                match_chroma_alignment(&mut planes, align, stored.len())?;
             }
-            copy_planes(format, width, height, &planes, stored)
+            copy_planes(
+                format,
+                width,
+                height,
+                &planes,
+                stored,
+                plane_order,
+                row_interleaved,
+            )
         }
+        #[cfg(feature = "std")]
+        RawVideoStorage::MixedChromaRows {
+            row_align,
+            chroma_first,
+            vu,
+        } => copy_mixed_chroma_rows(format, columns, rows, row_align, stored, chroma_first, vu),
     }
 }
 
 #[derive(Debug, Clone, Copy)]
 struct AlignedPlane {
-    pixel_bytes: usize,
+    input_row: usize,
     frame_row: usize,
     stride: usize,
     rows: usize,
+    packed_samples: Option<usize>,
 }
 
 fn aligned_planes(
@@ -180,6 +215,7 @@ fn aligned_planes(
     columns: usize,
     rows: usize,
     align: usize,
+    bit_packed: bool,
 ) -> Option<Vec<AlignedPlane>> {
     (0..format.plane_count())
         .map(|plane| {
@@ -189,24 +225,144 @@ fn aligned_planes(
                 RawVideoFormat::Bayer(_) => columns.checked_mul(format.pixel_stride()?)?,
                 _ => row,
             };
-            let stride = match align {
-                0 => pixel_bytes,
-                align => pixel_bytes.checked_next_multiple_of(align)?,
-            };
-            Some(AlignedPlane {
-                pixel_bytes,
-                frame_row: row,
-                stride,
-                rows,
-            })
+            aligned_plane(format, pixel_bytes, row, rows, align, bit_packed)
         })
         .collect()
+}
+
+fn aligned_plane(
+    format: RawVideoFormat,
+    pixel_bytes: usize,
+    frame_row: usize,
+    rows: usize,
+    align: usize,
+    bit_packed: bool,
+) -> Option<AlignedPlane> {
+    let packed_samples = bit_packed.then(|| pixel_bytes / format.bytes_per_sample());
+    let input_row = match packed_samples {
+        Some(samples) => samples
+            .checked_mul(usize::from(format.bit_depth()))?
+            .div_ceil(8),
+        None => pixel_bytes,
+    };
+    Some(AlignedPlane {
+        input_row,
+        frame_row,
+        stride: aligned_stride(input_row, align)?,
+        rows,
+        packed_samples,
+    })
+}
+
+fn aligned_stride(row: usize, align: usize) -> Option<usize> {
+    match align {
+        0 => Some(row),
+        align => row.checked_next_multiple_of(align),
+    }
+}
+
+#[cfg(feature = "std")]
+fn copy_mixed_chroma_rows(
+    format: RawVideoFormat,
+    columns: usize,
+    rows: usize,
+    row_align: u32,
+    stored: &[u8],
+    chroma_first: bool,
+    vu: bool,
+) -> Option<Vec<u8>> {
+    let align = usize::try_from(row_align).ok()?;
+    let (_, y_row, y_rows) = tight_plane(format, 0, columns, rows)?;
+    let (_, chroma_row, chroma_rows) = tight_plane(format, 1, columns, rows)?;
+    let pair_row = match format {
+        RawVideoFormat::Nv12 => chroma_row,
+        RawVideoFormat::I422
+        | RawVideoFormat::I420p10
+        | RawVideoFormat::I422p10
+        | RawVideoFormat::I420p12
+        | RawVideoFormat::I422p12 => chroma_row.checked_mul(2)?,
+        _ => return None,
+    };
+    let bits = format.bit_depth();
+    let bit_packed = bits > 8;
+    let luma_plane = aligned_plane(format, y_row, y_row, y_rows, align, bit_packed)?;
+    let chroma_plane = aligned_plane(format, pair_row, pair_row, chroma_rows, align, bit_packed)?;
+    let y_len = luma_plane.stride.checked_mul(y_rows)?;
+    let pair_len = chroma_plane.stride.checked_mul(chroma_rows)?;
+    let stored = stored.get(..y_len.checked_add(pair_len)?)?;
+    let (y, pairs) = match chroma_first {
+        true => (&stored[pair_len..], &stored[..pair_len]),
+        false => stored.split_at(y_len),
+    };
+    let mut frame = copy_mixed_plane(y, &luma_plane, bits)?;
+    let mut pairs = copy_mixed_plane(pairs, &chroma_plane, bits)?;
+    frame.try_reserve_exact(pairs.len()).ok()?;
+    if format == RawVideoFormat::Nv12 {
+        if vu {
+            for pair in pairs.as_chunks_mut::<2>().0 {
+                pair.swap(0, 1);
+            }
+        }
+        frame.extend_from_slice(&pairs);
+    } else {
+        let y_len = frame.len();
+        frame.resize(y_len.checked_add(pairs.len())?, 0);
+        let chroma = &mut frame[y_len..];
+        if bit_packed {
+            let samples = pairs.as_chunks::<2>().0;
+            crate::pixel::deinterleave_chroma(
+                samples.as_chunks::<2>().0,
+                chroma.as_chunks_mut::<2>().0,
+                vu,
+            );
+        } else {
+            crate::pixel::deinterleave_chroma(pairs.as_chunks::<2>().0, chroma, vu);
+        }
+    }
+    Some(frame)
+}
+
+#[cfg(feature = "std")]
+fn copy_mixed_plane(input: &[u8], plane: &AlignedPlane, bits: u8) -> Option<Vec<u8>> {
+    if let Some(samples) = plane.packed_samples {
+        let mut plane_data = Vec::new();
+        plane_data
+            .try_reserve_exact(plane.frame_row.checked_mul(plane.rows)?)
+            .ok()?;
+        unpack_plane(&mut plane_data, input, plane, plane.stride, samples, bits)?;
+        return Some(plane_data);
+    }
+    copy_rows(
+        input,
+        plane.input_row,
+        plane.frame_row,
+        plane.stride,
+        plane.rows,
+        false,
+    )
 }
 
 fn stored_planes_len(planes: &[AlignedPlane]) -> Option<usize> {
     planes.iter().try_fold(0usize, |len, plane| {
         len.checked_add(plane.stride.checked_mul(plane.rows)?)
     })
+}
+
+#[cfg(feature = "std")]
+fn match_chroma_alignment(
+    planes: &mut [AlignedPlane],
+    align: usize,
+    stored_len: usize,
+) -> Option<()> {
+    // libheif applies the full alignment to every plane. The standard halves it
+    // for subsampled chroma. With no tile padding, the sample size distinguishes them.
+    if stored_planes_len(planes) == Some(stored_len) {
+        return Some(());
+    }
+    for chroma in planes.get_mut(1..=2)? {
+        chroma.stride = chroma.input_row.checked_next_multiple_of(align / 2)?;
+    }
+    (stored_planes_len(planes) == Some(stored_len)).then_some(())
 }
 
 #[cfg(feature = "std")]
@@ -221,6 +377,7 @@ pub(crate) fn aligned_rows_are_tight(
         width as usize,
         height as usize,
         usize::try_from(row_align).ok()?,
+        false,
     )?;
     Some(planes.iter().all(|plane| plane.stride == plane.frame_row))
 }
@@ -230,24 +387,92 @@ fn copy_planes(
     width: u32,
     height: u32,
     planes: &[AlignedPlane],
-    stored: &[u8],
+    mut stored: &[u8],
+    plane_order: Option<[u8; 3]>,
+    row_interleaved: bool,
 ) -> Option<Vec<u8>> {
-    let mut frame = Vec::with_capacity(frame_byte_size(format, width, height));
-    let mut offset = 0;
-    for plane in planes {
-        let end = offset + plane.stride * plane.rows;
+    let group_stride = if row_interleaved {
+        if stored.len() < stored_planes_len(planes)? {
+            return None;
+        }
+        Some(
+            planes
+                .iter()
+                .try_fold(0usize, |stride, plane| stride.checked_add(plane.stride))?,
+        )
+    } else {
+        None
+    };
+    let mut input_planes = [&[][..]; MAX_PLANES];
+    for position in 0..planes.len() {
+        let index = match &plane_order {
+            Some(order) => usize::from(*order.get(position)?),
+            None => position,
+        };
+        let plane = planes.get(index)?;
+        let (input, rest) = if row_interleaved {
+            (stored, stored.get(plane.stride..)?)
+        } else {
+            let len = plane.stride.checked_mul(plane.rows)?;
+            stored.split_at_checked(len)?
+        };
+        *input_planes.get_mut(index)? = input;
+        stored = rest;
+    }
+    let mut frame = Vec::new();
+    frame
+        .try_reserve_exact(frame_byte_size(format, width, height))
+        .ok()?;
+    for (plane, input) in planes.iter().zip(input_planes) {
+        let stride = group_stride.unwrap_or(plane.stride);
+        if let Some(samples) = plane.packed_samples {
+            unpack_plane(
+                &mut frame,
+                input,
+                plane,
+                stride,
+                samples,
+                format.bit_depth(),
+            )?;
+            continue;
+        }
         let plane_rows = copy_rows(
-            &stored[offset..end],
-            plane.pixel_bytes,
+            input,
+            plane.input_row,
             plane.frame_row,
-            plane.stride,
+            stride,
             plane.rows,
             false,
         )?;
         frame.extend_from_slice(&plane_rows);
-        offset = end;
     }
     Some(frame)
+}
+
+fn unpack_plane(
+    frame: &mut Vec<u8>,
+    input: &[u8],
+    plane: &AlignedPlane,
+    stride: usize,
+    samples: usize,
+    bits: u8,
+) -> Option<()> {
+    if stride == 0 {
+        return None;
+    }
+    let padding = plane
+        .frame_row
+        .checked_sub(samples.checked_mul(size_of::<u16>())?)?;
+    let mut rows = input.chunks(stride);
+    for _ in 0..plane.rows {
+        let mut reader = BitReader::new(rows.next()?.get(..plane.input_row)?);
+        for _ in 0..samples {
+            let sample = reader.read_bits(u32::from(bits))? as u16;
+            frame.extend_from_slice(&sample.to_le_bytes());
+        }
+        frame.resize(frame.len().checked_add(padding)?, 0);
+    }
+    Some(())
 }
 
 // `rows` rows of `pixel_bytes` bytes, read `stride` bytes apart and zero-padded to `frame_row` bytes, the bottom one first when `bottom_up`
@@ -412,6 +637,73 @@ mod tests {
         let stored = [&luma[..], &v[..], &u[..]].concat();
         let frame = copy_raw_video_frame(format, storage, 3, 3, &stored);
         assert_eq!(frame, Some([&luma[..], &u[..], &v[..]].concat()));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn bit_packed_bayer_rows_skip_input_padding_and_zero_output_padding() {
+        let format = RawVideoFormat::Bayer(g2g_core::BayerFormat {
+            pattern: g2g_core::BayerPattern::Rggb,
+            sample: g2g_core::BayerSampleFormat::Bits10Le,
+        });
+        let storage = RawVideoStorage::AlignedRows {
+            row_align: 8,
+            plane_order: None,
+            bit_packed: true,
+            row_interleaved: false,
+        };
+        let stored = [
+            0x00, 0x3f, 0xf5, 0x54, 0xee, 0xee, 0xee, 0xee, 0xaa, 0x80, 0x18, 0x00, 0xee, 0xee,
+            0xee, 0xee,
+        ];
+        let expected: Vec<u8> = [0u16, 1023, 341, 0, 682, 1, 512, 0]
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert_eq!(
+            copy_raw_video_frame(format, storage, 3, 2, &stored),
+            Some(expected)
+        );
+        assert!(copy_raw_video_frame(format, storage, 3, 2, &stored[..11]).is_none());
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn padded_bit_packed_chroma_rejects_sizes_between_alignments() {
+        let storage = RawVideoStorage::AlignedRows {
+            row_align: 16,
+            plane_order: Some([2, 0, 1]),
+            bit_packed: true,
+            row_interleaved: false,
+        };
+        // At 6x4 the recognized sample sizes are 96 and 128 bytes.
+        let format = RawVideoFormat::I420p10;
+        assert!(copy_raw_video_frame(format, storage, 6, 4, &[0; 127]).is_none());
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn row_interleaved_frames_require_complete_row_groups() {
+        let storage = RawVideoStorage::AlignedRows {
+            row_align: 4,
+            plane_order: None,
+            bit_packed: false,
+            row_interleaved: true,
+        };
+        // Two groups of three four-byte rows. The truncated sample still
+        // holds more bytes than the graph's 18-byte RGBP frame.
+        assert!(copy_raw_video_frame(RawVideoFormat::Rgbp8, storage, 3, 2, &[0; 23]).is_none());
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn mixed_chroma_rows_require_a_complete_padded_frame() {
+        let storage = RawVideoStorage::MixedChromaRows {
+            row_align: 8,
+            chroma_first: true,
+            vu: true,
+        };
+        assert!(copy_raw_video_frame(RawVideoFormat::Nv12, storage, 6, 4, &[0; 47]).is_none());
     }
 
     #[test]

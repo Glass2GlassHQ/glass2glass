@@ -127,8 +127,9 @@ demuxer selects such a stream as `stream=raw-i420`, `raw-yuy2`, `raw-uyvy` or
 size. A stored frame longer than its rows, v210's padded ones included, is cut
 to them, which is how libavcodec reads it, and a shorter one is dropped.
 
-`mp4mux` writes raw video, Bayer and raw video a lossless compressor wrapped as
-ISO/IEC 23001-17 sample entries (`uncv.rs`): `uncv` with `cmpd` and a version 0
+The fragmented and progressive layouts of `mp4mux` write raw video, Bayer and
+raw video a lossless compressor wrapped as ISO/IEC 23001-17 sample entries
+(`uncv.rs`): `uncv` with `cmpd` and a version 0
 `uncC`, plus `cpat` for Bayer, and for compressed caps a `resv` entry whose
 `rinf` holds `frma` `uncv`, `schm` `gcmp` and a `cmpC` naming `zlib`, `defl` or
 `brot`, with `gcmm` and `iso6` added to the `ftyp`. One table holds the layouts
@@ -140,23 +141,49 @@ pixel-interleaved rows, which state their byte stride: GStreamer's qtdemux reads
 a zero there as rows of the components alone, missing BGRx's fourth byte.
 `qtdemux` reads `row_align_size` as libheif does, each plane's rows padded to a
 multiple of it, which matches GStreamer's files wherever only one plane is
-padded, and repacks padded rows to tight frames. A compressed track passes its
-samples through as `Caps::LosslesslyCompressed` for `decodebin` to plug the
-decompressor, so one with padded rows is declined. Tracks are selected as
+padded, and repacks padded rows to tight frames. For 8-bit three-plane YUV and
+RGB, it also reads planes in the order listed by `uncC` and writes them in the
+graph's format order. Other RGB permutations are normalized to `RGBP`.
+A compressed track passes its samples through as `Caps::LosslesslyCompressed`
+for `decodebin` to plug the decompressor, so one that needs repacking is declined.
+Tracks are selected as
 `stream=raw-<format>` by GStreamer format name, or `zlib-raw-<format>`,
 `deflate-raw-<format>` and `brotli-raw-<format>` when compressed.
+`qtdemux` resolves Bayer `cpat` indices through `cmpd` and also accepts the
+direct colour values GStreamer writes with a filter-only `cmpd`. It reads
+16-bit Bayer samples stored without an explicit block and byte-aligned packed
+pixels whose size is implied by their components.
+For bit-packed input it expands 10-, 12-, and 14-bit Bayer, 10- and 12-bit
+planar YUV, and 10-bit planar RGB to little-endian words. Each stored row
+starts on a byte boundary. For padded, subsampled bit-packed YUV, the sample
+size selects between the ISO half alignment for chroma and libheif's full
+alignment. The RGB output takes `GBR_10LE` plane order.
+For row-interleaved RGB and 4:4:4 YUV with a single tile and no tile padding,
+`qtdemux` reads a row from each component in file order and puts it in the
+corresponding output plane. The same path reads byte-aligned and bit-packed
+rows and removes row padding.
+For 8-bit mixed interleave in a single tile without tile padding, `qtdemux`
+reads UV or VU pairs before or after the luma plane. It strips row padding
+and emits NV12 for 4:2:0 and I422 for 4:2:2.
+For 10- and 12-bit mixed interleave it reads bit-packed rows in the same
+orders and emits planar 4:2:0 or 4:2:2 with little-endian samples.
 `tools/uncv-fixtures.sh` writes GStreamer reference files and
 `tools/uncv-gst-check.sh` reads `mp4mux` output back through GStreamer's qtdemux.
 
-## Plain-text files
+## File source caps
 
-`filesrc` types a `.txt` or `.text` file as `Caps::Text { Utf8 }`, and
-`bytestream-format=text` does the same for any other name, such as a prompt kept
-as `.md`. Content sniffing never answers plain text, since almost any small file
-of ASCII bytes is valid UTF-8, so the extension and the property are the only two
-ways in. GStreamer spells this as a `text/x-raw,format=utf8` caps filter after
-`filesrc`, whose source pad takes any caps. A g2g source declares its caps before
-negotiation, so in g2g that caps filter checks the type rather than setting it.
+In a launch line, a caps filter on the only link out of `filesrc` supplies its
+output caps. For a compressed dump, give the filter the compression and the
+original media caps, for example
+`filesrc location=frames.zlib ! application/x-zlib-compressed,original-caps=(caps)[video/x-raw,format=NV12,width=64,height=48,framerate=30/1] ! zlibdecompress ! ...`.
+The source still emits file chunks and the decompressor rebuilds each stream
+across chunk boundaries. An explicit `caps` or `bytestream-format` property on
+`filesrc` takes precedence over the filter.
+
+`filesrc` types a `.txt` or `.text` file as `Caps::Text { Utf8 }`.
+For a file with another name, declare `bytestream-format=text` or follow
+`filesrc` with `text/x-raw,format=utf8`. The type sniffer does not infer plain
+text from its bytes.
 
 ## AIFF and AU
 
@@ -669,8 +696,8 @@ Opus / AC-3 / FLAC / Vorbis / PCM audio, defaulting to VP9. An `A_PCM/*` track
 takes the PCM format its byte order and `BitDepth` name, the `WAVEFORMATEX`
 table WAV and AVI use, and big-endian samples are swapped at demux. A track's `ContentEncodings` chain is undone at demux, highest
 `ContentEncodingOrder` first, on the blocks and on the `CodecPrivate` as each
-step's scope names: zlib, header stripping, and with `matroska-compression`
-bzip2 (`libbz2-rs-sys`) and LZO1X (`lzo`). A block that does not decode or
+step's scope names: zlib (`zlib-rs`), header stripping, and with
+`matroska-compression` bzip2 (`libbz2-rs-sys`) and LZO1X (`lzo`). A block that does not decode or
 decodes past 16 MiB is dropped, and so is a `CodecPrivate` past 1 MiB. An
 encryption with no supplied key, an unknown algorithm, a scope naming the next encoding, a repeated
 order or a chain over eight steps flags the track `unsupported_encoding`. The

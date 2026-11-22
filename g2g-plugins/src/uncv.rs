@@ -10,6 +10,7 @@ use g2g_core::{
 };
 
 use crate::mp4box::{be32, find_entry_child, full_box, mp4_box};
+use crate::uncompressedvideo::RawVideoStorage;
 
 // ISO/IEC 23001-17 component types
 const MONOCHROME: u16 = 0;
@@ -29,6 +30,7 @@ const SAMPLING_420: u8 = 2;
 const INTERLEAVE_COMPONENT: u8 = 0;
 const INTERLEAVE_PIXEL: u8 = 1;
 const INTERLEAVE_MIXED: u8 = 2;
+const INTERLEAVE_ROW: u8 = 3;
 const INTERLEAVE_MULTI_Y: u8 = 5;
 
 const COMPONENTS_LITTLE_ENDIAN: u8 = 0x80;
@@ -288,12 +290,12 @@ fn cmpd_box(components: &[u16]) -> Vec<u8> {
 const BAYER_PATTERN_SIZE: u16 = 2;
 const UNIT_GAIN: f32 = 1.0;
 
-fn cpat_box(pattern: BayerPattern) -> Vec<u8> {
+fn cpat_box(sites: [u32; 4]) -> Vec<u8> {
     let mut payload = Vec::new();
     payload.extend_from_slice(&BAYER_PATTERN_SIZE.to_be_bytes());
     payload.extend_from_slice(&BAYER_PATTERN_SIZE.to_be_bytes());
-    for site in bayer_sites(pattern) {
-        payload.extend_from_slice(&u32::from(site).to_be_bytes());
+    for site in sites {
+        payload.extend_from_slice(&site.to_be_bytes());
         payload.extend_from_slice(&UNIT_GAIN.to_be_bytes());
     }
     full_box(b"cpat", 0, 0, &payload)
@@ -329,7 +331,7 @@ fn frame_boxes(format: RawVideoFormat, width: u32, height: u32) -> Option<Vec<u8
         };
         return Some(
             [
-                cpat_box(pattern),
+                cpat_box(bayer_sites(pattern).map(u32::from)),
                 cmpd_box(&[FILTER_ARRAY]),
                 uncc_box(&config),
             ]
@@ -389,6 +391,10 @@ fn rinf_box(compression: LosslessCompression) -> Vec<u8> {
 }
 
 pub(crate) fn formats() -> impl Iterator<Item = RawVideoFormat> {
+    written_formats().chain(PACKED_PLANAR_FORMATS.iter().map(|&(format, _)| format))
+}
+
+fn written_formats() -> impl Iterator<Item = RawVideoFormat> {
     UNCV_LAYOUTS.iter().map(|layout| layout.format).chain(
         g2g_core::caps::ALL_BAYER_FORMATS
             .into_iter()
@@ -457,7 +463,7 @@ pub(crate) fn original_caps(caps: &Caps) -> &Caps {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct UncvFrames {
     pub(crate) format: RawVideoFormat,
-    pub(crate) row_align: u32,
+    pub(crate) storage: RawVideoStorage,
     pub(crate) compression: Option<LosslessCompression>,
 }
 
@@ -493,6 +499,7 @@ impl<'a> Reader<'a> {
 const FULL_BOX_HEADER: usize = 4;
 // cmpd lists at most this many components, which bounds the allocation a crafted count asks for
 const MAX_COMPONENTS: u32 = 64;
+const FIRST_CUSTOM_COMPONENT_TYPE: u16 = 0x8000;
 
 fn parse_cmpd(cmpd: &[u8]) -> Result<Vec<u16>, G2gError> {
     let mut reader = Reader { data: cmpd, at: 0 };
@@ -500,23 +507,39 @@ fn parse_cmpd(cmpd: &[u8]) -> Result<Vec<u16>, G2gError> {
     if count == 0 || count > MAX_COMPONENTS {
         return Err(G2gError::CapsMismatch);
     }
-    (0..count).map(|_| reader.u16()).collect()
+    (0..count)
+        .map(|_| {
+            let component = reader.u16()?;
+            if component >= FIRST_CUSTOM_COMPONENT_TYPE {
+                let uri = &cmpd[reader.at..];
+                let end = memchr::memchr(0, uri).ok_or(G2gError::CapsMismatch)?;
+                reader.bytes(end + 1)?;
+            }
+            Ok(component)
+        })
+        .collect()
 }
 
-fn bayer_pattern(cpat: &[u8]) -> Result<Option<BayerPattern>, G2gError> {
-    let mut reader = Reader {
-        data: cpat,
-        at: FULL_BOX_HEADER,
-    };
-    if reader.u16()? != BAYER_PATTERN_SIZE || reader.u16()? != BAYER_PATTERN_SIZE {
+fn bayer_pattern(cpat: &[u8], types: &[u16]) -> Result<Option<BayerPattern>, G2gError> {
+    let mut reader = Reader { data: cpat, at: 0 };
+    let version = reader.bytes(FULL_BOX_HEADER)?[0];
+    if version != 0 || reader.u16()? != BAYER_PATTERN_SIZE || reader.u16()? != BAYER_PATTERN_SIZE {
         return Ok(None);
     }
+    // GStreamer writes the colour types directly and declares only the filter array in cmpd.
+    let legacy_types = types == [FILTER_ARRAY];
     let mut sites = [0u16; 4];
     for site in &mut sites {
-        let Ok(component) = u16::try_from(reader.u32()?) else {
-            return Ok(None);
+        let index = reader.u32()?;
+        *site = if legacy_types {
+            let Ok(component) = u16::try_from(index) else {
+                return Ok(None);
+            };
+            component
+        } else {
+            let index = usize::try_from(index).map_err(|_| G2gError::CapsMismatch)?;
+            *types.get(index).ok_or(G2gError::CapsMismatch)?
         };
-        *site = component;
         reader.u32()?;
     }
     Ok(BAYER_PATTERNS
@@ -525,6 +548,11 @@ fn bayer_pattern(cpat: &[u8]) -> Result<Option<BayerPattern>, G2gError> {
 }
 
 fn bayer_sample(bit_depth: u8, block_size: u8, flags: u8) -> Option<BayerSampleFormat> {
+    // A 16-bit component occupies two bytes with or without an explicit block.
+    let block_size = match (bit_depth, block_size) {
+        (16, 0) => BAYER_WIDE_BLOCK_SIZE,
+        _ => block_size,
+    };
     BAYER_SAMPLE_FORMATS.into_iter().find(|sample| {
         sample.bit_depth() == bit_depth && bayer_bits(*sample) == (block_size, flags)
     })
@@ -538,14 +566,21 @@ fn profile_format(profile: [u8; 4]) -> Option<RawVideoFormat> {
     }
 }
 
-fn parse_frames(children: &[u8]) -> Result<Option<(RawVideoFormat, u32)>, G2gError> {
+fn parse_frames(
+    children: &[u8],
+    compression: Option<LosslessCompression>,
+) -> Result<Option<UncvFrames>, G2gError> {
     let uncc = find_entry_child(children, b"uncC").ok_or(G2gError::CapsMismatch)?;
     let mut reader = Reader { data: uncc, at: 0 };
     let version = reader.u8()?;
     reader.bytes(3)?;
     let profile: [u8; 4] = reader.bytes(4)?.try_into().expect("4 bytes");
     if version == 1 {
-        return Ok(profile_format(profile).map(|format| (format, 0)));
+        return Ok(profile_format(profile).map(|format| UncvFrames {
+            format,
+            storage: RawVideoStorage::Tight,
+            compression,
+        }));
     }
     if version != 0 {
         return Ok(None);
@@ -571,41 +606,190 @@ fn parse_frames(children: &[u8]) -> Result<Option<(RawVideoFormat, u32)>, G2gErr
         (reader.u8()?, reader.u8()?, reader.u8()?, reader.u8()?);
     let pixel_size = reader.u32()?;
     let row_align = reader.u32()?;
-    let _tile_align = reader.u32()?;
+    let tile_align = reader.u32()?;
     let (tile_columns, tile_rows) = (reader.u32()?, reader.u32()?);
     let bit_depth = bit_depths[0];
     if !plain || tile_columns != 0 || tile_rows != 0 || bit_depths.iter().any(|d| *d != bit_depth) {
         return Ok(None);
     }
+    let row_interleaved = interleave == INTERLEAVE_ROW;
+    if row_interleaved && (sampling != SAMPLING_NONE || tile_align != 0) {
+        return Ok(None);
+    }
+    // Both modes use the same per-plane row layout.
+    let interleave = if row_interleaved {
+        INTERLEAVE_COMPONENT
+    } else {
+        interleave
+    };
+    let describe = |format: RawVideoFormat, plane_order, bit_packed| UncvFrames {
+        format,
+        storage: RawVideoStorage::AlignedRows {
+            row_align,
+            plane_order,
+            bit_packed,
+            row_interleaved: row_interleaved && format.plane_count() > 1,
+        },
+        compression,
+    };
+    // Endianness has no effect on single-byte components.
+    let flags = if bit_depth == 8 {
+        flags & !COMPONENTS_LITTLE_ENDIAN
+    } else {
+        flags
+    };
+    let bit_packed = interleave == INTERLEAVE_COMPONENT
+        && block_size == 0
+        && flags == 0
+        && pixel_size == 0
+        && tile_align == 0
+        && matches!(bit_depth, 10 | 12 | 14);
     if components == [FILTER_ARRAY] {
         let Some(cpat) = find_entry_child(children, b"cpat") else {
             return Ok(None);
         };
         let plain_bayer =
             sampling == SAMPLING_NONE && interleave == INTERLEAVE_COMPONENT && pixel_size == 0;
-        let format = match (
-            bayer_pattern(cpat)?,
-            bayer_sample(bit_depth, block_size, flags),
-        ) {
+        let sample = if bit_packed {
+            bayer_sample(bit_depth, BAYER_WIDE_BLOCK_SIZE, COMPONENTS_LITTLE_ENDIAN)
+        } else {
+            bayer_sample(bit_depth, block_size, flags)
+        };
+        let format = match (bayer_pattern(cpat, &types)?, sample) {
             (Some(pattern), Some(sample)) if plain_bayer => {
                 RawVideoFormat::Bayer(BayerFormat { pattern, sample })
             }
             _ => return Ok(None),
         };
-        return Ok(Some((format, row_align)));
+        return Ok(Some(describe(format, None, bit_packed)));
     }
-    Ok(UNCV_LAYOUTS
-        .iter()
-        .find(|layout| {
-            layout.components == components.as_slice()
-                && layout.bit_depth == bit_depth
+    if bit_packed {
+        // ISO/IEC 23001-17 requires even row alignment for subsampled planar YUV.
+        if sampling != SAMPLING_NONE && !row_align.is_multiple_of(2) {
+            return Ok(None);
+        }
+        return Ok(packed_planar_format(&components, bit_depth, sampling)
+            .map(|(format, order)| describe(format, Some(order), true)));
+    }
+    // Without a pixel size, byte-aligned pixel interleave stores the listed components contiguously.
+    let pixel_size = if interleave == INTERLEAVE_PIXEL && bit_depth == 8 && pixel_size == 0 {
+        count
+    } else {
+        pixel_size
+    };
+    let matching_layouts = || {
+        UNCV_LAYOUTS.iter().filter(move |layout| {
+            layout.bit_depth == bit_depth
                 && layout.sampling == sampling
                 && layout.interleave == interleave
                 && layout.block_size == block_size
                 && flags == 0
                 && layout.pixel_size == pixel_size
         })
-        .map(|layout| (layout.format, row_align)))
+    };
+    if let Some(layout) = matching_layouts().find(|layout| layout.components == components) {
+        return Ok(Some(describe(layout.format, None, false)));
+    }
+    if interleave == INTERLEAVE_MIXED
+        && block_size == 0
+        && flags == 0
+        && pixel_size == 0
+        && tile_align == 0
+    {
+        return Ok(
+            mixed_chroma_layout(&components, sampling, bit_depth, row_align).map(
+                |(format, storage)| UncvFrames {
+                    format,
+                    storage,
+                    compression,
+                },
+            ),
+        );
+    }
+    if interleave != INTERLEAVE_COMPONENT || compression.is_some() {
+        return Ok(None);
+    }
+    Ok(matching_layouts().find_map(|layout| {
+        let order = planar_component_order(&components, layout.components)?;
+        Some(describe(layout.format, Some(order), false))
+    }))
+}
+
+fn mixed_chroma_layout(
+    components: &[u16],
+    sampling: u8,
+    bit_depth: u8,
+    row_align: u32,
+) -> Option<(RawVideoFormat, RawVideoStorage)> {
+    let format = match (sampling, bit_depth) {
+        (SAMPLING_420, 8) => RawVideoFormat::Nv12,
+        (SAMPLING_422, 8) => RawVideoFormat::I422,
+        (SAMPLING_420 | SAMPLING_422, 10 | 12) => {
+            PACKED_PLANAR_FORMATS.iter().find_map(|&(format, mode)| {
+                (mode == sampling && format.bit_depth() == bit_depth).then_some(format)
+            })?
+        }
+        _ => return None,
+    };
+    let (chroma_first, vu) = match components {
+        [LUMA, CB, CR] => (false, false),
+        [LUMA, CR, CB] => (false, true),
+        [CB, CR, LUMA] => (true, false),
+        [CR, CB, LUMA] => (true, true),
+        _ => return None,
+    };
+    Some((
+        format,
+        RawVideoStorage::MixedChromaRows {
+            row_align,
+            chroma_first,
+            vu,
+        },
+    ))
+}
+
+// Dense layouts with an existing graph format that stores each sample as a LE word.
+const PACKED_PLANAR_FORMATS: &[(RawVideoFormat, u8)] = &[
+    (RawVideoFormat::I420p10, SAMPLING_420),
+    (RawVideoFormat::I422p10, SAMPLING_422),
+    (RawVideoFormat::I444p10, SAMPLING_NONE),
+    (RawVideoFormat::I420p12, SAMPLING_420),
+    (RawVideoFormat::I422p12, SAMPLING_422),
+    (RawVideoFormat::I444p12, SAMPLING_NONE),
+    (RawVideoFormat::Gbr10Le, SAMPLING_NONE),
+];
+
+fn packed_planar_format(
+    components: &[u16],
+    bit_depth: u8,
+    sampling: u8,
+) -> Option<(RawVideoFormat, [u8; 3])> {
+    PACKED_PLANAR_FORMATS
+        .iter()
+        .filter(|(format, subsampling)| *subsampling == sampling && format.bit_depth() == bit_depth)
+        .find_map(|&(format, _)| {
+            let output = match format {
+                RawVideoFormat::Gbr10Le => [GREEN, BLUE, RED],
+                _ => [LUMA, CB, CR],
+            };
+            planar_component_order(components, &output).map(|order| (format, order))
+        })
+}
+
+// Match a three-plane permutation. Each component must appear exactly once.
+fn planar_component_order(stored: &[u16], output: &[u16]) -> Option<[u8; 3]> {
+    let &[first, second, third] = stored else {
+        return None;
+    };
+    if output.len() != 3 || first == second || first == third || second == third {
+        return None;
+    }
+    let position = |component| output.iter().position(|&candidate| candidate == component);
+    Some([
+        position(first)? as u8,
+        position(second)? as u8,
+        position(third)? as u8,
+    ])
 }
 
 fn generic_compression(rinf: &[u8]) -> Result<Option<LosslessCompression>, G2gError> {
@@ -647,13 +831,7 @@ pub(crate) fn parse_sample_entry(
         }
         _ => return Ok(None),
     };
-    Ok(
-        parse_frames(children)?.map(|(format, row_align)| UncvFrames {
-            format,
-            row_align,
-            compression,
-        }),
-    )
+    parse_frames(children, compression)
 }
 
 #[cfg(test)]
@@ -672,7 +850,7 @@ mod tests {
 
     #[test]
     fn every_written_layout_parses_back_to_its_format() {
-        for format in formats() {
+        for format in written_formats() {
             for compression in [None, Some(LosslessCompression::Brotli)] {
                 let caps = match compression {
                     None => raw(format, 18, 4),
@@ -687,6 +865,77 @@ mod tests {
                     .expect("a graph format");
                 assert_eq!((parsed.format, parsed.compression), (format, compression));
             }
+        }
+    }
+
+    #[test]
+    fn cpat_resolves_colour_indices_in_cmpd() {
+        let mut cmpd = 5u32.to_be_bytes().to_vec();
+        for component in [FILTER_ARRAY, FIRST_CUSTOM_COMPONENT_TYPE, BLUE, RED, GREEN] {
+            cmpd.extend_from_slice(&component.to_be_bytes());
+            if component == FIRST_CUSTOM_COMPONENT_TYPE {
+                cmpd.extend_from_slice(b"urn:example:unused-component\0");
+            }
+        }
+        let cmpd = mp4_box(b"cmpd", &cmpd);
+        let uncc = uncc_box(&FrameConfig {
+            profile: NO_PROFILE,
+            component_count: 1,
+            bit_depth: 16,
+            sampling: SAMPLING_NONE,
+            interleave: INTERLEAVE_COMPONENT,
+            block_size: 0,
+            flags: COMPONENTS_LITTLE_ENDIAN,
+            pixel_size: 0,
+            row_align: 0,
+        });
+        let parse = |sites| {
+            parse_sample_entry(
+                b"uncv",
+                &[cmpd.as_slice(), &uncc, &cpat_box(sites)].concat(),
+            )
+        };
+        let entry = parse([3, 4, 4, 2]).expect("valid indices").unwrap();
+        assert_eq!(
+            entry.format,
+            RawVideoFormat::Bayer(BayerFormat {
+                pattern: BayerPattern::Rggb,
+                sample: BayerSampleFormat::Bits16Le,
+            })
+        );
+        // 6 is the legacy blue type, but a wrong index into this file's table.
+        assert!(parse([3, 4, 4, 6]).is_err());
+    }
+
+    #[test]
+    fn byte_aligned_layouts_accept_implicit_pixel_sizes() {
+        for format in [
+            RawVideoFormat::Rgb8,
+            RawVideoFormat::Rgba8,
+            RawVideoFormat::Bgrp8,
+        ] {
+            let layout = UNCV_LAYOUTS
+                .iter()
+                .find(|layout| layout.format == format)
+                .unwrap();
+            let boxes = [
+                cmpd_box(layout.components),
+                uncc_box(&FrameConfig {
+                    profile: layout.profile,
+                    component_count: layout.components.len(),
+                    bit_depth: layout.bit_depth,
+                    sampling: layout.sampling,
+                    interleave: layout.interleave,
+                    block_size: 0,
+                    flags: COMPONENTS_LITTLE_ENDIAN,
+                    pixel_size: 0,
+                    row_align: 0,
+                }),
+            ];
+            let entry = parse_sample_entry(b"uncv", &boxes.concat())
+                .expect("valid uncv")
+                .unwrap();
+            assert_eq!(entry.format, format);
         }
     }
 

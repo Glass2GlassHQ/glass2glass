@@ -649,14 +649,17 @@ pub fn default_registry() -> Registry {
     );
     // The output caps are a nominal default; a bare launch `filesrc` derives its
     // type from the `location` extension (M478), and the `bytestream-format`
-    // property (incl. `auto`) overrides that per instance before negotiation.
-    reg.register_source(SourceFactory::new(
-        "filesrc",
-        Caps::ByteStream {
-            encoding: ByteStreamEncoding::MpegTs,
-        },
-        || Box::new(FileSrc::untyped()),
-    ));
+    // property (incl. `auto`) or a caps declaration overrides it.
+    reg.register_source(
+        SourceFactory::new(
+            "filesrc",
+            Caps::ByteStream {
+                encoding: ByteStreamEncoding::MpegTs,
+            },
+            || Box::new(FileSrc::untyped()),
+        )
+        .with_caps_from_filter(),
+    );
     // Synthetic byte source (M1070): `fakesrc num-buffers=20 sizemax=4096 ! ...`
     // drives a graph without a file, a device or a network. Same byte-stream type
     // as an untyped `filesrc`, so a `typefind` after it behaves the same.

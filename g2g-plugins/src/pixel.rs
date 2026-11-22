@@ -125,6 +125,16 @@ pub(crate) fn chroma_420_offsets(
     }
 }
 
+/// Write one interleaved chroma plane into successive U and V planes.
+pub(crate) fn deinterleave_chroma<T: Copy>(src: &[[T; 2]], output: &mut [T], vu: bool) {
+    let (u, v) = output.split_at_mut(src.len());
+    let (first, second) = if vu { (v, u) } else { (u, v) };
+    for (pair, (a, b)) in src.iter().zip(first.iter_mut().zip(second)) {
+        *a = pair[0];
+        *b = pair[1];
+    }
+}
+
 // (byte offset, row bytes, rows) of one plane of a tight frame, as g2g-core defines it
 pub(crate) fn tight_plane(
     format: RawVideoFormat,

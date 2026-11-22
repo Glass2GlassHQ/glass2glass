@@ -3747,7 +3747,25 @@ fn build_graph(
                 .add_fanout_src(GraphNodeRef::FanoutSource(src), kinds.len() as u8)
                 .node()
         } else if in_deg[ei] == 0 {
-            let src = build_source(registry, &spec.name, &spec.props)?;
+            let props_with_caps =
+                if out_deg[ei] == 1 && registry.source_takes_caps_from_filter(&spec.name) {
+                    links
+                        .iter()
+                        .find(|&&(source, ..)| source == ei)
+                        .map(|&(_, consumer, ..)| &specs[consumer])
+                        .filter(|filter| filter.name == "capsfilter")
+                        .and_then(|filter| prop(filter, "caps"))
+                        .map(|caps| {
+                            let mut props = spec.props.clone();
+                            // Properties written on the source take precedence.
+                            props.insert(0, ("caps".to_string(), caps.to_string()));
+                            props
+                        })
+                } else {
+                    None
+                };
+            let props = props_with_caps.as_deref().unwrap_or(&spec.props);
+            let src = build_source(registry, &spec.name, props)?;
             graph.add_source(GraphNodeRef::Source(src))
         } else if is_muxer(ei) {
             let mut mux = registry

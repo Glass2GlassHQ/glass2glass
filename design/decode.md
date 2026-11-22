@@ -740,7 +740,7 @@ before, and when a launch line links only two pads the metadata pad takes the
 audio one's slot rather than growing the element past what was linked.
 
 retina concatenates the RTP payloads to the marker bit, which closes one XML
-document. The element inflates a gzip member itself with `miniz_oxide` and
+document. The element inflates a gzip member with `zlib-rs` and
 bounded output, and emits the whole `tt:MetadataStream` document as one
 `Caps::OnvifMetadata` frame. The Streaming Specification writes the compressed
 encoding name `vnd.onvif.metadata+gzip` while retina matches
