@@ -8,8 +8,8 @@
 //!
 //! Given a bound UDP socket, read in batches through a
 //! [`UdpReceiver`](crate::udprecv::UdpReceiver), it reorders (jitter buffer),
-//! recovers (ULPFEC / FlexFEC / RTX), and depayloads RTP into H.264 Annex-B
-//! access units or Opus packets ([`RtpRecvConfig::encoding`]), pushing each as
+//! recovers (ULPFEC / FlexFEC / RTX), and depayloads RTP into the codec's
+//! access units ([`RtpRecvConfig::encoding`]), pushing each as
 //! one frame downstream, while driving RTCP receiver reports and Generic NACK
 //! retransmission requests back to the sender.
 //!
@@ -27,8 +27,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::rtp::{CaptureTimeExtensionIds, RtpHeader};
 use g2g_core::{
-    Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, Rate,
+    Caps, Colorimetry, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, Rate, VideoCodec,
 };
 
 use crate::filesink::io_err;
@@ -66,9 +66,9 @@ pub struct RtpRecvConfig {
     pub fec_pt: Option<u8>,
     /// RFC 8627 FlexFEC repair-packet payload type, if enabled.
     pub flexfec_pt: Option<u8>,
-    /// The caps the source negotiated. When set, each depayloaded access unit's
-    /// SPS refines them and a `CapsChanged` precedes the frame that carries the
-    /// new geometry ([`SpsCapsRefiner`]). `None` leaves the stream unrefined.
+    /// The caps the source negotiated. When set, the bitstream refines them
+    /// and a `CapsChanged` precedes the frame with the new geometry
+    /// ([`VideoCapsRefiner`]). `None` leaves the stream unrefined.
     pub declared_caps: Option<Caps>,
     pub capture_time_ids: CaptureTimeExtensionIds,
     pub encoding: RtpEncoding,
@@ -97,30 +97,27 @@ impl Default for RtpRecvConfig {
     }
 }
 
-/// Runtime caps refinement from the bitstream: an RTP receiver has no in-band
-/// stream description, so the geometry it negotiated with is whatever the SDP
-/// declared or the element was told. The H.264 SPS in the stream is
-/// authoritative, so each access unit is checked against the caps in force and a
-/// mismatch (the first SPS, or a mid-stream resolution change) yields the
-/// corrected caps for the caller to emit as `CapsChanged`.
+/// Refine video caps from H.26x parameter sets, VP8/VP9 keyframes, or AV1 sequence headers.
+/// The caller emits `CapsChanged` before forwarding a frame with new caps.
 #[derive(Debug)]
-pub struct SpsCapsRefiner {
+pub struct VideoCapsRefiner {
     current: Caps,
 }
 
-impl SpsCapsRefiner {
+/// The original name for the bitstream caps refiner.
+pub type SpsCapsRefiner = VideoCapsRefiner;
+
+impl VideoCapsRefiner {
     pub fn new(declared: Caps) -> Self {
         Self { current: declared }
     }
 
-    /// The caps in force right now (the declared ones until an SPS refines them).
+    /// The caps in force right now.
     pub fn caps(&self) -> &Caps {
         &self.current
     }
 
-    /// Refine from the SPS in one Annex-B access unit. Returns the new caps the
-    /// first time they differ from the ones in force (and on any later change),
-    /// `None` when the unit carries no SPS or nothing changed.
+    /// Return the new caps when this access unit changes them.
     pub fn refine(&mut self, au: &[u8]) -> Option<Caps> {
         let Caps::CompressedVideo {
             codec, framerate, ..
@@ -129,19 +126,41 @@ impl SpsCapsRefiner {
             return None;
         };
         let (codec, framerate) = (*codec, framerate.clone());
-        let sps = match codec {
-            g2g_core::VideoCodec::H264 => crate::h264parse::H264Codec::extract_sps_info(au)?,
-            g2g_core::VideoCodec::H265 => crate::h265parse::H265Codec::extract_sps_info(au)?,
+        let (width, height, rate, colorimetry) = match codec {
+            VideoCodec::H264 | VideoCodec::H265 => {
+                let sps = if codec == VideoCodec::H264 {
+                    crate::h264parse::H264Codec::extract_sps_info(au)?
+                } else {
+                    crate::h265parse::H265Codec::extract_sps_info(au)?
+                };
+                (sps.width, sps.height, sps.framerate, Colorimetry::UNKNOWN)
+            }
+            VideoCodec::Vp8 => {
+                let info = crate::vp8parse::parse_keyframe(au)?;
+                (info.width, info.height, None, Colorimetry::UNKNOWN)
+            }
+            VideoCodec::Vp9 => {
+                let info = crate::vp9parse::parse_keyframe(au)?;
+                (info.width, info.height, None, info.colorimetry)
+            }
+            VideoCodec::Av1 => {
+                let info = crate::av1parse::extract_seq_header(au)?;
+                (
+                    info.width,
+                    info.height,
+                    info.framerate_q16,
+                    info.colorimetry,
+                )
+            }
             _ => return None,
         };
         let refined = Caps::CompressedVideo {
             codec,
-            width: Dim::Fixed(sps.width),
-            height: Dim::Fixed(sps.height),
-            // Keep the declared rate when the SPS has no VUI timing: a live
-            // source must never hand downstream a wildcard rate.
-            framerate: sps.framerate.map_or(framerate, Rate::Fixed),
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            width: Dim::Fixed(width),
+            height: Dim::Fixed(height),
+            // Keep the declared rate when the bitstream supplies none.
+            framerate: rate.map_or(framerate, Rate::Fixed),
+            colorimetry,
             pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
@@ -249,26 +268,48 @@ pub(crate) fn get_recv_prop(cfg: &RtpRecvConfig, name: &str) -> Option<PropValue
 
 #[derive(Debug, Default)]
 pub(crate) struct CaptureTimeLatch {
-    latest: Option<(u32, i64)>,
+    latest: Option<(u32, RtpWallTimes)>,
+    previous: Option<(u32, RtpWallTimes)>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct RtpWallTimes {
+    capture_ns: Option<i64>,
+    sync_ns: Option<i64>,
 }
 
 impl CaptureTimeLatch {
     pub(crate) fn observe(&mut self, ids: &CaptureTimeExtensionIds, packet: &[u8]) {
-        let Some(ntp) = ids.read(packet) else { return };
+        if ids.is_empty() {
+            return;
+        }
         let Some(parsed) = RtpHeader::parse_header(packet) else {
             return;
         };
-        self.latest =
-            g2g_core::unix_nanos_from_ntp(ntp).map(|unix_ns| (parsed.header.timestamp, unix_ns));
+        let timestamp = parsed.header.timestamp;
+        // The next timestamp can close an access unit whose marker was absent.
+        if self.latest.is_none_or(|(seen, _)| seen != timestamp) {
+            self.previous = self.latest.take();
+        }
+        let (_, times) = self
+            .latest
+            .get_or_insert((timestamp, RtpWallTimes::default()));
+        let capture = ids
+            .read_abs_capture_time(packet)
+            .and_then(g2g_core::unix_nanos_from_ntp);
+        let sync = ids
+            .read_ntp_64(packet)
+            .and_then(g2g_core::unix_nanos_from_ntp);
+        times.capture_ns = capture.or(times.capture_ns);
+        times.sync_ns = sync.or(times.sync_ns);
     }
 
-    pub(crate) fn take(&mut self, rtp_timestamp: u32) -> Option<i64> {
-        let (stamped, unix_ns) = self.latest?;
-        if stamped != rtp_timestamp {
-            return None;
-        }
-        self.latest = None;
-        Some(unix_ns)
+    pub(crate) fn take(&mut self, rtp_timestamp: u32) -> Option<RtpWallTimes> {
+        [&mut self.latest, &mut self.previous]
+            .into_iter()
+            .find(|slot| slot.is_some_and(|(stamped, _)| stamped == rtp_timestamp))?
+            .take()
+            .map(|(_, times)| times)
     }
 }
 
@@ -277,7 +318,7 @@ impl CaptureTimeLatch {
 pub(crate) struct SessionTimeline {
     // the local monotonic instant PTS zero stands for, set by the session's first frame
     origin_ns: Cell<Option<i64>>,
-    // the sender's wall clock minus local monotonic time, from the session's first sender report
+    // the sender's wall clock minus local monotonic time, from the first synchronization stamp
     sender_minus_local_ns: Cell<Option<i64>>,
     // with a pipeline clock, PTS zero is running-time zero instead of the first frame
     pipeline_clock: Option<ClockSync>,
@@ -307,6 +348,15 @@ impl SessionTimeline {
         self.origin_ns.set(Some(origin));
         origin
     }
+
+    fn sender_offset_ns(&self, unix_ns: i64, arrival_ns: u64) -> i64 {
+        let offset = self
+            .sender_minus_local_ns
+            .get()
+            .unwrap_or_else(|| unix_ns.saturating_sub(arrival_ns as i64));
+        self.sender_minus_local_ns.set(Some(offset));
+        offset
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -328,38 +378,47 @@ impl TrackTimeline<'_> {
 
     fn note_sender_report(&self, clock: SenderClock, arrival_ns: u64) {
         self.sender_clock.set(Some(clock));
-        let offsets = &self.session.sender_minus_local_ns;
-        if offsets.get().is_none() {
-            offsets.set(Some(clock.unix_nanos - arrival_ns as i64));
-        }
+        self.session.sender_offset_ns(clock.unix_nanos, arrival_ns);
     }
 
-    // the local monotonic instant of the frame stamped `rtp_timestamp`, once this
-    // track has a sender report
-    fn reported_local_ns(&self, rtp_timestamp: u32) -> Option<i64> {
-        let clock = self.sender_clock.get()?;
-        let sender_minus_local_ns = self.session.sender_minus_local_ns.get()?;
-        Some(clock.wall_clock_ns(rtp_timestamp) - sender_minus_local_ns)
+    // An RFC 6051 stamp can place a track while it is still waiting for RTCP.
+    fn synchronized_local_ns(
+        &self,
+        rtp_timestamp: u32,
+        arrival_ns: u64,
+        ntp_64_unix_ns: Option<i64>,
+    ) -> Option<i64> {
+        let unix_ns = self
+            .sender_clock
+            .get()
+            .map(|clock| clock.wall_clock_ns(rtp_timestamp))
+            .or(ntp_64_unix_ns)?;
+        let offset = self.session.sender_offset_ns(unix_ns, arrival_ns);
+        Some(unix_ns.saturating_sub(offset))
     }
 
     fn session_ns(&self, local_ns: i64) -> i64 {
-        local_ns - self.session.origin_ns(local_ns)
+        local_ns.saturating_sub(self.session.origin_ns(local_ns))
     }
 
-    // where on the session timeline the frame stamped `rtp_timestamp` falls, from the
-    // sender report when one came first and from the frame's arrival otherwise
-    fn session_offset_ns(&self, rtp_timestamp: u32, arrival_ns: u64) -> i64 {
-        let local_ns = self
-            .reported_local_ns(rtp_timestamp)
-            .unwrap_or(arrival_ns as i64);
-        self.session_ns(local_ns)
+    fn session_placement(
+        &self,
+        rtp_timestamp: u32,
+        arrival_ns: u64,
+        sync_ns: Option<i64>,
+    ) -> (i64, bool) {
+        let local_ns = self.synchronized_local_ns(rtp_timestamp, arrival_ns, sync_ns);
+        (
+            self.session_ns(local_ns.unwrap_or(arrival_ns as i64)),
+            local_ns.is_some(),
+        )
     }
 }
 
 #[derive(Debug, Clone, Copy)]
 enum TimelinePlacement<'a> {
     BeforeFirstFrame(TrackTimeline<'a>),
-    // moved onto the sender report's timeline when the track's first report arrives
+    // moved onto the sender's timeline when the track's first synchronization stamp arrives
     ByArrival(TrackTimeline<'a>),
     Fixed,
 }
@@ -370,7 +429,7 @@ enum TimelinePlacement<'a> {
 pub(crate) struct AccessUnitEmitter<'a> {
     placement: TimelinePlacement<'a>,
     session_offset_ns: i64,
-    // frames before this PTS are dropped after a late sender report moves the track back
+    // frames before this PTS are dropped when late synchronization moves the track back
     min_pts_ns: u64,
     encoding: RtpEncoding,
     // emptied at the first keyframe
@@ -404,7 +463,10 @@ impl<'a> AccessUnitEmitter<'a> {
             session_offset_ns: 0,
             min_pts_ns: 0,
             encoding: cfg.encoding.clone(),
-            parameter_sets: cfg.parameter_sets.clone(),
+            parameter_sets: match cfg.encoding {
+                RtpEncoding::H264 | RtpEncoding::H265 => cfg.parameter_sets.clone(),
+                _ => Vec::new(),
+            },
             pts_rebase: RtpPtsRebase::new(),
             pts_offset_ns: 0,
             last_pts_ns: 0,
@@ -425,24 +487,36 @@ impl<'a> AccessUnitEmitter<'a> {
         self.pts_rebase = RtpPtsRebase::new();
     }
 
-    fn place_on_session_timeline(&mut self, rtp_timestamp: u32, arrival_ns: u64, stream_pts: u64) {
+    fn place_on_session_timeline(
+        &mut self,
+        rtp_timestamp: u32,
+        arrival_ns: u64,
+        stream_pts: u64,
+        sync_ns: Option<i64>,
+    ) {
         match self.placement {
             TimelinePlacement::Fixed => {}
             TimelinePlacement::BeforeFirstFrame(timeline) => {
-                self.session_offset_ns =
-                    timeline.session_offset_ns(rtp_timestamp, arrival_ns) - stream_pts as i64;
-                self.placement = match timeline.reported_local_ns(rtp_timestamp) {
-                    Some(_) => TimelinePlacement::Fixed,
-                    None => TimelinePlacement::ByArrival(timeline),
+                let (session_ns, synchronized) =
+                    timeline.session_placement(rtp_timestamp, arrival_ns, sync_ns);
+                self.session_offset_ns = session_ns.saturating_sub_unsigned(stream_pts);
+                self.placement = if synchronized {
+                    TimelinePlacement::Fixed
+                } else {
+                    TimelinePlacement::ByArrival(timeline)
                 };
             }
             TimelinePlacement::ByArrival(timeline) => {
-                let Some(local_ns) = timeline.reported_local_ns(rtp_timestamp) else {
+                let Some(local_ns) =
+                    timeline.synchronized_local_ns(rtp_timestamp, arrival_ns, sync_ns)
+                else {
                     return;
                 };
-                let session_offset_ns = timeline.session_ns(local_ns) - stream_pts as i64;
+                let session_offset_ns = timeline
+                    .session_ns(local_ns)
+                    .saturating_sub_unsigned(stream_pts);
                 if session_offset_ns < self.session_offset_ns {
-                    self.min_pts_ns = self.last_pts_ns + 1;
+                    self.min_pts_ns = self.last_pts_ns.saturating_add(1);
                 }
                 self.session_offset_ns = session_offset_ns;
                 self.placement = TimelinePlacement::Fixed;
@@ -459,7 +533,7 @@ impl<'a> AccessUnitEmitter<'a> {
     pub(crate) async fn push(
         &mut self,
         au: AccessUnit,
-        capture_unix_ns: Option<i64>,
+        wall_times: Option<RtpWallTimes>,
         out: &mut dyn OutputSink,
     ) -> Result<bool, G2gError> {
         // false (the safe default) for H.264 without an IDR NAL.
@@ -475,9 +549,15 @@ impl<'a> AccessUnitEmitter<'a> {
             + self
                 .pts_rebase
                 .pts_ns(au.rtp_timestamp, self.encoding.clock_rate_hz());
-        self.place_on_session_timeline(au.rtp_timestamp, arrival_ns, stream_pts);
+        let wall_times = wall_times.unwrap_or_default();
+        self.place_on_session_timeline(
+            au.rtp_timestamp,
+            arrival_ns,
+            stream_pts,
+            wall_times.sync_ns,
+        );
         // a stream that started before the session's first frame drops what precedes it
-        let Ok(pts) = u64::try_from(stream_pts as i64 + self.session_offset_ns) else {
+        let Some(pts) = stream_pts.checked_add_signed(self.session_offset_ns) else {
             return Ok(false);
         };
         if pts < self.min_pts_ns {
@@ -489,11 +569,12 @@ impl<'a> AccessUnitEmitter<'a> {
         } else {
             Vec::new()
         };
-        let in_band = self
-            .encoding
-            .video_codec()
-            .is_some_and(|codec| crate::annexb::starts_with_param_set(&au.data, codec));
-        let data = if announced.is_empty() || in_band {
+        let data = if announced.is_empty()
+            || self
+                .encoding
+                .video_codec()
+                .is_some_and(|codec| crate::annexb::starts_with_param_set(&au.data, codec))
+        {
             au.data
         } else {
             [announced, au.data].concat()
@@ -515,13 +596,11 @@ impl<'a> AccessUnitEmitter<'a> {
         #[cfg(feature = "metadata")]
         let frame = {
             let mut frame = frame;
-            if let Some(unix_nanos) = capture_unix_ns {
+            if let Some(unix_nanos) = wall_times.capture_ns.or(wall_times.sync_ns) {
                 frame.meta.attach(g2g_core::WallClockMeta { unix_nanos });
             }
             frame
         };
-        #[cfg(not(feature = "metadata"))]
-        let _ = capture_unix_ns;
         out.push(PipelinePacket::DataFrame(frame)).await?;
         self.seq += 1;
         if self.emitted() >= self.frame_limit {
@@ -693,8 +772,8 @@ pub(crate) async fn receive_rtp(
     // The original media stream's SSRC, learned from the first non-RTX packet;
     // an RFC 4588 RTX resend is restamped back onto it.
     let mut media_ssrc_seen: Option<u32> = None;
-    // In-band caps discovery: correct the declared geometry from the stream's SPS.
-    let mut refiner = cfg.declared_caps.clone().map(SpsCapsRefiner::new);
+    // In-band caps discovery, starting from the geometry the sender declared.
+    let mut refiner = cfg.declared_caps.clone().map(VideoCapsRefiner::new);
 
     // RTCP feedback state: the sender's RTP and RTCP addresses (learned from
     // their first datagrams) and report timers.
@@ -724,8 +803,8 @@ pub(crate) async fn receive_rtp(
                 if let Some(caps) = refiner.as_mut().and_then(|r| r.refine(&au.data)) {
                     out.push(PipelinePacket::CapsChanged(caps)).await?;
                 }
-                let capture_unix_ns = sender.capture_time.take(au.rtp_timestamp);
-                if emitter.push(au, capture_unix_ns, out).await? {
+                let wall_times = sender.capture_time.take(au.rtp_timestamp);
+                if emitter.push(au, wall_times, out).await? {
                     return Ok(emitter.emitted());
                 }
             }
@@ -1113,6 +1192,101 @@ mod tests {
         assert_eq!(pts_ms(&audio_out), [40]);
     }
 
+    #[test]
+    fn in_band_ntp_aligns_tracks_before_a_sender_report() {
+        use core::num::NonZeroU8;
+        use g2g_core::rtp::RtpHeaderExtension;
+
+        let session = SessionTimeline::default();
+        let (video_clock, audio_clock) = (Cell::new(None), Cell::new(None));
+        let video = TrackTimeline {
+            session: &session,
+            sender_clock: &video_clock,
+        };
+        let audio = TrackTimeline {
+            session: &session,
+            sender_clock: &audio_clock,
+        };
+        let mut video_emitter = emitter(RtpEncoding::H264, video);
+        let mut audio_emitter = emitter(RtpEncoding::Opus, audio);
+        let (mut video_out, mut audio_out) = (CollectSink::default(), CollectSink::default());
+        let stamps = |timestamp, sync_offset_ns| {
+            let ids = CaptureTimeExtensionIds {
+                abs_capture_time: NonZeroU8::new(4),
+                ntp_64: NonZeroU8::new(5),
+            };
+            // Deliberately use different capture and synchronization clocks.
+            let capture = g2g_core::ntp_from_unix_nanos(REPORT_UNIX_NS - 1_000_000_000)
+                .unwrap()
+                .to_be_bytes();
+            let sync = g2g_core::ntp_from_unix_nanos(REPORT_UNIX_NS + sync_offset_ns)
+                .unwrap()
+                .to_be_bytes();
+            let extensions = [
+                RtpHeaderExtension {
+                    id: 4,
+                    data: &capture,
+                },
+                RtpHeaderExtension { id: 5, data: &sync },
+            ];
+            let header = RtpHeader {
+                payload_type: 96,
+                marker: true,
+                sequence: 0,
+                timestamp,
+                ssrc: 1,
+            };
+            let mut packet = [0; 64];
+            let len = header
+                .write_with_extensions(&extensions, &mut packet)
+                .unwrap();
+            let mut latch = CaptureTimeLatch::default();
+            latch.observe(&ids, &packet[..len]);
+            latch.take(timestamp)
+        };
+
+        block_on(async {
+            video_emitter
+                .push(
+                    access_unit(VIDEO_REPORT_RTP),
+                    stamps(VIDEO_REPORT_RTP, 0),
+                    &mut video_out,
+                )
+                .await
+                .unwrap();
+            audio_emitter
+                .push(
+                    access_unit(AUDIO_REPORT_RTP),
+                    stamps(AUDIO_REPORT_RTP, 250_000_000),
+                    &mut audio_out,
+                )
+                .await
+                .unwrap();
+            let report_timestamp = AUDIO_REPORT_RTP.wrapping_sub(AUDIO_CLOCK_HZ / 4);
+            audio.note_sender_report(report(report_timestamp, AUDIO_CLOCK_HZ), REPORT_ARRIVAL_NS);
+            let next = ticks_after(AUDIO_REPORT_RTP, AUDIO_CLOCK_HZ, 20);
+            audio_emitter
+                .push(access_unit(next), None, &mut audio_out)
+                .await
+                .unwrap();
+        });
+
+        assert_eq!(pts_ms(&video_out), [0]);
+        assert_eq!(pts_ms(&audio_out), [250, 270]);
+        #[cfg(feature = "metadata")]
+        match &audio_out.packets[0] {
+            PipelinePacket::DataFrame(frame) => assert_eq!(
+                frame
+                    .meta
+                    .get::<g2g_core::WallClockMeta>()
+                    .unwrap()
+                    .unix_nanos,
+                REPORT_UNIX_NS - 1_000_000_000,
+            ),
+            packet => panic!("expected a frame, got {packet:?}"),
+        }
+    }
+
     fn push_all(
         emitter: &mut AccessUnitEmitter<'_>,
         rtp_timestamps: &[u32],
@@ -1311,13 +1485,13 @@ mod tests {
         video.note_sender_report(report(VIDEO_REPORT_RTP, VIDEO_CLOCK_HZ), REPORT_ARRIVAL_NS);
         // The frame the report names maps to the report's own arrival.
         assert_eq!(
-            video.session_offset_ns(VIDEO_REPORT_RTP, REPORT_ARRIVAL_NS + 7 * NANOS_PER_MS),
-            0
+            video.session_placement(VIDEO_REPORT_RTP, REPORT_ARRIVAL_NS + 7 * NANOS_PER_MS, None),
+            (0, true)
         );
         let audio_arrival_ns = REPORT_ARRIVAL_NS + 250 * NANOS_PER_MS;
         assert_eq!(
-            audio.session_offset_ns(AUDIO_REPORT_RTP, audio_arrival_ns),
-            (250 * NANOS_PER_MS) as i64
+            audio.session_placement(AUDIO_REPORT_RTP, audio_arrival_ns, None),
+            ((250 * NANOS_PER_MS) as i64, false)
         );
     }
 }

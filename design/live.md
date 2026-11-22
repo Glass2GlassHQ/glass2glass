@@ -568,9 +568,8 @@ GStreamer's SRTP elements.
 `UdpSrc` (`udpsrc.rs`, `udp-ingress` feature) is the receive-side inverse of
 `UdpSink`. It receives RTP on a tokio `UdpSocket` and by default depayloads
 H.264 into Annex-B access units pushed downstream as `CompressedVideo` H.264, so
-the canonical chain is `UdpSrc -> FfmpegH264Dec -> sink`. Opus is the other
-payload it takes, described below. The I/O is async, so
-unlike `V4l2Src` it needs no capture thread.
+the canonical chain is `UdpSrc -> FfmpegH264Dec -> sink`. It reads the socket
+asynchronously. `RtspSrc` handles RTSP sessions ([decode.md](decode.md)).
 
 The protocol logic is sans-IO, mirroring the egress split. `rtpdepay.rs`'s
 `RtpH264Depayloader` is a pure, `no_std`, host-testable function that inverts
@@ -579,6 +578,18 @@ fragments reassemble with the original NAL header rebuilt from the FU
 indicator's F and NRI bits plus the FU header's type, and the RTP marker bit
 closes an access unit. A sequence-number gap drops the in-flight reassembly, so
 loss or reorder never welds two access units together.
+
+`udpsrc` takes the RTP codec and optional geometry hints from its properties
+or SDP. H.26x parameter sets, VP8/VP9 keyframe headers and AV1 sequence headers
+supply the actual dimensions, which the source sends in `CapsChanged` before
+the affected frame. `encoding-name=VP8` (RFC 7741) and `encoding-name=VP9` (RFC 9628,
+single spatial layer) join consecutive fragments into one coded frame per
+buffer and discard an incomplete frame after a gap.
+
+`encoding-name=AV1` or an SDP with an `AV1/90000` rtpmap selects the AV1
+depayloader. It rejoins OBU fragments, restores OBU size fields, and emits
+one low-overhead temporal unit per buffer. The RTP marker or a timestamp
+change closes the unit. A sequence gap drops the in-flight unit.
 
 `encoding-name=OPUS` (`RtpEncoding::Opus`), or an SDP whose first mappable
 section has an `opus` rtpmap, switches the source to Opus. Each RTP payload goes
@@ -687,19 +698,13 @@ That costs no round trip, which is the better fit for one-way or high-RTT
 paths. NACK, RTX and FEC compose.
 
 `UdpSrc` stamps PTS as running time on the `ClockSync` the runner hands it: the
-frame's local instant, from the sender report or from its arrival before one,
-minus the base time, so several `udpsrc` elements share one timeline, as gst's
-`udpsrc` does. A late sender report moves the track as it does for RTSP ingest.
+frame's local instant minus the base time, so several `udpsrc` elements share
+one pipeline timeline, as gst's `udpsrc` does. A late sender report moves the
+track as it does for RTSP ingest.
 Run without a runner, `udpsrc` starts at PTS zero on its first frame.
 Validated against ffmpeg sending H.264 and Opus to two `udpsrc` with the audio
 delayed 500 ms: the recorded offset matches the delay less Opus's 6.5 ms
 lookahead within 1 ms, where arrival times alone give 0 ms.
-
-This is raw RTP with no RTSP or SDP, so there is no out-of-band stream
-description. The output geometry is a declared hint (`with_video_size`,
-`with_framerate`), and since H.264 carries its real dimensions in the SPS a
-downstream decoder re-derives and corrects them. `RtspSrc` covers the RTSP case
-with its own jitter buffer ([decode.md](decode.md)).
 
 ### Per-frame identity
 
@@ -710,6 +715,13 @@ maps to a `timestamp/x-ntp` reference timestamp meta. A session picks the ids
 with the `abs-capture-time-id` and `ntp-64-id` properties on `udpsink` and
 `udpsrc`, or through the `a=extmap` lines of the SDP given to `udpsrc`. Either
 extension can run alone.
+
+UDP and RTSP RECORD ingest can place a track from an NTP-64 stamp before RTCP
+arrives. The first synchronization timestamp ties the sender clock to local
+monotonic time, shared by the tracks in one RECORD session. A track with no
+sender report or NTP-64 stamp starts on arrival time and moves onto the sender
+timeline when a synchronization timestamp becomes available. Absolute capture
+time takes precedence for `WallClockMeta` when both extensions are present.
 
 RTSP carries both extensions too. `rtspclientsink` takes the same two
 properties and writes one `a=extmap` line per id into each video section of its

@@ -28,9 +28,10 @@ use crate::avidemux::pcm_alternatives;
 use crate::demuxseek::{DemuxSeek, TailRead};
 use crate::mkvdemux::{prores_stream_from_str, prores_stream_str};
 use crate::mxf::{
-    header_partition_metadata, index_segment, key_kind, partition_pack, random_index_pack,
+    d10_pcm, header_partition_metadata, index_segment, key_kind, partition_pack, random_index_pack,
     random_index_pack_len, read_klv, whole_klv, Essence, EssenceTrack, IndexEntry, IndexSegment,
-    KeyKind, Klv, KlvError, PartitionPack, Rational, QUANTIZATION_FORMATS,
+    KeyKind, Klv, KlvError, PartitionPack, PcmPacking, Rational, MAX_D10_SOUND_BYTES,
+    QUANTIZATION_FORMATS,
 };
 use crate::oneport::OnePortElement;
 use crate::typefind::container_video_caps;
@@ -65,6 +66,7 @@ pub(crate) fn track_caps(track: &EssenceTrack) -> Caps {
             format,
             channels,
             sample_rate,
+            ..
         } => Caps::Audio {
             format,
             channels,
@@ -893,6 +895,30 @@ impl MxfDemuxN {
                         continue;
                     };
                     let track = self.tracks[port];
+                    if let Essence::Pcm {
+                        format,
+                        channels,
+                        sample_rate,
+                        packing: PcmPacking::D10Aes3,
+                    } = track.essence
+                    {
+                        if klv.value_len > MAX_D10_SOUND_BYTES {
+                            return Err(malformed("mxf: D-10 sound klv too large"));
+                        }
+                        let Ok((_, value)) = whole_klv(&self.buf) else {
+                            if stream_ended {
+                                return Err(malformed("mxf: truncated D-10 sound klv"));
+                            }
+                            break;
+                        };
+                        let (data, samples) = d10_pcm(value, format, channels)
+                            .ok_or_else(|| malformed("mxf: malformed D-10 sound element"))?;
+                        if samples != 0 {
+                            self.send_pcm(port, data, samples, sample_rate, out).await?;
+                        }
+                        next = after;
+                        continue;
+                    }
                     if !is_video(&track) || track.clip_wrapped {
                         let at = next + klv.header_len as u64;
                         let split = SplitValue {
@@ -1033,10 +1059,26 @@ impl MxfDemuxN {
             self.split = None;
         }
         let data = Vec::from(&self.buf[..take as usize]);
-        let samples = self.positions[split.port];
-        let sample_count = take / block;
-        self.positions[split.port] += sample_count;
-        let pts_ns = self.delay_ns() + samples_ns(samples, sample_rate);
+        self.send_pcm(split.port, data, take / block, sample_rate, out)
+            .await?;
+        Ok(take)
+    }
+
+    async fn send_pcm(
+        &mut self,
+        port: usize,
+        data: Vec<u8>,
+        sample_count: u64,
+        sample_rate: u32,
+        out: &mut dyn MultiOutputSink,
+    ) -> Result<(), G2gError> {
+        let samples = self.positions[port];
+        self.positions[port] = samples
+            .checked_add(sample_count)
+            .ok_or_else(|| malformed("mxf: sound sample position overflows"))?;
+        let pts_ns = self
+            .delay_ns()
+            .saturating_add(samples_ns(samples, sample_rate));
         let timing = FrameTiming {
             pts_ns,
             dts_ns: pts_ns,
@@ -1044,13 +1086,7 @@ impl MxfDemuxN {
             keyframe: true,
             ..FrameTiming::default()
         };
-        let unit = Unit {
-            port: split.port,
-            data,
-            timing,
-        };
-        self.send(unit, true, out).await?;
-        Ok(take)
+        self.send(Unit { port, data, timing }, true, out).await
     }
 
     async fn send(
@@ -1112,13 +1148,24 @@ impl MxfDemuxN {
         let picture_rate = self.picture_rate();
         for (port, track) in self.tracks.iter().enumerate() {
             self.positions[port] = match (track.essence, picture_rate) {
-                (Essence::Pcm { sample_rate, .. }, Some(rate)) => u64::try_from(
-                    u128::from(landing.edit_unit)
+                (
+                    Essence::Pcm {
+                        sample_rate,
+                        packing,
+                        ..
+                    },
+                    Some(rate),
+                ) => {
+                    let denominator = u128::from(rate.numerator);
+                    let mut numerator = u128::from(landing.edit_unit)
                         * u128::from(sample_rate)
-                        * u128::from(rate.denominator)
-                        / u128::from(rate.numerator),
-                )
-                .unwrap_or(u64::MAX),
+                        * u128::from(rate.denominator);
+                    // ST 331's five-frame cadence rounds each edit boundary to the nearest sample.
+                    if packing == PcmPacking::D10Aes3 {
+                        numerator += denominator / 2;
+                    }
+                    u64::try_from(numerator / denominator).unwrap_or(u64::MAX)
+                }
                 _ => landing.edit_unit,
             };
         }

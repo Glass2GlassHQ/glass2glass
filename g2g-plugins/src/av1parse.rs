@@ -660,6 +660,16 @@ fn push_low_overhead_obu(obu: &[u8], out: &mut Vec<u8>) -> Result<(), G2gError> 
     Ok(())
 }
 
+pub(crate) fn push_rtp_obu(obu: &[u8], out: &mut Vec<u8>) -> Result<(), G2gError> {
+    // AV1 RTP receivers ignore temporal delimiters and tile list OBUs.
+    const OBU_TILE_LIST: u8 = 8;
+    let &header = obu.first().ok_or(G2gError::CapsMismatch)?;
+    if matches!(obu_type(header), OBU_TEMPORAL_DELIMITER | OBU_TILE_LIST) {
+        return Ok(());
+    }
+    push_low_overhead_obu(obu, out)
+}
+
 // spec annex B: a temporal_unit_size, then frame units each led by a frame_unit_size, each holding
 // OBUs led by an obu_length. The unit at the front of `data` as low-overhead OBUs and the bytes it
 // spanned, or Ok(None) until all of it has arrived
@@ -856,7 +866,7 @@ impl TemporalUnitFramer {
 
 /// Walk the OBUs of one temporal unit and parse the first sequence-header OBU.
 /// `None` if none is present or the framing is malformed.
-fn extract_seq_header(data: &[u8]) -> Option<Av1SeqHeader> {
+pub(crate) fn extract_seq_header(data: &[u8]) -> Option<Av1SeqHeader> {
     let obus = obu_ranges(data)?;
     obus.iter()
         .filter(|o| o.obu_type == OBU_SEQUENCE_HEADER)

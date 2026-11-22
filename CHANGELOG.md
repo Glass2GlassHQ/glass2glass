@@ -6,6 +6,12 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2508: `udpsrc` receives AV1 over RTP.
+- M2507: `udpsrc` receives VP8 and single-spatial-layer VP9 over RTP.
+- M2506: `rtspsrc` and `rtspsrcn` receive Motion JPEG cameras.
+- M2505: `mxfdemux` reads D-10 AES3 audio as PCM.
+- M2504: `g2g-player` can hand decoded PCM to the host.
+- M2503: RTP ingest uses in-band NTP-64 for synchronization before sender reports arrive.
 - M2502: `qtdemux` reads alternate 8-bit multi-Y `uncv` component orders.
 - M2501: Restore NV12 conversion throughput and refresh standalone lockfiles.
 - M2500: `qtdemux` reads word-aligned 10- and 12-bit mixed-interleave `uncv` tracks.

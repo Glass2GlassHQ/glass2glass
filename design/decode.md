@@ -634,7 +634,8 @@ via `retina` using RTSP/RTP over TCP (or the `protocols` order) with
 `FrameFormat::SIMPLE`, so H.264 and H.265 arrive Annex-B with SPS/PPS ahead of
 every keyframe, and it drops access units until the first keyframe of each
 session so a mid-GOP tune-in never feeds a decoder slices without parameter
-sets. Output 0 is the video, output 1 the first audio stream the SDP offers,
+sets. RTP/JPEG (RFC 2435) arrives as one complete JPEG image per frame. Output
+0 is the video, output 1 the first audio stream the SDP offers,
 AAC via `mpeg4-generic` or G.711 via `pcma` / `pcmu`, as a `MultiOutputSource`.
 Every track takes the same lower transport and one `FrameFormat::SIMPLE` SETUP,
 so AAC arrives ADTS-framed and needs no out-of-band config. `with_credentials`
@@ -651,12 +652,13 @@ failed connect per the reconnect policy, so the video pad advertises the real
 codec and geometry. `RtspSrcN` does this in `resolve_output_caps`, which the
 graph runner awaits for a fan-out source and `OnePortSource` awaits in
 `intercept_caps`. The first session of `run` PLAYs that set-up session instead
-of connecting again. A server that keeps the parameter sets out of the SDP
-leaves the geometry a placeholder range with the real codec, refined by a
-`CapsChanged` once the first SPS arrives. `with_expected_dims` (or `width` and
-`height`) skips the connect and advertises fixed H.264 geometry. Framerate comes
-from the VUI `timing_info` (`time_scale / (2 * num_units_in_tick)`) when
-present, else a fixable placeholder range.
+of connecting again. The geometry starts at a placeholder range when it is
+absent from the SDP. `CapsChanged` carries the actual dimensions from the
+first SPS or JPEG frame before downstream receives that picture.
+`with_expected_dims` (or `width` and `height`) skips the connect and advertises
+fixed H.264 geometry. Framerate comes from the VUI `timing_info`
+(`time_scale / (2 * num_units_in_tick)`) when present, else a fixable
+placeholder range.
 
 The source reports live latency with a zero minimum. On a network failure with
 `reconnect` set it pushes a `Flush` to every open pad, waits the backoff, and

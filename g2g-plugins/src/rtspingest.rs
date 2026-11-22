@@ -150,7 +150,7 @@ pub(crate) fn set_encoding_name(
 ) -> Result<(), PropError> {
     let name = value.as_str().ok_or(PropError::Type)?;
     let encoding = RtpEncoding::from_name(name)
-        .filter(|encoding| encoding.video_codec().is_some())
+        .filter(|encoding| matches!(encoding, RtpEncoding::H264 | RtpEncoding::H265))
         .ok_or(PropError::Value)?;
     recv.encoding = encoding;
     Ok(())
@@ -491,12 +491,8 @@ async fn receive_interleaved(
                     {
                         track.capture_time.observe(&track.capture_time_ids, packet);
                         for au in track.depay.depacketize(packet) {
-                            let capture_unix_ns = track.capture_time.take(au.rtp_timestamp);
-                            if track
-                                .emitter
-                                .push(au, capture_unix_ns, &mut *track.out)
-                                .await?
-                            {
+                            let wall_times = track.capture_time.take(au.rtp_timestamp);
+                            if track.emitter.push(au, wall_times, &mut *track.out).await? {
                                 track.finished = true;
                                 break;
                             }

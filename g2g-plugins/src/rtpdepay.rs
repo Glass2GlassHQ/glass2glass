@@ -9,12 +9,12 @@
 //! through; fragmentation units reassemble; the RTP marker bit closes an
 //! access unit. No I/O: `UdpSrc` wraps this and feeds it the
 //! datagrams a socket receives. Opus (RFC 7587) needs no reassembly: each RTP
-//! payload is one Opus packet.
+//! payload is one Opus packet. VP8 (RFC 7741) and VP9 (RFC 9628) strip their
+//! payload descriptors and join consecutive fragments of each coded frame.
+//! AV1 RTP reassembles size-delimited OBUs into temporal units.
 //!
-//! This is the basic in-order depayloader. A jitter buffer (packet reorder,
-//! loss concealment, RTCP) is the larger receive-side follow-up (design/TODO.md);
-//! out-of-order or lost packets are detected via the sequence number and reset
-//! the in-flight reassembly so a gap never welds two access units together.
+//! Packets arrive in order from the jitter buffer. A sequence gap resets
+//! in-flight reassembly so fragments on either side are never joined.
 
 use alloc::vec::Vec;
 
@@ -29,15 +29,16 @@ use crate::sdp::OPUS_CLOCK_HZ;
 const STAP_A_TYPE: u8 = 24;
 const ANNEX_B_START_CODE: [u8; 4] = [0, 0, 0, 1];
 
-/// One depayloaded access unit: Annex-B bytes for H.264, one Opus packet for
-/// Opus, plus the RTP timestamp shared by its packets.
+/// One depayloaded access unit with the RTP timestamp shared by its packets.
+/// H.26x is Annex-B, VP8 and VP9 each carry one coded frame, AV1 carries a
+/// low-overhead temporal unit, and Opus carries one Opus packet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessUnit {
     pub data: Vec<u8>,
     pub rtp_timestamp: u32,
 }
 
-/// Cap the in-flight FU-A and access-unit reassembly buffers. A never-ending
+/// Cap the in-flight video reassembly buffers. A never-ending
 /// fragment run (start without end) or an access unit whose marker never arrives
 /// would otherwise grow without bound on untrusted RTP; past this we drop the
 /// in-flight data and resync at the next start-of-AU. 8 MiB covers a large
@@ -82,6 +83,9 @@ pub enum RtpEncoding {
     H264,
     Opus,
     H265,
+    Vp8,
+    Vp9,
+    Av1,
     Aac(Mpeg4GenericAac),
     AacLatm(Mp4aLatmAac),
 }
@@ -92,6 +96,9 @@ impl RtpEncoding {
             "H264" => Some(RtpEncoding::H264),
             "OPUS" => Some(RtpEncoding::Opus),
             "H265" => Some(RtpEncoding::H265),
+            "VP8" => Some(RtpEncoding::Vp8),
+            "VP9" => Some(RtpEncoding::Vp9),
+            "AV1" => Some(RtpEncoding::Av1),
             _ => None,
         }
     }
@@ -101,6 +108,9 @@ impl RtpEncoding {
             RtpEncoding::H264 => "H264",
             RtpEncoding::Opus => "OPUS",
             RtpEncoding::H265 => "H265",
+            RtpEncoding::Vp8 => "VP8",
+            RtpEncoding::Vp9 => "VP9",
+            RtpEncoding::Av1 => "AV1",
             RtpEncoding::Aac(_) => "MPEG4-GENERIC",
             RtpEncoding::AacLatm(_) => "MP4A-LATM",
         }
@@ -108,7 +118,11 @@ impl RtpEncoding {
 
     pub fn clock_rate_hz(&self) -> u32 {
         match self {
-            RtpEncoding::H264 | RtpEncoding::H265 => MediaClock::VIDEO_RATE_HZ,
+            RtpEncoding::H264
+            | RtpEncoding::H265
+            | RtpEncoding::Vp8
+            | RtpEncoding::Vp9
+            | RtpEncoding::Av1 => MediaClock::VIDEO_RATE_HZ,
             RtpEncoding::Opus => OPUS_CLOCK_HZ,
             RtpEncoding::Aac(format) => format.clock_rate_hz,
             RtpEncoding::AacLatm(format) => format.clock_rate_hz,
@@ -119,6 +133,9 @@ impl RtpEncoding {
         match self {
             RtpEncoding::H264 => Some(VideoCodec::H264),
             RtpEncoding::H265 => Some(VideoCodec::H265),
+            RtpEncoding::Vp8 => Some(VideoCodec::Vp8),
+            RtpEncoding::Vp9 => Some(VideoCodec::Vp9),
+            RtpEncoding::Av1 => Some(VideoCodec::Av1),
             RtpEncoding::Opus | RtpEncoding::Aac(_) | RtpEncoding::AacLatm(_) => None,
         }
     }
@@ -128,6 +145,9 @@ impl RtpEncoding {
         match self {
             RtpEncoding::H264 => crate::annexb::au_is_keyframe(VideoCodec::H264, unit),
             RtpEncoding::H265 => crate::annexb::au_is_keyframe(VideoCodec::H265, unit),
+            RtpEncoding::Vp8 => crate::vp8parse::is_keyframe(unit),
+            RtpEncoding::Vp9 => crate::vp9parse::is_keyframe(unit),
+            RtpEncoding::Av1 => crate::av1parse::av1_keyframe(unit),
             RtpEncoding::Opus | RtpEncoding::Aac(_) | RtpEncoding::AacLatm(_) => true,
         }
     }
@@ -141,6 +161,8 @@ pub enum RtpDepayloader {
     H264(RtpH264Depayloader),
     Opus,
     H265(RtpH265Depayloader),
+    Vp(RtpVpDepayloader),
+    Av1(RtpAv1Depayloader),
     Aac(RtpAacDepayloader),
     AacLatm(RtpLatmDepayloader),
 }
@@ -151,6 +173,9 @@ impl RtpDepayloader {
             RtpEncoding::H264 => RtpDepayloader::H264(RtpH264Depayloader::new()),
             RtpEncoding::Opus => RtpDepayloader::Opus,
             RtpEncoding::H265 => RtpDepayloader::H265(RtpH265Depayloader::new()),
+            RtpEncoding::Vp8 => RtpDepayloader::Vp(RtpVpDepayloader::new(vp8_fragment)),
+            RtpEncoding::Vp9 => RtpDepayloader::Vp(RtpVpDepayloader::new(vp9_fragment)),
+            RtpEncoding::Av1 => RtpDepayloader::Av1(RtpAv1Depayloader::default()),
             RtpEncoding::Aac(format) => RtpDepayloader::Aac(RtpAacDepayloader::new(format.clone())),
             RtpEncoding::AacLatm(format) => {
                 RtpDepayloader::AacLatm(RtpLatmDepayloader::new(format.clone()))
@@ -163,11 +188,309 @@ impl RtpDepayloader {
         match self {
             RtpDepayloader::H264(depayloader) => depayloader.depacketize(packet).collect(),
             RtpDepayloader::H265(depayloader) => depayloader.depacketize(packet).collect(),
+            RtpDepayloader::Vp(depayloader) => {
+                depayloader.depacketize(packet).into_iter().collect()
+            }
+            RtpDepayloader::Av1(depayloader) => depayloader.depacketize(packet).collect(),
             RtpDepayloader::Opus => depacketize_opus(packet).into_iter().collect(),
             RtpDepayloader::Aac(depayloader) => depayloader.depacketize(packet),
             RtpDepayloader::AacLatm(depayloader) => depayloader.depacketize(packet),
         }
     }
+}
+
+/// Reassembles AV1 OBU elements into one low-overhead temporal unit per RTP timestamp.
+#[derive(Debug, Default)]
+pub struct RtpAv1Depayloader {
+    previous: Option<RtpHeader>,
+    temporal_unit: Option<Av1TemporalUnit>,
+}
+
+#[derive(Debug)]
+struct Av1TemporalUnit {
+    unit: AccessUnit,
+    fragment: Vec<u8>,
+}
+
+// AV1 RTP v1.0 §4.4, aggregation header flags.
+const AV1_Z: u8 = 0x80;
+const AV1_Y: u8 = 0x40;
+const AV1_N: u8 = 0x08;
+
+impl RtpAv1Depayloader {
+    pub fn depacketize(&mut self, packet: &[u8]) -> AccessUnits {
+        let mut unit = self.temporal_unit.take();
+        let Some(parsed) = RtpHeader::parse(packet) else {
+            return None.into_iter().chain(None);
+        };
+        let header = parsed.header;
+        let previous = self.previous.replace(header);
+        let same_source = previous.filter(|prev| prev.ssrc == header.ssrc);
+        let adjacent =
+            same_source.is_none_or(|prev| prev.sequence.wrapping_add(1) == header.sequence);
+        let boundary =
+            same_source.is_none_or(|prev| prev.marker || prev.timestamp != header.timestamp);
+        let mut first = None;
+        if !adjacent || (previous.is_some() && same_source.is_none()) {
+            unit = None;
+        } else if boundary {
+            first = unit.take().and_then(Av1TemporalUnit::finish);
+        }
+
+        let payload = &packet[parsed.payload_offset..parsed.payload_offset + parsed.payload_len];
+        let Some((&aggregation, elements)) = payload.split_first() else {
+            return first.into_iter().chain(None);
+        };
+        let new_sequence = aggregation & AV1_N != 0;
+        if new_sequence || (boundary && adjacent) {
+            unit = Some(Av1TemporalUnit {
+                unit: AccessUnit {
+                    data: Vec::new(),
+                    rtp_timestamp: header.timestamp,
+                },
+                fragment: Vec::new(),
+            });
+        }
+        // A malformed packet can remove a whole OBU, so discard the temporal unit.
+        if unit
+            .as_mut()
+            .and_then(|unit| unit.append(aggregation, elements))
+            .is_none()
+        {
+            unit = None;
+        }
+        let last = if header.marker {
+            unit.and_then(Av1TemporalUnit::finish)
+        } else {
+            self.temporal_unit = unit;
+            None
+        };
+        first.into_iter().chain(last)
+    }
+}
+
+impl Av1TemporalUnit {
+    fn finish(self) -> Option<AccessUnit> {
+        (self.fragment.is_empty() && !self.unit.data.is_empty()).then_some(self.unit)
+    }
+
+    fn append(&mut self, aggregation: u8, elements: &[u8]) -> Option<()> {
+        use crate::av1parse::{push_rtp_obu, read_leb128};
+
+        let continuation = aggregation & AV1_Z != 0;
+        if continuation == self.fragment.is_empty() || elements.is_empty() {
+            return None;
+        }
+        let count = (aggregation >> 4) & 3;
+        let mut index = 0;
+        let mut pos = 0;
+        while pos < elements.len() {
+            index += 1;
+            let length = if count != 0 && index == count {
+                elements.len() - pos
+            } else {
+                usize::try_from(read_leb128(elements, &mut pos)?).ok()?
+            };
+            let end = pos.checked_add(length)?;
+            let bytes = elements.get(pos..end)?;
+            if bytes.is_empty()
+                || self
+                    .unit
+                    .data
+                    .len()
+                    .saturating_add(self.fragment.len())
+                    .saturating_add(bytes.len())
+                    > MAX_ASSEMBLY_BYTES
+            {
+                return None;
+            }
+            let continues = end == elements.len() && aggregation & AV1_Y != 0;
+            if continues || !self.fragment.is_empty() {
+                self.fragment.extend_from_slice(bytes);
+                if !continues {
+                    push_rtp_obu(&self.fragment, &mut self.unit.data).ok()?;
+                    self.fragment.clear();
+                }
+            } else {
+                push_rtp_obu(bytes, &mut self.unit.data).ok()?;
+            }
+            if self.unit.data.len() > MAX_ASSEMBLY_BYTES {
+                return None;
+            }
+            pos = end;
+        }
+        (count == 0 || index == count).then_some(())
+    }
+}
+
+#[derive(Debug)]
+struct VpFragment<'a> {
+    start: bool,
+    end: bool,
+    bytes: &'a [u8],
+}
+
+#[derive(Debug)]
+struct VpAssembly {
+    unit: AccessUnit,
+    next_sequence: u16,
+}
+
+/// Reassembles the payloads of consecutive packets into one VP8 or VP9 frame.
+#[derive(Debug)]
+pub struct RtpVpDepayloader {
+    parse_fragment: fn(&[u8], bool) -> Option<VpFragment<'_>>,
+    frame: Option<VpAssembly>,
+}
+
+impl RtpVpDepayloader {
+    fn new(parse_fragment: fn(&[u8], bool) -> Option<VpFragment<'_>>) -> Self {
+        Self {
+            parse_fragment,
+            frame: None,
+        }
+    }
+
+    pub fn depacketize(&mut self, packet: &[u8]) -> Option<AccessUnit> {
+        // A malformed packet breaks the run. Only a subsequent frame start can reopen it.
+        let mut frame = self.frame.take();
+        let parsed = RtpHeader::parse(packet)?;
+        let header = parsed.header;
+        let payload =
+            packet.get(parsed.payload_offset..parsed.payload_offset + parsed.payload_len)?;
+        let fragment = (self.parse_fragment)(payload, header.marker)?;
+        if fragment.bytes.is_empty() {
+            return None;
+        }
+        if fragment.start {
+            frame = Some(VpAssembly {
+                unit: AccessUnit {
+                    data: Vec::new(),
+                    rtp_timestamp: header.timestamp,
+                },
+                next_sequence: header.sequence,
+            });
+        }
+        let mut frame = frame?;
+        if frame.unit.rtp_timestamp != header.timestamp
+            || frame.next_sequence != header.sequence
+            || frame.unit.data.len().saturating_add(fragment.bytes.len()) > MAX_ASSEMBLY_BYTES
+        {
+            return None;
+        }
+        frame.unit.data.extend_from_slice(fragment.bytes);
+        if fragment.end {
+            return Some(frame.unit);
+        }
+        frame.next_sequence = header.sequence.wrapping_add(1);
+        self.frame = Some(frame);
+        None
+    }
+}
+
+// Both payload descriptors use the high bit of the first PictureID octet
+// to indicate the 15-bit rather than the 7-bit form.
+fn after_picture_id(body: &[u8]) -> Option<&[u8]> {
+    let id_bytes = if body.first()? & 0x80 != 0 { 2 } else { 1 };
+    body.get(id_bytes..)
+}
+
+// RFC 7741 section 4.2: S at partition zero starts the frame, the RTP marker ends it.
+fn vp8_fragment(payload: &[u8], marker: bool) -> Option<VpFragment<'_>> {
+    const X: u8 = 0x80;
+    const START: u8 = 0x10;
+    const PARTITION: u8 = 0x07;
+    const I: u8 = 0x80;
+    const L: u8 = 0x40;
+    const T_OR_K: u8 = 0x30;
+    let (&descriptor, mut body) = payload.split_first()?;
+    if descriptor & X != 0 {
+        let (&extension, rest) = body.split_first()?;
+        body = if extension & I != 0 {
+            after_picture_id(rest)?
+        } else {
+            rest
+        };
+        let trailing = usize::from(extension & L != 0) + usize::from(extension & T_OR_K != 0);
+        body = body.get(trailing..)?;
+    }
+    Some(VpFragment {
+        start: descriptor & (START | PARTITION) == START,
+        end: marker,
+        bytes: body,
+    })
+}
+
+// RFC 9628 sections 4.2 and 4.3: B/E delimit one spatial layer's coded frame.
+// A single-layer picture also has the RTP marker set on its final packet.
+fn vp9_fragment(payload: &[u8], marker: bool) -> Option<VpFragment<'_>> {
+    const I: u8 = 0x80;
+    const P: u8 = 0x40;
+    const L: u8 = 0x20;
+    const F: u8 = 0x10;
+    const B: u8 = 0x08;
+    const E: u8 = 0x04;
+    const V: u8 = 0x02;
+    const SID: u8 = 0x0e;
+    let (&descriptor, mut body) = payload.split_first()?;
+    let flexible = descriptor & F != 0;
+    let end = descriptor & E != 0;
+    if end != marker || (flexible && descriptor & I == 0) {
+        return None;
+    }
+    if descriptor & I != 0 {
+        body = after_picture_id(body)?;
+    }
+    if descriptor & L != 0 {
+        if body.first()? & SID != 0 {
+            return None;
+        }
+        // In non-flexible mode the layer indices are followed by TL0PICIDX.
+        body = body.get(if flexible { 1 } else { 2 }..)?;
+    }
+    if flexible && descriptor & P != 0 {
+        body = after_vp9_references(body)?;
+    }
+    if descriptor & V != 0 {
+        body = after_vp9_scalability(body)?;
+    }
+    Some(VpFragment {
+        start: descriptor & B != 0,
+        end,
+        bytes: body,
+    })
+}
+
+fn after_vp9_references(mut body: &[u8]) -> Option<&[u8]> {
+    const MAX_REFERENCES: usize = 3;
+    for _ in 0..MAX_REFERENCES {
+        let (&reference, rest) = body.split_first()?;
+        if reference & 1 == 0 {
+            return Some(rest);
+        }
+        body = rest;
+    }
+    None
+}
+
+fn after_vp9_scalability(body: &[u8]) -> Option<&[u8]> {
+    let (&scalability, mut body) = body.split_first()?;
+    if scalability >> 5 != 0 {
+        return None;
+    }
+    if scalability & 0x10 != 0 {
+        body = body.get(4..)?; // optional width and height, one pair for the single spatial layer
+    }
+    if scalability & 0x08 != 0 {
+        let (&pictures, rest) = body.split_first()?;
+        body = rest;
+        for _ in 0..pictures {
+            let (&picture, references) = body.split_first()?;
+            let count = usize::from((picture >> 2) & 0x03);
+            body = references.get(count..)?;
+        }
+    }
+    Some(body)
 }
 
 // RFC 3640 3.2.1: the AU-headers-length field ahead of the AU headers, in bits
@@ -816,6 +1139,169 @@ mod tests {
         let mut packet = header.to_bytes().to_vec();
         packet.extend_from_slice(payload);
         packet
+    }
+
+    #[test]
+    fn vp8_extensions_and_partition_boundaries_preserve_the_frame() {
+        let mut depay = RtpDepayloader::new(&RtpEncoding::Vp8);
+        // X and S, a long PictureID, TL0PICIDX and a shared TID/KEYIDX octet.
+        let start = rtp_packet(u16::MAX, 90, false, &[0x90, 0xf0, 0x81, 2, 3, 0, 0xaa]);
+        // S is also set at the start of partition 1, inside this frame.
+        let end = rtp_packet(0, 90, true, &[0x11, 0xbb]);
+        assert!(depay.depacketize(&start).is_empty());
+        assert_eq!(
+            depay.depacketize(&end),
+            [AccessUnit {
+                data: alloc::vec![0xaa, 0xbb],
+                rtp_timestamp: 90
+            }]
+        );
+    }
+
+    #[test]
+    fn vp9_skips_scalability_and_flexible_reference_descriptors() {
+        let mut depay = RtpDepayloader::new(&RtpEncoding::Vp9);
+        // Long PictureID, one spatial layer with dimensions, one picture with one reference.
+        let start = rtp_packet(
+            7,
+            90,
+            false,
+            &[0x8a, 0x80, 7, 0x18, 0, 64, 0, 48, 1, 4, 1, 0xaa],
+        );
+        let end = rtp_packet(8, 90, true, &[0x84, 0x80, 7, 0xbb]);
+        assert!(depay.depacketize(&start).is_empty());
+        assert_eq!(
+            depay.depacketize(&end),
+            [AccessUnit {
+                data: alloc::vec![0xaa, 0xbb],
+                rtp_timestamp: 90
+            }]
+        );
+
+        let predicted = rtp_packet(9, 180, true, &[0xfc, 8, 0, 3, 4, 0xcc]);
+        assert_eq!(
+            depay.depacketize(&predicted),
+            [AccessUnit {
+                data: alloc::vec![0xcc],
+                rtp_timestamp: 180
+            }]
+        );
+        let too_many_references = rtp_packet(10, 270, true, &[0xfc, 9, 0, 3, 5, 7, 8, 0xdd]);
+        let multiple_layers = rtp_packet(11, 360, true, &[0x0e, 0x20, 0xdd]);
+        assert!(depay.depacketize(&too_many_references).is_empty());
+        assert!(depay.depacketize(&multiple_layers).is_empty());
+    }
+
+    #[test]
+    fn vp8_and_vp9_drop_partial_frames_and_resume_at_the_next_start() {
+        for (codec, start, end, whole, malformed) in [
+            (RtpEncoding::Vp8, 0x10, 0x00, 0x10, 0x80),
+            (RtpEncoding::Vp9, 0x08, 0x04, 0x0c, 0x80),
+        ] {
+            let mut depay = RtpDepayloader::new(&codec);
+            let packet = |seq, ts, marker, header| rtp_packet(seq, ts, marker, &[header, 0xaa]);
+            assert!(depay.depacketize(&packet(1, 100, false, start)).is_empty());
+            assert!(depay.depacketize(&packet(3, 100, true, end)).is_empty());
+            assert!(depay.depacketize(&packet(4, 200, false, start)).is_empty());
+            assert!(depay
+                .depacketize(&rtp_packet(5, 200, false, &[malformed]))
+                .is_empty());
+            assert!(depay.depacketize(&packet(6, 200, true, end)).is_empty());
+            assert_eq!(
+                depay.depacketize(&packet(7, 300, true, whole)),
+                [AccessUnit {
+                    data: alloc::vec![0xaa],
+                    rtp_timestamp: 300
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn av1_rejoins_obu_fragments_and_normalizes_both_aggregation_forms() {
+        let mut depay = RtpDepayloader::new(&RtpEncoding::Av1);
+        // W=2: sequence header then the start of an extended frame OBU.
+        let start = rtp_packet(u16::MAX, 90, false, &[0x68, 2, 0x08, 0xaa, 0x34]);
+        let middle = rtp_packet(0, 90, false, &[0xd0, 0x20, 0xbb]);
+        // W=0: continuation, delimiter, tile list, and an OBU with a size field.
+        let end = rtp_packet(
+            1,
+            90,
+            true,
+            &[0x80, 1, 0xcc, 1, 0x10, 2, 0x40, 0xaa, 3, 0x2a, 1, 0xdd],
+        );
+        assert!(depay.depacketize(&start).is_empty());
+        assert!(depay.depacketize(&middle).is_empty());
+        assert_eq!(
+            depay.depacketize(&end),
+            [AccessUnit {
+                data: alloc::vec![0x0a, 1, 0xaa, 0x36, 0x20, 2, 0xbb, 0xcc, 0x2a, 1, 0xdd],
+                rtp_timestamp: 90
+            }]
+        );
+    }
+
+    #[test]
+    fn av1_uses_timestamps_to_close_whole_units_when_the_marker_is_clear() {
+        let mut depay = RtpDepayloader::new(&RtpEncoding::Av1);
+        assert!(depay
+            .depacketize(&rtp_packet(1, 90, false, &[0x10, 0x30, 0xaa]))
+            .is_empty());
+        assert_eq!(
+            depay.depacketize(&rtp_packet(2, 180, true, &[0x10, 0x30, 0xbb])),
+            [
+                AccessUnit {
+                    data: alloc::vec![0x32, 1, 0xaa],
+                    rtp_timestamp: 90
+                },
+                AccessUnit {
+                    data: alloc::vec![0x32, 1, 0xbb],
+                    rtp_timestamp: 180
+                }
+            ]
+        );
+        // A timestamp change can only close a unit whose last OBU is complete.
+        assert!(depay
+            .depacketize(&rtp_packet(3, 270, false, &[0x50, 0x30, 0xcc]))
+            .is_empty());
+        assert_eq!(
+            depay.depacketize(&rtp_packet(4, 360, true, &[0x10, 0x30, 0xdd])),
+            [AccessUnit {
+                data: alloc::vec![0x32, 1, 0xdd],
+                rtp_timestamp: 360
+            }]
+        );
+    }
+
+    #[test]
+    fn av1_discards_units_after_missing_or_malformed_elements() {
+        for (sequence, malformed) in [
+            (3, &[0x10, 0x30, 0xbb][..]),    // sequence gap
+            (2, &[0x00, 0xff, 0xff][..]),    // unterminated LEB128
+            (2, &[0x00, 127, 0x30][..]),     // length past the packet
+            (2, &[0x20, 2, 0x30, 0xbb][..]), // W requires another element
+            (2, &[0x10, 0x32, 2, 0xbb][..]), // inconsistent internal OBU size
+            (2, &[0x98, 0x30, 0xbb][..]),    // N with Z
+        ] {
+            let mut depay = RtpDepayloader::new(&RtpEncoding::Av1);
+            assert!(depay
+                .depacketize(&rtp_packet(1, 90, false, &[0x18, 0x08, 0xaa]))
+                .is_empty());
+            assert!(depay
+                .depacketize(&rtp_packet(sequence, 90, false, malformed))
+                .is_empty());
+            assert!(depay
+                .depacketize(&rtp_packet(sequence + 1, 90, true, &[0x10, 0x30, 0xcc]))
+                .is_empty());
+            // N locates a fresh sequence even when the preceding packets were lost.
+            assert_eq!(
+                depay.depacketize(&rtp_packet(sequence + 3, 180, true, &[0x18, 0x08, 0xdd])),
+                [AccessUnit {
+                    data: alloc::vec![0x0a, 1, 0xdd],
+                    rtp_timestamp: 180
+                }]
+            );
+        }
     }
 
     #[test]

@@ -360,24 +360,33 @@ impl CaptureTimeExtensionIds {
     }
 
     pub fn read(&self, packet: &[u8]) -> Option<u64> {
-        let abs_capture_time = self
-            .abs_capture_time
-            .and_then(|id| RtpHeader::find_extension(packet, id.get()))
-            .filter(|data| {
-                data.len() == NTP_TIMESTAMP_LEN || data.len() == ABS_CAPTURE_TIME_WITH_OFFSET_LEN
-            });
-        let ntp_64 = self
-            .ntp_64
-            .and_then(|id| RtpHeader::find_extension(packet, id.get()))
-            .filter(|data| data.len() == NTP_TIMESTAMP_LEN);
-        [abs_capture_time, ntp_64]
-            .into_iter()
-            .flatten()
-            .filter_map(|data| data.get(..NTP_TIMESTAMP_LEN)?.try_into().ok())
-            .map(u64::from_be_bytes)
-            // GStreamer sends zero when it has no time to stamp
-            .find(|&ntp| ntp != 0)
+        self.read_abs_capture_time(packet)
+            .or_else(|| self.read_ntp_64(packet))
     }
+
+    /// The capture timestamp, optionally followed by an estimated clock offset.
+    pub fn read_abs_capture_time(&self, packet: &[u8]) -> Option<u64> {
+        let data = RtpHeader::find_extension(packet, self.abs_capture_time?.get())?;
+        match data.len() {
+            NTP_TIMESTAMP_LEN | ABS_CAPTURE_TIME_WITH_OFFSET_LEN => read_ntp_stamp(data),
+            _ => None,
+        }
+    }
+
+    /// The RFC 6051 synchronization timestamp paired with the RTP timestamp.
+    pub fn read_ntp_64(&self, packet: &[u8]) -> Option<u64> {
+        let data = RtpHeader::find_extension(packet, self.ntp_64?.get())?;
+        if data.len() != NTP_TIMESTAMP_LEN {
+            return None;
+        }
+        read_ntp_stamp(data)
+    }
+}
+
+fn read_ntp_stamp(data: &[u8]) -> Option<u64> {
+    let ntp = u64::from_be_bytes(data.get(..NTP_TIMESTAMP_LEN)?.try_into().ok()?);
+    // GStreamer sends zero when it has no time to stamp
+    (ntp != 0).then_some(ntp)
 }
 
 const CLASSIFICATION_CONFIDENCE_STEPS: f32 = u8::MAX as f32;

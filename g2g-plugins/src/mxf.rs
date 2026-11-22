@@ -378,7 +378,14 @@ pub(crate) enum Essence {
         format: AudioFormat,
         channels: u8,
         sample_rate: u32,
+        packing: PcmPacking,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PcmPacking {
+    Packed,
+    D10Aes3,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -462,10 +469,16 @@ pub(crate) fn header_metadata(data: &[u8], op_atom: bool) -> HeaderMetadata {
                 .or_else(|| descriptor.i64(CONTAINER_DURATION_TAG))
                 .and_then(|duration| u64::try_from(duration).ok())
                 .filter(|duration| *duration > 0);
-            let clip_wrapped = op_atom
+            let clip_wrapped = !matches!(
+                essence,
+                Essence::Pcm {
+                    packing: PcmPacking::D10Aes3,
+                    ..
+                }
+            ) && (op_atom
                 || descriptor
                     .label(ESSENCE_CONTAINER_TAG)
-                    .is_some_and(|label| names_clip_wrapping(&label));
+                    .is_some_and(|label| names_clip_wrapping(&label)));
             metadata.tracks.push(EssenceTrack {
                 track_number,
                 edit_rate,
@@ -537,7 +550,10 @@ fn essence(descriptor: &LocalSet) -> Option<Essence> {
     }
     let mapping = container[13];
     if mapping == PCM_MAPPING {
-        return pcm(descriptor);
+        return pcm(descriptor, PcmPacking::Packed);
+    }
+    if mapping == D10_MAPPING && SOUND_DESCRIPTORS.contains(&descriptor.kind) {
+        return pcm(descriptor, PcmPacking::D10Aes3);
     }
     let coding = descriptor
         .label(PICTURE_CODING_TAG)
@@ -591,7 +607,7 @@ pub(crate) const QUANTIZATION_FORMATS: [(u32, AudioFormat); 3] = [
     (32, AudioFormat::PcmS32Le),
 ];
 
-fn pcm(descriptor: &LocalSet) -> Option<Essence> {
+fn pcm(descriptor: &LocalSet, packing: PcmPacking) -> Option<Essence> {
     if !SOUND_DESCRIPTORS.contains(&descriptor.kind) {
         return None;
     }
@@ -600,18 +616,68 @@ fn pcm(descriptor: &LocalSet) -> Option<Essence> {
         .into_iter()
         .find(|(depth, _)| *depth == bits)?;
     let channels = descriptor.u32(CHANNEL_COUNT_TAG)?;
-    if channels == 0 || channels > MAX_CHANNELS {
+    let max_channels = match packing {
+        PcmPacking::Packed => MAX_CHANNELS,
+        PcmPacking::D10Aes3 => D10_CHANNELS as u32,
+    };
+    if channels == 0 || channels > max_channels {
         return None;
     }
     let rate = descriptor.rational(AUDIO_SAMPLING_RATE_TAG)?;
     if rate.numerator % rate.denominator != 0 {
         return None;
     }
+    let sample_rate = rate.numerator / rate.denominator;
+    if packing == PcmPacking::D10Aes3 && (sample_rate != D10_SAMPLE_RATE || bits == 32) {
+        return None;
+    }
     Some(Essence::Pcm {
         format,
         channels: channels as u8,
-        sample_rate: rate.numerator / rate.denominator,
+        sample_rate,
+        packing,
     })
+}
+
+const D10_CHANNELS: usize = 8;
+const D10_SAMPLE_RATE: u32 = 48_000;
+const D10_WORD_BYTES: usize = 4;
+const D10_SAMPLE_ROW_BYTES: usize = D10_CHANNELS * D10_WORD_BYTES;
+const D10_HEADER_BYTES: usize = 4;
+pub(crate) const MAX_D10_SOUND_BYTES: u64 =
+    (D10_HEADER_BYTES + u16::MAX as usize * D10_SAMPLE_ROW_BYTES) as u64;
+
+/// Unpack the frame-wrapped PCM words of the SMPTE ST 331 eight-channel element.
+pub(crate) fn d10_pcm(value: &[u8], format: AudioFormat, channels: u8) -> Option<(Vec<u8>, u64)> {
+    let [flags, count_lo, count_hi, valid, words @ ..] = value else {
+        return None;
+    };
+    let samples = usize::from(u16::from_le_bytes([*count_lo, *count_hi]));
+    let channels = usize::from(channels);
+    if words.len() != samples * D10_SAMPLE_ROW_BYTES || !(1..=D10_CHANNELS).contains(&channels) {
+        return None;
+    }
+    let (bytes, shift) = match format {
+        AudioFormat::PcmS16Le => (2, 12),
+        AudioFormat::PcmS24Le => (3, 4),
+        _ => return None,
+    };
+    const FVUCP_ACTIVE: u8 = 0x80;
+    const AES3_INVALID_SAMPLE: u32 = 1 << 28;
+    let mut pcm = Vec::with_capacity(samples * channels * bytes);
+    let (rows, _) = words.as_chunks::<D10_SAMPLE_ROW_BYTES>();
+    for row in rows {
+        let (words, _) = row.as_chunks::<D10_WORD_BYTES>();
+        for (channel, &word) in words.iter().take(channels).enumerate() {
+            let word = u32::from_le_bytes(word);
+            let invalid = valid & (1 << channel) == 0
+                || flags & FVUCP_ACTIVE != 0 && word & AES3_INVALID_SAMPLE != 0;
+            // Keep the descriptor's channel order and silence unused slots.
+            let sample = if invalid { 0 } else { word >> shift };
+            pcm.extend_from_slice(&sample.to_le_bytes()[..bytes]);
+        }
+    }
+    Some((pcm, samples as u64))
 }
 
 // ---- index tables ----
@@ -753,6 +819,7 @@ mod tests {
                     format: AudioFormat::PcmS24Le,
                     channels: 2,
                     sample_rate: 48_000,
+                    packing: PcmPacking::Packed,
                 },
             ]
         );
@@ -813,6 +880,7 @@ mod tests {
                 format: AudioFormat::PcmS24Le,
                 channels: 1,
                 sample_rate: 48_000,
+                packing: PcmPacking::Packed,
             }
         );
         let clip = header_partition_metadata(IMF_PCM_CLIP).unwrap();
@@ -825,8 +893,27 @@ mod tests {
                 format: AudioFormat::PcmS24Le,
                 channels: 2,
                 sample_rate: 48_000,
+                packing: PcmPacking::Packed,
             }
         );
+    }
+
+    #[test]
+    fn d10_pcm_checks_the_sample_count_and_silences_invalid_slots() {
+        // Two valid channels in the element mask. Channel 2's sample carries AES3 V.
+        let mut value = [0u8; D10_HEADER_BYTES + D10_SAMPLE_ROW_BYTES];
+        value[..D10_HEADER_BYTES].copy_from_slice(&[0x80, 1, 0, 0b11]);
+        let words = [0x0f_ed_cb_a0u32, 0x11_23_45_61, 0x07_65_43_22];
+        let (slots, _) = value[D10_HEADER_BYTES..].as_chunks_mut::<D10_WORD_BYTES>();
+        for (slot, word) in slots.iter_mut().zip(words) {
+            *slot = word.to_le_bytes();
+        }
+        assert_eq!(
+            d10_pcm(&value, AudioFormat::PcmS24Le, 3),
+            Some((Vec::from([0xba, 0xdc, 0xfe, 0, 0, 0, 0, 0, 0]), 1))
+        );
+        value[1] = 2;
+        assert_eq!(d10_pcm(&value, AudioFormat::PcmS24Le, 3), None);
     }
 
     fn index_segments(file: &[u8]) -> Vec<IndexSegment> {

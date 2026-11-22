@@ -3,14 +3,16 @@
 // SPDX-License-Identifier: MPL-2.0
 
 #![allow(dead_code)] // no one test file uses every helper here
-                     // ffmpeg packetizes an H.265 fixture as RTP, this answers RTSP and relays each datagram
-                     // interleaved, one client session at a time
+
+// ffmpeg packetizes video as RTP, this answers RTSP and relays each datagram
+// interleaved, one client session at a time
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 const FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -18,10 +20,11 @@ const FIXTURE: &str = concat!(
 );
 const INTERLEAVED_RTP_CHANNEL: u8 = 0;
 const MAX_DATAGRAM: usize = 65536;
+const SDP_TIMEOUT: Duration = Duration::from_secs(10);
 // shorter than the fixed RTP header, so the client fails the session on it
 const CORRUPT_RTP: [u8; 4] = [0; 4];
 
-pub(crate) struct H265Relay {
+pub(crate) struct RtspRelay {
     pub(crate) url: String,
     sessions: Arc<AtomicUsize>,
     ffmpeg: Child,
@@ -29,14 +32,14 @@ pub(crate) struct H265Relay {
     _rtcp: UdpSocket,
 }
 
-impl H265Relay {
+impl RtspRelay {
     // RTSP connections the relay has accepted
     pub(crate) fn sessions(&self) -> usize {
         self.sessions.load(Ordering::SeqCst)
     }
 }
 
-impl Drop for H265Relay {
+impl Drop for RtspRelay {
     fn drop(&mut self) {
         let _ = self.ffmpeg.kill();
         let _ = self.ffmpeg.wait();
@@ -57,33 +60,72 @@ pub(crate) enum EarlyEnd {
 }
 
 // session `n` ends as `early_ends[n]` says, and a `range` goes into the SDP as `a=range`
-pub(crate) fn serve_h265_fixture(early_ends: &[EarlyEnd], range: Option<&str>) -> H265Relay {
+pub(crate) fn serve_h265_fixture(early_ends: &[EarlyEnd], range: Option<&str>) -> RtspRelay {
+    let mut ffmpeg = ffmpeg_command();
+    ffmpeg.args(["-stream_loop", "-1", "-i", FIXTURE, "-c", "copy"]);
+    serve_ffmpeg_rtp(ffmpeg, |sdp| sdp.contains("H265"), early_ends, range)
+}
+
+pub(crate) fn serve_mjpeg() -> RtspRelay {
+    let mut ffmpeg = ffmpeg_command();
+    ffmpeg.args([
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=64x48:rate=25",
+        "-c:v",
+        "mjpeg",
+        "-pix_fmt",
+        "yuvj420p",
+        "-huffman",
+        "default",
+        "-force_duplicated_matrix",
+        "1",
+        "-threads:v",
+        "1",
+    ]);
+    // FFmpeg uses static payload type 26 and sends no rtpmap for it.
+    serve_ffmpeg_rtp(ffmpeg, |sdp| sdp.contains("RTP/AVP 26"), &[], None)
+}
+
+fn ffmpeg_command() -> Command {
+    let mut command = Command::new("ffmpeg");
+    command.args(["-hide_banner", "-loglevel", "error", "-re"]);
+    command
+}
+
+fn serve_ffmpeg_rtp(
+    mut command: Command,
+    sdp_ready: impl Fn(&str) -> bool,
+    early_ends: &[EarlyEnd],
+    range: Option<&str>,
+) -> RtspRelay {
     let rtp = UdpSocket::bind("127.0.0.1:0").expect("bind rtp");
     let rtp_port = rtp.local_addr().unwrap().port();
     let (rtcp, rtcp_port) = rtcp_sink();
-    let sdp_path = std::env::temp_dir().join(format!("h265-relay-{rtp_port}.sdp"));
-    let ffmpeg = Command::new("ffmpeg")
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-re",
-            "-stream_loop",
-            "-1",
-            "-i",
-            FIXTURE,
-        ])
-        .args(["-c", "copy", "-f", "rtp", "-sdp_file"])
+    let sdp_path = std::env::temp_dir().join(format!("g2g-rtsp-relay-{rtp_port}.sdp"));
+    let mut ffmpeg = command
+        .args(["-f", "rtp", "-sdp_file"])
         .arg(&sdp_path)
         .arg(format!("rtp://127.0.0.1:{rtp_port}?rtcpport={rtcp_port}"))
         .stdin(Stdio::null())
         .spawn()
         .expect("spawn ffmpeg");
+    let deadline = Instant::now() + SDP_TIMEOUT;
     let sdp = loop {
-        match std::fs::read_to_string(&sdp_path) {
-            Ok(text) if text.contains("H265") => break text,
-            _ => std::thread::sleep(std::time::Duration::from_millis(50)),
+        let sdp = std::fs::read_to_string(&sdp_path).ok();
+        if let Some(text) = sdp.filter(|text| text.ends_with('\n') && sdp_ready(text)) {
+            break text;
         }
+        if let Some(status) = ffmpeg.try_wait().expect("poll ffmpeg") {
+            panic!("ffmpeg exited without an SDP: {status}");
+        }
+        if Instant::now() >= deadline {
+            let _ = ffmpeg.kill();
+            let _ = ffmpeg.wait();
+            panic!("ffmpeg did not publish the expected SDP");
+        }
+        std::thread::sleep(Duration::from_millis(50));
     };
     let _ = std::fs::remove_file(&sdp_path);
     let sdp = match range {
@@ -106,7 +148,7 @@ pub(crate) fn serve_h265_fixture(early_ends: &[EarlyEnd], range: Option<&str>) -
             }
         }
     });
-    H265Relay {
+    RtspRelay {
         url: format!("rtsp://127.0.0.1:{port}/stream"),
         sessions,
         ffmpeg,

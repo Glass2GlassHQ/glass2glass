@@ -30,7 +30,7 @@ impl RtspSrc {
             ElementMetadata::new(
                 "RTSP source",
                 "Source/Network",
-                "Receives an RTSP / RTP H.264 or H.265 stream via retina",
+                "Receives RTSP / RTP video via retina",
                 crate::AARON_BOXER,
             ),
         )

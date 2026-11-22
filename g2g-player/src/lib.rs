@@ -29,6 +29,7 @@ use g2g_plugins::launched::RunFailure;
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::uridecodebin::{file_track_playbin, FileTrackPlaybin, PlaybinTrackSelection};
 
+mod audiosink;
 mod caps_probe;
 mod demux_probe;
 mod level_meter;
@@ -37,7 +38,8 @@ mod render;
 mod subtitles;
 mod videosink;
 
-pub use g2g_core::{ChannelLayout, ChannelPosition, StreamType};
+pub use audiosink::{AudioOutputEvent, PcmBuffer};
+pub use g2g_core::{AudioFormat, ChannelLayout, ChannelPosition, FrameTiming, StreamType};
 #[cfg(feature = "ffmpeg")]
 pub use g2g_plugins::ffmpegdec::Lowres;
 pub use g2g_plugins::glnv12::GlTarget;
@@ -49,6 +51,7 @@ pub use render::GlRenderContext;
 pub use render::WgpuRenderContext;
 pub use subtitles::SubtitleSlot;
 
+use audiosink::{AudioCallback, PlayerAudioSink, PLAYER_AUDIO_SINK, PLAYER_AUDIO_SINK_METADATA};
 use caps_probe::CapsProbe;
 use demux_probe::DemuxProbe;
 use level_meter::{apply_level_meter, insert_level_meter, LEVEL_METER};
@@ -89,6 +92,21 @@ impl SoundOutput {
         match self {
             SoundOutput::Device => "autoaudiosink",
             SoundOutput::Discard => "fakeaudiosink",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum AudioRoute {
+    BuiltIn(SoundOutput),
+    Host(AudioCallback),
+}
+
+impl AudioRoute {
+    fn sink(&self) -> &'static str {
+        match self {
+            Self::BuiltIn(output) => output.sink(),
+            Self::Host(_) => PLAYER_AUDIO_SINK,
         }
     }
 }
@@ -220,6 +238,7 @@ pub enum LoadError {
     Parse(ParseError),
     Edl(EdlError),
     NoVideoSink,
+    NoAudioCallback,
     StartNotSeekable,
     Spawn(std::io::Error),
 }
@@ -230,7 +249,13 @@ impl fmt::Display for LoadError {
             LoadError::Parse(error) => write!(f, "parse error: {error}"),
             LoadError::Edl(error) => write!(f, "edl:// timeline: {error}"),
             LoadError::NoVideoSink => {
-                write!(f, "the launch line has no {PLAYER_VIDEO_SINK} element")
+                write!(
+                    f,
+                    "the launch line needs {PLAYER_VIDEO_SINK} or {PLAYER_AUDIO_SINK}"
+                )
+            }
+            LoadError::NoAudioCallback => {
+                write!(f, "{PLAYER_AUDIO_SINK} requires Player::set_audio_callback")
             }
             LoadError::StartNotSeekable => {
                 f.write_str("a start position was given, but the media cannot seek")
@@ -551,7 +576,7 @@ enum PlaybackStop {
 struct SelectedFile {
     uri: String,
     selection: PlaybinTrackSelection,
-    sound_output: SoundOutput,
+    sound_output: AudioRoute,
     #[cfg(feature = "ffmpeg")]
     lowres: Lowres,
 }
@@ -569,7 +594,8 @@ struct OpenedMedia {
     graph: Graph<GraphNode>,
     selected_file: Option<SelectedFile>,
     tracks: Vec<Track>,
-    needs_video_sink: bool,
+    sound_output: AudioRoute,
+    needs_player_sink: bool,
     #[cfg(feature = "ffmpeg")]
     lowres: Lowres,
 }
@@ -599,7 +625,7 @@ pub struct Player {
     // mpv keeps its vf chain across loads
     picture_filters: tokio::sync::watch::Sender<Vec<PictureFilter>>,
     level_meter_window: tokio::sync::watch::Sender<Option<Duration>>,
-    sound_output: Mutex<SoundOutput>,
+    sound_output: Mutex<AudioRoute>,
     #[cfg(feature = "ffmpeg")]
     lowres: Mutex<Lowres>,
 }
@@ -614,7 +640,7 @@ fn nanoseconds(position: Duration) -> u64 {
     u64::try_from(position.as_nanos()).unwrap_or(u64::MAX)
 }
 
-fn edl_launch_line(uri: &str, sound_output: SoundOutput) -> Result<String, LoadError> {
+fn edl_launch_line(uri: &str, sound_output: &AudioRoute) -> Result<String, LoadError> {
     // guikit's timelines carry their sound file in the stream after the first !new_stream
     const SOUND_STREAM: usize = 1;
     let edl = parse_edl_uri(uri).map_err(LoadError::Edl)?;
@@ -636,13 +662,17 @@ impl Player {
             PLAYER_VIDEO_SINK,
             || Box::new(PlayerVideoSink::new(Arc::default())),
         ));
+        registry.register_launch(LaunchFactory::of::<PlayerAudioSink>(
+            PLAYER_AUDIO_SINK,
+            || Box::new(PlayerAudioSink::default()),
+        ));
         Player {
             registry,
             shared: Arc::default(),
             playback: Mutex::new(None),
             picture_filters: tokio::sync::watch::Sender::new(Vec::new()),
             level_meter_window: tokio::sync::watch::Sender::new(None),
-            sound_output: Mutex::new(SoundOutput::default()),
+            sound_output: Mutex::new(AudioRoute::BuiltIn(SoundOutput::default())),
             #[cfg(feature = "ffmpeg")]
             lowres: Mutex::new(Lowres::default()),
         }
@@ -650,14 +680,14 @@ impl Player {
 
     pub fn load(&self, media: Media<'_>, options: LoadOptions) -> Result<(), LoadError> {
         self.stop();
-        let sound_output = *self.sound_output.lock().expect("sound output lock");
+        let sound_output = self.sound_output.lock().expect("sound output lock").clone();
         #[cfg(feature = "ffmpeg")]
         let lowres = *self.lowres.lock().expect("lowres lock");
         if let Media::Uri(uri) = media {
             let file = SelectedFile {
                 uri: uri.to_string(),
                 selection: PlaybinTrackSelection::default(),
-                sound_output,
+                sound_output: sound_output.clone(),
                 #[cfg(feature = "ffmpeg")]
                 lowres,
             };
@@ -670,7 +700,8 @@ impl Player {
                         graph,
                         selected_file: Some(file),
                         tracks,
-                        needs_video_sink: false,
+                        sound_output,
+                        needs_player_sink: false,
                         #[cfg(feature = "ffmpeg")]
                         lowres,
                     },
@@ -680,7 +711,7 @@ impl Player {
             }
         }
         let line = match media {
-            Media::Uri(uri) if uri.starts_with("edl://") => edl_launch_line(uri, sound_output)?,
+            Media::Uri(uri) if uri.starts_with("edl://") => edl_launch_line(uri, &sound_output)?,
             Media::Uri(uri) => format!(
                 "playbin uri={} video-sink={PLAYER_VIDEO_SINK} audio-sink={}",
                 launch_quote(uri),
@@ -694,7 +725,8 @@ impl Player {
                 graph,
                 selected_file: None,
                 tracks: Vec::new(),
-                needs_video_sink: matches!(media, Media::LaunchLine(_)),
+                sound_output,
+                needs_player_sink: matches!(media, Media::LaunchLine(_)),
                 #[cfg(feature = "ffmpeg")]
                 lowres,
             },
@@ -717,8 +749,11 @@ impl Player {
         };
         #[cfg(not(feature = "ffmpeg"))]
         let lowres = false;
-        let video_sinks = connect_video_sinks(&mut graph, &self.shared);
-        if video_sinks.is_empty() && opened.needs_video_sink {
+        // Audio and video start together only once every sink has prerolled.
+        let state = StateController::new(PipelineState::Paused);
+        let (video_sinks, has_host_audio) =
+            connect_player_sinks(&mut graph, &self.shared, &opened.sound_output, &state)?;
+        if video_sinks.is_empty() && !has_host_audio && opened.needs_player_sink {
             return Err(LoadError::NoVideoSink);
         }
         let (decoded_size, decoded) = tokio::sync::watch::channel(None);
@@ -754,8 +789,6 @@ impl Player {
         if let Some(seek) = &seek {
             seek.keep_run_open();
         }
-        // audio and video start together only once every sink has prerolled
-        let state = StateController::new(PipelineState::Paused);
         let replacing = previous.is_some();
         let progress = PipelineProgress::new();
         let (seeks, seek_requests) = tokio::sync::mpsc::unbounded_channel();
@@ -889,9 +922,10 @@ impl Player {
         self.start_playback(
             OpenedMedia {
                 graph,
+                sound_output: file.sound_output.clone(),
                 selected_file: Some(file),
                 tracks,
-                needs_video_sink: false,
+                needs_player_sink: false,
                 #[cfg(feature = "ffmpeg")]
                 lowres,
             },
@@ -1169,9 +1203,23 @@ impl Player {
         Ok(())
     }
 
-    // takes effect at the next load
+    /// Select built-in sound output for the next load.
     pub fn set_sound_output(&self, output: SoundOutput) {
-        *self.sound_output.lock().expect("sound output lock") = output;
+        *self.sound_output.lock().expect("sound output lock") = AudioRoute::BuiltIn(output);
+    }
+
+    /// Route sound from the next URI load to the host, or use `playeraudiosink`
+    /// explicitly in a launch line. The playback thread calls `callback` with
+    /// borrowed interleaved PCM at its presentation time and signals seek flushes
+    /// and end of stream. Copy any samples that must outlive the call.
+    /// Callbacks should return promptly and must not invoke `load`, `stop` or
+    /// `select_track` on this player, since those operations join the thread.
+    pub fn set_audio_callback(
+        &self,
+        callback: impl Fn(AudioOutputEvent<'_>) + Send + Sync + 'static,
+    ) {
+        *self.sound_output.lock().expect("sound output lock") =
+            AudioRoute::Host(AudioCallback::new(callback));
     }
 
     // mpv's vd-lavc-o=lowres, takes effect at the next load
@@ -1208,24 +1256,32 @@ impl Drop for Player {
     }
 }
 
-fn connect_video_sinks(graph: &mut Graph<GraphNode>, shared: &Arc<Shared>) -> Vec<NodeId> {
-    let mut connected = Vec::new();
+fn connect_player_sinks(
+    graph: &mut Graph<GraphNode>,
+    shared: &Arc<Shared>,
+    audio: &AudioRoute,
+    state: &StateController,
+) -> Result<(Vec<NodeId>, bool), LoadError> {
+    let mut video = Vec::new();
+    let mut has_host_audio = false;
     for index in 0..graph.node_count() {
-        let node = g2g_core::graph::NodeId(index as u32);
-        let Some(element) = graph.element_mut(node) else {
+        let node = NodeId(index as u32);
+        let Some(GraphNodeRef::Element(sink)) = graph.element_mut(node) else {
             continue;
         };
-        let is_player_sink = matches!(
-            element,
-            GraphNodeRef::Element(sink) if sink.metadata() == PLAYER_VIDEO_SINK_METADATA
-        );
-        if is_player_sink {
-            // parse_launch builds each sink from a factory that cannot reach this player
-            *element = GraphNodeRef::Element(Box::new(PlayerVideoSink::new(shared.clone())));
-            connected.push(node);
+        // Launch factories cannot reach an individual player's callbacks.
+        if sink.metadata() == PLAYER_VIDEO_SINK_METADATA {
+            *sink = Box::new(PlayerVideoSink::new(shared.clone()));
+            video.push(node);
+        } else if sink.metadata() == PLAYER_AUDIO_SINK_METADATA {
+            let AudioRoute::Host(callback) = audio else {
+                return Err(LoadError::NoAudioCallback);
+            };
+            *sink = Box::new(PlayerAudioSink::new(callback.clone(), state.clone()));
+            has_host_audio = true;
         }
     }
-    connected
+    Ok((video, has_host_audio))
 }
 
 fn insert_video_params_probe(

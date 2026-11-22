@@ -573,7 +573,8 @@ impl SenderClock {
         const NANOS_PER_SEC: i64 = 1_000_000_000;
         let delta = rtp_timestamp.wrapping_sub(self.rtp_timestamp) as i32;
         let rate = i64::from(self.clock_rate_hz.max(1));
-        self.unix_nanos + i64::from(delta) * NANOS_PER_SEC / rate
+        self.unix_nanos
+            .saturating_add(i64::from(delta) * NANOS_PER_SEC / rate)
     }
 }
 

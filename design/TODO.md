@@ -49,9 +49,7 @@ The plan is [remote.md](remote.md).
 
 ## Embeddable player (`g2g-player`)
 
-- D-10 AES3 sound in MXF (SMPTE ST 331).
 - Take GPU frames in `playervideosink` once decoders open on the host's device.
-- An option that hands PCM to the host.
 - A versioned C ABI (`g2g_player.h`), wrapped in the C#, C++, Kotlin and
   Python bindings.
 - Bevy / wgpu, Qt, Flutter and Android hosts, with one texture export per
@@ -200,10 +198,7 @@ libraries installed.
   - AV1 and VP9 on `mediacodecdec`.
   - HEVC 4:4:4 and 12-bit on `nvdec`.
 - **RTP receive:**
-  - Place frames from RFC 6051 in-band NTP-64 before the first sender report,
-    for faster sync.
-  - VP8, VP9, AV1 and JPEG RTP payloads in `udpsrc`, and MJPEG cameras in
-    `rtspsrcn` (retina has a JPEG depacketizer).
+  - JPEG RTP payloads and spatially scalable VP9 in `udpsrc`.
   - RED (RFC 2198) receive.
 - **RTSP:**
   - retina joins an absolute `a=control:/path` onto the base URL. Report it

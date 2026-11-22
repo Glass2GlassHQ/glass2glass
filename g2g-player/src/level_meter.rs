@@ -39,7 +39,7 @@ fn interval_ns(window: Duration) -> u64 {
     u64::try_from(window.as_nanos()).unwrap_or(u64::MAX)
 }
 
-fn audio_params_of(caps: &Caps) -> Option<AudioParams> {
+pub(crate) fn audio_params_of(caps: &Caps) -> Option<AudioParams> {
     let Caps::Audio {
         channels,
         sample_rate,

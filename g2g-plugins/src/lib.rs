@@ -1228,9 +1228,8 @@ pub mod livekitsink;
 #[cfg(feature = "webrtc-livekit")]
 pub mod livekitsrc;
 
-// UDP ingress source (M91): receives RTP on a tokio UdpSocket and depayloads
-// H.264 (rtpdepay) into Annex-B access units, the receive-side inverse of
-// UdpSink. Caps come from a published SDP or the stream's SPS; see module docs.
+// UDP ingress source (M91): receives RTP and depayloads each codec's access
+// units. Caps come from a published SDP and are refined by the bitstream.
 #[cfg(feature = "udp-ingress")]
 pub mod udpsrc;
 

@@ -17,7 +17,14 @@ unsafe {
 }
 ```
 
-A launch line must contain `playervideosink`, which is where the frames are taken from.
+A launch line includes `playervideosink` for video, `playeraudiosink` for host
+audio, or both. Call `player.set_audio_callback(callback)` before loading to
+receive host audio. URI loads select that output automatically. The playback
+thread calls the callback with borrowed interleaved PCM and its negotiated
+format, rate, channel layout, and timing. URI playback uses playbin's audio
+conversion chain. A launch line can pin its own format and rate.
+`AudioOutputEvent::Flush` tells the host to discard previously queued samples
+after seeking.
 
 ## Tests
 

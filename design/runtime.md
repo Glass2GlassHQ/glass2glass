@@ -1094,12 +1094,17 @@ speaker layout, the conventional layout for the count when the stream names none
 The video and audio probes are one `CapsProbe` element with a callback.
 `set_sound_output(SoundOutput::Discard)`, mpv's `ao=null`, ends the sound branch
 in `fakeaudiosink` instead of `autoaudiosink` from the next load on.
+`set_audio_callback` selects `playeraudiosink` for the next URI load. It holds
+the preroll PCM until playback, then uses the pipeline clock and segment to
+deliver borrowed interleaved buffers with their negotiated format, rate, and
+speaker layout on the playback thread. It reports a flush before PCM from a
+new seek position and signals EOS after delivering the last samples.
 
 The host draws the frame due now into its own target, as with libmpv's render API.
-A URI load builds `playbin uri=... video-sink=playervideosink`, and a launch line
-must contain `playervideosink`. After `parse_launch` the sink node is found by its
-metadata and replaced with one holding the player's frame slot, since a
-`LaunchFactory` is a plain function pointer. `playervideosink` paces frames with
+A URI load builds `playbin uri=... video-sink=playervideosink`. A launch line
+includes `playervideosink` for video, `playeraudiosink` for host PCM, or both.
+After `parse_launch` the player finds its sink nodes by metadata and attaches
+the corresponding callback or frame slot. `playervideosink` paces frames with
 `PresentationPacer` against a `MonotonicClock` it provides, converts each due frame
 to NV12 or RGBA, or a YUV frame deeper than 8 bits to P010
 (`glnv12::convert_for_display`), on the pipeline thread, puts it in

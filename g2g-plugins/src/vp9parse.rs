@@ -199,7 +199,6 @@ pub struct Vp9KeyFrame {
 }
 
 /// Whether `packet` is a shown VP9 key frame with a readable header.
-#[cfg(any(feature = "webrtc", feature = "observe"))]
 pub(crate) fn is_keyframe(packet: &[u8]) -> bool {
     parse_keyframe(packet).is_some()
 }
@@ -207,7 +206,7 @@ pub(crate) fn is_keyframe(packet: &[u8]) -> bool {
 /// Decode a VP9 key-frame uncompressed header. `None` when the marker / sync
 /// code don't match, the frame is not a (shown) key frame, or the header is
 /// truncated before the size fields.
-fn parse_keyframe(packet: &[u8]) -> Option<Vp9KeyFrame> {
+pub(crate) fn parse_keyframe(packet: &[u8]) -> Option<Vp9KeyFrame> {
     let mut br = BitReader::new(packet);
     let color = read_keyframe_head(&mut br)?;
     let (width, height) = read_frame_size(&mut br)?;

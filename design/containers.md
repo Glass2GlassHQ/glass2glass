@@ -1620,7 +1620,12 @@ MXF muxer writes no temporal offsets for H.264, so its B-frames play out of
 order in ffmpeg as well. A picture is a keyframe when its index entry has the
 random access flag or its bitstream starts a GOP, which covers MPEG-2 open-GOP
 I-frames. A clip-wrapped picture track, as Avid OP-Atom writes, is cut at the
-index offset of each next edit unit. Sound goes out in pieces of at most 1/25 s.
+index offset of each next edit unit. Packed PCM goes out in pieces of at most
+1/25 s. D-10 sound carries an SMPTE ST 331 eight-channel AES3 element per edit
+unit. `mxfdemux` checks its sample count and unpacks the descriptor's channel
+slots to 16- or 24-bit little-endian PCM, silencing invalid samples and slots.
+Audio timestamps count the actual samples in each element, including the
+alternating sample counts at 30000/1001 fps.
 
 A seek lands on the keyframe of the target's display position, through its
 temporal and key frame offsets, when the index and the partition holding it are

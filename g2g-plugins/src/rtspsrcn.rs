@@ -6,9 +6,10 @@
 //! one output pad per subscribed track. [`RtspSrc`](crate::rtspsrc::RtspSrc) is
 //! this element with the video pad alone.
 //!
-//! Output 0 is the first H.264 / H.265 video stream in the SDP, Annex-B framed
-//! with SPS/PPS ahead of every key frame. Output 1, when the SDP offers
-//! a supported audio stream, is that audio: AAC arrives ADTS-framed (retina's
+//! Output 0 is the first supported video stream in the SDP. H.264 and H.265
+//! arrive Annex-B framed with parameter sets ahead of every keyframe, and
+//! Motion JPEG arrives as one complete JPEG image per frame. Output 1 is the
+//! first supported audio stream in the SDP: AAC arrives ADTS-framed (retina's
 //! [`FrameFormat::SIMPLE`] wraps it, matching what `Mp4DemuxN` synthesizes from
 //! an `AudioSpecificConfig`), G.711 as raw companded samples. Without audio the
 //! element has a single output.
@@ -111,7 +112,7 @@ const AUDIO_FORMAT_NICKS: &str = "aac | alaw | mulaw";
 /// The tracks a DESCRIBE found, as negotiation caps.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RtspTracks {
-    /// The first H.264 / H.265 stream, with the SDP's geometry.
+    /// The first supported video stream, with its geometry when known.
     pub video: Caps,
     /// The first supported audio stream as the SDP declares it (real channels
     /// and sample rate), or `None` when the SDP offers none. The pad negotiates
@@ -516,13 +517,15 @@ fn rtsp_failure(
     failure
 }
 
-/// The first stream g2g decodes as video, H.264 or H.265, and its codec.
+/// The first stream g2g decodes as video, and its codec.
 fn video_stream(streams: &[retina::client::Stream]) -> Option<(usize, VideoCodec)> {
     streams.iter().enumerate().find_map(|(i, s)| {
-        if s.media() != "video" {
-            return None;
-        }
-        Some((i, video_codec(s)?))
+        let codec = video_codec(s)?;
+        matches!(
+            (s.media(), codec),
+            ("video", _) | ("image", VideoCodec::Mjpeg)
+        )
+        .then_some((i, codec))
     })
 }
 
@@ -530,11 +533,12 @@ fn video_codec(stream: &retina::client::Stream) -> Option<VideoCodec> {
     match stream.encoding_name() {
         "h264" => Some(VideoCodec::H264),
         "h265" => Some(VideoCodec::H265),
+        "jpeg" => Some(VideoCodec::Mjpeg),
         _ => None,
     }
 }
 
-// `None` until the SDP or the stream has carried the parameter sets
+// `None` until the SDP or the stream has carried the video parameters
 fn video_caps_for(stream: &retina::client::Stream, codec: VideoCodec) -> Option<Caps> {
     let Some(ParametersRef::Video(p)) = stream.parameters() else {
         return None;
@@ -765,7 +769,7 @@ fn declared_audio_caps(format: AudioFormat, params: Option<&AudioParameters>) ->
 /// [`probe_tracks`] on a throwaway current-thread runtime, so a synchronous
 /// graph builder (the `playbin uri=rtsp://...` hook) can size the fan-out before
 /// the graph exists. `None` when the server is unreachable or offers no
-/// H.264 / H.265 video.
+/// supported video.
 pub fn blocking_probe_tracks(url: &str, user_agent: &str) -> Option<RtspTracks> {
     crate::uridecodebin::block_on_own_thread(|| probe_tracks(url, user_agent))
         .ok()
@@ -773,14 +777,16 @@ pub fn blocking_probe_tracks(url: &str, user_agent: &str) -> Option<RtspTracks> 
 }
 
 /// DESCRIBE `url` and report the tracks g2g can play from it: the first
-/// H.264 / H.265 video stream and the first supported audio stream, with the
-/// geometry and channel layout the SDP declares. `None` when the server is
+/// supported video and audio streams, with the geometry and channel layout
+/// the SDP declares. JPEG geometry arrives in the RTP payload, so the video
+/// caps start with a placeholder. `None` when the server is
 /// unreachable or carries no video.
 pub async fn probe_tracks(url: &str, user_agent: &str) -> Option<RtspTracks> {
     let session = connect_describe(url, user_agent, None).await.ok()?;
     let streams = session.streams();
     let (video_idx, codec) = video_stream(streams)?;
-    let video = video_caps_for(&streams[video_idx], codec)?;
+    let video = video_caps_for(&streams[video_idx], codec)
+        .or_else(|| (codec == VideoCodec::Mjpeg).then(|| elementary_video_caps(codec)))?;
     let audio = audio_stream_index(streams, None)
         .map(|(idx, format)| declared_audio_caps(format, audio_params_for(streams, idx)));
     let onvif_metadata = onvif_metadata_stream_index(streams).is_some();
@@ -895,7 +901,7 @@ impl MultiOutputSource for RtspSrcN {
         }
         let prepared = self.prepare_session_with_retries().await?;
         let stream = &prepared.session.streams()[prepared.video_idx];
-        // A server that keeps the parameter sets out of the SDP still names the codec.
+        // The SDP can name the codec before the stream supplies its parameters.
         let video = video_caps_for(stream, prepared.codec)
             .unwrap_or_else(|| elementary_video_caps(prepared.codec));
         self.probed_video = Some(video);
