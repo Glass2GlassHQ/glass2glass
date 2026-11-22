@@ -1681,11 +1681,12 @@ mod tests {
             .unwrap();
         det.set_property("tensor-name", PropValue::Str(String::from("ssd")))
             .unwrap();
-        let label_file = std::env::temp_dir().join("g2g_detect_ssd_labels.txt");
-        std::fs::write(&label_file, "person\nbicycle\n").unwrap();
         det.set_property(
             "label-file",
-            PropValue::Str(label_file.to_string_lossy().into_owned()),
+            PropValue::Str(String::from(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/ssd_labels.txt"
+            ))),
         )
         .unwrap();
         det.configure_pipeline(&rgba_caps(256, 256)).unwrap();

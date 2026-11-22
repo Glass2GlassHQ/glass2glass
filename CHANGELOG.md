@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2509: The SSD label tests can run in parallel.
 - M2508: `udpsrc` receives AV1 over RTP.
 - M2507: `udpsrc` receives VP8 and single-spatial-layer VP9 over RTP.
 - M2506: `rtspsrc` and `rtspsrcn` receive Motion JPEG cameras.
