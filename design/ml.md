@@ -438,6 +438,17 @@ GPU and NPU share it. Weston 13 on the board offers linux-dmabuf version 3,
 which has no feedback to name its DRM device, hence the `overlay-device`
 property.
 
+With Weston stopped, `kmssink render-overlays=true` puts the camera dma-buf on
+NV12 overlay plane 42 with no copy, centred at its size, the composition in
+ARGB8888 on plane 49 above it, and a black XRGB8888 buffer on primary plane 34,
+setting zpos 0, 1 and 2 since the LTDC's zpos is settable and Weston leaves
+planes 42 and 49 both at 2. Tracking at 15 fps detection presents all 300
+camera frames with no late drops, against 155 under Weston, at 31.6% system
+CPU against 46.4%. Nothing renders on the GPU per frame, so inference no longer
+delays the display. The LTDC has no writeback connector, so the plane
+composite cannot be read back, and a recording blends the same
+graph into an H.264 file instead.
+
 Given an H.264 MP4 instead of a frame count, the script decodes it on the Hantro
 and splits it with a `tee`, with `videoscale` making the model input on the CPU,
 so both branches read system memory. A 640x360 clip presents 307 of 341 frames.
@@ -1028,12 +1039,15 @@ buffer and its damage staying in buffer coordinates. The argument is the inverse
 of the descriptor, because `set_buffer_transform` names the transform already
 applied to the buffer and the compositor applies its inverse.
 
-`KmsSink` and `CudaKmsSink` absorb through the primary plane's `rotation`
-property, reading the value names and their bits from the plane and passing the
-descriptor as is, since the plane applies its rotation directly. They advertise
-the turns the plane can show, so a plane with only rotate-0 and rotate-180 absorbs
-the half turn and leaves quarter turns to the flip, and they turn the CRTC off and back on around a change so
-`set_crtc` sizes the plane for the new turn. `D3D11Sink` absorbs every turn through
+`KmsSink` absorbs through the `rotation` property of the plane showing the
+picture, and `CudaKmsSink` through the primary plane's, reading the value names
+and their bits from the plane and passing the descriptor as is, since the plane
+applies its rotation directly. They advertise the turns the plane can show, so a
+plane with only rotate-0 and rotate-180 absorbs the half turn and leaves quarter
+turns to the flip. `KmsSink` sets the value in the frame's atomic commit, with the
+plane's on-screen size swapped for a quarter turn, and gives the composition
+plane the same value. `CudaKmsSink` turns the CRTC off and back on around a
+change so `set_crtc` sizes the plane for the new turn. `D3D11Sink` absorbs every turn through
 `VideoProcessorSetStreamRotation` and `VideoProcessorSetStreamMirror`, and resizes
 the swapchain and window for a turn that transposes the picture. Its processor
 caps are only known at the first frame, so a processor without rotation or mirror

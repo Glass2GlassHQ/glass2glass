@@ -21,10 +21,10 @@ use crate::paint::{blend_layer_into_nv12, over_premultiplied};
 use crate::pixel::{plane_shapes, rgba_rb_offsets};
 use crate::yuvmatrix::YuvRgbMatrix;
 
-#[cfg(any(feature = "wgpu-sink", feature = "wayland-sink"))]
+#[cfg(any(feature = "wgpu-sink", feature = "wayland-sink", feature = "kms-sink"))]
 pub(crate) const RENDER_OVERLAYS_NAME: &str = "render-overlays";
 
-#[cfg(any(feature = "wgpu-sink", feature = "wayland-sink"))]
+#[cfg(any(feature = "wgpu-sink", feature = "wayland-sink", feature = "kms-sink"))]
 pub(crate) const RENDER_OVERLAYS_PROPERTY: g2g_core::PropertySpec = g2g_core::PropertySpec::new(
     RENDER_OVERLAYS_NAME,
     g2g_core::PropKind::Bool,
@@ -32,7 +32,7 @@ pub(crate) const RENDER_OVERLAYS_PROPERTY: g2g_core::PropertySpec = g2g_core::Pr
 )
 .with_default("false");
 
-#[cfg(any(feature = "wgpu-sink", feature = "wayland-sink"))]
+#[cfg(any(feature = "wgpu-sink", feature = "wayland-sink", feature = "kms-sink"))]
 pub(crate) fn render_requests(render: bool) -> MetaRequests {
     if render {
         MetaRequests::new().request_from_every_consumer::<OverlayCompositionMeta>()

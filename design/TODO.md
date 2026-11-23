@@ -372,8 +372,8 @@ libraries installed.
 - Write the VUI sample aspect from `openh264enc` once the `openh264` crate can
   set `bAspectRatioPresent`, and carry the caps ratio through `mfencode`,
   `vtencode`, `mediacodecenc` and `webcodecsencode` into their bitstreams.
-- Letterbox `kmssink` on an overlay plane with source and destination
-  rectangles, and size and letterbox `glsink`, `cudaglsink`, `d3d11videosink`
+- Scale `kmssink`'s picture to the display by display aspect on planes that
+  can scale, and size and letterbox `glsink`, `cudaglsink`, `d3d11videosink`
   and `metalvideosink` by display aspect behind `force-aspect-ratio`.
 - Keep the display aspect through the GPU scalers.
 - Derive an unpinned output width that keeps the display aspect when downstream
@@ -479,9 +479,8 @@ unless it says otherwise.
 - **Overlays:** `cairooverlay`, `rsvgoverlay`, `gdkpixbufoverlay`, `qroverlay` /
   `debugqroverlay`, `faceoverlay`, `zxing`,
   `objectdetectionoverlay` (vs `analyticsoverlay`).
-- **Overlay scanout:** submit `OverlayCompositionMeta` rectangles on separate
-  DRM/KMS planes in `kmssink`, and blend when separate submission is
-  unavailable.
+- **Overlay scanout:** blend `OverlayCompositionMeta` in `kmssink` when no
+  overlay plane above the picture takes ARGB8888.
 - **Video transforms:** `interlace`, `ivtc` / `combdetect`, `fieldanalysis`,
   `smpte` / `smptealpha`, `shapewipe`, `alphacolor`, `lcms`,
   `simplevideomark` / `simplevideomarkdetect`,

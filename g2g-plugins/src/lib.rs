@@ -1254,7 +1254,8 @@ pub mod dmabufmap;
 #[cfg(any(
     all(target_os = "linux", feature = "dmabuf-wgpu"),
     all(target_os = "linux", feature = "hip"),
-    all(target_os = "linux", feature = "wayland-sink")
+    all(target_os = "linux", feature = "wayland-sink"),
+    all(target_os = "linux", feature = "kms-sink")
 ))]
 mod dmabufimport;
 

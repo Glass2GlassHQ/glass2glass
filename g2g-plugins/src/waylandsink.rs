@@ -129,8 +129,8 @@ use crate::worker_ready::Handshake;
 use crate::yuvmatrix::YuvRgbMatrix;
 #[cfg(feature = "metadata")]
 use crate::{
-    drmcard::{Card, DEFAULT_CARD},
-    overlaycomposition::{composition_layer, RENDER_OVERLAYS_NAME, RENDER_OVERLAYS_PROPERTY},
+    drmcard::{draw_composition, same_composition, Card, DEFAULT_CARD},
+    overlaycomposition::{RENDER_OVERLAYS_NAME, RENDER_OVERLAYS_PROPERTY},
 };
 use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::frame::Frame;
@@ -1732,12 +1732,14 @@ impl OverlaySurface {
         let Some(buffer) = self.buffers.iter_mut().find(|buffer| !buffer.on_screen) else {
             return Ok(false);
         };
-        let layer = composition_layer(&composition, (width, height), &mut self.layer)?;
-        let pitch = drm::buffer::Buffer::pitch(&buffer.dumb) as usize;
-        let mut mapping = drm::control::Device::map_dumb_buffer(&self.card, &mut buffer.dumb)
-            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-        copy_as_argb8888(layer, width as usize, pitch, &mut mapping, &mut self.row);
-        drop(mapping);
+        draw_composition(
+            &self.card,
+            &mut buffer.dumb,
+            &composition,
+            (width, height),
+            &mut self.layer,
+            &mut self.row,
+        )?;
         self.surface.attach(Some(&buffer.wl_buffer), 0, 0);
         self.surface
             .damage_buffer(0, 0, width as i32, height as i32);
@@ -1747,24 +1749,6 @@ impl OverlaySurface {
         self.shown = Some(composition);
         Ok(appeared)
     }
-}
-
-// frames reuse the composition's bitmaps by reference until the overlay changes
-#[cfg(feature = "metadata")]
-fn same_composition(
-    first: &g2g_core::OverlayCompositionMeta,
-    second: &g2g_core::OverlayCompositionMeta,
-) -> bool {
-    first.rectangles().len() == second.rectangles().len()
-        && first
-            .rectangles()
-            .iter()
-            .zip(second.rectangles())
-            .all(|(first, second)| {
-                first.placement() == second.placement()
-                    && first.pixel_size() == second.pixel_size()
-                    && Arc::ptr_eq(first.pixels(), second.pixels())
-            })
 }
 
 #[cfg(feature = "metadata")]
@@ -1811,30 +1795,6 @@ fn overlay_buffers(
             })
         })
         .collect()
-}
-
-#[cfg(feature = "metadata")]
-fn copy_as_argb8888(
-    layer: &[u8],
-    width: usize,
-    pitch: usize,
-    mapped: &mut [u8],
-    row: &mut Vec<u8>,
-) {
-    // drm ARGB8888 is BGRA in memory
-    let (red, blue) = rgba_rb_offsets(RawVideoFormat::Bgra8);
-    row.resize(width * 4, 0);
-    for (layer_row, mapped_row) in layer.chunks_exact(width * 4).zip(mapped.chunks_mut(pitch)) {
-        for (dst, src) in row
-            .as_chunks_mut::<4>()
-            .0
-            .iter_mut()
-            .zip(layer_row.as_chunks::<4>().0)
-        {
-            *dst = [src[red], src[1], src[blue], src[3]];
-        }
-        mapped_row[..row.len()].copy_from_slice(row);
-    }
 }
 
 // =================================================================
@@ -1998,32 +1958,6 @@ mod tests {
         // drm_fourcc.h values of DRM_FORMAT_NV12 and DRM_FORMAT_YUYV
         assert_eq!(drm_format(RawVideoFormat::Nv12), Some(0x3231_564e));
         assert_eq!(drm_format(RawVideoFormat::Yuyv), Some(0x5659_5559));
-    }
-
-    #[cfg(feature = "metadata")]
-    #[test]
-    fn overlay_rows_land_as_argb8888_at_the_buffer_pitch() {
-        const WIDTH: usize = 2;
-        const PITCH: usize = 12;
-        const PADDING: u8 = 0xEE;
-        let red = [200, 0, 0, 200];
-        let half_blue = [0, 0, 64, 128];
-        let layer = [red, half_blue, half_blue, red].concat();
-        let mut mapped = [PADDING; 2 * PITCH];
-        copy_as_argb8888(&layer, WIDTH, PITCH, &mut mapped, &mut Vec::new());
-        // ARGB8888 is [blue, green, red, alpha] in memory
-        let argb_red = [0, 0, 200, 200];
-        let argb_half_blue = [64, 0, 0, 128];
-        assert_eq!(mapped[..8], [argb_red, argb_half_blue].concat());
-        assert_eq!(
-            mapped[PITCH..PITCH + 8],
-            [argb_half_blue, argb_red].concat()
-        );
-        assert_eq!(
-            mapped[8..PITCH],
-            [PADDING; PITCH - 8],
-            "row padding untouched"
-        );
     }
 
     #[test]

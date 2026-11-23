@@ -5,8 +5,12 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use drm::control::{crtc, plane, property, Device as ControlDevice, ResourceHandles};
-use drm::ClientCapability;
+use drm::control::{property, Device as ControlDevice};
+#[cfg(feature = "cuda-kms")]
+use {
+    drm::control::{crtc, plane, ResourceHandles},
+    drm::ClientCapability,
+};
 
 use g2g_core::meta::{Orientation, OrientationSet};
 use g2g_core::{G2gError, HardwareError};
@@ -22,18 +26,35 @@ const ORIENTATIONS: [Orientation; 8] = [
     Orientation::Transverse,
 ];
 
-// The `rotation` property of the primary plane on a sink's CRTC.
+// A plane's `rotation` property.
 #[derive(Debug)]
 pub(crate) struct PlaneRotation {
-    plane: plane::Handle,
     property: property::Handle,
     // each value name the plane lists, with the bit it sets in the property
     values: Vec<(String, u32)>,
-    // the property value as last read or written
-    value: u64,
 }
 
 impl PlaneRotation {
+    pub(crate) fn new(
+        card: &impl ControlDevice,
+        property: property::Handle,
+    ) -> Result<Self, G2gError> {
+        Ok(Self {
+            property,
+            values: bitmask_values(card, property)?,
+        })
+    }
+
+    #[cfg(feature = "kms-sink")]
+    pub(crate) fn property(&self) -> property::Handle {
+        self.property
+    }
+
+    // The property value that shows `orientation`.
+    pub(crate) fn value(&self, orientation: Orientation) -> Result<u64, G2gError> {
+        rotation_value(drm_rotation(orientation), &self.values).ok_or(G2gError::CapsMismatch)
+    }
+
     pub(crate) fn shown_orientations(&self) -> OrientationSet {
         ORIENTATIONS
             .into_iter()
@@ -42,11 +63,23 @@ impl PlaneRotation {
             })
             .collect()
     }
+}
 
+// The primary plane's `rotation` property, set outside atomic commits.
+#[cfg(feature = "cuda-kms")]
+#[derive(Debug)]
+pub(crate) struct PrimaryPlaneRotation {
+    plane: plane::Handle,
+    pub(crate) rotation: PlaneRotation,
+    // the property value as last read or written
+    value: u64,
+}
+
+#[cfg(feature = "cuda-kms")]
+impl PrimaryPlaneRotation {
     // The property value that shows `orientation`, None when the plane already shows it.
     pub(crate) fn changed_value(&self, orientation: Orientation) -> Result<Option<u64>, G2gError> {
-        let value = rotation_value(drm_rotation(orientation), &self.values)
-            .ok_or(G2gError::CapsMismatch)?;
+        let value = self.rotation.value(orientation)?;
         Ok((value != self.value).then_some(value))
     }
 
@@ -60,7 +93,7 @@ impl PlaneRotation {
         // a quarter turn on a lit plane fails the kernel's size check until set_crtc sizes it again
         card.set_crtc(crtc, None, (0, 0), &[], None)
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-        card.set_property(self.plane, self.property, value)
+        card.set_property(self.plane, self.rotation.property, value)
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
         self.value = value;
         Ok(())
@@ -153,11 +186,12 @@ fn bitmask_values(
 }
 
 // None when the primary plane on `crtc` has no `rotation` property.
+#[cfg(feature = "cuda-kms")]
 pub(crate) fn primary_plane_rotation(
     card: &impl ControlDevice,
     resources: &ResourceHandles,
     crtc: crtc::Handle,
-) -> Result<Option<PlaneRotation>, G2gError> {
+) -> Result<Option<PrimaryPlaneRotation>, G2gError> {
     // a kernel without universal planes lists no primary plane
     if card
         .set_client_capability(ClientCapability::UniversalPlanes, true)
@@ -203,10 +237,9 @@ pub(crate) fn primary_plane_rotation(
         let Some((property, value)) = rotation else {
             return Ok(None);
         };
-        return Ok(Some(PlaneRotation {
+        return Ok(Some(PrimaryPlaneRotation {
             plane,
-            property,
-            values: bitmask_values(card, property)?,
+            rotation: PlaneRotation::new(card, property)?,
             value,
         }));
     }
@@ -244,13 +277,21 @@ pub(crate) mod tests {
         1 << position
     }
 
-    // Plane handles the sink never passes to a device, the plane showing rotate-0.
+    // A property handle the sink never passes to a device.
     fn fixture_plane_rotation(values: Vec<(String, u32)>) -> PlaneRotation {
         PlaneRotation {
-            plane: drm::control::from_u32(1).expect("non-zero handle"),
             property: drm::control::from_u32(2).expect("non-zero handle"),
-            value: bit(&values, "rotate-0"),
             values,
+        }
+    }
+
+    // A plane handle the sink never passes to a device, the plane showing rotate-0.
+    #[cfg(feature = "cuda-kms")]
+    fn fixture_primary_plane_rotation(rotation: PlaneRotation) -> PrimaryPlaneRotation {
+        PrimaryPlaneRotation {
+            plane: drm::control::from_u32(1).expect("non-zero handle"),
+            value: bit(&rotation.values, "rotate-0"),
+            rotation,
         }
     }
 
@@ -351,21 +392,24 @@ pub(crate) mod tests {
     fn plane_without_quarter_turns_shows_only_half_turns() {
         let plane = plane_without_quarter_turns();
         assert_eq!(
-            plane.changed_value(Orientation::Rotate180),
-            Ok(Some(bit(&plane.values, "rotate-180")))
+            plane.value(Orientation::Rotate180),
+            Ok(bit(&plane.values, "rotate-180"))
         );
         assert_eq!(
-            plane.changed_value(Orientation::Rotate90Cw),
+            plane.value(Orientation::Rotate90Cw),
             Err(G2gError::CapsMismatch)
         );
         assert_eq!(plane.shown_orientations(), half_turns_and_axis_mirrors());
     }
 
+    #[cfg(feature = "cuda-kms")]
     #[test]
     fn unchanged_rotation_needs_no_write() {
+        let primary = fixture_primary_plane_rotation(plane_with_every_value());
+        assert_eq!(primary.changed_value(Orientation::Identity), Ok(None));
         assert_eq!(
-            plane_with_every_value().changed_value(Orientation::Identity),
-            Ok(None)
+            primary.changed_value(Orientation::Rotate180),
+            Ok(Some(bit(&primary.rotation.values, "rotate-180")))
         );
     }
 

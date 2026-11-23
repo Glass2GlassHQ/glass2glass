@@ -84,7 +84,7 @@ use g2g_core::{
 
 use crate::clock::wait_to_present;
 use crate::cuda::nv12_byte_size;
-use crate::drm_plane_rotation::{primary_plane_rotation, require_unrotated, PlaneRotation};
+use crate::drm_plane_rotation::{primary_plane_rotation, require_unrotated, PrimaryPlaneRotation};
 use crate::drmcard::{Card, DEFAULT_CARD};
 use crate::glnv12::{GlMode, GlState};
 use crate::videoflip::frame_orientation;
@@ -553,7 +553,7 @@ struct WorkerState {
     card: Card,
     crtc: drm::control::crtc::Handle,
     connector: connector::Handle,
-    plane_rotation: Option<PlaneRotation>,
+    plane_rotation: Option<PrimaryPlaneRotation>,
     mode: Mode,
     /// DRM framebuffers, cached by the GBM bo's gem handle (bos recur).
     fbs: BTreeMap<u32, framebuffer::Handle>,
@@ -585,7 +585,9 @@ fn worker_main(
     let plane_orientations = state
         .plane_rotation
         .as_ref()
-        .map_or(OrientationSet::EMPTY, PlaneRotation::shown_orientations);
+        .map_or(OrientationSet::EMPTY, |primary| {
+            primary.rotation.shown_orientations()
+        });
     let _ = ready_tx.send(Ok(plane_orientations));
 
     loop {
