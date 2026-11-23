@@ -187,6 +187,35 @@ consumer takes only system memory. The matrix and range come from the output
 caps, BT.601 limited range when they are untagged, which is what
 `videoconvert` writes for the same caps.
 
+### WaylandDisplaySrc
+
+`WaylandDisplaySrc` (`waylanddisplaysrc`, Linux) runs a headless Wayland
+compositor built on smithay and produces its output picture. It lives in the
+`g2g-wayland-display` crate behind the `display` feature. The crate is not
+published, since it depends on smithay's git master, and its elements reach a
+launch line through `g2g_wayland_display::register`.
+
+The run opens the next free `wayland-N` socket in `XDG_RUNTIME_DIR` and
+publishes the name on `socket_names()`. The compositor offers `wl_compositor`,
+`wl_subcompositor`, `wl_shm`, `xdg_wm_base`, `wl_seat` with a keyboard and a
+pointer, `wl_output` with `xdg_output`, and `wl_data_device_manager`. GTK 4
+refuses a display without the last one. Drag and drop is refused, the
+clipboard works. Every toplevel is configured fullscreen at the output size and
+takes keyboard focus. smithay's pixman renderer composites into BGRx system
+memory at the `width`, `height` and `framerate` properties.
+
+The `run` loop asks the compositor thread for one frame at a time. The thread
+renders once a client has committed since the last frame and a frame period has
+passed, and otherwise sends the last picture again after one second. Clients get
+frame callbacks only when a frame is rendered, so they draw at the rate the
+pipeline takes frames.
+
+Input arrives as `WindowInput` through `input_sender()`: evdev key codes,
+pointer positions in output pixels, buttons, and wheel steps of 120 per notch,
+the same events `wgpusink` reports from its window. A button press raises and
+focuses the window under the pointer. `Focus(false)` releases every held key and
+button.
+
 ## PipeWire camera output
 
 `PipeWireVideoSink` (`pipewirevideosink`, `pipewire` feature) publishes raw

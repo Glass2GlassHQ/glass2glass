@@ -10,44 +10,34 @@
 //! once rather than being copied into every element's `set_property` /
 //! `get_property`.
 
-use g2g_core::{PropError, PropValue};
+use g2g_core::{PropError, PropKind, PropValue, PropertySpec};
+
+pub const NUM_BUFFERS_PROPERTY: PropertySpec = PropertySpec::new(
+    "num-buffers",
+    PropKind::Int,
+    "frames to produce then EOS (-1 = forever)",
+)
+.with_default("-1")
+.with_range("-1", "9223372036854775807");
 
 /// Set a `u64` buffer-limit field from a gst-style `num-buffers` value:
 /// negative selects unlimited (`u64::MAX`), n >= 0 a bounded run (0 emits
 /// nothing).
-pub(crate) fn set_num_buffers(limit: &mut u64, value: &PropValue) -> Result<(), PropError> {
+pub fn set_num_buffers(limit: &mut u64, value: &PropValue) -> Result<(), PropError> {
     let n = value.as_int().ok_or(PropError::Type)?;
     *limit = if n < 0 { u64::MAX } else { n as u64 };
     Ok(())
 }
 
 /// The read half of [`set_num_buffers`]: unlimited reads back as -1.
-pub(crate) fn get_num_buffers(limit: u64) -> PropValue {
+pub fn get_num_buffers(limit: u64) -> PropValue {
     PropValue::Int(if limit == u64::MAX { -1 } else { limit as i64 })
 }
 
 /// A zero limit means "emit nothing, EOS at once", so a source checks this
 /// first and never opens its device. Pushes the EOS and reports `true` when the
 /// run is already over.
-#[cfg(any(
-    feature = "rtsp-server",
-    feature = "srt",
-    feature = "tcp",
-    all(target_os = "linux", feature = "shm"),
-    feature = "udp-ingress",
-    feature = "mqtt",
-    all(target_os = "linux", feature = "v4l2"),
-    all(target_os = "windows", feature = "mf-video-src"),
-    all(target_os = "windows", feature = "d3d11-screen-capture"),
-    feature = "moqt",
-    feature = "webrtc",
-    all(target_os = "linux", feature = "pipewire"),
-    all(target_os = "linux", feature = "decklink"),
-    all(target_os = "linux", feature = "libcamera"),
-    all(target_os = "linux", feature = "local-ipc"),
-    all(target_os = "linux", feature = "local-dmabuf"),
-))]
-pub(crate) async fn finished_at_zero_limit(
+pub async fn finished_at_zero_limit(
     limit: u64,
     out: &mut dyn g2g_core::OutputSink,
 ) -> Result<bool, g2g_core::G2gError> {

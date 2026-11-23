@@ -18,7 +18,7 @@
 
 extern crate alloc;
 
-pub(crate) const AARON_BOXER: &str = "Aaron Boxer <boxerab@protonmail.com>";
+pub const AARON_BOXER: &str = "Aaron Boxer <boxerab@protonmail.com>";
 
 // runs the rust blocks in AUTHORING.md as doc tests
 #[cfg(all(doctest, feature = "std"))]
@@ -293,7 +293,7 @@ mod paint;
 mod xmlutil;
 // Shared gst `num-buffers` property conversion used by the source elements.
 mod livesource;
-mod numbuffers;
+pub mod numbuffers;
 // Shared `cuda-device-id` property used by the elements that open a CUDA context.
 #[cfg(any(
     all(any(target_os = "linux", windows), feature = "cuda"),
@@ -2200,13 +2200,6 @@ pub(crate) mod waylandwindow;
     any(feature = "d3d11-sink", feature = "wgpu-present")
 ))]
 pub(crate) mod win32window;
-#[cfg(any(
-    all(
-        target_os = "linux",
-        any(feature = "cuda-gl", feature = "gl-sink", feature = "wgpu-present")
-    ),
-    all(target_os = "windows", feature = "wgpu-present")
-))]
 pub mod windowinput;
 #[cfg(any(
     all(

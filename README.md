@@ -682,6 +682,7 @@ cargo clippy --workspace --all-targets
 | `PipeWireVideoSrc` (video capture, `io-mode=mmap` or `dmabuf`) | `pipewire` | Linux + libpipewire |
 | `PipeWireVideoSink` (`pipewirevideosink`: publishes video as a PipeWire camera node that other applications capture from) | `pipewire` | Linux + libpipewire |
 | `PipeWireVideoSrc portal=true` (screen capture via xdg-desktop-portal) | `portal` | Linux + libpipewire + a desktop portal |
+| `WaylandDisplaySrc` (`waylanddisplaysrc`: a headless Wayland compositor that apps connect to, producing its picture as BGRx frames and taking keyboard and pointer input) | `display` (in `g2g-wayland-display`, unpublished) | Linux + libpixman |
 | `DeckLinkVideoSink` / `DeckLinkAudioSink` / `DeckLinkVideoSrc` (SDI output with VANC from `output-vanc`, and video capture that detects the input mode and attaches VANC as `AncillaryMeta`, for Blackmagic Design DeckLink, unverified on hardware until a board runs them) | `decklink` | Linux + a C++ compiler at build, the Desktop Video driver at run time |
 | `MfVideoSrc` (camera) | `mf-video-src` | Windows + Media Foundation |
 | `Av1Enc` (pure-Rust `rav1e`) | `av1-encode` | none |

@@ -322,7 +322,7 @@ jobs:
             pkg-config libssl-dev libasound2-dev libpulse-dev \
             libopus-dev libwayland-dev libegl-dev libxkbcommon-dev libdav1d-dev nasm \
             clang libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
-            libva-dev libdrm-dev libgbm-dev libvpx-dev libpipewire-0.3-dev \
+            libva-dev libdrm-dev libgbm-dev libvpx-dev libpipewire-0.3-dev libpixman-1-dev \
             mosquitto mosquitto-clients ninja-build
           # the apparmor package's mosquitto profile reads config only from /etc/mosquitto, and m1179 writes its broker config to /tmp
           if [ -f /etc/apparmor.d/mosquitto ]; then sudo apparmor_parser -R /etc/apparmor.d/mosquitto; fi
@@ -348,7 +348,10 @@ jobs:
       # ...) runs only here, so this runs the suite under the union rather than
       # just checking it. Tests that need a device skip on a runner without one.
       - name: test workspace (linux-full)
-        run: cargo test --workspace --locked --features linux-full,g2g-desktop/session --no-fail-fast
+        # waylanddisplaysrc opens its socket in XDG_RUNTIME_DIR
+        run: |
+          export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$RUNNER_TEMP}"
+          cargo test --workspace --locked --features linux-full,g2g-desktop/session,g2g-wayland-display/display --no-fail-fast
       # the linux-full test binaries leave no disk for the steps below
       - name: drop the linux-full test binaries
         run: |

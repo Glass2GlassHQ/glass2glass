@@ -33,7 +33,20 @@ Highest leverage first:
 The plan is [remote.md](remote.md).
 
 - `ximagesrc` for unattended X11 capture, and window capture.
-- VA-API encode on the Linux host through `ffmpegenc`.
+- VA-API encode on the Linux host through `ffmpegenc`, taking dma-buf frames
+  and converting RGBA to NV12 with `scale_vaapi`.
+- `waylanddisplaysrc`: render with smithay's GLES renderer on a render node and
+  output a linear RGBA dma-buf.
+- `waylanddisplaysrc`: output a linear NV12 dma-buf from a GLES pass when
+  downstream caps ask for NV12.
+- `waylanddisplaysrc`: run X11 apps through Xwayland with smithay's X11 window
+  manager.
+- `waylanddisplaysrc`: take the size and rate from a downstream caps filter, and
+  support drag and drop.
+- `dmabuftocuda`: import a dma-buf into CUDA so `nvenc` encodes
+  `waylanddisplaysrc` output with no copy.
+- `g2g-desktop host`: capture from `waylanddisplaysrc`, send client input into
+  it, and start an app in it with `--run`.
 - Opus audio from the host's default capture device, on a short queue that
   does not hold the picture.
 - Encode with `d3d11convert ! nvenc` on a Windows host with an NVIDIA GPU,

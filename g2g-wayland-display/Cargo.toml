@@ -1,0 +1,39 @@
+[package]
+name = "g2g-wayland-display"
+description = "Headless Wayland compositor source for glass2glass."
+license.workspace = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+# smithay has no crates.io release with the API this crate is written against
+publish = false
+
+[features]
+display = [
+    "dep:g2g-core",
+    "dep:g2g-plugins",
+    "dep:smithay",
+    "dep:tokio",
+]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+g2g-core = { workspace = true, features = ["std", "runtime"], optional = true }
+g2g-plugins = { workspace = true, optional = true }
+tokio = { version = "1", features = ["sync"], optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies.smithay]
+git = "https://github.com/Smithay/smithay"
+rev = "a38bb709a0400759b6a4fab6129e0f1dd72808c3"
+optional = true
+default-features = false
+features = ["desktop", "renderer_pixman", "wayland_frontend"]
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+g2g-plugins = { workspace = true, features = ["std"] }
+smithay-client-toolkit = "0.21"
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+
+[lints]
+workspace = true

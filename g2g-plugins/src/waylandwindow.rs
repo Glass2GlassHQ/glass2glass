@@ -40,10 +40,7 @@ use smithay_client_toolkit::{
     registry_handlers,
     seat::{
         keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers},
-        pointer::{
-            AxisScroll, PointerEvent, PointerEventKind, PointerHandler, BTN_LEFT, BTN_MIDDLE,
-            BTN_RIGHT,
-        },
+        pointer::{AxisScroll, PointerEvent, PointerEventKind, PointerHandler},
         Capability, SeatHandler, SeatState,
     },
     shell::{
@@ -60,7 +57,9 @@ use smithay_client_toolkit::{
 };
 
 use crate::cursorshape::{CursorShape, CURSOR_BYTES_PER_PIXEL};
-use crate::windowinput::{PointerButton, WindowInput};
+use crate::windowinput::{
+    PointerButton, WindowInput, WHEEL_PIXELS_PER_NOTCH, WHEEL_UNITS_PER_NOTCH,
+};
 use crate::windowworker::{
     PresentReports, WindowParams, WindowRenderer, WorkerChannels, WorkerCmd,
 };
@@ -562,19 +561,6 @@ impl<R: WindowRenderer> KeyboardHandler for WindowWorker<R> {
     }
 }
 
-const WHEEL_UNITS_PER_NOTCH: i32 = 120;
-// weston and mutter scroll 10 pixels per wheel notch
-const WHEEL_PIXELS_PER_NOTCH: f64 = 10.0;
-
-fn pointer_button(code: u32) -> Option<PointerButton> {
-    match code {
-        BTN_LEFT => Some(PointerButton::Left),
-        BTN_RIGHT => Some(PointerButton::Right),
-        BTN_MIDDLE => Some(PointerButton::Middle),
-        _ => None,
-    }
-}
-
 fn wheel_units(scroll: &AxisScroll) -> i32 {
     if scroll.value120 != 0 {
         return scroll.value120;
@@ -616,7 +602,7 @@ impl<R: WindowRenderer> PointerHandler for WindowWorker<R> {
                 PointerEventKind::Press { button, .. }
                 | PointerEventKind::Release { button, .. } => {
                     let down = matches!(event.kind, PointerEventKind::Press { .. });
-                    if let Some(button) = pointer_button(button) {
+                    if let Some(button) = PointerButton::from_evdev_code(button) {
                         self.send_input(WindowInput::Button { button, down });
                     }
                 }
