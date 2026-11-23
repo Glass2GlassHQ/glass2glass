@@ -480,9 +480,8 @@ unless it says otherwise.
   `debugqroverlay`, `faceoverlay`, `zxing`,
   `objectdetectionoverlay` (vs `analyticsoverlay`).
 - **Overlay scanout:** submit `OverlayCompositionMeta` rectangles on separate
-  DRM/KMS planes or as Wayland DMA-BUF subsurfaces for compositor-managed plane
-  assignment. Reuse static overlay buffers and blend when separate submission
-  is unavailable.
+  DRM/KMS planes in `kmssink`, and blend when separate submission is
+  unavailable.
 - **Video transforms:** `interlace`, `ivtc` / `combdetect`, `fieldanalysis`,
   `smpte` / `smptealpha`, `shapewipe`, `alphacolor`, `lcms`,
   `simplevideomark` / `simplevideomarkdetect`,

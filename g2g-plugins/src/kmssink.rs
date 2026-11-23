@@ -50,7 +50,6 @@
 
 use core::future::Future;
 use core::pin::Pin;
-use std::os::unix::io::{AsFd, BorrowedFd};
 use std::path::{Path, PathBuf};
 
 use alloc::boxed::Box;
@@ -60,7 +59,6 @@ use drm::buffer::{Buffer, DrmFourcc, DrmModifier, Handle as BufferHandle, Planar
 use drm::control::{
     connector, crtc, framebuffer, Device as ControlDevice, Event, FbCmd2Flags, Mode, PageFlipFlags,
 };
-use drm::Device;
 
 use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::frame::Frame;
@@ -77,34 +75,9 @@ use g2g_core::{
 
 use crate::clock::wait_to_present;
 use crate::drm_plane_rotation::{primary_plane_rotation, require_unrotated, PlaneRotation};
+use crate::drmcard::{Card, DEFAULT_CARD};
 use crate::videoconvert::display::{display_sink_caps, DisplayInput};
 use crate::videoflip::frame_orientation;
-
-/// Thin wrapper over `/dev/dri/cardN` implementing the `drm` device traits
-/// via its owned file's borrowed fd. Same pattern the upstream `drm` crate
-/// examples use; we redeclare it here so `g2g-plugins` doesn't take an
-/// example-only dependency.
-#[derive(Debug)]
-struct Card(std::fs::File);
-
-impl AsFd for Card {
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        self.0.as_fd()
-    }
-}
-impl Device for Card {}
-impl ControlDevice for Card {}
-
-impl Card {
-    fn open<P: AsRef<Path>>(path: P) -> Result<Self, G2gError> {
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)
-            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-        Ok(Card(file))
-    }
-}
 
 /// One NV12 dumb buffer + the registered KMS framebuffer that points at it.
 ///
@@ -227,8 +200,6 @@ impl Default for KmsSink {
         Self::new()
     }
 }
-
-const DEFAULT_CARD: &str = "/dev/dri/card0";
 
 pub(crate) fn default_card_present() -> Result<(), alloc::string::String> {
     if Path::new(DEFAULT_CARD).exists() {
@@ -649,7 +620,7 @@ impl AsyncElement for KmsSink {
                 PropKind::Str,
                 "DRM device node (e.g. /dev/dri/card0)",
             )
-            .with_default("/dev/dri/card0"),
+            .with_default(DEFAULT_CARD),
             MAX_LATENESS_PROPERTY,
             PROCESSING_DEADLINE_PROPERTY,
             QOS_INTERVAL_PROPERTY,

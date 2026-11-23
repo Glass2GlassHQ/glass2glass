@@ -542,7 +542,7 @@ kms-sink = ["std", "dep:drm", "dep:drm-ffi", "dep:drm-fourcc"]
 # std. Pulls smithay-client-toolkit (which transitively brings wayland-*).
 # This is the desktop-dev convenience sink; KmsSink is the production
 # low-latency path.
-wayland-sink = ["std", "dep:smithay-client-toolkit"]
+wayland-sink = ["std", "dep:smithay-client-toolkit", "dep:drm"]
 # Vendor-neutral OpenGL ES display sink (`GlSink`, M891): system-memory NV12 or
 # RGBA presented through EGL on a Wayland `xdg_toplevel`, with the NV12->RGB
 # convert on the GPU. No CUDA anywhere in its path, so it runs on any Mesa /
@@ -1375,7 +1375,7 @@ v4l = { version = "0.14", optional = true }
 # needs libclang). Drives the `libcamera` capture source. Linux-only; libcamera
 # is a Linux camera stack. Known to build against libcamera >= 0.4.
 libcamera = { version = "0.7", optional = true }
-smithay-client-toolkit = { version = "0.20", optional = true }
+smithay-client-toolkit = { version = "0.21", optional = true }
 # The libwayland-backed client backend, so a display / surface raw pointer can be
 # handed to a native API (Vulkan WSI under `wgpu-present`). The GL sinks get the
 # same backend through wayland-egl.

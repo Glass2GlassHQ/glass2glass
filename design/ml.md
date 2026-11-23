@@ -420,6 +420,19 @@ to the display: `analyticsoverlay` draws into it through a CPU mapping and
 the sink converts system-memory NV12 to XRGB on the CPU and misses the 30 fps
 frame period.
 
+With `waylandsink render-overlays=true` the camera buffer is not written at all.
+`analyticsoverlay` attaches its drawing as an `OverlayCompositionMeta`, and the
+sink shows it on a subsurface above the picture in two ARGB8888 dumb buffers
+from `overlay-device` (`/dev/dri/card0`), rewritten only when the detections
+change. With `show-trail` a result held by `hold-last` adds no trail point, so a
+held result leaves the bitmap unchanged too. Weston puts that subsurface on an LTDC overlay plane. It still
+composites the NV12 video on the GPU, because ST's GBM fails to import the
+camera buffer (`GBM_BO_IMPORT_FAILED` in `weston-debug drm-backend`). At 640x480
+with YOLOv8n at 640x384 detecting at 8 fps, `analyticsoverlay` goes from 8 ms to
+under 0.1 ms per frame and system CPU from about 40% to 33%. Late drops are
+unchanged. Weston 13 on the board offers linux-dmabuf version 3, which has no
+feedback to name its DRM device, hence the `overlay-device` property.
+
 Given an H.264 MP4 instead of a frame count, the script decodes it on the Hantro
 and splits it with a `tee`, with `videoscale` making the model input on the CPU,
 so both branches read system memory. A 640x360 clip presents 307 of 341 frames.

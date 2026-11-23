@@ -23,9 +23,8 @@ use std::time::Duration;
 use alloc::boxed::Box;
 
 use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState},
-    delegate_compositor, delegate_keyboard, delegate_output, delegate_pointer, delegate_registry,
-    delegate_seat, delegate_shm, delegate_xdg_shell, delegate_xdg_window,
+    compositor::{CompositorHandler, CompositorState, FrameCallbackData},
+    delegate_dispatch2, delegate_registry,
     output::{OutputHandler, OutputState},
     reexports::calloop::{
         channel::{Channel, Event as ChanEvent},
@@ -337,7 +336,7 @@ impl<R: WindowRenderer> WindowWorker<R> {
         // Subscribe to the next frame callback (compositor pacing) before the
         // present commits the surface.
         let surface = self.window.wl_surface().clone();
-        surface.frame(&self.qh, surface.clone());
+        surface.frame(&self.qh, FrameCallbackData(surface.clone()));
         self.renderer.present(frame)
     }
 }
@@ -636,15 +635,8 @@ impl<R: WindowRenderer> PointerHandler for WindowWorker<R> {
     }
 }
 
-delegate_compositor!(@<R: WindowRenderer> WindowWorker<R>);
-delegate_output!(@<R: WindowRenderer> WindowWorker<R>);
-delegate_xdg_shell!(@<R: WindowRenderer> WindowWorker<R>);
-delegate_xdg_window!(@<R: WindowRenderer> WindowWorker<R>);
+delegate_dispatch2!(@<R: WindowRenderer> WindowWorker<R>);
 delegate_registry!(@<R: WindowRenderer> WindowWorker<R>);
-delegate_seat!(@<R: WindowRenderer> WindowWorker<R>);
-delegate_keyboard!(@<R: WindowRenderer> WindowWorker<R>);
-delegate_pointer!(@<R: WindowRenderer> WindowWorker<R>);
-delegate_shm!(@<R: WindowRenderer> WindowWorker<R>);
 
 impl<R: WindowRenderer> ShmHandler for WindowWorker<R> {
     fn shm_state(&mut self) -> &mut Shm {

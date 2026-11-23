@@ -24,6 +24,8 @@
 //! the bottom edge of its recent boxes that fades out towards the oldest point.
 //! It is the one thing here that remembers anything between frames, so a trail
 //! outlives a few missed detections and is dropped once its track stops coming.
+//! A detection result held on several frames (`analyticsjoin hold-last`) adds
+//! one point, not one per frame.
 //!
 //! Pairs with the metadata-through-fan-out path: a `decode -> tee ->
 //! {detect, video} -> overlay -> display` diamond runs the detector on one branch
@@ -38,6 +40,10 @@
 //! upstream coordinate rewrite. A frame with no `AnalyticsMeta` passes through
 //! untouched. The Vello GPU backend is the separate `vello-overlay` feature, and
 //! draws the same captions in a shaped system font.
+//!
+//! When a downstream sink asks for `OverlayCompositionMeta` (`waylandsink` or
+//! `wgpusink` with `render-overlays=true`), the shapes go on the frame as one
+//! picture-sized bitmap and the video pixels stay untouched.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -156,6 +162,11 @@ pub struct AnalyticsOverlay {
     trails: BTreeMap<u64, Trail>,
     configured: bool,
     drawn: u64,
+    previous_analytics: Option<AnalyticsMeta>,
+    #[cfg(feature = "metadata")]
+    downstream_renders: bool,
+    #[cfg(feature = "metadata")]
+    cached_composition: Option<g2g_core::OverlayCompositionMeta>,
 }
 
 /// The recent path of one tracked object: normalized bottom-centre points of its
@@ -429,6 +440,11 @@ impl AnalyticsOverlay {
             trails: BTreeMap::new(),
             configured: false,
             drawn: 0,
+            previous_analytics: None,
+            #[cfg(feature = "metadata")]
+            downstream_renders: false,
+            #[cfg(feature = "metadata")]
+            cached_composition: None,
         }
     }
 
@@ -503,6 +519,10 @@ impl AnalyticsOverlay {
         self.height = *height;
         self.format = *format;
         self.matrix = YuvRgbMatrix::new(*colorimetry);
+        #[cfg(feature = "metadata")]
+        {
+            self.cached_composition = None;
+        }
         Ok(())
     }
 
@@ -568,6 +588,46 @@ impl AnalyticsOverlay {
         Ok(())
     }
 
+    #[cfg(feature = "metadata")]
+    fn attach_composition(
+        &mut self,
+        frame: &mut g2g_core::Frame,
+        shapes: &AnalyticsShapes,
+        unchanged: bool,
+    ) -> Result<(), G2gError> {
+        let composition = match &self.cached_composition {
+            Some(composition) if unchanged => composition.clone(),
+            _ => {
+                let composition = self.render_composition(shapes)?;
+                self.cached_composition = Some(composition.clone());
+                composition
+            }
+        };
+        frame.meta.attach(composition);
+        Ok(())
+    }
+
+    #[cfg(feature = "metadata")]
+    fn render_composition(
+        &self,
+        shapes: &AnalyticsShapes,
+    ) -> Result<g2g_core::OverlayCompositionMeta, G2gError> {
+        let mut layer = alloc::vec![0; self.width as usize * self.height as usize * 4];
+        self.render(&mut layer, shapes);
+        let whole_picture = g2g_core::OverlayPlacement {
+            x: 0,
+            y: 0,
+            width: self.width,
+            height: self.height,
+        };
+        let rectangle =
+            g2g_core::OverlayRectangle::new(whole_picture, self.width, self.height, layer.into())
+                .ok_or(G2gError::CapsMismatch)?;
+        Ok(g2g_core::OverlayCompositionMeta::new(alloc::vec![
+            rectangle
+        ]))
+    }
+
     /// Paint every shape onto the RGBA8 `buf` of `self.width` x `self.height`.
     /// Mask fills go down first, so a box or ROI edge stays readable over one.
     fn render(&self, buf: &mut [u8], shapes: &AnalyticsShapes) {
@@ -601,12 +661,22 @@ impl AnalyticsOverlay {
 
     /// Extend each tracked object's path with this frame's position, and forget
     /// the tracks that have stopped arriving. `drawn` counts every frame, so it
-    /// is what a trail's age is measured against.
-    fn record_trails(&mut self, shapes: &AnalyticsShapes) {
+    /// is what a trail's age is measured against. A `repeated` detection result
+    /// keeps its tracks alive without adding a point. Returns whether any trail
+    /// changed.
+    fn record_trails(&mut self, shapes: &AnalyticsShapes, repeated: bool) -> bool {
+        let mut changed = false;
         for painted in &shapes.detections {
             let Some(id) = painted.track_id else {
                 continue;
             };
+            if repeated {
+                if let Some(trail) = self.trails.get_mut(&id) {
+                    trail.last_seen = self.drawn;
+                }
+                continue;
+            }
+            changed = true;
             let bbox = painted.detection.bbox;
             let trail = self.trails.entry(id).or_default();
             trail
@@ -618,7 +688,9 @@ impl AnalyticsOverlay {
             trail.last_seen = self.drawn;
         }
         let cutoff = self.drawn.saturating_sub(TRAIL_TTL_FRAMES);
+        let tracked = self.trails.len();
         self.trails.retain(|_, trail| trail.last_seen >= cutoff);
+        changed || self.trails.len() != tracked
     }
 
     fn draw_pose(&self, buf: &mut [u8], pose: &PaintedPose) {
@@ -948,6 +1020,13 @@ impl AsyncElement for AnalyticsOverlay {
         Ok(ConfigureOutcome::Accepted)
     }
 
+    #[cfg(feature = "metadata")]
+    fn configure_allocation(&mut self, params: &g2g_core::AllocationParams) {
+        self.downstream_renders = params
+            .meta_requests
+            .wants::<g2g_core::OverlayCompositionMeta>();
+    }
+
     fn properties(&self) -> &'static [PropertySpec] {
         const PROPS: &[PropertySpec] = &[
             PropertySpec::new(
@@ -1050,19 +1129,29 @@ impl AsyncElement for AnalyticsOverlay {
                 PipelinePacket::DataFrame(mut frame) => {
                     // Copy out the shapes so the immutable meta borrow ends before
                     // the mutable pixel borrow below.
-                    let shapes = frame
-                        .meta
-                        .get::<AnalyticsMeta>()
-                        .map(AnalyticsShapes::collect)
-                        .unwrap_or_default();
-                    self.drawn += 1;
-                    if self.show_trail {
-                        self.record_trails(&shapes);
+                    let analytics = frame.meta.get::<AnalyticsMeta>();
+                    // analyticsjoin's hold-last puts one detection result on several frames
+                    let repeated = analytics == self.previous_analytics.as_ref();
+                    let shapes = analytics.map(AnalyticsShapes::collect).unwrap_or_default();
+                    if !repeated {
+                        self.previous_analytics = analytics.cloned();
                     }
+                    self.drawn += 1;
+                    let trails_changed = self.show_trail && self.record_trails(&shapes, repeated);
                     // A live trail outlives the detections that fed it, so this
                     // frame may have something to paint with no shapes of its own.
                     let has_trail = self.show_trail && !self.trails.is_empty();
-                    if !shapes.is_empty() || has_trail {
+                    #[cfg(feature = "metadata")]
+                    let downstream_renders = self.downstream_renders;
+                    #[cfg(not(feature = "metadata"))]
+                    let downstream_renders = false;
+                    let has_drawing = !shapes.is_empty() || has_trail;
+                    #[cfg(feature = "metadata")]
+                    let composition_unchanged = repeated && !trails_changed;
+                    if has_drawing && downstream_renders {
+                        #[cfg(feature = "metadata")]
+                        self.attach_composition(&mut frame, &shapes, composition_unchanged)?;
+                    } else if has_drawing {
                         match &mut frame.domain {
                             MemoryDomain::System(slice) => {
                                 let layout =
@@ -1543,6 +1632,8 @@ mod tests {
     #[derive(Default)]
     struct PixelSink {
         last: Option<Vec<u8>>,
+        #[cfg(feature = "metadata")]
+        last_composition: Option<g2g_core::OverlayCompositionMeta>,
     }
     impl OutputSink for PixelSink {
         fn poll_push(
@@ -1555,6 +1646,13 @@ mod tests {
                 if let PipelinePacket::DataFrame(frame) = packet {
                     if let Some(slice) = frame.domain.as_system_slice() {
                         self.last = Some(slice.to_vec());
+                    }
+                    #[cfg(feature = "metadata")]
+                    {
+                        self.last_composition = frame
+                            .meta
+                            .get::<g2g_core::OverlayCompositionMeta>()
+                            .cloned();
                     }
                 }
                 Ok(PushOutcome::Accepted)
@@ -1719,8 +1817,9 @@ mod tests {
             .with_trail_length(4);
         ov.configure_pipeline(&rgba_caps(32, 32)).unwrap();
         let mut sink = PixelSink::default();
-        for _ in 0..10 {
-            let frame = rgba_frame_with_meta(32, 32, tracked_meta(det(0.4, 0.4, 0.2, 0.2, 0), 8));
+        let moving = |step: u8| tracked_meta(det(0.4, 0.04 * f32::from(step), 0.2, 0.2, 0), 8);
+        for step in 0..10 {
+            let frame = rgba_frame_with_meta(32, 32, moving(step));
             ov.process(PipelinePacket::DataFrame(frame), &mut sink)
                 .await
                 .unwrap();
@@ -1729,6 +1828,16 @@ mod tests {
             ov.trails[&8].points.len(),
             4,
             "only the last trail-length points are kept"
+        );
+        let oldest = ov.trails[&8].points.front().copied();
+        let frame = rgba_frame_with_meta(32, 32, moving(9));
+        ov.process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
+        assert_eq!(
+            ov.trails[&8].points.front().copied(),
+            oldest,
+            "a repeated detection result adds no point to push the oldest out"
         );
 
         // Frames with no detections age the trail out; it survives the first few.
@@ -1817,5 +1926,61 @@ mod tests {
             |neutral: u8, drawn: i32| blend_u8(neutral, drawn as u8, (3 * 255 / 4) as u8);
         assert_eq!(out[block], three_quarters(NEUTRAL_CHROMA, u));
         assert_eq!(out[block + 1], three_quarters(NEUTRAL_CHROMA, v));
+    }
+
+    #[cfg(feature = "metadata")]
+    #[tokio::test]
+    async fn a_rendering_sink_gets_the_shapes_as_a_composition_and_the_pixels_stay() {
+        use g2g_core::meta::MetaRequests;
+        use g2g_core::{AllocationParams, OverlayCompositionMeta};
+        const SIDE: u32 = 8;
+        let mut ov = AnalyticsOverlay::new().with_thickness(1).with_trail(true);
+        ov.configure_pipeline(&video_caps(RawVideoFormat::Nv12, SIDE, SIDE))
+            .unwrap();
+        ov.configure_allocation(&AllocationParams::meta_demand(
+            MetaRequests::new().request_from_every_consumer::<OverlayCompositionMeta>(),
+        ));
+        let meta = tracked_meta(det(0.25, 0.25, 0.5, 0.5, 0), 0);
+        let pixels = alloc::vec![100; frame_byte_size(RawVideoFormat::Nv12, SIDE, SIDE)];
+        let frame = |meta: &AnalyticsMeta| {
+            let mut frame = Frame::new(
+                MemoryDomain::System(SystemSlice::from_boxed(pixels.clone().into_boxed_slice())),
+                FrameTiming::default(),
+                0,
+            );
+            frame.meta.attach(meta.clone());
+            frame
+        };
+
+        let mut sink = PixelSink::default();
+        ov.process(PipelinePacket::DataFrame(frame(&meta)), &mut sink)
+            .await
+            .unwrap();
+        assert_eq!(sink.last.as_deref(), Some(&pixels[..]), "video untouched");
+        let composition = sink.last_composition.take().expect("composition attached");
+        let [rectangle] = composition.rectangles() else {
+            panic!("one rectangle, got {}", composition.rectangles().len());
+        };
+        assert_eq!(rectangle.pixel_size(), (SIDE, SIDE));
+        let bitmap = rectangle.pixels();
+        assert_eq!(
+            px(bitmap, SIDE as usize, 2, 2),
+            palette_color(0),
+            "box border"
+        );
+        assert_eq!(
+            px(bitmap, SIDE as usize, 3, 3),
+            [0; 4],
+            "transparent interior"
+        );
+
+        ov.process(PipelinePacket::DataFrame(frame(&meta)), &mut sink)
+            .await
+            .unwrap();
+        let repeated = sink.last_composition.expect("composition attached");
+        assert!(
+            alloc::sync::Arc::ptr_eq(repeated.rectangles()[0].pixels(), bitmap),
+            "a held detection with an unchanged trail reuses the bitmap"
+        );
     }
 }

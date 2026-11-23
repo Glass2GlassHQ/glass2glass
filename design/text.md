@@ -15,7 +15,10 @@ A launch pipeline can also use `overlaycomposition` to consume compositions
 attached by an upstream element.
 
 Set `wgpusink render-overlays=true` to draw the composition in the same wgpu
-target as the video. The sink requests the metadata during allocation
+target as the video. `waylandsink render-overlays=true` shows it on a subsurface
+above the picture instead, in ARGB8888 dumb buffers from `overlay-device` that
+the compositor can scan out on a hardware plane. `analyticsoverlay` attaches its
+shapes as a composition whenever such a sink asks for one. The sink requests the metadata during allocation
 negotiation. It maps the rectangles into the picture viewport, including
 letterboxing and clipping. A GPU-resident video frame stays on its device.
 Use `render-overlays` when building the graph so the request takes effect at

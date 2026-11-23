@@ -53,6 +53,10 @@
 //!   The window surface is a black buffer scaled to that size and the
 //!   picture is a subsurface `wp_viewporter` scales into it, letterboxed
 //!   unless `force-aspect-ratio` is off.
+//! - With `render-overlays=true` an `OverlayCompositionMeta` on the frames is
+//!   shown on a second subsurface above the picture, in ARGB8888 dumb buffers
+//!   from `overlay-device`, which the compositor can put on a hardware plane.
+//!   The buffers are rewritten only when the composition changes.
 //! - Once the runner elects a clock, each frame is held until its PTS
 //!   deadline and dropped if it is late beyond the QoS bound. On top of
 //!   that, backpressure is compositor-driven: `process()` blocks until
@@ -75,9 +79,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState},
-    delegate_compositor, delegate_dmabuf, delegate_output, delegate_registry, delegate_shm,
-    delegate_subcompositor, delegate_xdg_shell, delegate_xdg_window,
+    compositor::{CompositorHandler, CompositorState, FrameCallbackData},
+    delegate_dispatch2, delegate_registry,
     dmabuf::{DmabufFeedback, DmabufHandler, DmabufState},
     output::{OutputHandler, OutputState},
     reexports::calloop::{
@@ -127,6 +130,11 @@ use crate::videoconvert::yuv420_to_rgb_into;
 use crate::videoflip::frame_orientation;
 use crate::worker_ready::Handshake;
 use crate::yuvmatrix::YuvRgbMatrix;
+#[cfg(feature = "metadata")]
+use crate::{
+    drmcard::{Card, DEFAULT_CARD},
+    overlaycomposition::{composition_layer, RENDER_OVERLAYS_NAME, RENDER_OVERLAYS_PROPERTY},
+};
 use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, Target};
@@ -175,6 +183,8 @@ struct QueuedFrame {
     /// `Identity` for a frame with no `OrientationMeta`.
     orientation: Orientation,
     ack: tokio::sync::oneshot::Sender<()>,
+    #[cfg(feature = "metadata")]
+    overlay: Option<g2g_core::OverlayCompositionMeta>,
 }
 
 /// How the sink reacts when the producer pushes faster than the
@@ -340,6 +350,10 @@ pub struct WaylandSink {
     /// Once-per-second clock / media / deadline drift trace, logged under
     /// `G2G_DEBUG`.
     schedule_drift: ScheduleDriftTrace,
+    #[cfg(feature = "metadata")]
+    render_overlays: bool,
+    #[cfg(feature = "metadata")]
+    overlay_device: String,
 }
 
 impl g2g_core::log::LogSource for WaylandSink {
@@ -392,6 +406,10 @@ impl WaylandSink {
             last_present_done_ns: 0,
             deadline_errors: Vec::new(),
             schedule_drift: ScheduleDriftTrace::default(),
+            #[cfg(feature = "metadata")]
+            render_overlays: false,
+            #[cfg(feature = "metadata")]
+            overlay_device: String::from(DEFAULT_CARD),
         }
     }
 
@@ -660,6 +678,10 @@ impl AsyncElement for WaylandSink {
         let app_id = self.app_id.clone();
         let fullscreen = self.fullscreen;
         let force_aspect_ratio = self.force_aspect_ratio;
+        #[cfg(feature = "metadata")]
+        let overlay_device = self
+            .render_overlays
+            .then(|| std::path::PathBuf::from(&self.overlay_device));
 
         // Synchronous handshake: the worker signals readiness once the
         // compositor's first `configure` lands. Until then `process()`
@@ -677,6 +699,8 @@ impl AsyncElement for WaylandSink {
                     display_height,
                     fullscreen,
                     force_aspect_ratio,
+                    #[cfg(feature = "metadata")]
+                    overlay_device,
                     title,
                     app_id,
                     rx,
@@ -733,8 +757,22 @@ impl AsyncElement for WaylandSink {
             PROCESSING_DEADLINE_PROPERTY,
             QOS_INTERVAL_PROPERTY,
             SYNC_PROPERTY,
+            #[cfg(feature = "metadata")]
+            RENDER_OVERLAYS_PROPERTY,
+            #[cfg(feature = "metadata")]
+            PropertySpec::new(
+                "overlay-device",
+                PropKind::Str,
+                "DRM device node the render-overlays buffers are allocated on",
+            )
+            .with_default(DEFAULT_CARD),
         ];
         PROPS
+    }
+
+    #[cfg(feature = "metadata")]
+    fn meta_requests(&self) -> g2g_core::meta::MetaRequests {
+        crate::overlaycomposition::render_requests(self.render_overlays)
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
@@ -755,6 +793,16 @@ impl AsyncElement for WaylandSink {
                 self.fullscreen = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
+            #[cfg(feature = "metadata")]
+            RENDER_OVERLAYS_NAME => {
+                self.render_overlays = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            #[cfg(feature = "metadata")]
+            "overlay-device" => {
+                self.overlay_device = value.as_str().ok_or(PropError::Type)?.into();
+                Ok(())
+            }
             _ => self
                 .pacer
                 .set_property(name, &value)
@@ -768,6 +816,10 @@ impl AsyncElement for WaylandSink {
             "app-id" => Some(PropValue::Str(self.app_id.clone())),
             FORCE_ASPECT_RATIO_NAME => Some(PropValue::Bool(self.force_aspect_ratio)),
             "fullscreen" => Some(PropValue::Bool(self.fullscreen)),
+            #[cfg(feature = "metadata")]
+            RENDER_OVERLAYS_NAME => Some(PropValue::Bool(self.render_overlays)),
+            #[cfg(feature = "metadata")]
+            "overlay-device" => Some(PropValue::Str(self.overlay_device.clone())),
             _ => self.pacer.get_property(name),
         }
     }
@@ -784,6 +836,12 @@ impl AsyncElement for WaylandSink {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     let orientation = frame_orientation(&frame);
+                    #[cfg(feature = "metadata")]
+                    let overlay = frame
+                        .meta
+                        .get::<g2g_core::OverlayCompositionMeta>()
+                        .filter(|_| self.render_overlays)
+                        .cloned();
                     let Frame { domain, timing, .. } = frame;
                     if !matches!(domain, MemoryDomain::DmaBuf(_)) {
                         domain.require_system_slice(g2g_core::log::short_type_name::<Self>())?;
@@ -850,6 +908,8 @@ impl AsyncElement for WaylandSink {
                         arrival_ns: timing.arrival_ns,
                         orientation,
                         ack: ack_tx,
+                        #[cfg(feature = "metadata")]
+                        overlay,
                     }))
                     .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
                     match self.pacing {
@@ -1010,6 +1070,8 @@ struct WorkerState {
     /// arrival timestamp. Signalled when the compositor's matching
     /// `frame` callback fires, at which point we record the latency.
     pending_ack: Option<(u64, tokio::sync::oneshot::Sender<()>)>,
+    #[cfg(feature = "metadata")]
+    overlay: Option<OverlaySurface>,
 }
 
 // The worker owns the whole Wayland-thread state; threading it as one params
@@ -1022,6 +1084,7 @@ fn worker_main(
     display_height: u32,
     fullscreen: bool,
     force_aspect_ratio: bool,
+    #[cfg(feature = "metadata")] overlay_device: Option<std::path::PathBuf>,
     title: String,
     app_id: String,
     rx: Channel<WorkerCmd>,
@@ -1059,6 +1122,22 @@ fn worker_main(
         subcompositor.create_subsurface(window.wl_surface().clone(), &qh);
     let picture_viewport = viewporter.get_viewport(&picture_surface, &qh, ());
     picture_subsurface.set_desync();
+    #[cfg(feature = "metadata")]
+    let overlay = match overlay_device {
+        Some(device) => Some(
+            OverlaySurface::new(
+                &subcompositor,
+                &viewporter,
+                window.wl_surface(),
+                &device,
+                (width, height),
+                &dmabuf_state,
+                &qh,
+            )
+            .map_err(|error| std::format!("overlay buffers on {}: {error:?}", device.display()))?,
+        ),
+        None => None,
+    };
     window.commit();
 
     // Allocate enough for a single XRGB8888 buffer at the input dims;
@@ -1105,6 +1184,8 @@ fn worker_main(
         orientation: Orientation::Identity,
         picture_has_buffer: false,
         pending_ack: None,
+        #[cfg(feature = "metadata")]
+        overlay,
     };
 
     // Wire the cmd channel into calloop so we wake on frame arrival.
@@ -1184,6 +1265,33 @@ impl WorkerState {
             .set_position(layout.picture.x as i32, layout.picture.y as i32);
         self.picture_viewport
             .set_destination(layout.picture.width as i32, layout.picture.height as i32);
+        #[cfg(feature = "metadata")]
+        if let Some(overlay) = &self.overlay {
+            overlay
+                .subsurface
+                .set_position(layout.picture.x as i32, layout.picture.y as i32);
+            overlay
+                .viewport
+                .set_destination(layout.picture.width as i32, layout.picture.height as i32);
+        }
+    }
+
+    #[cfg(feature = "metadata")]
+    fn update_overlay(
+        &mut self,
+        composition: Option<g2g_core::OverlayCompositionMeta>,
+        turned: bool,
+    ) -> Result<bool, G2gError> {
+        let size = (self.width, self.height);
+        let Some(overlay) = &mut self.overlay else {
+            return Ok(false);
+        };
+        let appeared = overlay.show(composition, size)?;
+        // wayland applies a new transform and viewport with the surface's next commit
+        if turned {
+            overlay.surface.commit();
+        }
+        Ok(appeared)
     }
 
     fn fill_shm_buffer(
@@ -1269,6 +1377,8 @@ impl WorkerState {
             arrival_ns,
             orientation,
             ack,
+            #[cfg(feature = "metadata")]
+            overlay,
         } = queued;
         let width = self.width as i32;
         let height = self.height as i32;
@@ -1301,25 +1411,46 @@ impl WorkerState {
             },
         };
 
-        let surface = &self.picture_surface;
         let turned = orientation != self.orientation;
-        // weston repaints a subsurface for its own commits only once a parent commit has placed it on an output
-        let commit_parent = turned || !self.picture_has_buffer;
-        if commit_parent {
-            // wayland applies a sync subsurface's state with its parent's next commit
-            self.picture_subsurface.set_sync();
-        }
         if turned {
-            surface.set_buffer_transform(buffer_transform(orientation));
+            self.picture_surface
+                .set_buffer_transform(buffer_transform(orientation));
+            #[cfg(feature = "metadata")]
+            if let Some(overlay) = &self.overlay {
+                overlay
+                    .surface
+                    .set_buffer_transform(buffer_transform(orientation));
+            }
             // The surface is what the compositor lays out, and a turn that
             // transposes the picture transposes it. The buffer, and
             // `damage_buffer` with it, stays in buffer coordinates.
             self.set_layout(orientation);
         }
+        #[cfg(feature = "metadata")]
+        let overlay_appeared = match self.update_overlay(overlay, turned) {
+            Ok(appeared) => appeared,
+            Err(error) => {
+                g2g_core::g2g_error!(
+                    Target::category(short_type_name::<WaylandSink>()),
+                    "cannot show the overlay composition: {error:?}"
+                );
+                self.exit = true;
+                return;
+            }
+        };
+        #[cfg(not(feature = "metadata"))]
+        let overlay_appeared = false;
+        let surface = &self.picture_surface;
+        // weston repaints a subsurface for its own commits only once a parent commit has placed it on an output
+        let commit_parent = turned || !self.picture_has_buffer || overlay_appeared;
+        if commit_parent {
+            // wayland applies a sync subsurface's state with its parent's next commit
+            self.picture_subsurface.set_sync();
+        }
         // Subscribe to the compositor's `frame` callback for this commit.
-        // SCTK's CompositorHandler::frame routes by the WlSurface udata,
-        // so we pass a clone of the surface as the callback's user data.
-        surface.frame(&self.qh, surface.clone());
+        // smithay-client-toolkit hands the surface in `FrameCallbackData` to
+        // `CompositorHandler::frame`.
+        surface.frame(&self.qh, FrameCallbackData(surface.clone()));
         surface.damage_buffer(0, 0, width, height);
         match attach {
             Some((wl_buffer, dmabuf)) => {
@@ -1430,6 +1561,10 @@ impl WindowHandler for WorkerState {
         self.picture_subsurface.set_sync();
         self.set_layout(self.orientation);
         self.picture_surface.commit();
+        #[cfg(feature = "metadata")]
+        if let Some(overlay) = &self.overlay {
+            overlay.surface.commit();
+        }
         self.window.commit();
         self.picture_subsurface.set_desync();
         self.configured = true;
@@ -1509,19 +1644,201 @@ impl DmabufHandler for WorkerState {
         if let Some(index) = self.on_screen.iter().position(|(held, _)| held == buffer) {
             self.on_screen.swap_remove(index);
         }
+        #[cfg(feature = "metadata")]
+        if let Some(overlay) = &mut self.overlay {
+            for overlay_buffer in overlay
+                .buffers
+                .iter_mut()
+                .filter(|b| &b.wl_buffer == buffer)
+            {
+                overlay_buffer.on_screen = false;
+            }
+        }
     }
 }
 
-delegate_compositor!(WorkerState);
-delegate_subcompositor!(WorkerState);
-delegate_dmabuf!(WorkerState);
-delegate_output!(WorkerState);
-delegate_shm!(WorkerState);
-delegate_xdg_shell!(WorkerState);
-delegate_xdg_window!(WorkerState);
+delegate_dispatch2!(WorkerState);
 delegate_registry!(WorkerState);
 delegate_noop!(WorkerState: ignore WpViewporter);
 delegate_noop!(WorkerState: ignore WpViewport);
+
+// =================================================================
+// Overlay composition subsurface
+// =================================================================
+
+#[cfg(feature = "metadata")]
+struct OverlayBuffer {
+    dumb: drm::control::dumbbuffer::DumbBuffer,
+    wl_buffer: wl_buffer::WlBuffer,
+    on_screen: bool,
+}
+
+#[cfg(feature = "metadata")]
+struct OverlaySurface {
+    surface: wl_surface::WlSurface,
+    subsurface: WlSubsurface,
+    viewport: WpViewport,
+    card: Card,
+    buffers: Vec<OverlayBuffer>,
+    shown: Option<g2g_core::OverlayCompositionMeta>,
+    layer: Vec<u8>,
+    row: Vec<u8>,
+}
+
+#[cfg(feature = "metadata")]
+impl OverlaySurface {
+    fn new(
+        subcompositor: &SubcompositorState,
+        viewporter: &WpViewporter,
+        parent: &wl_surface::WlSurface,
+        device: &std::path::Path,
+        size: (u32, u32),
+        dmabuf_state: &DmabufState,
+        qh: &QueueHandle<WorkerState>,
+    ) -> Result<Self, G2gError> {
+        let card = Card::open(device)?;
+        let buffers = overlay_buffers(&card, size, dmabuf_state, qh)?;
+        let (subsurface, surface) = subcompositor.create_subsurface(parent.clone(), qh);
+        let viewport = viewporter.get_viewport(&surface, qh, ());
+        subsurface.set_desync();
+        Ok(Self {
+            surface,
+            subsurface,
+            viewport,
+            card,
+            buffers,
+            shown: None,
+            layer: Vec::new(),
+            row: Vec::new(),
+        })
+    }
+
+    fn show(
+        &mut self,
+        composition: Option<g2g_core::OverlayCompositionMeta>,
+        (width, height): (u32, u32),
+    ) -> Result<bool, G2gError> {
+        let unchanged = match (&composition, &self.shown) {
+            (None, None) => true,
+            (Some(next), Some(shown)) => same_composition(next, shown),
+            _ => false,
+        };
+        if unchanged {
+            return Ok(false);
+        }
+        let Some(composition) = composition else {
+            self.surface.attach(None, 0, 0);
+            self.surface.commit();
+            self.shown = None;
+            return Ok(false);
+        };
+        let Some(buffer) = self.buffers.iter_mut().find(|buffer| !buffer.on_screen) else {
+            return Ok(false);
+        };
+        let layer = composition_layer(&composition, (width, height), &mut self.layer)?;
+        let pitch = drm::buffer::Buffer::pitch(&buffer.dumb) as usize;
+        let mut mapping = drm::control::Device::map_dumb_buffer(&self.card, &mut buffer.dumb)
+            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+        copy_as_argb8888(layer, width as usize, pitch, &mut mapping, &mut self.row);
+        drop(mapping);
+        self.surface.attach(Some(&buffer.wl_buffer), 0, 0);
+        self.surface
+            .damage_buffer(0, 0, width as i32, height as i32);
+        self.surface.commit();
+        buffer.on_screen = true;
+        let appeared = self.shown.is_none();
+        self.shown = Some(composition);
+        Ok(appeared)
+    }
+}
+
+// frames reuse the composition's bitmaps by reference until the overlay changes
+#[cfg(feature = "metadata")]
+fn same_composition(
+    first: &g2g_core::OverlayCompositionMeta,
+    second: &g2g_core::OverlayCompositionMeta,
+) -> bool {
+    first.rectangles().len() == second.rectangles().len()
+        && first
+            .rectangles()
+            .iter()
+            .zip(second.rectangles())
+            .all(|(first, second)| {
+                first.placement() == second.placement()
+                    && first.pixel_size() == second.pixel_size()
+                    && Arc::ptr_eq(first.pixels(), second.pixels())
+            })
+}
+
+#[cfg(feature = "metadata")]
+fn overlay_buffers(
+    card: &Card,
+    (width, height): (u32, u32),
+    dmabuf_state: &DmabufState,
+    qh: &QueueHandle<WorkerState>,
+) -> Result<Vec<OverlayBuffer>, G2gError> {
+    use drm::buffer::Buffer as _;
+    use drm::control::Device as _;
+    let hardware = |_| G2gError::Hardware(HardwareError::Other);
+    let drm_format = drm_format(RawVideoFormat::Bgra8).ok_or(G2gError::CapsMismatch)?;
+    // one buffer is written while the compositor still reads the other
+    (0..2)
+        .map(|_| {
+            let dumb = card
+                .create_dumb_buffer((width, height), drm::buffer::DrmFourcc::Argb8888, 32)
+                .map_err(hardware)?;
+            let fd = card
+                .buffer_to_prime_fd(dumb.handle(), drm::CLOEXEC | drm::RDWR)
+                .map_err(hardware)?;
+            let params = dmabuf_state
+                .create_params(qh)
+                .map_err(|_| G2gError::UnsupportedDomain)?;
+            params.add(
+                std::os::fd::AsFd::as_fd(&fd),
+                0,
+                0,
+                dumb.pitch(),
+                DRM_FORMAT_MOD_LINEAR,
+            );
+            let (wl_buffer, _) = params.create_immed(
+                width as i32,
+                height as i32,
+                drm_format,
+                zwp_linux_buffer_params_v1::Flags::empty(),
+                qh,
+            );
+            Ok(OverlayBuffer {
+                dumb,
+                wl_buffer,
+                on_screen: false,
+            })
+        })
+        .collect()
+}
+
+#[cfg(feature = "metadata")]
+fn copy_as_argb8888(
+    layer: &[u8],
+    width: usize,
+    pitch: usize,
+    mapped: &mut [u8],
+    row: &mut Vec<u8>,
+) {
+    // drm ARGB8888 is BGRA in memory
+    let (red, blue) = rgba_rb_offsets(RawVideoFormat::Bgra8);
+    row.resize(width * 4, 0);
+    for (layer_row, mapped_row) in layer.chunks_exact(width * 4).zip(mapped.chunks_mut(pitch)) {
+        for (dst, src) in row
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(layer_row.as_chunks::<4>().0)
+        {
+            *dst = [src[red], src[1], src[blue], src[3]];
+        }
+        mapped_row[..row.len()].copy_from_slice(row);
+    }
+}
 
 // =================================================================
 // Orientation descriptor -> wl_surface buffer transform
@@ -1684,6 +2001,32 @@ mod tests {
         // drm_fourcc.h values of DRM_FORMAT_NV12 and DRM_FORMAT_YUYV
         assert_eq!(drm_format(RawVideoFormat::Nv12), Some(0x3231_564e));
         assert_eq!(drm_format(RawVideoFormat::Yuyv), Some(0x5659_5559));
+    }
+
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn overlay_rows_land_as_argb8888_at_the_buffer_pitch() {
+        const WIDTH: usize = 2;
+        const PITCH: usize = 12;
+        const PADDING: u8 = 0xEE;
+        let red = [200, 0, 0, 200];
+        let half_blue = [0, 0, 64, 128];
+        let layer = [red, half_blue, half_blue, red].concat();
+        let mut mapped = [PADDING; 2 * PITCH];
+        copy_as_argb8888(&layer, WIDTH, PITCH, &mut mapped, &mut Vec::new());
+        // ARGB8888 is [blue, green, red, alpha] in memory
+        let argb_red = [0, 0, 200, 200];
+        let argb_half_blue = [64, 0, 0, 128];
+        assert_eq!(mapped[..8], [argb_red, argb_half_blue].concat());
+        assert_eq!(
+            mapped[PITCH..PITCH + 8],
+            [argb_half_blue, argb_red].concat()
+        );
+        assert_eq!(
+            mapped[8..PITCH],
+            [PADDING; PITCH - 8],
+            "row padding untouched"
+        );
     }
 
     #[test]

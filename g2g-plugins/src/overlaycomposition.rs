@@ -12,8 +12,8 @@ use core::pin::Pin;
 use g2g_core::meta::{MetaRequests, PlaneLayout};
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, ElementMetadata,
-    Frame, G2gError, MemoryDomain, OutputSink, OverlayCompositionMeta, PadTemplate, PadTemplates,
-    PipelinePacket, RawVideoFormat,
+    Frame, G2gError, MemoryDomain, OutputSink, OverlayCompositionMeta, OverlayPlacement,
+    OverlayRectangle, PadTemplate, PadTemplates, PipelinePacket, RawVideoFormat,
 };
 
 use crate::compositor::blend_over_scaled;
@@ -21,10 +21,10 @@ use crate::paint::{blend_layer_into_nv12, over_premultiplied};
 use crate::pixel::{plane_shapes, rgba_rb_offsets};
 use crate::yuvmatrix::YuvRgbMatrix;
 
-#[cfg(feature = "wgpu-sink")]
+#[cfg(any(feature = "wgpu-sink", feature = "wayland-sink"))]
 pub(crate) const RENDER_OVERLAYS_NAME: &str = "render-overlays";
 
-#[cfg(feature = "wgpu-sink")]
+#[cfg(any(feature = "wgpu-sink", feature = "wayland-sink"))]
 pub(crate) const RENDER_OVERLAYS_PROPERTY: g2g_core::PropertySpec = g2g_core::PropertySpec::new(
     RENDER_OVERLAYS_NAME,
     g2g_core::PropKind::Bool,
@@ -32,7 +32,7 @@ pub(crate) const RENDER_OVERLAYS_PROPERTY: g2g_core::PropertySpec = g2g_core::Pr
 )
 .with_default("false");
 
-#[cfg(feature = "wgpu-sink")]
+#[cfg(any(feature = "wgpu-sink", feature = "wayland-sink"))]
 pub(crate) fn render_requests(render: bool) -> MetaRequests {
     if render {
         MetaRequests::new().request_from_every_consumer::<OverlayCompositionMeta>()
@@ -130,14 +130,11 @@ impl Picture {
         layout: Option<&PlaneLayout>,
         layer: &mut Vec<u8>,
     ) -> Result<(), G2gError> {
-        let visible = |rectangle: &&g2g_core::OverlayRectangle| {
-            rectangle
-                .placement()
-                .clipped_to(self.width, self.height)
-                .is_some()
-        };
-        let mut rectangles = composition.rectangles().iter().filter(visible).peekable();
-        if rectangles.peek().is_none() {
+        if !composition
+            .rectangles()
+            .iter()
+            .any(|rectangle| visible(rectangle, self.width, self.height))
+        {
             return Ok(());
         }
         if !matches!(
@@ -166,30 +163,7 @@ impl Picture {
         {
             return Err(G2gError::CapsMismatch);
         }
-        let layer_len = width
-            .checked_mul(height)
-            .and_then(|pixels| pixels.checked_mul(4))
-            .ok_or(G2gError::CapsMismatch)?;
-        layer.resize(layer_len, 0);
-        layer.fill(0);
-        for rectangle in rectangles {
-            let placement = rectangle.placement();
-            let (sw, sh) = rectangle.pixel_size();
-            blend_over_scaled(
-                layer,
-                width,
-                height,
-                rectangle.pixels(),
-                sw as usize,
-                sh as usize,
-                placement.x,
-                placement.y,
-                placement.width as usize,
-                placement.height as usize,
-                255,
-                paint_layer,
-            );
-        }
+        let layer = composition_layer(composition, (self.width, self.height), layer)?;
         let bytes = system.as_mut_slice();
         if self.format == RawVideoFormat::Nv12 {
             blend_layer_into_nv12(layer, bytes, layout, (width, height), &self.matrix)
@@ -211,6 +185,58 @@ impl Picture {
             Ok(())
         }
     }
+}
+
+fn visible(rectangle: &OverlayRectangle, width: u32, height: u32) -> bool {
+    rectangle.placement().clipped_to(width, height).is_some()
+}
+
+pub(crate) fn composition_layer<'a>(
+    composition: &'a OverlayCompositionMeta,
+    (width, height): (u32, u32),
+    layer: &'a mut Vec<u8>,
+) -> Result<&'a [u8], G2gError> {
+    let whole_picture = OverlayPlacement {
+        x: 0,
+        y: 0,
+        width,
+        height,
+    };
+    if let [rectangle] = composition.rectangles() {
+        if rectangle.placement() == whole_picture && rectangle.pixel_size() == (width, height) {
+            return Ok(rectangle.pixels());
+        }
+    }
+    let (width, height) = (width as usize, height as usize);
+    let layer_len = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or(G2gError::CapsMismatch)?;
+    layer.resize(layer_len, 0);
+    layer.fill(0);
+    for rectangle in composition
+        .rectangles()
+        .iter()
+        .filter(|rectangle| visible(rectangle, whole_picture.width, whole_picture.height))
+    {
+        let placement = rectangle.placement();
+        let (sw, sh) = rectangle.pixel_size();
+        blend_over_scaled(
+            layer,
+            width,
+            height,
+            rectangle.pixels(),
+            sw as usize,
+            sh as usize,
+            placement.x,
+            placement.y,
+            placement.width as usize,
+            placement.height as usize,
+            255,
+            paint_layer,
+        );
+    }
+    Ok(layer)
 }
 
 // The scratch layer holds premultiplied channels so resampling and stacking

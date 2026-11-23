@@ -52,7 +52,6 @@ use core::future::Future;
 use core::num::NonZeroU32;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicU64, Ordering};
-use std::os::fd::{AsFd, BorrowedFd};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
@@ -65,7 +64,6 @@ use alloc::string::String;
 
 use drm::buffer::{Buffer, DrmFourcc, Handle as BufferHandle};
 use drm::control::{connector, framebuffer, Device as ControlDevice, Event, Mode, PageFlipFlags};
-use drm::Device;
 use gbm::{
     AsRaw, BufferObject, BufferObjectFlags, Device as GbmDevice, Format as GbmFormat,
     Surface as GbmSurface,
@@ -87,6 +85,7 @@ use g2g_core::{
 use crate::clock::wait_to_present;
 use crate::cuda::nv12_byte_size;
 use crate::drm_plane_rotation::{primary_plane_rotation, require_unrotated, PlaneRotation};
+use crate::drmcard::{Card, DEFAULT_CARD};
 use crate::glnv12::{GlMode, GlState};
 use crate::videoflip::frame_orientation;
 
@@ -109,30 +108,6 @@ enum WorkerCmd {
         ack: tokio::sync::oneshot::Sender<()>,
     },
     Shutdown,
-}
-
-/// Thin wrapper over `/dev/dri/cardN` implementing the `drm` device traits via
-/// its owned file's borrowed fd (same pattern as `KmsSink`).
-#[derive(Debug)]
-struct Card(std::fs::File);
-
-impl AsFd for Card {
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        self.0.as_fd()
-    }
-}
-impl Device for Card {}
-impl ControlDevice for Card {}
-
-impl Card {
-    fn open<P: AsRef<Path>>(path: P) -> Result<Self, G2gError> {
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)
-            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-        Ok(Card(file))
-    }
 }
 
 /// A single-plane XRGB8888 framebuffer view over a GBM buffer object's gem
@@ -213,7 +188,7 @@ impl Default for CudaKmsSink {
 impl CudaKmsSink {
     pub fn new() -> Self {
         Self {
-            device_path: PathBuf::from("/dev/dri/card0"),
+            device_path: PathBuf::from(DEFAULT_CARD),
             cmd_tx: None,
             worker: None,
             width: 0,
@@ -368,7 +343,7 @@ impl AsyncElement for CudaKmsSink {
                 PropKind::Str,
                 "DRM device node (e.g. /dev/dri/card0)",
             )
-            .with_default("/dev/dri/card0"),
+            .with_default(DEFAULT_CARD),
             MAX_LATENESS_PROPERTY,
             PROCESSING_DEADLINE_PROPERTY,
             QOS_INTERVAL_PROPERTY,

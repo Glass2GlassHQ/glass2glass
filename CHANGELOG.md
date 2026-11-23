@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2523: Update smithay-client-toolkit to 0.21.
+- M2522: Show `analyticsoverlay` shapes on a `waylandsink` overlay plane.
 - M2521: Retry interrupted HTTP response bodies in HLS and DASH fetches.
 - M2520: Fix the HTTP connection-refusal test race and overlay Clippy failure.
 - M2519: Add `overlaycomposition` with software blending and wgpu sink rendering.
