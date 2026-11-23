@@ -2,67 +2,6 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
-//! Wayland display sink.
-//!
-//! Opens an `xdg_toplevel` window on the running Wayland compositor and
-//! presents raw video into it. A dma-buf frame is imported through
-//! `zwp_linux_dmabuf_v1` as a linear buffer in the negotiated format with no
-//! copy, and the compositor converts it with its own matrix, since the caps
-//! colorimetry has no way to reach it. A system-memory frame is converted to
-//! NV12 if it is in another format, then to XRGB8888 (in the caps
-//! colorimetry's matrix and range) straight into a `wl_shm` buffer on the
-//! worker thread, about 2 ms per 1080p frame on a modern x86 core.
-//!
-//! The compositor sets two things this sink cannot:
-//! - Latency is at least one wait for the compositor's `frame` callback, one
-//!   refresh (about 16 ms at 60 Hz) while its renderer keeps up.
-//! - A buffer reaches the screen on a hardware plane only when the
-//!   compositor and its driver accept it there. Otherwise the compositor's
-//!   renderer, usually the GPU, composites it on every refresh.
-//!
-//! [`crate::kmssink::KmsSink`] drives the display without a compositor,
-//! which needs DRM master.
-//!
-//! ## Pipeline shape
-//!
-//! ```text
-//! RtspSrc ─► FfmpegH264Dec(Nv12) ─► WaylandSink
-//!                                       │
-//!                                       └─► xdg_toplevel window
-//! ```
-//!
-//! ## Threading
-//!
-//! Wayland client types (`Connection`, `EventQueue`, the SCTK state
-//! struct) are designed to be single-thread-owned. We honour that by
-//! pinning all Wayland state to a dedicated worker thread, spun up at
-//! `configure_pipeline` time. The sink struct itself only holds a
-//! `calloop` channel sender and a shared atomic counter, both of which
-//! are `Send + Sync`. The runner can move us between worker tasks
-//! freely.
-//!
-//! ## Constraints (v1)
-//!
-//! - Mid-stream geometry change tears down the existing worker and
-//!   spawns a fresh one. Same-dims `CapsChanged` is a no-op.
-//! - The window opens at the video's display size and follows any size the
-//!   compositor's `configure` sets (fullscreen, maximize, tiling, resize).
-//!   The window surface is a black buffer scaled to that size and the
-//!   picture is a subsurface `wp_viewporter` scales into it, letterboxed
-//!   unless `force-aspect-ratio` is off.
-//! - With `render-overlays=true` an `OverlayCompositionMeta` on the frames is
-//!   shown on a second subsurface above the picture, in ARGB8888 dumb buffers
-//!   from `overlay-device`, which the compositor can put on a hardware plane.
-//!   The buffers are rewritten only when the composition changes.
-//! - Once the runner elects a clock, each frame is held until its PTS
-//!   deadline and dropped if it is late beyond the QoS bound. On top of
-//!   that, backpressure is compositor-driven: `process()` blocks until
-//!   the compositor's `frame` callback for the previously committed
-//!   buffer arrives, so the producer is throttled to refresh.
-//! - Window decorations are server-side if the compositor offers them
-//!   (KDE, GNOME with the right protocol), otherwise the window is
-//!   borderless. v1 doesn't carry CSD.
-
 use core::future::Future;
 use core::num::NonZeroU32;
 use core::pin::Pin;
@@ -146,19 +85,12 @@ use g2g_core::{
     PROCESSING_DEADLINE_PROPERTY, QOS_INTERVAL_PROPERTY, SYNC_PROPERTY,
 };
 
-/// Worker-thread message. `Frame` carries the pre-converted XRGB8888
-/// bytes (sink-side conversion keeps the worker thread free for Wayland
-/// I/O) plus a one-shot `ack` the worker signals once the frame has been
-/// committed *and* the compositor's next `frame` callback has fired —
-/// that's the signal we use to pace the producer to refresh.
-/// `Shutdown` exits the worker's event loop.
 enum WorkerCmd {
     Frame(QueuedFrame),
     Shutdown,
 }
 
 enum QueuedPixels {
-    // converted into the shm buffer by the worker
     System(SystemSlice),
     Imported {
         dmabuf: OwnedDmaBuf,
@@ -167,38 +99,16 @@ enum QueuedPixels {
     },
 }
 
-/// One converted frame on its way to the surface.
 struct QueuedFrame {
     pixels: QueuedPixels,
     matrix: YuvRgbMatrix,
-    /// Source-side wall-clock stamp from `FrameTiming::arrival_ns`.
-    /// The worker records `monotonic_ns() - arrival_ns` into the
-    /// latency histogram when the matching `frame` callback fires.
-    /// Zero means the frame was untimed; latency is not recorded.
     arrival_ns: u64,
-    /// The turn an upstream `videoflip` left for the compositor to apply.
-    /// `Identity` for a frame with no `OrientationMeta`.
     orientation: Orientation,
     ack: tokio::sync::oneshot::Sender<()>,
     #[cfg(feature = "metadata")]
     overlay: Option<g2g_core::OverlayCompositionMeta>,
 }
 
-/// How the sink reacts when the producer pushes faster than the
-/// compositor refreshes.
-///
-/// - `Block` (default): `process()` waits for the matching `frame`
-///   callback before returning. Producer is throttled to refresh.
-///   No drops, but backpressure propagates upstream. A compositor stops
-///   sending `frame` callbacks for a surface it is not painting (fully
-///   occluded, minimized, or on no output), so the wait only applies
-///   while callbacks are recent: a silent surface stops throttling
-///   rather than freezing the branch until the window is exposed again.
-/// - `DropOldest`: `process()` returns as soon as the worker accepts
-///   the frame. If a previous frame is still awaiting its `frame`
-///   callback, the worker overwrites it — the older frame never paints.
-///   Use for live sources that prefer freshness over completeness
-///   (security cameras, monitoring) and can't tolerate backpressure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PacingPolicy {
     #[default]
@@ -206,32 +116,12 @@ pub enum PacingPolicy {
     DropOldest,
 }
 
-/// `frame` callbacks older than this mean the compositor is not painting the
-/// surface, and `Block` stops waiting on them. Also the bound on one ack wait,
-/// so the first frames after the compositor goes silent pay at most this before
-/// the sink notices. Well above any real refresh interval.
+// compositors send no frame callbacks to a surface they are not painting
 const FRAME_CALLBACK_SILENCE_NS: u64 = 250_000_000;
 
-/// What the sink-side struct holds between `process()` calls. We keep
-/// only `Send + Sync` handles here so the multi-thread runner can move
-/// us between executor tasks.
-///
-/// # Example
-///
-/// ```no_run
-/// use g2g_plugins::waylandsink::{PacingPolicy, WaylandSink};
-///
-/// let sink = WaylandSink::new()
-///     .with_title("preview")
-///     .with_pacing(PacingPolicy::DropOldest);
-/// ```
-/// Raw per-frame samples (glass-to-glass latency, presentation deadline error)
-/// stop at this count (8 bytes each, about 2.4 hours at 30 fps). The latency
-/// histogram keeps counting past it.
+// 8 bytes per sample, about 2.4 hours at 30 fps
 const PER_FRAME_SAMPLE_CAPACITY: usize = 1 << 18;
 
-/// Glass-to-glass histogram plus the raw per-frame samples behind it, so a
-/// bench can read exact percentiles instead of log2 bucket edges.
 #[derive(Debug)]
 struct LatencyRecorder {
     histogram: LatencyHistogram,
@@ -255,16 +145,6 @@ impl LatencyRecorder {
     }
 }
 
-/// How far the elected clock, the media timeline and the frame deadline have
-/// each moved against this host's monotonic clock since the first paced frame,
-/// in nanoseconds. All three stay flat on a healthy run:
-///
-/// - `clock_ns` walking off is the elected clock running at the wrong rate.
-/// - `deadline_ns` parting from `media_ns` is the presentation anchor moving
-///   under the stream.
-/// - `media_ns` sagging while `clock_ns` holds is the sink failing to keep the
-///   schedule: the feed ran dry, so frames present on arrival instead of on
-///   their deadline.
 #[derive(Clone, Copy, Debug)]
 struct ScheduleDrift {
     clock_ns: i64,
@@ -272,12 +152,8 @@ struct ScheduleDrift {
     deadline_ns: i64,
 }
 
-/// Once-per-second sampler behind [`ScheduleDrift`]. The per-frame trace shows
-/// what one frame did; this shows which of the three timelines is losing ground,
-/// which is the only way to tell a bad clock from a slow feed.
 #[derive(Debug, Default)]
 struct ScheduleDriftTrace {
-    /// `(monotonic, clock, pts, deadline)` at the first paced frame.
     base: Option<(u64, u64, u64, u64)>,
     last_log_ns: u64,
 }
@@ -320,32 +196,15 @@ pub struct WaylandSink {
     pixel_aspect: PixelAspect,
     force_aspect_ratio: bool,
     fullscreen: bool,
-    /// NV12 -> XRGB coefficients for the negotiated caps' colorimetry, re-derived
-    /// whenever `configure_pipeline` runs.
     matrix: YuvRgbMatrix,
     frames_presented: Arc<AtomicU64>,
     latency: Arc<LatencyRecorder>,
     frames_dropped: Arc<AtomicU64>,
-    /// Monotonic time of the compositor's most recent `frame` callback,
-    /// written by the worker; how `Block` tells a painting surface from a
-    /// silent one.
     last_frame_callback_ns: Arc<AtomicU64>,
     pacing: PacingPolicy,
-    /// PTS pacing + QoS late-drop, shared with the other
-    /// synchronizing sinks: the elected clock, the segment mapping, the
-    /// presentation anchor, and the lateness bound. Idle until the runner hands
-    /// over a clock; the default bound drops a frame more than 5 ms past its end.
     pacer: PresentationPacer,
-    /// Monotonic stamp when the previous frame's present completed, for the
-    /// per-frame pacing log (the inter-present gap is what stutter looks like).
     last_present_done_ns: u64,
-    /// Signed presentation error per presented frame, nanoseconds: the elected
-    /// clock's reading once the frame is up, minus the frame's deadline on that
-    /// clock. Positive is late. Empty for an unpaced run (no clock, no
-    /// deadlines), capped at `PER_FRAME_SAMPLE_CAPACITY`.
     deadline_errors: Vec<i64>,
-    /// Once-per-second clock / media / deadline drift trace, logged under
-    /// `G2G_DEBUG`.
     schedule_drift: ScheduleDriftTrace,
     #[cfg(feature = "metadata")]
     render_overlays: bool,
@@ -415,24 +274,16 @@ impl WaylandSink {
         self
     }
 
-    /// Enable QoS late-drop: once PTS pacing is engaged, a frame already
-    /// past its end by more than `ns` is dropped instead of presented late,
-    /// so the sink catches up rather than accumulating lag. `0` drops any frame
-    /// that arrives after its end; the default is 5 ms, `u64::MAX` never drops.
     pub fn with_max_lateness_ns(mut self, ns: u64) -> Self {
         self.pacer.set_max_lateness_ns(ns);
         self
     }
 
-    /// Post a running-stats `Qos` report every `ns` of clock time while frames
-    /// present, on top of the per-drop reports. `0` (the default) reports only
-    /// drops.
     pub fn with_qos_interval_ns(mut self, ns: u64) -> Self {
         self.pacer.set_report_interval_ns(ns);
         self
     }
 
-    /// Attach the pipeline bus so QoS reports reach the application.
     pub fn with_bus(mut self, bus: BusHandle) -> Self {
         self.pacer.set_bus(bus);
         self
@@ -442,9 +293,6 @@ impl WaylandSink {
         self.frames_dropped.load(Ordering::Relaxed)
     }
 
-    /// Frames dropped by QoS late-drop (past their deadline beyond the configured
-    /// bound). Distinct from [`frames_dropped`](Self::frames_dropped), the
-    /// compositor-side `DropOldest` count.
     pub fn late_dropped(&self) -> u64 {
         self.pacer.late_dropped()
     }
@@ -463,18 +311,10 @@ impl WaylandSink {
         self.frames_presented.load(Ordering::Relaxed)
     }
 
-    /// Snapshot of glass-to-glass latency: source-side
-    /// `FrameTiming::arrival_ns` to the compositor's `frame` callback
-    /// that confirms our commit. Only frames whose timing was stamped
-    /// upstream contribute; an untimed pipeline reports `count = 0`.
     pub fn latency_snapshot(&self) -> LatencySnapshot {
         self.latency.histogram.snapshot()
     }
 
-    /// The raw per-frame samples behind [`latency_snapshot`], nanoseconds in
-    /// presentation order, capped at `PER_FRAME_SAMPLE_CAPACITY`.
-    ///
-    /// [`latency_snapshot`]: Self::latency_snapshot
     pub fn latency_samples(&self) -> Vec<u64> {
         self.latency
             .samples
@@ -483,30 +323,16 @@ impl WaylandSink {
             .clone()
     }
 
-    /// Signed presentation error per presented frame, nanoseconds in
-    /// presentation order: the elected clock's reading once the frame is on
-    /// screen minus the deadline the pacer held it to. Positive is late. Empty
-    /// for an unpaced run, since a clockless sink presents on arrival and has no
-    /// deadline to miss. Capped at `PER_FRAME_SAMPLE_CAPACITY`.
-    ///
-    /// In an A/V graph the elected clock is the audio sink's, so this is the
-    /// video-against-audio sync error: its drift over a long run is lip sync.
     pub fn deadline_error_samples(&self) -> Vec<i64> {
         self.deadline_errors.clone()
     }
 
-    /// The elected clock the runner handed over, `None` until one arrives (or
-    /// for a graph that elects none). An A/V graph hands the video sink the
-    /// audio sink's `DriftClock`, so this is how a test confirms the video is
-    /// slaved to the audio timeline.
     pub fn clock_sync(&self) -> Option<&ClockSync> {
         self.pacer.clock_sync()
     }
 
     fn shutdown(&mut self) {
         if let Some(tx) = self.cmd_tx.take() {
-            // Best-effort — if the worker is already gone the send fails
-            // silently and that's the outcome we want.
             let _ = tx.send(WorkerCmd::Shutdown);
         }
         if let Some(join) = self.worker.take() {
@@ -521,16 +347,6 @@ impl Drop for WaylandSink {
     }
 }
 
-/// Monotonic wall-clock the sink offers as a pipeline clock. Wraps
-/// `metrics::monotonic_ns()` so the sink's timeline matches the
-/// source-side `arrival_ns` stamps used by the latency histogram.
-///
-/// We register at `Provider` priority so a `LiveSource` (RTSP, camera)
-/// still wins election when present, but in absence of one the sink
-/// becomes the reference clock — the right answer for an audio-less
-/// video-only pipeline once A/V sync arrives. Not yet vsync-predicting:
-/// `now_ns()` is straight monotonic, no frame-callback feedback. That's
-/// the upgrade needed before audio sync; tracked as Plan-1 Step 3+.
 #[derive(Debug)]
 struct WaylandClock;
 impl PipelineClock for WaylandClock {
@@ -577,16 +393,10 @@ impl AsyncElement for WaylandSink {
         ))
     }
 
-    /// This sink blits system frames and hands dma-bufs to the compositor. The
-    /// allocation cascade turns that into a download demand on any other GPU producer.
     fn input_domains(&self) -> DomainSet {
         DomainSet::only(MemoryDomainKind::System).with(MemoryDomainKind::DmaBuf)
     }
 
-    /// The compositor turns the picture for us through
-    /// `wl_surface::set_buffer_transform`, so a `videoflip` upstream should
-    /// attach an `OrientationMeta` rather than remap every pixel. Needs
-    /// the `metadata` feature: without it a frame has nowhere to carry the turn.
     fn absorbed_orientations(&self) -> OrientationSet {
         if cfg!(feature = "metadata") {
             OrientationSet::ALL
@@ -595,16 +405,10 @@ impl AsyncElement for WaylandSink {
         }
     }
 
-    /// Adopt the elected clock + base time so frames present at their PTS
-    /// deadline. When the elected clock is our own `WaylandClock` (the common
-    /// audio-less case) its `now_ns()` shares the monotonic domain we sleep on.
     fn set_clock_sync(&mut self, sync: ClockSync) {
         self.pacer.set_clock_sync(sync);
     }
 
-    /// Relay a QoS report upstream: the runner forwards this onto the
-    /// incoming link, where the producer observes it as `PushOutcome::Qos` and
-    /// can shed load so the sink stops running behind.
     fn take_qos(&mut self) -> Option<QosMessage> {
         self.pacer.take_qos()
     }
@@ -638,23 +442,14 @@ impl AsyncElement for WaylandSink {
             return Err(G2gError::CapsMismatch);
         }
         self.input = Some(input);
-        // A mid-stream colorimetry refinement (the parser's VUI colour
-        // description) only re-derives the convert table: the worker's surface
-        // is unaffected.
         self.matrix = YuvRgbMatrix::new(colorimetry);
 
-        // Mid-stream geometry change: same dims is a no-op; different
-        // dims means we tear down the existing worker and spawn a fresh
-        // one. M16 5j: enables decoder→sink chains where the initial
-        // NV12 caps carry placeholder dims (e.g. RtspSrc's `Range`
-        // workaround #1, fixated to min) and the real geometry lands
-        // via a mid-stream `CapsChanged` after SPS parse.
+        // RtspSrc's first caps carry placeholder dimensions until the SPS arrives
         if self.worker.is_some() {
             if (w, h, pixel_aspect) == (self.width, self.height, self.pixel_aspect) {
                 return Ok(ConfigureOutcome::Accepted);
             }
             self.shutdown();
-            // fall through to fresh-worker spawn below.
         }
         let (display_width, display_height) = if self.force_aspect_ratio {
             display_size(w, h, pixel_aspect)
@@ -666,8 +461,6 @@ impl AsyncElement for WaylandSink {
         let presented = Arc::clone(&self.frames_presented);
         let dropped = Arc::clone(&self.frames_dropped);
         let latency = Arc::clone(&self.latency);
-        // Seeded with now so the just-mapped surface gets one silence window of
-        // ordinary blocking before its first callback has to arrive.
         self.last_frame_callback_ns
             .store(monotonic_ns(), Ordering::Relaxed);
         let last_frame_callback_ns = Arc::clone(&self.last_frame_callback_ns);
@@ -680,9 +473,6 @@ impl AsyncElement for WaylandSink {
             .render_overlays
             .then(|| std::path::PathBuf::from(&self.overlay_device));
 
-        // Synchronous handshake: the worker signals readiness once the
-        // compositor's first `configure` lands. Until then `process()`
-        // would be racing against an unmapped surface.
         let ready = Arc::new(Handshake::new());
         let ready_for_worker = Arc::clone(&ready);
 
@@ -712,10 +502,7 @@ impl AsyncElement for WaylandSink {
             })
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
 
-        // Bounded wait: a hung compositor mustn't lock us up forever.
         if !ready.wait(Duration::from_secs(5)) {
-            // Tell the worker to give up; if it already crashed, the
-            // send fails and join will pick up the panic.
             let _ = tx.send(WorkerCmd::Shutdown);
             let _ = join.join();
             return Err(G2gError::Hardware(HardwareError::Other));
@@ -843,18 +630,10 @@ impl AsyncElement for WaylandSink {
                     if !matches!(domain, MemoryDomain::DmaBuf(_)) {
                         domain.require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     }
-                    // PTS pacing: hold the frame until its running-time deadline
-                    // on the elected clock, or drop it if it is already too late
-                    // (the QoS bound) or outside the segment. Unpaced without a
-                    // clock: present immediately (pre-sync).
                     let t_in = monotonic_ns();
                     let presented = self.frames_presented.load(Ordering::Relaxed);
                     let pace = self.pacer.judge(&timing, presented);
-                    // Taken here rather than re-derived after the present: the
-                    // anchor this frame was judged against is the only one its
-                    // error means anything against.
                     let deadline_ns = self.pacer.last_deadline_ns();
-                    // Positive slack the pacer asked us to sleep; 0 = already due.
                     let wait_ns = match pace {
                         g2g_core::Pace::Wait(n) => n,
                         _ => 0,
@@ -911,13 +690,6 @@ impl AsyncElement for WaylandSink {
                     .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
                     match self.pacing {
                         PacingPolicy::Block => {
-                            // Wait for the compositor's `frame` callback for
-                            // this commit, but only while callbacks are
-                            // arriving at all: a surface the compositor is not
-                            // painting gets none, and gating on one would
-                            // freeze the branch until the window is exposed.
-                            // RecvError means the worker dropped the ack
-                            // (shutdown / crash) — treat as a hardware fault.
                             let silence =
                                 core::time::Duration::from_nanos(FRAME_CALLBACK_SILENCE_NS);
                             let last_callback_ns =
@@ -936,31 +708,19 @@ impl AsyncElement for WaylandSink {
                             }
                         }
                         PacingPolicy::DropOldest => {
-                            // Fire-and-forget: producer keeps moving.
-                            // If the previous frame's ack is still
-                            // outstanding when this one is drawn, the
-                            // worker drops it and bumps frames_dropped.
                             drop(ack_rx);
                         }
                     }
-                    // Per-frame pacing trace: where this frame's wall time went
-                    // (pacer sleep, convert+queue, compositor ack) and the gap
-                    // since the previous present, the number stutter shows up in.
                     let t_done = monotonic_ns();
                     let gap = t_done.saturating_sub(self.last_present_done_ns);
                     self.last_present_done_ns = t_done;
-                    // How far off its deadline the frame actually landed, read on
-                    // the elected clock (not `t_done`, which is this host's
-                    // monotonic timeline, a different one whenever audio is the
-                    // master).
+                    // the elected clock is the audio sink's in an A/V graph
                     let clock_now_ns = self.pacer.clock_sync().map(|s| s.now_ns());
                     if let (Some(deadline), Some(clock_now)) = (deadline_ns, clock_now_ns) {
                         let error = clock_now as i64 - deadline as i64;
                         if self.deadline_errors.len() < PER_FRAME_SAMPLE_CAPACITY {
                             self.deadline_errors.push(error);
                         }
-                        // Once a second: which of the three timelines is losing
-                        // ground against wall time. See `ScheduleDrift`.
                         if let Some(drift) =
                             self.schedule_drift
                                 .sample(t_done, clock_now, timing.pts_ns, deadline)
@@ -991,16 +751,10 @@ impl AsyncElement for WaylandSink {
                     Ok(())
                 }
                 PipelinePacket::Segment(seg) => {
-                    // Track the playback segment so PTS maps to running time
-                    // (correct across a seek).
                     self.pacer.set_segment(seg);
                     Ok(())
                 }
                 PipelinePacket::Flush => {
-                    // Seek flush: re-anchor presentation to the post-seek
-                    // timeline; the following Segment installs the new mapping.
-                    // The next frame first-frame-anchors (present the seek target
-                    // now), not at the stale play-edge base time (M176).
                     self.pacer.flush();
                     Ok(())
                 }
@@ -1009,16 +763,11 @@ impl AsyncElement for WaylandSink {
                     self.shutdown();
                     Ok(())
                 }
-                // future PipelinePacket variants: no-op (terminal sink).
                 _ => Ok(()),
             }
         })
     }
 }
-
-// =================================================================
-// Worker thread
-// =================================================================
 
 struct WorkerState {
     registry_state: RegistryState,
@@ -1049,30 +798,16 @@ struct WorkerState {
     presented: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
     latency: Arc<LatencyRecorder>,
-    /// Shared with the producer, stamped on every `frame` callback: how
-    /// `Block` pacing knows the compositor is still painting this surface.
     last_frame_callback_ns: Arc<AtomicU64>,
-    /// Frame queued before the surface is mappable. Once `configure`
-    /// lands we drain this into the first draw. With blocking pacing the
-    /// producer is throttled to one in-flight frame, so under steady
-    /// state this is None.
     pending: Option<QueuedFrame>,
-    /// Buffer transform currently committed on the surface. `set_buffer_transform`
-    /// is double-buffered state the compositor keeps, so it is re-issued only
-    /// when the descriptor on the frames changes.
+    // wayland keeps the buffer transform until the client sets another
     orientation: Orientation,
-    /// Whether the picture surface has had a buffer committed.
     picture_has_buffer: bool,
-    /// Ack for the most recently committed frame plus its source-side
-    /// arrival timestamp. Signalled when the compositor's matching
-    /// `frame` callback fires, at which point we record the latency.
     pending_ack: Option<(u64, tokio::sync::oneshot::Sender<()>)>,
     #[cfg(feature = "metadata")]
     overlay: Option<OverlaySurface>,
 }
 
-// The worker owns the whole Wayland-thread state; threading it as one params
-// struct would only move the argument list, not reduce it.
 #[allow(clippy::too_many_arguments)]
 fn worker_main(
     width: u32,
@@ -1137,8 +872,6 @@ fn worker_main(
     };
     window.commit();
 
-    // Allocate enough for a single XRGB8888 buffer at the input dims;
-    // SlotPool grows internally if we double-buffer below.
     let mut pool = SlotPool::new((width * height * 4) as usize, &shm)?;
     let (black_buffer, black_pixel) = pool.create_buffer(
         1,
@@ -1185,12 +918,8 @@ fn worker_main(
         overlay,
     };
 
-    // Wire the cmd channel into calloop so we wake on frame arrival.
     loop_handle.insert_source(rx, |event, _, state: &mut WorkerState| match event {
         ChanEvent::Msg(WorkerCmd::Frame(queued)) => {
-            // Producer is blocked on `ack` until our `frame` callback
-            // fires, so we should only ever see one in flight. If the
-            // surface isn't mappable yet, stash it; otherwise draw now.
             if state.configured {
                 state.draw(queued);
             } else {
@@ -1300,8 +1029,6 @@ impl WorkerState {
         let height = self.height as i32;
         let stride = self.width as i32 * 4;
 
-        // Allocate or reuse the buffer. If the compositor still owns the
-        // last one we double-buffer.
         let buffer = self.buffer.get_or_insert_with(|| {
             self.pool
                 .create_buffer(width, height, stride, wl_shm::Format::Xrgb8888)
@@ -1336,8 +1063,7 @@ impl WorkerState {
             let params = dmabuf_state
                 .create_params(qh)
                 .map_err(|_| G2gError::UnsupportedDomain)?;
-            // SAFETY: the fd is a live dma-buf owned by `dmabuf` for this call, and
-            // the request that sends it is written before the call returns.
+            // SAFETY: the fd is a live dma-buf owned by `dmabuf`, and the request is written before this returns.
             let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(dmabuf.as_raw()) };
             for index in 0..layout.count() {
                 let plane = layout.plane(index).ok_or(G2gError::CapsMismatch)?;
@@ -1362,11 +1088,6 @@ impl WorkerState {
         })
     }
 
-    /// Convert `pixels` into a `SlotPool` buffer, request a `frame` callback
-    /// (so the compositor tells us when it's ready for the next one),
-    /// and commit. The producer's `ack` is stashed in `pending_ack`; we
-    /// signal it when the matching `frame` callback fires in
-    /// `CompositorHandler::frame`.
     fn draw(&mut self, queued: QueuedFrame) {
         let QueuedFrame {
             pixels,
@@ -1382,9 +1103,6 @@ impl WorkerState {
         let attach = match pixels {
             QueuedPixels::System(pixels) => {
                 if self.fill_shm_buffer(&pixels, &matrix).is_err() {
-                    // Should never happen: the sink checked the frame size, and dims
-                    // are fixed at configure time. Drop quietly *and* release the
-                    // producer so we don't deadlock the pipeline.
                     let _ = ack.send(());
                     return;
                 }
@@ -1418,9 +1136,7 @@ impl WorkerState {
                     .surface
                     .set_buffer_transform(buffer_transform(orientation));
             }
-            // The surface is what the compositor lays out, and a turn that
-            // transposes the picture transposes it. The buffer, and
-            // `damage_buffer` with it, stays in buffer coordinates.
+            // a transposing turn swaps the surface size, not the buffer's
             self.set_layout(orientation);
         }
         #[cfg(feature = "metadata")]
@@ -1444,9 +1160,7 @@ impl WorkerState {
             // wayland applies a sync subsurface's state with its parent's next commit
             self.picture_subsurface.set_sync();
         }
-        // Subscribe to the compositor's `frame` callback for this commit.
-        // smithay-client-toolkit hands the surface in `FrameCallbackData` to
-        // `CompositorHandler::frame`.
+        // smithay-client-toolkit passes the surface to `CompositorHandler::frame` in `FrameCallbackData`
         surface.frame(&self.qh, FrameCallbackData(surface.clone()));
         surface.damage_buffer(0, 0, width, height);
         match attach {
@@ -1470,10 +1184,6 @@ impl WorkerState {
         self.picture_has_buffer = true;
         self.presented.fetch_add(1, Ordering::Relaxed);
 
-        // If a prior ack is still outstanding the compositor never sent
-        // us a frame callback for it before we drew over it. Release the
-        // ack (under Block this is unreachable; under DropOldest it's
-        // expected and counted).
         if let Some((_, stale)) = self.pending_ack.take() {
             self.dropped.fetch_add(1, Ordering::Relaxed);
             let _ = stale.send(());
@@ -1500,9 +1210,6 @@ impl CompositorHandler for WorkerState {
     ) {
     }
     fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {
-        // The compositor is ready for the next frame. Record the
-        // glass-to-glass delta (source ingest -> on-screen), then
-        // release the producer blocked on this commit's ack.
         self.last_frame_callback_ns
             .store(monotonic_ns(), Ordering::Relaxed);
         if let Some((arrival_ns, ack)) = self.pending_ack.take() {
@@ -1566,11 +1273,9 @@ impl WindowHandler for WorkerState {
         self.picture_subsurface.set_desync();
         self.configured = true;
         if was_first {
-            // Tell the sink-side handshake that the window is mappable.
             if let Some(ready) = self.ready.take() {
                 ready.notify();
             }
-            // Drain any frame that arrived before we were mappable.
             if let Some(queued) = self.pending.take() {
                 self.draw(queued);
             }
@@ -1658,10 +1363,6 @@ delegate_dispatch2!(WorkerState);
 delegate_registry!(WorkerState);
 delegate_noop!(WorkerState: ignore WpViewporter);
 delegate_noop!(WorkerState: ignore WpViewport);
-
-// =================================================================
-// Overlay composition subsurface
-// =================================================================
 
 #[cfg(feature = "metadata")]
 struct OverlayBuffer {
@@ -1797,44 +1498,22 @@ fn overlay_buffers(
         .collect()
 }
 
-// =================================================================
-// Orientation descriptor -> wl_surface buffer transform
-// =================================================================
-
-/// The `wl_surface::set_buffer_transform` argument that makes the compositor
-/// display a buffer turned by `orientation`.
-///
-/// `set_buffer_transform` takes "the transformation that the client has already
-/// applied to the content of the buffer", and the compositor applies the
-/// inverse; `wl_output::transform`'s rotations are counter-clockwise, and its
-/// `flipped_*` entries are "an initial flip around a vertical axis followed by
-/// rotation" (wayland.xml). An `OrientationMeta` says the opposite thing: the
-/// turn a consumer still has to apply. So the argument is the inverse of the
-/// descriptor, which moves only the two quarter rotations (every mirror is its
-/// own inverse).
 fn buffer_transform(orientation: Orientation) -> wl_output::Transform {
+    // set_buffer_transform takes the turn the buffer already has
     match orientation.inverse() {
         Orientation::Identity => wl_output::Transform::Normal,
-        // 90 counter-clockwise.
+        // wl_output rotations are counter-clockwise
         Orientation::Rotate90Ccw => wl_output::Transform::_90,
         Orientation::Rotate180 => wl_output::Transform::_180,
         Orientation::Rotate90Cw => wl_output::Transform::_270,
-        // Flip around a vertical axis, i.e. left to right.
+        // wl_output flips around the vertical axis before it rotates
         Orientation::HorizontalMirror => wl_output::Transform::Flipped,
-        // That flip then 90 counter-clockwise is the upper-left diagonal.
         Orientation::Transpose => wl_output::Transform::Flipped90,
         Orientation::VerticalMirror => wl_output::Transform::Flipped180,
         Orientation::Transverse => wl_output::Transform::Flipped270,
     }
 }
 
-// =================================================================
-// NV12 -> XRGB8888
-// =================================================================
-
-/// Convert a tightly packed NV12 frame into `canvas` as XRGB8888 (`[B, G, R,
-/// 0xFF]` per pixel, little-endian), through `matrix`, the negotiated
-/// colorimetry's coefficients.
 fn nv12_to_xrgb8888(
     src: &[u8],
     width: u32,
@@ -1859,7 +1538,6 @@ fn nv12_to_xrgb8888(
     Ok(())
 }
 
-/// XRGB8888 is BGRA in memory, alpha ignored.
 const XRGB8888_BYTES_PER_PIXEL: usize = 4;
 
 #[cfg(test)]
@@ -1907,11 +1585,6 @@ mod tests {
     }
     use g2g_core::{BusMessage, Dim, Rate, VideoCodec, VIDEO_SINK_MAX_LATENESS_NS};
 
-    /// Pins all eight descriptors to the transform that makes the compositor
-    /// show the picture the way the descriptor asked for. The turn is the
-    /// inverse of the argument, so getting the two quarter rotations backwards
-    /// (the easy mistake, `wl_output`'s names are counter-clockwise) shows up
-    /// here rather than upside down on a screen.
     #[test]
     fn buffer_transform_inverts_the_descriptor() {
         use wl_output::Transform;
@@ -1937,8 +1610,6 @@ mod tests {
         );
     }
 
-    /// The sink answers a `videoflip`'s question, so this is what keeps the
-    /// rotation deferred.
     #[test]
     fn advertises_that_it_absorbs_orientation() {
         let expected = if cfg!(feature = "metadata") {
@@ -1949,10 +1620,6 @@ mod tests {
         assert_eq!(WaylandSink::new().absorbed_orientations(), expected);
     }
 
-    /// The sink converts on the CPU into `wl_shm` or imports a dma-buf, so it has to tell
-    /// any other GPU decoder to download. The allocation cascade reads this declaration, so getting it
-    /// wrong means `nvdec ! waylandsink` takes a device pointer and dies with
-    /// `UnsupportedDomain`.
     #[test]
     fn dmabufs_import_by_their_drm_format_code() {
         // drm_fourcc.h values of DRM_FORMAT_NV12 and DRM_FORMAT_YUYV
@@ -1962,6 +1629,7 @@ mod tests {
 
     #[test]
     fn declares_system_memory_and_dmabuf_only() {
+        // a wrong declaration makes `nvdec ! waylandsink` fail with UnsupportedDomain
         assert_eq!(
             WaylandSink::new().input_domains(),
             DomainSet::only(MemoryDomainKind::System).with(MemoryDomainKind::DmaBuf)
@@ -1970,9 +1638,6 @@ mod tests {
 
     #[test]
     fn intercept_passes_through_any_format() {
-        // Negotiation-time intercept is pass-through; the NV12 requirement
-        // is enforced in `configure_pipeline`. (With a native decoder the
-        // solver hands this link NV12 anyway.)
         let sink = WaylandSink::new();
         let h264 = Caps::CompressedVideo {
             codec: VideoCodec::H264,
@@ -2039,8 +1704,6 @@ mod tests {
 
     #[test]
     fn set_clock_sync_enables_pts_pacing() {
-        // Without a clock the sink presents ASAP (pre-sync); after the runner
-        // hands it the elected clock, PTS pacing engages.
         let mut sink = WaylandSink::new();
         assert!(!sink.pacer.is_paced());
         let sync = ClockSync::new(Arc::new(WaylandClock), 0);
@@ -2050,7 +1713,6 @@ mod tests {
 
     #[test]
     fn qos_lateness_decision_respects_the_bound() {
-        // Default: the 5 ms video-sink bound.
         let sink = WaylandSink::new();
         assert!(
             !sink.pacer.is_too_late(0, VIDEO_SINK_MAX_LATENESS_NS),
@@ -2061,7 +1723,6 @@ mod tests {
             "past the default bound"
         );
 
-        // Bound 0: any frame past its deadline is too late.
         let strict = WaylandSink::new().with_max_lateness_ns(0);
         assert!(!strict.pacer.is_too_late(100, 100), "on time is not late");
         assert!(
@@ -2069,13 +1730,11 @@ mod tests {
             "1ns past the deadline is late"
         );
 
-        // Bound N: late only once past the deadline by more than N.
         let tol = WaylandSink::new().with_max_lateness_ns(10);
         assert!(!tol.pacer.is_too_late(100, 110), "within tolerance");
         assert!(tol.pacer.is_too_late(100, 111), "beyond tolerance");
     }
 
-    /// A clock whose `now_ns` the test drives by hand.
     struct ManualClock(Arc<AtomicU64>);
     impl PipelineClock for ManualClock {
         fn now_ns(&self) -> u64 {
@@ -2083,7 +1742,6 @@ mod tests {
         }
     }
 
-    /// A no-op downstream (a sink has none, but `process` takes one).
     struct NullOut;
     impl OutputSink for NullOut {
         fn poll_push(
@@ -2112,10 +1770,7 @@ mod tests {
 
     #[tokio::test]
     async fn qos_drops_a_late_frame_and_posts_to_the_bus() {
-        // A late frame is dropped before any compositor I/O, so this exercises
-        // the QoS path without a real Wayland window. The play anchor is stamped
-        // at clock 0, so a PTS-0 frame is due at 0 and the clock is already past
-        // it.
+        // a late frame drops before any compositor I/O
         use g2g_core::clock::PlayAnchor;
         let (bus, handle) = g2g_core::Bus::new(4);
         let clock = Arc::new(AtomicU64::new(1_000_000));
@@ -2127,15 +1782,13 @@ mod tests {
             ClockSync::with_play_anchor(Arc::new(ManualClock(clock)), 0, anchor),
         );
 
-        // Clock is 1 ms; a frame with deadline 0 is 1 ms late (> 0 bound).
+        // a PTS 0 frame is 1 ms late on this clock
         let mut out = NullOut;
         sink.process(PipelinePacket::DataFrame(nv12_frame(0)), &mut out)
             .await
             .unwrap();
 
         assert_eq!(sink.late_dropped(), 1, "the late frame was dropped");
-        // M174 relay: the runner reads this and pushes it upstream, where the
-        // producer sees `PushOutcome::Qos`.
         let upstream = AsyncElement::take_qos(&mut sink).expect("upstream QoS report");
         assert_eq!(upstream.jitter_ns, 1_000_000);
         assert!(
@@ -2159,13 +1812,9 @@ mod tests {
 
     #[tokio::test]
     async fn qos_default_does_not_drop() {
-        // Default bound: an on-time frame is not dropped. The anchor is
-        // set on this first frame so its deadline equals now; it then proceeds to
-        // present (no window here, so we only assert it was not QoS-dropped).
         let clock = Arc::new(AtomicU64::new(5_000_000));
         let mut sink = WaylandSink::new();
         AsyncElement::set_clock_sync(&mut sink, ClockSync::new(Arc::new(ManualClock(clock)), 0));
-        // First frame anchors at now, so it is never late under any bound.
         assert!(
             !sink.pacer.is_too_late(0, 5_000_000),
             "anchored first frame on time"
@@ -2175,15 +1824,13 @@ mod tests {
 
     #[test]
     fn running_time_uses_pts_without_segment() {
-        // No segment: PTS is the running time directly.
         let sink = WaylandSink::new();
         assert_eq!(sink.pacer.running_time(50_000_000), Some(50_000_000));
     }
 
     #[test]
     fn running_time_maps_through_segment_and_clips() {
-        // Accurate seek to 70 ms: a frame before the target is clipped (None);
-        // an at/after-target frame maps to running time. Mirrors SyncSink (M149).
+        // an accurate seek to 70 ms clips the frames before it
         let mut sink = WaylandSink::new();
         let seg = g2g_core::Segment::for_flush_seek(&g2g_core::Seek::flush_to(70_000_000), None);
         sink.pacer.set_segment(seg);
@@ -2199,7 +1846,6 @@ mod tests {
         );
     }
 
-    /// The XRGB8888 canvas `nv12_to_xrgb8888` fills from `src`.
     fn convert(
         src: &[u8],
         width: u32,
@@ -2213,7 +1859,7 @@ mod tests {
 
     #[test]
     fn nv12_to_xrgb_yields_correct_byte_count() {
-        // 4x2 NV12: Y=8 bytes, UV=4 bytes. Output = 4*2*4 = 32 bytes.
+        // 4x2 NV12 is 12 bytes in and 32 bytes of XRGB8888 out
         let src = alloc::vec![16u8; 12];
         let out = convert(&src, 4, 2, &YuvRgbMatrix::new(Colorimetry::UNKNOWN)).unwrap();
         assert_eq!(out.len(), 32);
@@ -2221,11 +1867,7 @@ mod tests {
 
     #[test]
     fn nv12_to_xrgb_neutral_grey_pixel_round_trips() {
-        // Y=126 (near mid-grey for limited range), U=V=128 (no chroma) →
-        // R = G = B ≈ (298*(126-16) + 128) >> 8 = (298*110 + 128) >> 8
-        //         = 32908 >> 8 = 128 (give or take rounding).
-        // Verify the centre pixel of a 2x2 fully-uniform NV12 frame lands
-        // in [125, 131] on all channels.
+        // limited-range Y 126 with neutral chroma is grey 128
         let mut src = alloc::vec![0u8; 6];
         for px in &mut src[..4] {
             *px = 126; // Y
@@ -2245,9 +1887,6 @@ mod tests {
         }
     }
 
-    /// The caps colorimetry reaches the convert table: the same NV12 bytes come
-    /// out different pixels once the caps say BT.709, and an untagged stream
-    /// keeps the BT.601 limited-range conversion it always had.
     #[test]
     fn configure_takes_the_convert_matrix_from_the_caps() {
         let src = alloc::vec![81u8, 81, 81, 81, 90, 240];
@@ -2260,8 +1899,7 @@ mod tests {
             colorimetry,
             pixel_aspect: g2g_core::PixelAspect::Any,
         };
-        // The worker never spawns: only the table is under test, and a failed
-        // worker spawn (no compositor in CI) would mask it.
+        // CI has no compositor for the worker to connect to
         let mut sink = WaylandSink::new();
         let convert = |sink: &WaylandSink| convert(&src, 2, 2, &sink.matrix).unwrap();
 

@@ -2,52 +2,6 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
-//! Linux KMS/DRM display sink.
-//!
-//! Scans video out on a display plane of the first connected output, with one
-//! atomic commit per frame. The picture goes on the first overlay plane that
-//! takes NV12, or on the primary plane when no overlay plane does, at its
-//! native size in the middle of the screen. With the picture on an overlay
-//! plane, the primary plane under it shows a black buffer.
-//!
-//! A dma-buf frame is scanned out from the producer's buffer with no copy. A
-//! system-memory frame is converted to NV12 if it is in another format, then
-//! copied into one of two dumb buffers.
-//!
-//! With `render-overlays=true` an `OverlayCompositionMeta` on the frames is
-//! drawn into ARGB8888 dumb buffers on an overlay plane stacked above the
-//! picture, and both planes change in the same commit. The buffers are
-//! redrawn only when the composition changes.
-//!
-//! Pipeline:
-//!
-//! ```text
-//! v4l2src (dma-buf NV12) ─► analyticsoverlay ─► KmsSink
-//!                                                 ├─► overlay plane: picture
-//!                                                 ├─► overlay plane: composition
-//!                                                 └─► primary plane: black
-//! ```
-//!
-//! ## Operational constraints
-//!
-//! - **Needs DRM master.** A running Wayland/X11 compositor already holds
-//!   master on the GPU, and the first commit fails with `EBUSY`. Stop the
-//!   compositor, test from a tty (`Ctrl+Alt+F3`), or use a DRM lease.
-//! - **Needs atomic modesetting.** The device must accept the atomic client
-//!   capability.
-//! - **No scaling.** A picture larger than the display mode is rejected.
-//! - **NV12 dma-bufs only.** A dma-buf in another format is rejected, since
-//!   it cannot be converted without downloading it.
-//! - **Tearing-free, not low-latency.** Each frame waits for the flip event of
-//!   the previous one before submitting, so the display rate limits
-//!   throughput.
-//!
-//! ## Threading
-//!
-//! `KmsSink` holds a `Card` (an owned `std::fs::File` over `/dev/dri/cardN`)
-//! plus DRM resource handles. All KMS calls happen on the runner's worker
-//! thread via `&mut self`; nothing is shared.
-
 use core::future::Future;
 use core::pin::Pin;
 use std::ffi::CStr;
@@ -102,21 +56,12 @@ fn hardware<E>(_: E) -> G2gError {
     G2gError::Hardware(HardwareError::Other)
 }
 
-/// One NV12 dumb buffer + the registered KMS framebuffer that points at it.
-///
-/// NV12 has a Y plane (full res, 8bpp) followed by an interleaved UV plane
-/// (half res, 16bpp per pixel pair). We allocate a *single* dumb buffer
-/// sized to hold both planes — `w` columns by `h * 3 / 2` rows at 8bpp,
-/// which gives `w * h * 3 / 2` bytes total — and treat the same buffer
-/// handle as both planes via offsets when adding the framebuffer.
 #[derive(Debug)]
 struct Slot {
     db: DumbBuffer,
     fb: framebuffer::Handle,
 }
 
-/// Planar-buffer adapter so we can call `add_planar_framebuffer` with an
-/// NV12 layout, from one dumb buffer or an imported dma-buf.
 #[derive(Debug)]
 struct Nv12Framebuffer {
     width: u32,
@@ -147,18 +92,12 @@ impl PlanarBuffer for Nv12Framebuffer {
     }
 }
 
-/// Pool size. Two is the minimum that lets a flip be in flight while we
-/// fill the next buffer; three lets us tolerate one frame of decoder
-/// jitter before stalling on vsync. Two keeps memory minimal and matches
-/// the simple flip cadence v1 uses.
 const POOL_SIZE: usize = 2;
 
 fn nv12_slots(card: &Card, (width, height): (u32, u32)) -> Result<Vec<Slot>, G2gError> {
     (0..POOL_SIZE)
         .map(|_| {
-            // Allocate a single dumb buffer covering Y + UV. Total bytes =
-            // width * height * 3 / 2, achieved by asking for a buffer that
-            // is `width` wide but `height + height/2` tall at 8bpp.
+            // drm dumb buffers take a bits-per-pixel, not a pixel format
             let db = card
                 .create_dumb_buffer((width, height + height / 2), DrmFourcc::C8, 8)
                 .map_err(hardware)?;
@@ -168,7 +107,6 @@ fn nv12_slots(card: &Card, (width, height): (u32, u32)) -> Result<Vec<Slot>, G2g
                 height,
                 handles: [Some(db.handle()), Some(db.handle()), None, None],
                 pitches: [pitch, pitch, 0, 0],
-                // UV plane sits immediately after the Y plane in the same buffer.
                 offsets: [0, pitch * height, 0, 0],
             };
             let fb = card
@@ -186,7 +124,7 @@ enum PlaneKind {
     Cursor,
 }
 
-// A plane's place in the stack, higher in front.
+// drm draws planes with a higher zpos in front
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Zpos {
     Fixed(u64),
@@ -215,7 +153,6 @@ impl PlaneCapabilities {
     }
 }
 
-// The atomic properties that put a framebuffer on a plane.
 #[derive(Debug, Clone, Copy)]
 struct PlaneProperties {
     fb_id: property::Handle,
@@ -239,7 +176,6 @@ struct Plane {
     rotation: Option<PlaneRotation>,
 }
 
-// Each property on a KMS object, with its current value.
 #[derive(Debug)]
 struct ObjectProperties(Vec<(property::Info, u64)>);
 
@@ -317,16 +253,14 @@ fn read_plane(card: &Card, handle: plane::Handle, formats: &[u32]) -> Result<Pla
     })
 }
 
-// Indices into the output's planes, and the zpos to set on each settable one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PlaneChoice {
     picture: usize,
     background: Option<usize>,
     composition: Option<usize>,
-    zpos: Vec<(usize, u64)>,
+    zpos_to_set: Vec<(usize, u64)>,
 }
 
-// The lowest zpos values that stack `order` bottom to top, None when the ranges do not allow it.
 fn stack(planes: &[&PlaneCapabilities], order: &[usize]) -> Option<Vec<(usize, u64)>> {
     let mut floor = 0;
     let mut settable = Vec::new();
@@ -369,7 +303,7 @@ fn choose_planes(
             picture,
             background,
             composition: None,
-            zpos: stack(planes, &under_composition)
+            zpos_to_set: stack(planes, &under_composition)
                 .ok_or("the picture cannot go above the primary plane")?,
         });
     }
@@ -391,7 +325,7 @@ fn choose_planes(
         picture,
         background,
         composition: Some(composition),
-        zpos,
+        zpos_to_set: zpos,
     })
 }
 
@@ -415,7 +349,6 @@ fn centred(
     })
 }
 
-// The `rotation` value that shows `orientation`, None for a plane without the property.
 fn rotation_value(
     rotation: Option<&PlaneRotation>,
     orientation: Orientation,
@@ -508,7 +441,6 @@ impl Output {
     }
 }
 
-// The first connected connector, its first mode, and a CRTC it can drive.
 fn open_output(card: &Card) -> Result<Output, G2gError> {
     let resources = card.resource_handles().map_err(hardware)?;
     let connector = resources
@@ -556,7 +488,6 @@ fn open_output(card: &Card) -> Result<Output, G2gError> {
     })
 }
 
-// A black XRGB8888 framebuffer the size of the display mode.
 fn black_framebuffer(card: &Card, size: (u32, u32)) -> Result<framebuffer::Handle, G2gError> {
     let mut dumb = card
         .create_dumb_buffer(size, BACKGROUND_FORMAT, 32)
@@ -572,7 +503,6 @@ struct CompositionBuffer {
     framebuffer: framebuffer::Handle,
 }
 
-// The composition drawn into one of two buffers, the other still on screen.
 #[cfg(feature = "metadata")]
 #[derive(Debug)]
 struct CompositionBuffers {
@@ -649,10 +579,9 @@ enum Picture<'a> {
     DmaBuf(OwnedDmaBuf),
 }
 
-// The opened device and every buffer shown on it, for one picture size.
 #[derive(Debug)]
 struct Scanout {
-    // drm removes a file's framebuffers when it closes, which turns off the planes showing them
+    // drm turns off the planes showing a closing file's framebuffers
     card: Card,
     output: Output,
     planes: PlaneChoice,
@@ -795,8 +724,6 @@ impl Scanout {
         orientation: Orientation,
         #[cfg(feature = "metadata")] composition: Option<g2g_core::OverlayCompositionMeta>,
     ) -> Result<(), G2gError> {
-        // Drain a still-pending flip first; we must not overwrite the
-        // buffer that the CRTC is still reading from.
         if self.flip_pending {
             self.wait_for_flip()?;
         }
@@ -837,7 +764,7 @@ impl Scanout {
             );
             request.add_property(crtc, output.crtc_mode_id, self.mode_blob);
             request.add_property(crtc, output.crtc_active, property::Value::Boolean(true));
-            for &(index, zpos) in &self.planes.zpos {
+            for &(index, zpos) in &self.planes.zpos_to_set {
                 let plane = &output.planes[index];
                 if let Some(property) = plane.zpos_property {
                     request.add_property(
@@ -897,9 +824,6 @@ impl Scanout {
         Ok(request)
     }
 
-    /// Block until the kernel reports the in-flight commit completed.
-    /// Drops every event up to and including a `PageFlip`; vblank events
-    /// (we don't request them) are ignored.
     fn wait_for_flip(&mut self) -> Result<(), G2gError> {
         let mut empty_reads = 0u32;
         loop {
@@ -917,9 +841,7 @@ impl Scanout {
                 self.displayed_dmabuf = self.queued_dmabuf.take();
                 return Ok(());
             }
-            // A blocking DRM fd should not return an empty read; repeated
-            // empties mean the device went away (tty switch, hot-unplug, lost
-            // master). Bail with a hardware error instead of spinning forever.
+            // blocking drm fds return empty reads only after the device is gone
             if saw_any {
                 empty_reads = 0;
             } else {
@@ -928,20 +850,10 @@ impl Scanout {
                     return Err(G2gError::Hardware(HardwareError::Other));
                 }
             }
-            // Otherwise no flip event yet (vblanks); loop and block again.
         }
     }
 }
 
-/// # Example
-///
-/// ```no_run
-/// use g2g_plugins::kmssink::KmsSink;
-///
-/// let element = KmsSink::new()
-///     .with_device("/dev/dri/card1")
-///     .with_max_lateness_ns(20_000_000);
-/// ```
 pub struct KmsSink {
     device_path: PathBuf,
     #[cfg(feature = "metadata")]
@@ -949,19 +861,7 @@ pub struct KmsSink {
     scanout: Option<Scanout>,
     input: Option<DisplayInput>,
     frames_presented: u64,
-    /// Glass-to-glass latency distribution. Recorded once per
-    /// successful `present()` as `monotonic_ns() - frame.arrival_ns`,
-    /// measured at commit *submission* (not at vblank completion).
-    /// That's an approximation: it includes copy + commit submission
-    /// time but excludes the wait for the next vblank, so it under-
-    /// reports true scanout latency by up to one refresh interval.
-    /// Good enough for regression guarding; a future refinement could
-    /// correlate per-frame `arrival_ns` with the PageFlip completion
-    /// event to recover true present time.
     latency: LatencyHistogram,
-    /// PTS pacing + QoS late-drop, on top of the vblank pacing `present()`
-    /// already does: idle until the runner hands over a clock, and the default
-    /// lateness bound is 5 ms past the frame end.
     pacer: PresentationPacer,
 }
 
@@ -989,8 +889,6 @@ pub(crate) fn default_card_present() -> Result<(), alloc::string::String> {
 }
 
 impl KmsSink {
-    /// Defaults to `/dev/dri/card0`. Override with [`Self::with_device`]
-    /// for multi-GPU systems or render-node-only environments.
     pub fn new() -> Self {
         Self {
             device_path: PathBuf::from(DEFAULT_CARD),
@@ -1004,10 +902,6 @@ impl KmsSink {
         }
     }
 
-    /// Snapshot of the glass-to-glass latency histogram. Counts only
-    /// frames that arrived with a non-zero `FrameTiming::arrival_ns`
-    /// stamp (synthetic or unstamped frames are skipped). See the
-    /// `latency` field doc for the measurement-time caveat.
     pub fn latency_snapshot(&self) -> LatencySnapshot {
         self.latency.snapshot()
     }
@@ -1017,29 +911,21 @@ impl KmsSink {
         self
     }
 
-    /// QoS late-drop bound: once PTS pacing is engaged, a frame past its
-    /// end by more than `ns` is dropped instead of presented late, so the
-    /// sink catches up. The default is 5 ms, `u64::MAX` never drops.
     pub fn with_max_lateness_ns(mut self, ns: u64) -> Self {
         self.pacer.set_max_lateness_ns(ns);
         self
     }
 
-    /// Post a running-stats `Qos` report every `ns` of clock time while frames
-    /// present, on top of the per-drop reports. `0` (the default) reports only
-    /// drops.
     pub fn with_qos_interval_ns(mut self, ns: u64) -> Self {
         self.pacer.set_report_interval_ns(ns);
         self
     }
 
-    /// Attach the pipeline bus so QoS reports reach the application.
     pub fn with_bus(mut self, bus: BusHandle) -> Self {
         self.pacer.set_bus(bus);
         self
     }
 
-    /// Frames dropped by QoS late-drop (past their deadline beyond the bound).
     pub fn late_dropped(&self) -> u64 {
         self.pacer.late_dropped()
     }
@@ -1049,12 +935,6 @@ impl KmsSink {
     }
 }
 
-/// Monotonic wall-clock the sink offers as a pipeline clock. See
-/// `WaylandClock` in `waylandsink.rs` for the rationale. KmsSink already
-/// paces to hardware vblank via `wait_for_flip`, so a vsync-predicting
-/// `AsyncClock` impl here is the more natural eventual home — but until
-/// audio sync demands it, a monotonic `now_ns` at `Provider` priority is
-/// enough to keep the election story coherent.
 #[derive(Debug)]
 struct KmsClock;
 impl PipelineClock for KmsClock {
@@ -1092,15 +972,12 @@ impl AsyncElement for KmsSink {
     where
         Self: 'a;
 
-    /// A dma-buf is scanned out as it is, and a system frame is copied into a
-    /// dumb buffer mapped on the CPU. The allocation cascade turns anything
-    /// else into a download demand on a GPU producer.
     fn input_domains(&self) -> DomainSet {
         DomainSet::only(MemoryDomainKind::System).with(MemoryDomainKind::DmaBuf)
     }
 
-    // configure_pipeline opens the device before the runner asks
     fn absorbed_orientations(&self) -> OrientationSet {
+        // the runner asks after configure_pipeline opens the device
         shown_orientations(self.scanout.as_ref().and_then(Scanout::picture_rotation))
     }
 
@@ -1111,14 +988,10 @@ impl AsyncElement for KmsSink {
         ))
     }
 
-    /// Adopt the elected clock + base time so frames scan out at their PTS
-    /// deadline rather than as fast as the flip cadence allows.
     fn set_clock_sync(&mut self, sync: ClockSync) {
         self.pacer.set_clock_sync(sync);
     }
 
-    /// Relay a late drop upstream: the runner forwards it onto the
-    /// incoming link, where the producer can shed load.
     fn take_qos(&mut self) -> Option<QosMessage> {
         self.pacer.take_qos()
     }
@@ -1144,17 +1017,10 @@ impl AsyncElement for KmsSink {
         let input = DisplayInput::from_caps(absolute_caps, NATIVE_FORMATS)?;
         let (w, h) = (input.width, input.height);
         if w % 2 != 0 || h % 2 != 0 {
-            // NV12's UV plane is half-res in both dims; odd extents would
-            // need rounded handling we don't bother with in v1.
             return Err(G2gError::CapsMismatch);
         }
 
-        // Mid-stream geometry change: same dims is a no-op; different
-        // dims means we close the device and open it again at the new
-        // geometry. M16 5j: enables decoder→sink chains where the initial
-        // NV12 caps carry placeholder dims (e.g. RtspSrc's `Range`
-        // workaround #1, fixated to min) and the real geometry lands via a
-        // mid-stream `CapsChanged` after SPS parse.
+        // RtspSrc's first caps carry placeholder dimensions until the SPS arrives
         self.input = Some(input);
         let same_size = self
             .scanout
@@ -1255,10 +1121,6 @@ impl AsyncElement for KmsSink {
                     if !matches!(domain, MemoryDomain::DmaBuf(_)) {
                         domain.require_system_slice(short_type_name::<Self>())?;
                     }
-                    // PTS pacing: hold the frame until its deadline on the
-                    // elected clock, or drop it when it is already too late (the
-                    // QoS bound) or outside the segment. Unpaced without a
-                    // clock: scan out as fast as the flip cadence allows.
                     let paced = self.pacer.judge(&timing, self.frames_presented);
                     if !wait_to_present(paced).await {
                         return Ok(());
@@ -1291,9 +1153,6 @@ impl AsyncElement for KmsSink {
                         composition,
                     )?;
                     self.frames_presented += 1;
-                    // Record glass-to-glass latency after commit
-                    // submission. Stamped frames only; unstamped
-                    // (synthetic or arrival_ns=0) are skipped silently.
                     if timing.arrival_ns != 0 {
                         let now = monotonic_ns();
                         if now >= timing.arrival_ns {
@@ -1303,8 +1162,6 @@ impl AsyncElement for KmsSink {
                     Ok(())
                 }
                 PipelinePacket::CapsChanged(_) => Ok(()),
-                // Track the playback segment so PTS maps to running time
-                // (correct across a seek), and re-anchor after a seek flush.
                 PipelinePacket::Segment(seg) => {
                     self.pacer.set_segment(seg);
                     Ok(())
@@ -1314,8 +1171,6 @@ impl AsyncElement for KmsSink {
                     Ok(())
                 }
                 PipelinePacket::Eos => {
-                    // Drain any in-flight flip so the final frame is fully
-                    // presented before the pipeline tears down.
                     if let Some(scanout) =
                         self.scanout.as_mut().filter(|scanout| scanout.flip_pending)
                     {
@@ -1323,16 +1178,12 @@ impl AsyncElement for KmsSink {
                     }
                     Ok(())
                 }
-                // future PipelinePacket variants: no-op (terminal sink).
                 _ => Ok(()),
             }
         })
     }
 }
 
-/// Copy a tightly packed NV12 frame into a destination dumb buffer whose rows
-/// are `pitch` bytes apart: the kernel's NV12 dumb buffer, Y plane first at
-/// offset 0, UV plane at offset `pitch * height`.
 fn copy_nv12(
     src: &[u8],
     width: u32,
@@ -1361,12 +1212,9 @@ mod tests {
     use alloc::vec;
     use g2g_core::{Dim, Rate, VideoCodec};
 
-    /// The sink scans dma-bufs out and copies system frames, so it has to tell
-    /// any other GPU decoder to download. The allocation cascade reads this
-    /// declaration, so getting it wrong means `nvdec ! kmssink` takes a device
-    /// pointer and dies with `UnsupportedDomain`.
     #[test]
     fn declares_system_memory_and_dmabuf_only() {
+        // a wrong declaration makes `nvdec ! kmssink` fail with UnsupportedDomain
         assert_eq!(
             KmsSink::new().input_domains(),
             DomainSet::only(MemoryDomainKind::System).with(MemoryDomainKind::DmaBuf)
@@ -1375,8 +1223,6 @@ mod tests {
 
     #[test]
     fn intercept_passes_through_any_format() {
-        // Negotiation-time intercept is pass-through; NV12 is enforced in
-        // configure_pipeline. (A native decoder hands this link NV12.)
         let sink = KmsSink::new();
         let h264 = Caps::CompressedVideo {
             codec: VideoCodec::H264,
@@ -1453,8 +1299,7 @@ mod tests {
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
             pixel_aspect: g2g_core::PixelAspect::Any,
         };
-        // `ConfigureOutcome` doesn't implement `PartialEq`, so match the
-        // Err arm explicitly rather than using assert_eq!.
+        // ConfigureOutcome has no PartialEq
         match sink.configure_pipeline(&odd) {
             Err(G2gError::CapsMismatch) => {}
             other => panic!("expected CapsMismatch on odd dims, got {other:?}"),
@@ -1463,15 +1308,12 @@ mod tests {
 
     #[test]
     fn copy_nv12_packs_planes_at_pitch() {
-        // 4x2 NV12: Y = 8 bytes, UV = 4 bytes (1 chroma row of 4 bytes).
-        // Destination pitch = 8 to exercise the row-stride path.
+        // 4x2 NV12 into rows 8 bytes apart
         let src: Vec<u8> = (0..12).collect();
         let mut dst = vec![0u8; 8 * 3];
         copy_nv12(&src, 4, 2, 8, &mut dst).unwrap();
-        // Y plane rows at pitch 8: rows are width=4 bytes wide, rest unset.
         assert_eq!(&dst[0..4], &[0, 1, 2, 3]);
         assert_eq!(&dst[8..12], &[4, 5, 6, 7]);
-        // UV plane begins at row=2 (offset 16); one row of 4 bytes.
         assert_eq!(&dst[16..20], &[8, 9, 10, 11]);
     }
 
@@ -1482,7 +1324,6 @@ mod tests {
         assert!(copy_nv12(&src, 4, 2, 8, &mut dst).is_err());
     }
 
-    /// A clock whose `now_ns` the test drives by hand.
     #[derive(Debug)]
     struct ManualClock(alloc::sync::Arc<core::sync::atomic::AtomicU64>);
     impl PipelineClock for ManualClock {
@@ -1491,7 +1332,6 @@ mod tests {
         }
     }
 
-    /// A no-op downstream (a sink has none, but `process` takes one).
     struct NullOut;
     impl OutputSink for NullOut {
         fn poll_push(
@@ -1506,9 +1346,7 @@ mod tests {
 
     #[tokio::test]
     async fn qos_drops_a_late_frame_before_any_drm_io() {
-        // The late-drop verdict is taken before `present`, so this runs headless
-        // (no DRM device). The play anchor is stamped at clock 0 and the clock is
-        // 1 ms past, so a PTS-0 frame is 1 ms late against a 0 bound.
+        // a PTS 0 frame is 1 ms late on this clock
         use g2g_core::clock::PlayAnchor;
         use g2g_core::memory::{MemoryDomain, SystemSlice};
         let (bus, handle) = g2g_core::Bus::new(4);
@@ -1606,8 +1444,8 @@ mod tests {
         highest: 2,
     });
 
-    // the STM32MP257's LTDC planes, in the order the kernel lists them
     fn stm32mp257_planes() -> Vec<PlaneCapabilities> {
+        // the STM32MP257's LTDC planes, in the order the kernel lists them
         vec![
             plane(
                 PlaneKind::Primary,
@@ -1637,7 +1475,7 @@ mod tests {
                 picture: 1,
                 background: Some(0),
                 composition: Some(2),
-                zpos: vec![(0, 0), (1, 1), (2, 2)],
+                zpos_to_set: vec![(0, 0), (1, 1), (2, 2)],
             })
         );
         assert_eq!(
@@ -1646,7 +1484,7 @@ mod tests {
                 picture: 1,
                 background: Some(0),
                 composition: None,
-                zpos: vec![(0, 0), (1, 1)],
+                zpos_to_set: vec![(0, 0), (1, 1)],
             })
         );
     }
@@ -1673,7 +1511,7 @@ mod tests {
                 picture: 2,
                 background: None,
                 composition: Some(1),
-                zpos: Vec::new(),
+                zpos_to_set: Vec::new(),
             })
         );
     }
@@ -1706,9 +1544,6 @@ mod tests {
 
     #[test]
     fn debug_impl_does_not_touch_card() {
-        // The Debug derive on KmsSink must work on an unopened sink so we
-        // can print/log it before the first negotiation. Card is None at
-        // this point — if Debug tried to format it as a Card we'd panic.
         let sink = KmsSink::new();
         fmt_unused(&sink);
     }
