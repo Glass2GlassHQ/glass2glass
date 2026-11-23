@@ -10,9 +10,9 @@ use alloc::collections::VecDeque;
 
 use g2g_core::frame::Frame;
 use g2g_core::{
-    AnalyticsMeta, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError,
-    LatencyReport, MultiInputElement, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, Relation,
+    AnalyticsMeta, AnalyticsNode, BBox, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata,
+    G2gError, LatencyReport, MultiInputElement, OutputSink, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, Relation,
 };
 
 // gst-python-ml's metadata replay allows this window when a frame has no duration.
@@ -44,6 +44,39 @@ fn append_analytics(existing: &mut AnalyticsMeta, added: &AnalyticsMeta) -> Resu
     Ok(())
 }
 
+fn move_tracked_boxes(analytics: &mut AnalyticsMeta, next: &AnalyticsMeta, fraction: f32) {
+    for index in 0..analytics.nodes.len() {
+        let Some(object_id) = analytics.tracking_id(index) else {
+            continue;
+        };
+        let target = next
+            .nodes
+            .iter()
+            .enumerate()
+            .find_map(|(next_index, node)| match node {
+                AnalyticsNode::Detection(detection)
+                    if next.tracking_id(next_index) == Some(object_id) =>
+                {
+                    Some(detection.bbox)
+                }
+                _ => None,
+            });
+        let (Some(target), AnalyticsNode::Detection(detection)) =
+            (target, &mut analytics.nodes[index])
+        else {
+            continue;
+        };
+        let from = detection.bbox;
+        let between = |start: f32, end: f32| start + (end - start) * fraction;
+        detection.bbox = BBox {
+            x: between(from.x, target.x),
+            y: between(from.y, target.y),
+            w: between(from.w, target.w),
+            h: between(from.h, target.h),
+        };
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct AnalyticsJoin {
     video_caps: Option<Caps>,
@@ -65,7 +98,7 @@ static ANALYTICSJOIN_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "hold-last",
         PropKind::Uint,
-        "nanoseconds a video frame with no analytics at its time takes the newest earlier analytics, 0 for never",
+        "nanoseconds a video frame with no analytics at its time takes the newest earlier analytics, with tracked boxes moved toward the next analytics, 0 for never",
     )
     .with_default("0"),
 ];
@@ -101,23 +134,40 @@ impl AnalyticsJoin {
             .iter()
             .filter(|(analytics_pts_ns, _)| analytics_pts_ns.abs_diff(pts_ns) <= tolerance_ns)
             .min_by_key(|(analytics_pts_ns, _)| analytics_pts_ns.abs_diff(pts_ns));
-        let held = || {
-            self.unmatched_analytics
-                .iter()
-                .rev()
-                .find(|(analytics_pts_ns, _)| *analytics_pts_ns <= pts_ns)
-                .filter(|(analytics_pts_ns, _)| pts_ns - analytics_pts_ns <= self.hold_last_ns)
-        };
-        let Some((_, analytics)) = nearest.or_else(held) else {
-            return Ok(());
+        let analytics = match nearest {
+            Some((_, nearest)) => nearest.clone(),
+            None => match self.held_analytics(pts_ns) {
+                Some(held) => held,
+                None => return Ok(()),
+            },
         };
         match frame.meta.get_mut::<AnalyticsMeta>() {
-            Some(existing) => append_analytics(existing, analytics),
+            Some(existing) => append_analytics(existing, &analytics),
             None => {
-                frame.meta.attach(analytics.clone());
+                frame.meta.attach(analytics);
                 Ok(())
             }
         }
+    }
+
+    fn held_analytics(&self, pts_ns: u64) -> Option<AnalyticsMeta> {
+        let (held_pts_ns, held) = self
+            .unmatched_analytics
+            .iter()
+            .rev()
+            .find(|(analytics_pts_ns, _)| *analytics_pts_ns <= pts_ns)
+            .filter(|(analytics_pts_ns, _)| pts_ns - analytics_pts_ns <= self.hold_last_ns)?;
+        let mut analytics = held.clone();
+        let next = self
+            .unmatched_analytics
+            .iter()
+            .find(|(analytics_pts_ns, _)| *analytics_pts_ns > pts_ns)
+            .filter(|(analytics_pts_ns, _)| analytics_pts_ns - pts_ns <= self.hold_last_ns);
+        if let Some((next_pts_ns, next)) = next {
+            let fraction = (pts_ns - held_pts_ns) as f32 / (next_pts_ns - held_pts_ns) as f32;
+            move_tracked_boxes(&mut analytics, next, fraction);
+        }
+        Some(analytics)
     }
 
     async fn release_decided_video(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {

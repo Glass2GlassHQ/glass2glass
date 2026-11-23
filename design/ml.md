@@ -425,7 +425,8 @@ With `waylandsink render-overlays=true` the camera buffer is not written at all.
 sink shows it on a subsurface above the picture in two ARGB8888 dumb buffers
 from `overlay-device` (`/dev/dri/card0`), rewritten only when the detections
 change. With `show-trail` a result held by `hold-last` adds no trail point, so a
-held result leaves the bitmap unchanged too. Weston puts that subsurface on an
+held result leaves the bitmap unchanged too. Tracked boxes that `hold-last` moves
+between two results change the bitmap on every frame. Weston puts that subsurface on an
 LTDC overlay plane. It still composites the NV12 video on the GPU, because ST's
 GBM fails to import the camera buffer (`GBM_BO_IMPORT_FAILED` in `weston-debug
 drm-backend`). At 640x480 with YOLOv8n at 640x384 detecting at 8 fps,
@@ -763,8 +764,13 @@ joins in a row put two detectors' results on one frame, and two different
 class-name tables fail the run with `CapsMismatch`. A frame with no match passes
 through unchanged, unless `hold-last` (nanoseconds, default 0) is set: then it
 takes the newest earlier analytics no older than that, so boxes from a detector
-at a lower rate stay on every frame in between instead of flickering, at the
-cost of lagging the picture by up to one detection stride. When the analytics
+at a lower rate stay on every frame in between instead of flickering. A box on
+a track (a `Tracks` relation, as `tracker` writes) moves toward its track's box
+in the next analytics by the frame's share of the time between the two, when
+the next analytics is also within `hold-last`. The next analytics has always
+arrived by then, since the frame waited for the analytics stream to pass its
+PTS. An untracked box, or a track missing from the next analytics, stays where
+it was and lags the picture by up to one detection stride. When the analytics
 pad ends the held video is released in order. A mid-stream caps change on the video pad is queued with the held frames,
 so it reaches downstream after the frames that came before it. The wait adds one
 detection stride plus inference time of latency. The element cannot measure that

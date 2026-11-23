@@ -68,6 +68,16 @@ fn detections_frame(pts_ns: u64, x: f32) -> PipelinePacket {
     PipelinePacket::DataFrame(frame)
 }
 
+fn tracked_detections_frame(pts_ns: u64, x: f32) -> PipelinePacket {
+    let PipelinePacket::DataFrame(mut frame) = detections_frame(pts_ns, x) else {
+        unreachable!()
+    };
+    let analytics = frame.meta.get_mut::<AnalyticsMeta>().expect("analytics");
+    let track = analytics.push(AnalyticsNode::Tracking(Tracking { object_id: 1 }));
+    analytics.relate(0, track, RelationKind::Tracks);
+    PipelinePacket::DataFrame(frame)
+}
+
 fn configured_join() -> AnalyticsJoin {
     let mut join = AnalyticsJoin::new();
     join.configure_pipeline(AnalyticsJoin::VIDEO, &rgba())
@@ -109,7 +119,10 @@ fn detection_x_for_index(index: u64) -> f32 {
 }
 
 // video runs ahead of the detector branch, as it does behind inference
-async fn join_strided_detections(mut join: AnalyticsJoin) -> Vec<Option<f32>> {
+async fn join_strided_detections(
+    mut join: AnalyticsJoin,
+    make_detections: fn(u64, f32) -> PipelinePacket,
+) -> Vec<Option<f32>> {
     let mut sink = CollectSink::default();
     for index in 0..VIDEO_FRAMES {
         push(
@@ -129,7 +142,7 @@ async fn join_strided_detections(mut join: AnalyticsJoin) -> Vec<Option<f32>> {
         push(
             &mut join,
             AnalyticsJoin::ANALYTICS,
-            detections_frame(pts_ns, detection_x_for_index(index)),
+            make_detections(pts_ns, detection_x_for_index(index)),
             &mut sink,
         )
         .await;
@@ -155,7 +168,7 @@ async fn join_strided_detections(mut join: AnalyticsJoin) -> Vec<Option<f32>> {
 
 #[tokio::test]
 async fn detections_land_on_the_video_frames_at_their_time() {
-    let found = join_strided_detections(configured_join()).await;
+    let found = join_strided_detections(configured_join(), detections_frame).await;
     let expected: Vec<Option<f32>> = (0..VIDEO_FRAMES)
         .map(|index| {
             index
@@ -176,7 +189,7 @@ async fn hold_last_carries_a_detection_onto_the_frames_up_to_its_age() {
             g2g_core::PropValue::Uint(held_frames * FRAME_PERIOD_NS),
         )
         .unwrap();
-        let found = join_strided_detections(join).await;
+        let found = join_strided_detections(join, detections_frame).await;
         let expected: Vec<Option<f32>> = (0..VIDEO_FRAMES)
             .map(|index| {
                 let detected = index - index % DETECTION_STRIDE;
@@ -184,6 +197,36 @@ async fn hold_last_carries_a_detection_onto_the_frames_up_to_its_age() {
             })
             .collect();
         assert_eq!(found, expected, "held for {held_frames} frames");
+    }
+}
+
+#[tokio::test]
+async fn hold_last_moves_a_tracked_box_toward_its_next_detection() {
+    use g2g_core::MultiInputElement as _;
+    let held_frames = DETECTION_STRIDE - 1;
+    let mut join = configured_join();
+    join.set_property(
+        "hold-last",
+        g2g_core::PropValue::Uint(held_frames * FRAME_PERIOD_NS),
+    )
+    .unwrap();
+    let found = join_strided_detections(join, tracked_detections_frame).await;
+    let last_detected = (VIDEO_FRAMES - 1) / DETECTION_STRIDE * DETECTION_STRIDE;
+    for (index, x) in (0..VIDEO_FRAMES).zip(found) {
+        let detected = index - index % DETECTION_STRIDE;
+        let from = detection_x_for_index(detected);
+        let expected = if detected == last_detected {
+            from
+        } else {
+            let to = detection_x_for_index(detected + DETECTION_STRIDE);
+            let fraction = (index - detected) as f32 / DETECTION_STRIDE as f32;
+            from + (to - from) * fraction
+        };
+        let x = x.expect("every frame has a box");
+        assert!(
+            (x - expected).abs() < 1e-6,
+            "frame {index}: {x} for {expected}"
+        );
     }
 }
 
