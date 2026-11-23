@@ -231,6 +231,15 @@ pub(crate) fn ceil(x: f64) -> f64 {
     }
 }
 
+#[cfg(any(
+    all(target_os = "linux", feature = "placement"),
+    all(target_os = "linux", feature = "wayland-sink")
+))]
+pub(crate) fn median(mut values: alloc::vec::Vec<u64>) -> u64 {
+    values.sort_unstable();
+    values[values.len() / 2]
+}
+
 #[cfg(test)]
 mod transcendental_tests {
     use super::{asinh, cos, cosh, exp, ln, sin, sinh, tan};

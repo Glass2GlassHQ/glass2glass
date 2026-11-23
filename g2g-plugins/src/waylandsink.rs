@@ -11,6 +11,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -76,6 +77,7 @@ use crate::display_aspect::{
     FORCE_ASPECT_RATIO_PROPERTY,
 };
 use crate::dmabufimport::DmaBufImportCache;
+use crate::mathf::median;
 use crate::paddedrows::dmabuf_plane_layout;
 use crate::pixel::{carries_yuv, even_dims_required, frame_byte_size, row_bytes};
 use crate::videoflip::frame_orientation;
@@ -129,6 +131,17 @@ struct PresentationDeadline {
 struct PresentedFrame {
     arrival_ns: u64,
     deadline: Option<PresentationDeadline>,
+}
+
+struct CommittedFrame {
+    frame: PresentedFrame,
+    committed_ns: u64,
+}
+
+#[derive(Debug, Default)]
+struct DeadlineErrors {
+    samples: Vec<i64>,
+    latest: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -221,10 +234,10 @@ pub struct WaylandSink {
     latency: Arc<LatencyRecorder>,
     frames_dropped: Arc<AtomicU64>,
     last_frame_callback_ns: Arc<AtomicU64>,
-    commit_lead_ns: Arc<AtomicU64>,
+    present_delay_ns: Arc<AtomicU64>,
     pacing: PacingPolicy,
     pacer: PresentationPacer,
-    deadline_errors: Arc<std::sync::Mutex<Vec<i64>>>,
+    deadline_errors: Arc<std::sync::Mutex<DeadlineErrors>>,
     schedule_drift: ScheduleDriftTrace,
     #[cfg(feature = "metadata")]
     render_overlays: bool,
@@ -274,10 +287,10 @@ impl WaylandSink {
             latency: Arc::new(LatencyRecorder::new()),
             frames_dropped: Arc::new(AtomicU64::new(0)),
             last_frame_callback_ns: Arc::new(AtomicU64::new(0)),
-            commit_lead_ns: Arc::new(AtomicU64::new(0)),
+            present_delay_ns: Arc::new(AtomicU64::new(0)),
             pacing: PacingPolicy::default(),
             pacer: PresentationPacer::for_video_sink(),
-            deadline_errors: Arc::new(std::sync::Mutex::new(Vec::new())),
+            deadline_errors: Arc::new(std::sync::Mutex::new(DeadlineErrors::default())),
             schedule_drift: ScheduleDriftTrace::default(),
             #[cfg(feature = "metadata")]
             render_overlays: false,
@@ -344,6 +357,7 @@ impl WaylandSink {
         self.deadline_errors
             .lock()
             .expect("deadline errors lock")
+            .samples
             .clone()
     }
 
@@ -660,8 +674,8 @@ impl AsyncElement for WaylandSink {
         self.last_frame_callback_ns
             .store(monotonic_ns(), Ordering::Relaxed);
         let last_frame_callback_ns = Arc::clone(&self.last_frame_callback_ns);
-        self.commit_lead_ns.store(0, Ordering::Relaxed);
-        let commit_lead_ns = Arc::clone(&self.commit_lead_ns);
+        self.present_delay_ns.store(0, Ordering::Relaxed);
+        let present_delay_ns = Arc::clone(&self.present_delay_ns);
         let title = self.title.clone();
         let app_id = self.app_id.clone();
         let fullscreen = self.fullscreen;
@@ -691,7 +705,7 @@ impl AsyncElement for WaylandSink {
                     latency,
                     deadline_errors,
                     last_frame_callback_ns,
-                    commit_lead_ns,
+                    present_delay_ns,
                     ready_for_worker,
                 ) {
                     std::eprintln!("g2g-waylandsink worker error: {e:?}");
@@ -827,12 +841,18 @@ impl AsyncElement for WaylandSink {
                     }
                     let t_in = monotonic_ns();
                     let presented = self.frames_presented.load(Ordering::Relaxed);
-                    let commit_lead_ns = self.commit_lead_ns.load(Ordering::Relaxed);
-                    let pace = match self.pacer.judge(&timing, presented) {
-                        g2g_core::Pace::Wait(n) if n <= commit_lead_ns => g2g_core::Pace::Now,
-                        g2g_core::Pace::Wait(n) => g2g_core::Pace::Wait(n - commit_lead_ns),
-                        pace => pace,
-                    };
+                    self.pacer
+                        .set_present_delay_ns(self.present_delay_ns.load(Ordering::Relaxed));
+                    let latest_error = self
+                        .deadline_errors
+                        .lock()
+                        .expect("deadline errors lock")
+                        .latest
+                        .take();
+                    if let Some(error_ns) = latest_error {
+                        self.pacer.record_presented_error_ns(error_ns);
+                    }
+                    let pace = self.pacer.judge(&timing, presented);
                     let deadline_ns = self.pacer.last_deadline_ns();
                     let wait_ns = match pace {
                         g2g_core::Pace::Wait(n) => n,
@@ -1019,13 +1039,14 @@ struct WorkerState {
     presented: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
     latency: Arc<LatencyRecorder>,
-    deadline_errors: Arc<std::sync::Mutex<Vec<i64>>>,
+    deadline_errors: Arc<std::sync::Mutex<DeadlineErrors>>,
     presentation: WpPresentation,
     presentation_clock: Option<u32>,
     timed_commits: Option<TimedCommits>,
     color_representation: Option<ColorRepresentation>,
     supported_coefficients: Vec<(Coefficients, Range)>,
-    commit_lead_ns: Arc<AtomicU64>,
+    present_delay_ns: Arc<AtomicU64>,
+    commit_to_screen_ns: VecDeque<u64>,
     unresolved_feedback: usize,
     last_feedback_ns: u64,
     last_frame_callback_ns: Arc<AtomicU64>,
@@ -1052,9 +1073,9 @@ fn worker_main(
     presented: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
     latency: Arc<LatencyRecorder>,
-    deadline_errors: Arc<std::sync::Mutex<Vec<i64>>>,
+    deadline_errors: Arc<std::sync::Mutex<DeadlineErrors>>,
     last_frame_callback_ns: Arc<AtomicU64>,
-    commit_lead_ns: Arc<AtomicU64>,
+    present_delay_ns: Arc<AtomicU64>,
     ready: Arc<Handshake>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (width, height) = (picture.width, picture.height);
@@ -1178,7 +1199,8 @@ fn worker_main(
         timed_commits,
         color_representation,
         supported_coefficients: Vec::new(),
-        commit_lead_ns,
+        present_delay_ns,
+        commit_to_screen_ns: VecDeque::new(),
         unresolved_feedback: 0,
         last_feedback_ns: 0,
         last_frame_callback_ns,
@@ -1463,7 +1485,11 @@ impl WorkerState {
                 surface.frame(&self.qh, FrameCallbackData(surface.clone()));
             }
         }
-        self.presentation.feedback(surface, &self.qh, presented);
+        let committed = CommittedFrame {
+            frame: presented,
+            committed_ns: monotonic_ns(),
+        };
+        self.presentation.feedback(surface, &self.qh, committed);
         self.unresolved_feedback += 1;
         self.last_feedback_ns = monotonic_ns();
         surface.damage_buffer(0, 0, width, height);
@@ -1740,30 +1766,29 @@ impl WorkerState {
     }
 }
 
-impl Dispatch<WpPresentationFeedback, PresentedFrame> for WorkerState {
+// about a second of frames at 30 fps
+const PRESENT_DELAY_WINDOW: usize = 30;
+
+impl Dispatch<WpPresentationFeedback, CommittedFrame> for WorkerState {
     fn event(
         state: &mut Self,
         _: &WpPresentationFeedback,
         event: wp_presentation_feedback::Event,
-        frame: &PresentedFrame,
+        committed: &CommittedFrame,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        let shown_ns = match event {
+        let (shown_ns, refresh) = match event {
             wp_presentation_feedback::Event::Presented {
                 tv_sec_hi,
                 tv_sec_lo,
                 tv_nsec,
                 refresh,
                 ..
-            } => {
-                if state.timed_commits.is_some() {
-                    state
-                        .commit_lead_ns
-                        .store(u64::from(refresh), Ordering::Relaxed);
-                }
-                nanoseconds(u64::from(tv_sec_hi) << 32 | u64::from(tv_sec_lo), tv_nsec)
-            }
+            } => (
+                nanoseconds(u64::from(tv_sec_hi) << 32 | u64::from(tv_sec_lo), tv_nsec),
+                refresh,
+            ),
             wp_presentation_feedback::Event::Discarded => {
                 state.dropped.fetch_add(1, Ordering::Relaxed);
                 state.resolve_feedback();
@@ -1791,8 +1816,24 @@ impl Dispatch<WpPresentationFeedback, PresentedFrame> for WorkerState {
             state.exit = true;
             return;
         };
+        let frame = &committed.frame;
+        let shown_monotonic_ns = monotonic_ns().saturating_add_signed(shown_from_now_ns);
+        let present_delay_ns = if state.timed_commits.is_some() {
+            // compositors hold a timed commit until its target time
+            u64::from(refresh)
+        } else {
+            state
+                .commit_to_screen_ns
+                .push_back(shown_monotonic_ns.saturating_sub(committed.committed_ns));
+            if state.commit_to_screen_ns.len() > PRESENT_DELAY_WINDOW {
+                state.commit_to_screen_ns.pop_front();
+            }
+            median(state.commit_to_screen_ns.iter().copied().collect())
+        };
+        state
+            .present_delay_ns
+            .store(present_delay_ns, Ordering::Relaxed);
         if frame.arrival_ns != 0 {
-            let shown_monotonic_ns = monotonic_ns().saturating_add_signed(shown_from_now_ns);
             state
                 .latency
                 .record(shown_monotonic_ns.saturating_sub(frame.arrival_ns));
@@ -1802,10 +1843,12 @@ impl Dispatch<WpPresentationFeedback, PresentedFrame> for WorkerState {
                 .clock
                 .now_ns()
                 .saturating_add_signed(shown_from_now_ns);
+            let error_ns = shown_on_clock_ns as i64 - deadline.deadline_ns as i64;
             let mut errors = state.deadline_errors.lock().expect("deadline errors lock");
-            if errors.len() < PER_FRAME_SAMPLE_CAPACITY {
-                errors.push(shown_on_clock_ns as i64 - deadline.deadline_ns as i64);
+            if errors.samples.len() < PER_FRAME_SAMPLE_CAPACITY {
+                errors.samples.push(error_ns);
             }
+            errors.latest = Some(error_ns);
         }
     }
 }

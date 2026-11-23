@@ -61,12 +61,12 @@ async fn every_presented_frame_is_timed_at_its_presentation() {
 
     let errors = sink.deadline_error_samples();
     assert_eq!(errors.len() as u64, presented);
-    // the sink commits at the deadline, so the screen shows the frame after it
+    // without timed commits the sink commits early by the median delay to the screen
     let frame_period_ns = 1_000_000_000 / i64::from(FRAME_RATE);
     assert!(
         errors
             .iter()
-            .all(|&error| (0..10 * frame_period_ns).contains(&error)),
+            .all(|&error| (-frame_period_ns..10 * frame_period_ns).contains(&error)),
         "presentation minus deadline, nanoseconds: {errors:?}"
     );
 }

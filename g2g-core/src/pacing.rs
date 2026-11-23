@@ -139,6 +139,8 @@ pub struct PresentationPacer {
     late_drops_in_a_row: u64,
     processing_deadline_ns: u64,
     frame_period_ns: Option<u64>,
+    present_delay_ns: u64,
+    presented_error_ns: Option<i64>,
 }
 
 /// GStreamer's `GstVideoSink` default.
@@ -181,6 +183,7 @@ impl PresentationPacer {
         self.anchor_ns = None;
         self.anchor_pre_play = false;
         self.last_upstream_report_ns = None;
+        self.presented_error_ns = None;
     }
 
     /// The clock + base time being paced against, `None` until one is adopted.
@@ -220,6 +223,7 @@ impl PresentationPacer {
     pub fn flush(&mut self) {
         self.anchor_ns = None;
         self.anchor_pre_play = false;
+        self.presented_error_ns = None;
         self.qos.flush();
         // gstreamer's flushing seek in Paused restarts running time at the next play edge's base time
         self.seek_reanchor = !self
@@ -327,20 +331,21 @@ impl PresentationPacer {
                 .map_or(0, |end| end.saturating_sub(running_time))
         });
         let now = sync.now_ns();
+        let reach = now.saturating_add(self.present_delay_ns);
         // A frame already late beyond the bound is dropped, not presented late,
         // so the sink catches up instead of accumulating lag. The same call
         // posts the periodic running-stats report when the frame is on time and
         // the interval has elapsed.
         if let Some(q) = self
             .qos
-            .judge_frame(deadline, duration, now, running_time, presented)
+            .judge_frame(deadline, duration, reach, running_time, presented)
         {
             if self.late_drops_in_a_row == 0 {
                 crate::g2g_debug!(
                     Target::category(PACING_CATEGORY),
                     "dropping late frames from pts {}, {} past its deadline",
                     ClockTime(pts_ns),
-                    ClockTime(now.saturating_sub(deadline))
+                    ClockTime(reach.saturating_sub(deadline))
                 );
             }
             self.late_drops_in_a_row += 1;
@@ -360,15 +365,27 @@ impl PresentationPacer {
         match self.last_upstream_report_ns {
             None => self.last_upstream_report_ns = Some(now),
             Some(last) if now.saturating_sub(last) >= UPSTREAM_QOS_INTERVAL_NS => {
-                self.pending_qos = Some(upstream_report(deadline, now, running_time));
+                let mut report = upstream_report(deadline, reach, running_time);
+                if let Some(error_ns) = self.presented_error_ns {
+                    report.jitter_ns = error_ns;
+                }
+                self.pending_qos = Some(report);
                 self.last_upstream_report_ns = Some(now);
             }
             Some(_) => {}
         }
-        match deadline.checked_sub(now) {
+        match deadline.checked_sub(reach) {
             Some(0) | None => Pace::Now,
             Some(wait) => Pace::Wait(wait),
         }
+    }
+
+    pub fn set_present_delay_ns(&mut self, ns: u64) {
+        self.present_delay_ns = ns;
+    }
+
+    pub fn record_presented_error_ns(&mut self, error_ns: i64) {
+        self.presented_error_ns = Some(error_ns);
     }
 
     /// The deadline the most recent [`judge`](Self::judge) call measured its
@@ -796,6 +813,43 @@ mod tests {
             Pace::Wait(2 * early_ns)
         );
         assert!(p.take_qos().is_none(), "the interval restarted");
+    }
+
+    #[test]
+    fn a_present_delay_wakes_early_and_drops_what_cannot_reach_the_screen() {
+        const PRESENT_DELAY_NS: u64 = 4_000_000;
+        let (clock, sync) = manual();
+        let mut p = PresentationPacer::new();
+        p.set_clock_sync(sync);
+        p.set_max_lateness_ns(0);
+        clock.store(10_000_000, Ordering::Relaxed);
+        assert_eq!(p.judge(&at(0), 0), Pace::Now);
+
+        p.set_present_delay_ns(PRESENT_DELAY_NS);
+        // due now, so it reaches the screen the delay late
+        assert_eq!(p.judge(&at(0), 1), Pace::Drop);
+        assert_eq!(p.late_dropped(), 1);
+        let report = p.take_qos().expect("a late-drop report");
+        assert_eq!(report.jitter_ns, PRESENT_DELAY_NS as i64);
+
+        assert_eq!(
+            p.judge(&at(20_000_000), 2),
+            Pace::Wait(20_000_000 - PRESENT_DELAY_NS)
+        );
+    }
+
+    #[test]
+    fn the_upstream_report_carries_the_presented_error() {
+        const PRESENTED_ERROR_NS: i64 = 7_000_000;
+        let (clock, sync) = manual();
+        let mut p = PresentationPacer::for_video_sink();
+        p.set_clock_sync(sync);
+        assert_eq!(p.judge(&at(0), 0), Pace::Now);
+        p.record_presented_error_ns(PRESENTED_ERROR_NS);
+        clock.store(UPSTREAM_QOS_INTERVAL_NS, Ordering::Relaxed);
+        assert_eq!(p.judge(&at(UPSTREAM_QOS_INTERVAL_NS), 1), Pace::Now);
+        let report = p.take_qos().expect("a periodic upstream report");
+        assert_eq!(report.jitter_ns, PRESENTED_ERROR_NS);
     }
 
     #[test]

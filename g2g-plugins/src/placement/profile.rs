@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
+use crate::mathf::median;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
@@ -59,11 +60,6 @@ impl VisitRecorder for ComputeTimes {
                 poll_ns: visit.poll_ns,
             });
     }
-}
-
-fn median(mut values: Vec<u64>) -> u64 {
-    values.sort_unstable();
-    values[values.len() / 2]
 }
 
 impl ComputeTimes {

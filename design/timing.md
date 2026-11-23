@@ -450,16 +450,24 @@ with no feedback, since a compositor sends none for a surface it is not painting
 and counts the frames still without feedback as dropped.
 
 When the compositor offers both `wp_fifo_v1` and `wp_commit_timing_v1` (mutter
-does, Weston 13 does not), `WaylandSink` stops waiting for frame callbacks. The
-pacer wakes the sink one display refresh before a frame's deadline, the refresh
-being the one the last presentation feedback reported, and the sink commits the
-frame with a fifo barrier and the deadline, moved onto the compositor's clock, as
-its target time. The compositor then shows it at the first refresh at or after the
-target. On a 30 Hz mutter desktop, 60 frames of `videotestsrc` in a release build
-land a median 3 to 15 ms after their deadlines, depending on the phase of the
-deadlines against the refresh, against 15 to 21 ms when the sink commits at the
-deadline and waits for frame callbacks. Without both protocols the sink commits at
-the deadline and waits for the frame callback.
+does, Weston 13 does not), `WaylandSink` stops waiting for frame callbacks and
+commits each frame with a fifo barrier and the deadline, moved onto the
+compositor's clock, as its target time. The compositor then shows it at the first
+refresh at or after the target. On a 30 Hz mutter desktop, 60 frames of
+`videotestsrc` in a release build land a median 3 to 15 ms after their deadlines,
+depending on the phase of the deadlines against the refresh, against 15 to 21 ms
+when the sink commits at the deadline and waits for frame callbacks. Without both
+protocols the sink commits and waits for the frame callback.
+
+The sink gives the pacer the time a frame takes from commit to the screen through
+`PresentationPacer::set_present_delay_ns`. `judge` wakes the sink that long before
+the deadline, and drops a frame when the clock plus the delay is past the deadline
+by more than `max-lateness`. With timed commits the delay is the refresh the last
+feedback reported, since the compositor holds an earlier commit until its target.
+Without them it is the median commit-to-screen time of the last 30 presented
+frames. On the STM32MP257 under Weston 13, 60 frames of `videotestsrc` land a
+median 10 to 30 ms after their deadlines with the delay, against 50 to 60 ms
+without it, and the earliest 5% land up to 7 ms before the deadline.
 `deadline_error_samples()` returns the run's samples, capped like the latency
 samples and empty for an unpaced sink. In an A/V graph the elected clock is the
 audio sink's, which makes the series the video-against-audio sync error: its p95 is
@@ -491,7 +499,10 @@ incoming link's reverse `QosSlot`, and the producer observes it as
 QoS is advisory and never holds the packet back. `PresentationPacer` originates it
 on a late-drop, and on a presented frame at most once per
 `UPSTREAM_QOS_INTERVAL_NS` (100 ms) with the frame's signed jitter, so a producer
-also learns when the sink is on time again. `VideoTestSrc` reacts to a positive
+also learns when the sink is on time again. A sink that learns when its frames
+reached the screen passes the latest on-screen error to
+`PresentationPacer::record_presented_error_ns`, and the periodic report carries
+that as its jitter instead. `WaylandSink` does, from presentation feedback. `VideoTestSrc` reacts to a positive
 jitter by skipping about `jitter / frame_period` frames, advancing PTS without
 generating them.
 

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2532: Pace and report `waylandsink` QoS by when frames reach the screen.
 - M2531: Take `waylandsink` formats from the compositor and show them without conversion.
 - M2530: Commit `waylandsink` frames at target times with `wp_fifo_v1` and `wp_commit_timing_v1`.
 - M2529: Time `waylandsink` frames with `wp_presentation` feedback.
