@@ -64,7 +64,7 @@ const DEFAULT_EPOCH_SECS: i64 = -2_208_988_800;
 /// Format a SMPTE 12M timecode as `HH:MM:SS:FF`, with the `;` frame separator
 /// that marks a drop-frame count.
 #[cfg(feature = "metadata")]
-fn format_timecode(tc: &g2g_core::meta::TimecodeMeta) -> String {
+pub(crate) fn format_timecode(tc: &g2g_core::meta::TimecodeMeta) -> String {
     let sep = if tc.drop_frame { ';' } else { ':' };
     format!(
         "{:02}:{:02}:{:02}{sep}{:02}",

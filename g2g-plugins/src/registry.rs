@@ -1024,6 +1024,12 @@ pub fn default_registry() -> Registry {
         "timeoverlay",
         || Box::new(crate::timeoverlay::TimeOverlay::new()),
     ));
+    #[cfg(feature = "metadata")]
+    reg.register_launch(
+        LaunchFactory::of::<crate::timecodestamper::TimecodeStamper>("timecodestamper", || {
+            Box::new(crate::timecodestamper::TimecodeStamper::new())
+        }),
+    );
     reg.register_launch(LaunchFactory::of::<crate::clockoverlay::ClockOverlay>(
         "clockoverlay",
         || Box::new(crate::clockoverlay::ClockOverlay::new()),
@@ -1251,6 +1257,14 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::new("trim", Vec::new(), || {
         Box::new(crate::trim::Trim::new())
     }));
+    reg.register_launch(LaunchFactory::of::<crate::segmentclip::AudioSegmentClip>(
+        "audiosegmentclip",
+        || Box::new(crate::segmentclip::AudioSegmentClip::new()),
+    ));
+    reg.register_launch(LaunchFactory::of::<crate::segmentclip::VideoSegmentClip>(
+        "videosegmentclip",
+        || Box::new(crate::segmentclip::VideoSegmentClip::new()),
+    ));
     // Still-frame stream generator (M1067): `imagefreeze num-buffers=N` bounds
     // the run, a bare `imagefreeze` repeats the first frame indefinitely. No pad
     // templates declared (caps-driven via intercept_caps).

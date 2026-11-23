@@ -41,7 +41,7 @@ const ANY_CHANNELS: u8 = 0;
 const ANY_SAMPLE_RATE: u32 = 0;
 
 /// Every raw video shape, for the sink's declared constraint and pad template.
-fn raw_video_caps() -> CapsSet {
+pub(crate) fn raw_video_caps() -> CapsSet {
     CapsSet::from_alternatives(
         g2g_core::caps::ALL_RAW_VIDEO_FORMATS
             .iter()

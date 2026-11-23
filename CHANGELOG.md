@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2518: Add `timecodestamper` for SMPTE timecode on raw video.
+- M2517: Add `audiosegmentclip` and `videosegmentclip` for raw media.
 - M2516: `mpegpsdemux` reads DVD LPCM as raw audio.
 - M2515: `avidemux` reads Xan DPCM audio.
 - M2514: `matroskademux` reads True Audio tracks.

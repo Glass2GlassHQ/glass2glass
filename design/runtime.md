@@ -629,6 +629,21 @@ scheduling them, counted by `trick_dropped()`.
 
 ### Segment playback and looping
 
+`audiosegmentclip` and `videosegmentclip` apply the active `Segment` to raw
+media. Audio trims whole interleaved sample frames at either edge. Video
+shortens the presentation interval without touching the pixel buffer. A
+missing video duration uses the negotiated frame period when available.
+Both pass untimed buffers through and clear the active segment on a flush.
+The source controls when playback ends, so a new segment can resume clipping
+after buffers outside the previous window were dropped.
+
+With the `metadata` feature, `timecodestamper` attaches `TimecodeMeta` to raw
+video while retaining the input memory domain and timing. It stamps from a
+frame counter, the active segment's running time, zero, or a counter anchored
+to the last upstream timecode. `set` controls whether to keep or replace
+upstream labels. `timeoverlay` can render the resulting label in buffer-time
+mode.
+
 Segment playback, the `GstSeekFlags::SEGMENT` analog, is consumed through the
 `SeekController` rather than a new packet, because g2g has no `SEGMENT_DONE`
 `PipelinePacket` and adding one would force a new control variant through every

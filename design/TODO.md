@@ -482,8 +482,9 @@ unless it says otherwise.
 - **Video transforms:** `interlace`, `ivtc` / `combdetect`, `fieldanalysis`,
   `smpte` / `smptealpha`, `shapewipe`, `alphacolor`, `lcms`,
   `simplevideomark` / `simplevideomarkdetect`,
-  `videoframe-audiolevel`, `timecodestamper` / `avwait`, `audiosegmentclip` /
-  `videosegmentclip`, `navigationtest`.
+  `videoframe-audiolevel`, `avwait`, `navigationtest`.
+- **Timecode:** add wall-clock, LTC and ST 12 ancillary sources, caption input,
+  upstream timecode rate scaling, and timecode bus messages to `timecodestamper`.
 - **Flow / bins:** `uritranscodebin` (a URI in, an encoding profile out),
   encoder presets (a named quality / speed set an encoding profile's stream part
   selects, which needs a `preset` property on the encoders first), `autoconvert`

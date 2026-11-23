@@ -346,6 +346,8 @@ pub mod analyticsalert;
 pub mod embeddingsink;
 // Text window digest (no_std): the text frames of a window as one frame.
 pub mod textdigest;
+// Clip raw media to the active playback segment (no_std).
+pub mod segmentclip;
 // Presentation-time range cut (no_std).
 pub mod trim;
 // Shared wgpu device context for the GPU elements (M103): a producer and a sink
@@ -431,6 +433,8 @@ pub mod gamma;
 pub mod gaussianblur;
 pub mod smooth;
 pub mod tensorconvert;
+#[cfg(feature = "metadata")]
+pub mod timecodestamper;
 pub mod timeoverlay;
 pub mod videobalance;
 pub mod videobox;
