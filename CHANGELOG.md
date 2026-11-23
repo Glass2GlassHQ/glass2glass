@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2529: Time `waylandsink` frames with `wp_presentation` feedback.
 - M2528: Release evicted dma-buf imports in `kmssink` and `waylandsink`.
 - M2527: Blend overlays in `kmssink` without an ARGB plane and scale to the display.
 - M2526: Move tracked boxes between detections in `analyticsjoin hold-last`.

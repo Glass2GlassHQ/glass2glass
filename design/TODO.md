@@ -397,9 +397,14 @@ libraries installed.
 
 ## Clock-synchronised presentation
 
-- **KMS vblank reconciliation** + Wayland frame-callback co-scheduling. Needs a
-  DRM/KMS presentation sink (current `WaylandSink` is SHM software). Validate on
-  a real display.
+- **KMS vblank reconciliation** in `kmssink`. Validate on a real display.
+- **Wayland commit pacing:** when the compositor offers `wp_fifo_v1` and
+  `wp_commit_timing_v1`, commit `waylandsink` frames with a target time behind a
+  fifo barrier instead of sleeping in the pacer and waiting for the frame
+  callback.
+- **Wayland formats:** build `waylandsink`'s caps from the compositor's `wl_shm`
+  formats and linux-dmabuf format table, import dma-bufs with their real
+  modifier, and drop the sink's NV12 to XRGB8888 conversion.
 - **PTP clock polish** (not blocking): a live multi-machine / `ptp4l`-grandmaster
   soak of `PtpClient` (host/root/reference-gear gated); a direct PHC
   (`/dev/ptpN`) read; hardware RX/TX timestamping for uncompressed ST 2110-20

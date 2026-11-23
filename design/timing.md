@@ -436,10 +436,17 @@ than holding it for the difference between the two epochs.
 
 ## Deadline telemetry
 
-Once a frame is on screen `WaylandSink` reads the elected clock again and records
-the signed difference from that frame's deadline
+`WaylandSink` asks the compositor for `wp_presentation` feedback on every frame it
+commits, and the compositor reports the time the frame reached the screen or that
+it was discarded. Presented and discarded feedback are the sink's presented and
+dropped counts, and the latency sample is the presentation time minus the frame's
+arrival. The sink moves the presentation time onto the elected clock by reading
+that clock and subtracting how long ago, on the compositor's clock, the frame was
+shown, then records the signed difference from that frame's deadline
 (`PresentationPacer::last_deadline_ns`, captured where `judge` derived it, so the
-reading is against the anchor the frame was actually held to).
+reading is against the anchor the frame was actually held to). At end of stream
+the sink waits for the feedback of the frames it has committed, until 250 ms pass
+with no feedback, since a compositor sends none for a surface it is not painting.
 `deadline_error_samples()` returns the run's samples, capped like the latency
 samples and empty for an unpaced sink. In an A/V graph the elected clock is the
 audio sink's, which makes the series the video-against-audio sync error: its p95 is

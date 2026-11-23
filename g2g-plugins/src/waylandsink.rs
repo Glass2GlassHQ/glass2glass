@@ -28,10 +28,14 @@ use smithay_client_toolkit::{
         delegate_noop,
         globals::registry_queue_init,
         protocol::{wl_buffer, wl_output, wl_shm, wl_subsurface::WlSubsurface, wl_surface},
-        Connection, QueueHandle,
+        Connection, Dispatch, QueueHandle,
     },
     reexports::protocols::wp::linux_dmabuf::zv1::client::{
         zwp_linux_buffer_params_v1, zwp_linux_dmabuf_feedback_v1,
+    },
+    reexports::protocols::wp::presentation_time::client::{
+        wp_presentation::{self, WpPresentation},
+        wp_presentation_feedback::{self, WpPresentationFeedback},
     },
     reexports::protocols::wp::viewporter::client::{
         wp_viewport::WpViewport, wp_viewporter::WpViewporter,
@@ -102,11 +106,21 @@ enum QueuedPixels {
 struct QueuedFrame {
     pixels: QueuedPixels,
     matrix: YuvRgbMatrix,
-    arrival_ns: u64,
+    presented: PresentedFrame,
     orientation: Orientation,
     ack: tokio::sync::oneshot::Sender<()>,
     #[cfg(feature = "metadata")]
     overlay: Option<g2g_core::OverlayCompositionMeta>,
+}
+
+struct PresentationDeadline {
+    clock: Arc<dyn PipelineClock + Send + Sync>,
+    deadline_ns: u64,
+}
+
+struct PresentedFrame {
+    arrival_ns: u64,
+    deadline: Option<PresentationDeadline>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -204,7 +218,7 @@ pub struct WaylandSink {
     pacing: PacingPolicy,
     pacer: PresentationPacer,
     last_present_done_ns: u64,
-    deadline_errors: Vec<i64>,
+    deadline_errors: Arc<std::sync::Mutex<Vec<i64>>>,
     schedule_drift: ScheduleDriftTrace,
     #[cfg(feature = "metadata")]
     render_overlays: bool,
@@ -260,7 +274,7 @@ impl WaylandSink {
             pacing: PacingPolicy::default(),
             pacer: PresentationPacer::for_video_sink(),
             last_present_done_ns: 0,
-            deadline_errors: Vec::new(),
+            deadline_errors: Arc::new(std::sync::Mutex::new(Vec::new())),
             schedule_drift: ScheduleDriftTrace::default(),
             #[cfg(feature = "metadata")]
             render_overlays: false,
@@ -324,7 +338,10 @@ impl WaylandSink {
     }
 
     pub fn deadline_error_samples(&self) -> Vec<i64> {
-        self.deadline_errors.clone()
+        self.deadline_errors
+            .lock()
+            .expect("deadline errors lock")
+            .clone()
     }
 
     pub fn clock_sync(&self) -> Option<&ClockSync> {
@@ -461,6 +478,7 @@ impl AsyncElement for WaylandSink {
         let presented = Arc::clone(&self.frames_presented);
         let dropped = Arc::clone(&self.frames_dropped);
         let latency = Arc::clone(&self.latency);
+        let deadline_errors = Arc::clone(&self.deadline_errors);
         self.last_frame_callback_ns
             .store(monotonic_ns(), Ordering::Relaxed);
         let last_frame_callback_ns = Arc::clone(&self.last_frame_callback_ns);
@@ -494,6 +512,7 @@ impl AsyncElement for WaylandSink {
                     presented,
                     dropped,
                     latency,
+                    deadline_errors,
                     last_frame_callback_ns,
                     ready_for_worker,
                 ) {
@@ -678,10 +697,20 @@ impl AsyncElement for WaylandSink {
 
                     let tx = self.cmd_tx.as_ref().ok_or(G2gError::NotConfigured)?;
                     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+                    let deadline =
+                        deadline_ns
+                            .zip(self.pacer.clock_sync())
+                            .map(|(deadline_ns, sync)| PresentationDeadline {
+                                clock: Arc::clone(&sync.clock),
+                                deadline_ns,
+                            });
                     tx.send(WorkerCmd::Frame(QueuedFrame {
                         pixels,
                         matrix: self.matrix,
-                        arrival_ns: timing.arrival_ns,
+                        presented: PresentedFrame {
+                            arrival_ns: timing.arrival_ns,
+                            deadline,
+                        },
                         orientation,
                         ack: ack_tx,
                         #[cfg(feature = "metadata")]
@@ -717,10 +746,6 @@ impl AsyncElement for WaylandSink {
                     // the elected clock is the audio sink's in an A/V graph
                     let clock_now_ns = self.pacer.clock_sync().map(|s| s.now_ns());
                     if let (Some(deadline), Some(clock_now)) = (deadline_ns, clock_now_ns) {
-                        let error = clock_now as i64 - deadline as i64;
-                        if self.deadline_errors.len() < PER_FRAME_SAMPLE_CAPACITY {
-                            self.deadline_errors.push(error);
-                        }
                         if let Some(drift) =
                             self.schedule_drift
                                 .sample(t_done, clock_now, timing.pts_ns, deadline)
@@ -793,17 +818,23 @@ struct WorkerState {
     force_aspect_ratio: bool,
     configured_size: ConfiguredSize,
     configured: bool,
+    closing: bool,
     exit: bool,
     ready: Option<Arc<Handshake>>,
     presented: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
     latency: Arc<LatencyRecorder>,
+    deadline_errors: Arc<std::sync::Mutex<Vec<i64>>>,
+    presentation: WpPresentation,
+    presentation_clock: Option<u32>,
+    unresolved_feedback: usize,
+    last_feedback_ns: u64,
     last_frame_callback_ns: Arc<AtomicU64>,
     pending: Option<QueuedFrame>,
     // wayland keeps the buffer transform until the client sets another
     orientation: Orientation,
     picture_has_buffer: bool,
-    pending_ack: Option<(u64, tokio::sync::oneshot::Sender<()>)>,
+    pending_ack: Option<tokio::sync::oneshot::Sender<()>>,
     #[cfg(feature = "metadata")]
     overlay: Option<OverlaySurface>,
 }
@@ -823,6 +854,7 @@ fn worker_main(
     presented: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
     latency: Arc<LatencyRecorder>,
+    deadline_errors: Arc<std::sync::Mutex<Vec<i64>>>,
     last_frame_callback_ns: Arc<AtomicU64>,
     ready: Arc<Handshake>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -839,6 +871,7 @@ fn worker_main(
     let subcompositor =
         SubcompositorState::bind(compositor.wl_compositor().clone(), &globals, &qh)?;
     let viewporter: WpViewporter = globals.bind(&qh, 1..=1, ())?;
+    let presentation: WpPresentation = globals.bind(&qh, 1..=1, ())?;
     let shm = Shm::bind(&globals, &qh)?;
     let dmabuf_state = DmabufState::new(&globals, &qh);
 
@@ -904,11 +937,17 @@ fn worker_main(
         force_aspect_ratio,
         configured_size: (None, None),
         configured: false,
+        closing: false,
         exit: false,
         ready: Some(ready),
         presented,
         dropped,
         latency,
+        deadline_errors,
+        presentation,
+        presentation_clock: None,
+        unresolved_feedback: 0,
+        last_feedback_ns: 0,
         last_frame_callback_ns,
         pending: None,
         orientation: Orientation::Identity,
@@ -927,12 +966,18 @@ fn worker_main(
             }
         }
         ChanEvent::Msg(WorkerCmd::Shutdown) | ChanEvent::Closed => {
-            state.exit = true;
+            state.closing = true;
         }
     })?;
 
     while !state.exit {
         event_loop.dispatch(Some(Duration::from_millis(100)), &mut state)?;
+        // compositors send no feedback for a commit on a surface they are not painting
+        let feedback_silent =
+            monotonic_ns().saturating_sub(state.last_feedback_ns) >= FRAME_CALLBACK_SILENCE_NS;
+        if state.closing && (state.unresolved_feedback == 0 || feedback_silent) {
+            state.exit = true;
+        }
     }
     Ok(())
 }
@@ -1100,7 +1145,7 @@ impl WorkerState {
         let QueuedFrame {
             pixels,
             matrix,
-            arrival_ns,
+            presented,
             orientation,
             ack,
             #[cfg(feature = "metadata")]
@@ -1170,6 +1215,9 @@ impl WorkerState {
         }
         // smithay-client-toolkit passes the surface to `CompositorHandler::frame` in `FrameCallbackData`
         surface.frame(&self.qh, FrameCallbackData(surface.clone()));
+        self.presentation.feedback(surface, &self.qh, presented);
+        self.unresolved_feedback += 1;
+        self.last_feedback_ns = monotonic_ns();
         surface.damage_buffer(0, 0, width, height);
         match attach {
             Some((wl_buffer, dmabuf)) => {
@@ -1190,13 +1238,11 @@ impl WorkerState {
         }
         self.orientation = orientation;
         self.picture_has_buffer = true;
-        self.presented.fetch_add(1, Ordering::Relaxed);
 
-        if let Some((_, stale)) = self.pending_ack.take() {
-            self.dropped.fetch_add(1, Ordering::Relaxed);
+        if let Some(stale) = self.pending_ack.take() {
             let _ = stale.send(());
         }
-        self.pending_ack = Some((arrival_ns, ack));
+        self.pending_ack = Some(ack);
     }
 }
 
@@ -1220,13 +1266,7 @@ impl CompositorHandler for WorkerState {
     fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {
         self.last_frame_callback_ns
             .store(monotonic_ns(), Ordering::Relaxed);
-        if let Some((arrival_ns, ack)) = self.pending_ack.take() {
-            if arrival_ns != 0 {
-                let now = monotonic_ns();
-                if now >= arrival_ns {
-                    self.latency.record(now - arrival_ns);
-                }
-            }
+        if let Some(ack) = self.pending_ack.take() {
             let _ = ack.send(());
         }
     }
@@ -1362,6 +1402,103 @@ impl DmabufHandler for WorkerState {
                 .filter(|b| &b.wl_buffer == buffer)
             {
                 overlay_buffer.on_screen = false;
+            }
+        }
+    }
+}
+
+impl Dispatch<WpPresentation, ()> for WorkerState {
+    fn event(
+        state: &mut Self,
+        _: &WpPresentation,
+        event: wp_presentation::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wp_presentation::Event::ClockId { clk_id } = event {
+            state.presentation_clock = Some(clk_id);
+        }
+    }
+}
+
+fn nanoseconds(seconds: u64, nanoseconds: u32) -> u64 {
+    let since =
+        Duration::from_secs(seconds).saturating_add(Duration::from_nanos(u64::from(nanoseconds)));
+    u64::try_from(since.as_nanos()).unwrap_or(u64::MAX)
+}
+
+fn clock_now_ns(clock: u32) -> Option<u64> {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // presentation-time reports a clock_gettime clock id
+    // SAFETY: `now` is a live timespec the call writes into.
+    let result = unsafe { libc::clock_gettime(clock as libc::clockid_t, &mut now) };
+    (result == 0).then(|| nanoseconds(now.tv_sec as u64, now.tv_nsec as u32))
+}
+
+impl WorkerState {
+    fn resolve_feedback(&mut self) {
+        self.unresolved_feedback -= 1;
+        self.last_feedback_ns = monotonic_ns();
+    }
+}
+
+impl Dispatch<WpPresentationFeedback, PresentedFrame> for WorkerState {
+    fn event(
+        state: &mut Self,
+        _: &WpPresentationFeedback,
+        event: wp_presentation_feedback::Event,
+        frame: &PresentedFrame,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let shown_ns = match event {
+            wp_presentation_feedback::Event::Presented {
+                tv_sec_hi,
+                tv_sec_lo,
+                tv_nsec,
+                ..
+            } => nanoseconds(u64::from(tv_sec_hi) << 32 | u64::from(tv_sec_lo), tv_nsec),
+            wp_presentation_feedback::Event::Discarded => {
+                state.dropped.fetch_add(1, Ordering::Relaxed);
+                state.resolve_feedback();
+                return;
+            }
+            _ => return,
+        };
+        state.resolve_feedback();
+        state.presented.fetch_add(1, Ordering::Relaxed);
+        let Some(clock) = state.presentation_clock else {
+            g2g_core::g2g_error!(
+                Target::category(short_type_name::<WaylandSink>()),
+                "the compositor sent a presentation time before its clock id"
+            );
+            state.exit = true;
+            return;
+        };
+        let Some(since_shown_ns) = clock_now_ns(clock).map(|now| now.saturating_sub(shown_ns))
+        else {
+            g2g_core::g2g_error!(
+                Target::category(short_type_name::<WaylandSink>()),
+                "cannot read the compositor's presentation clock {clock}"
+            );
+            state.exit = true;
+            return;
+        };
+        if frame.arrival_ns != 0 {
+            let shown_monotonic_ns = monotonic_ns().saturating_sub(since_shown_ns);
+            state
+                .latency
+                .record(shown_monotonic_ns.saturating_sub(frame.arrival_ns));
+        }
+        if let Some(deadline) = &frame.deadline {
+            let shown_on_clock_ns = deadline.clock.now_ns().saturating_sub(since_shown_ns);
+            let mut errors = state.deadline_errors.lock().expect("deadline errors lock");
+            if errors.len() < PER_FRAME_SAMPLE_CAPACITY {
+                errors.push(shown_on_clock_ns as i64 - deadline.deadline_ns as i64);
             }
         }
     }
