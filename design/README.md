@@ -679,7 +679,8 @@ letterboxes the picture through the render pass viewport when the window takes
 another shape. `waylandsink` opens at the display size and follows any size the
 compositor configures: its window surface is a black buffer scaled to that
 size and the picture is a subsurface letterboxed inside it, both through
-`wp_viewporter`. Encoders carry the input ratio to their output caps.
+`wp_viewporter`. A caps change to a new size in the same format resizes that
+window rather than opening another. Encoders carry the input ratio to their output caps.
 `x264enc` and `ffmpegenc` set libavcodec's `sample_aspect_ratio`, which its encoders
 write as the VUI sample aspect, and `nvenc` sets NVENC's display aspect, from which
 the driver derives it. `openh264enc`, `vpxenc` and `av1enc` carry it on the caps

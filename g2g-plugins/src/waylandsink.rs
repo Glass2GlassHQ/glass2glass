@@ -105,6 +105,7 @@ use g2g_core::{
 
 enum WorkerCmd {
     Frame(QueuedFrame),
+    Resize(Picture),
     Shutdown,
 }
 
@@ -660,10 +661,17 @@ impl AsyncElement for WaylandSink {
 
         // RtspSrc's first caps carry placeholder dimensions until the SPS arrives
         if self.worker.is_some() {
-            if self.picture == Some(picture) {
-                return Ok(ConfigureOutcome::Accepted);
+            match self.picture {
+                Some(shown) if shown == picture => return Ok(ConfigureOutcome::Accepted),
+                Some(shown) if shown.format == picture.format => {
+                    let tx = self.cmd_tx.as_ref().ok_or(G2gError::NotConfigured)?;
+                    tx.send(WorkerCmd::Resize(picture))
+                        .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+                    self.picture = Some(picture);
+                    return Ok(ConfigureOutcome::Accepted);
+                }
+                _ => self.shutdown(),
             }
-            self.shutdown();
         }
 
         let (tx, rx) = channel::<WorkerCmd>();
@@ -1220,6 +1228,15 @@ fn worker_main(
                 state.pending = Some(queued);
             }
         }
+        ChanEvent::Msg(WorkerCmd::Resize(picture)) => {
+            if let Err(error) = state.resize(picture) {
+                g2g_core::g2g_error!(
+                    Target::category(short_type_name::<WaylandSink>()),
+                    "cannot resize the picture: {error:?}"
+                );
+                state.exit = true;
+            }
+        }
         ChanEvent::Msg(WorkerCmd::Shutdown) | ChanEvent::Closed => {
             state.closing = true;
         }
@@ -1281,6 +1298,38 @@ fn window_layout(
 }
 
 impl WorkerState {
+    fn commit_layout(&self) {
+        self.picture_subsurface.set_sync();
+        self.set_layout(self.orientation);
+        self.picture_surface.commit();
+        #[cfg(feature = "metadata")]
+        if let Some(overlay) = &self.overlay {
+            overlay.surface.commit();
+        }
+        self.window.commit();
+        self.picture_subsurface.set_desync();
+    }
+
+    fn resize(&mut self, picture: Picture) -> Result<(), G2gError> {
+        self.width = picture.width;
+        self.height = picture.height;
+        self.display_width = picture.display_width;
+        self.display_height = picture.display_height;
+        self.buffer = None;
+        #[cfg(feature = "metadata")]
+        if let Some(overlay) = &mut self.overlay {
+            overlay.resize(
+                (picture.width, picture.height),
+                &self.dmabuf_state,
+                &self.qh,
+            )?;
+        }
+        if self.configured {
+            self.commit_layout();
+        }
+        Ok(())
+    }
+
     fn set_layout(&self, orientation: Orientation) {
         let layout = window_layout(
             (self.display_width, self.display_height),
@@ -1611,15 +1660,7 @@ impl WindowHandler for WorkerState {
             window_surface.damage_buffer(0, 0, 1, 1);
         }
         self.configured_size = configure.new_size;
-        self.picture_subsurface.set_sync();
-        self.set_layout(self.orientation);
-        self.picture_surface.commit();
-        #[cfg(feature = "metadata")]
-        if let Some(overlay) = &self.overlay {
-            overlay.surface.commit();
-        }
-        self.window.commit();
-        self.picture_subsurface.set_desync();
+        self.commit_layout();
         self.configured = true;
         if was_first {
             if let Some(ready) = self.ready.take() {
@@ -1927,6 +1968,25 @@ impl OverlaySurface {
             layer: Vec::new(),
             row: Vec::new(),
         })
+    }
+
+    fn resize(
+        &mut self,
+        size: (u32, u32),
+        dmabuf_state: &DmabufState,
+        qh: &QueueHandle<WorkerState>,
+    ) -> Result<(), G2gError> {
+        use drm::control::Device as _;
+        for buffer in self.buffers.drain(..) {
+            buffer.wl_buffer.destroy();
+            self.card
+                .destroy_dumb_buffer(buffer.dumb)
+                .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+        }
+        self.buffers = overlay_buffers(&self.card, size, dmabuf_state, qh)?;
+        self.surface.attach(None, 0, 0);
+        self.shown = None;
+        Ok(())
     }
 
     fn show(
