@@ -223,13 +223,18 @@ const DRM_FORMAT_FIELD: &str = "drm-format=";
 
 const DMA_DRM_FORMAT: &str = "DMA_DRM";
 
-// GStreamer's drm-format fourcc for each format dmabuftowgpu and waylandsink import
+// GStreamer's drm-format fourcc for each format g2g imports as a dma-buf
 pub(crate) const DRM_FOURCC_FORMATS: &[(&str, &str)] = &[
     ("AB24", "RGBA"),
     ("AR24", "BGRA"),
+    ("BA24", "ARGB"),
     ("NV12", "NV12"),
     ("P010", "P010_10LE"),
+    ("UYVY", "UYVY"),
+    ("XR24", "BGRx"),
     ("YU12", "I420"),
+    ("YU16", "Y42B"),
+    ("YU24", "Y444"),
     ("YUYV", "YUY2"),
 ];
 
@@ -279,7 +284,7 @@ pub struct GstCapsMemory {
 /// Read the `memory:DMABuf` feature off a [`normalize_gst_caps`] string. A
 /// GStreamer 1.24+ `format=DMA_DRM, drm-format=<fourcc>` is read as the pixel
 /// format it names. `None` for dma-buf caps whose `drm-format` names no format
-/// `dmabuftowgpu` imports, or carries a non-linear modifier.
+/// in `DRM_FOURCC_FORMATS`, or carries a non-linear modifier.
 pub fn read_memory_feature(caps: &str) -> Option<GstCapsMemory> {
     let (media_type, fields) = caps.split_once(',').unwrap_or((caps, ""));
     let Some(media_type) = media_type.strip_suffix(DMABUF_CAPS_FEATURE) else {

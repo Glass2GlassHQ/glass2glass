@@ -399,7 +399,7 @@ at that `await`; the `JoinAll` keeps polling the siblings, so the sink renders
 while the stage runs, and the blocking pool is separate from the runtime workers
 so this pipelines even on a `current_thread` runtime. The closure must be `Send`,
 so an element owns the input bytes before offloading (`videoconvert`'s pixel
-convert, `waylandsink`'s NV12->XRGB convert). `ffmpegdec` moves its `!Send`
+convert). `ffmpegdec` moves its `!Send`
 libavcodec decoder + pts map into the closure by value and takes them back via an
 `OffloadDecode` bundle (`unsafe Send`, sound because the bundle is owned by the
 one blocking-pool thread until `run_blocking` hands it back, never aliased),

@@ -590,7 +590,6 @@ pub(crate) fn converts_from(format: RawVideoFormat, w: u32, h: u32) -> bool {
     all(target_os = "macos", feature = "metal-sink"),
     all(target_os = "windows", feature = "d3d11-sink"),
     all(target_os = "linux", feature = "kms-sink"),
-    all(target_os = "linux", feature = "wayland-sink"),
 ))]
 pub(crate) mod display {
     use super::{convert, frame_byte_size, FORMATS};

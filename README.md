@@ -635,7 +635,7 @@ cargo clippy --workspace --all-targets
 | `VtDecode` / `VtEncode` (H.264 / H.265, H.265 with alpha from BGRA, zero-copy `CVPixelBuffer` output via `cv-output`) | `vtdecode`, `vtencode` | macOS + VideoToolbox |
 | `AtEnc` (`atenc`: PCM to ADTS AAC-LC, mono or stereo) | `audiotoolbox-aac` | macOS + AudioToolbox |
 | `MediaCodecDec` (H.264 / H.265, zero-copy GPU output via `with_gpu_output`) | `mediacodec`, `mediacodec-wgpu` | Android + NDK MediaCodec (+ wgpu / Vulkan for GPU output) |
-| `WaylandSink` (NV12 from system memory, or zero-copy dma-bufs such as NV12 and YUY2) | `wayland-sink` | Linux + Wayland |
+| `WaylandSink` (the compositor's `wl_shm` formats from system memory, its linear dma-buf formats zero-copy) | `wayland-sink` | Linux + Wayland |
 | `KmsSink` | `kms-sink` | Linux + libdrm, needs DRM master / tty |
 | `D3D11Sink` (`d3d11videosink`: owns its window, any raw format from system memory or zero-copy NV12 from D3D11 textures) | `d3d11-sink` | Windows |
 | `MetalVideoSink` (zero-copy from `CVPixelBuffer`) | `metal-sink` | macOS + Metal |

@@ -376,6 +376,20 @@ boundary. ROCm 7.2 cannot import a semaphore at all on Linux
 on tokio's blocking pool. ROCm never closes an imported fd, so `HipExternalBuffer` holds
 it until the import is destroyed.
 
+`waylandsink` shows a frame in the format it arrives in. Before its first
+negotiation it opens a short Wayland connection and reads the compositor's
+`wl_shm` formats and the linux-dmabuf format table, bound at version 3, the last
+version that sends the table as modifier events. It accepts each of those formats
+that `DRM_FOURCC_FORMATS` names, NV12 first, and a dma-buf format only when the
+table lists it with the linear modifier, since `OwnedDmaBuf` carries no modifier.
+With no compositor it accepts nothing. A system-memory frame is copied into a
+`wl_shm` buffer and a dma-buf frame is imported, so a system-memory frame in a
+format the compositor takes only as a dma-buf (UYVY and ARGB on Weston 13 and
+mutter 51) fails with an error that suggests `videoconvert`. The compositor
+converts YUV to RGB. When it offers `wp_color_representation_v1` (mutter 51 does,
+Weston 13 does not) the sink sets the matrix and range from the caps colorimetry
+through `Colorimetry::yuv_conversion`, otherwise the compositor's default applies.
+
 `hipconvertscale` converts and scales Hip frames between NV12, I420, YUY2,
 P010, RGBA, BGRA, RGB, the planar `RGBP` and `BGRP`, and the float `RGBA_F16LE`,
 `RGBA_F32LE`, `RGB_F16LE`, `RGB_F32LE`, `RGBP_F16LE` and `RGBP_F32LE`, whose
@@ -548,7 +562,7 @@ existed. That is the single place the fallback lives, and a better guess would
 change that function alone. The weights come from one `LumaCoefficients` table
 beside `MatrixCoefficients`, the BT.601, BT.709 and BT.2020 NCL `(Kr, Kb)` pairs.
 `g2g-plugins`' `yuvmatrix` derives from them both the 8-bit fixed-point tables the
-CPU paths use (`videoconvert`, `videoconvertscale`, `waylandsink`, the
+CPU paths use (`videoconvert`, `videoconvertscale`, the
 `compositor` background fill) and the normalized weights compiled into the GL and
 WGSL convert shaders (`glsink`, `cudaglsink` and `cudakmssink` through `glnv12`,
 and `wgpusink`), so no coefficient is written out twice. `g2g-ml`'s

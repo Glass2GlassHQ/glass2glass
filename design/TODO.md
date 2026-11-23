@@ -320,6 +320,12 @@ libraries installed.
   surface on the first frame, which takes about 1.3 s on a Windows laptop, so a
   live camera shows an empty window and late-drops about 40 frames. Measure the
   split, then open the device at `configure_pipeline`.
+- **Dma-buf modifiers:** carry a format modifier on `OwnedDmaBuf`, pass each
+  consumer's accepted format and modifier pairs to the producer through
+  `AllocationParams`, import with the frame's modifier in `waylandsink`,
+  `kmssink`, `dmabuftowgpu` and `hipupload`, and read the modifier suffix of
+  GStreamer's `drm-format` in `capsfilter`. First find which producers hand out
+  tiled buffers (Vulkan decode on RADV, PipeWire screen capture).
 
 ## Containers
 
@@ -398,9 +404,6 @@ libraries installed.
 ## Clock-synchronised presentation
 
 - **KMS vblank reconciliation** in `kmssink`. Validate on a real display.
-- **Wayland formats:** build `waylandsink`'s caps from the compositor's `wl_shm`
-  formats and linux-dmabuf format table, import dma-bufs with their real
-  modifier, and drop the sink's NV12 to XRGB8888 conversion.
 - **PTP clock polish** (not blocking): a live multi-machine / `ptp4l`-grandmaster
   soak of `PtpClient` (host/root/reference-gear gated); a direct PHC
   (`/dev/ptpN`) read; hardware RX/TX timestamping for uncompressed ST 2110-20

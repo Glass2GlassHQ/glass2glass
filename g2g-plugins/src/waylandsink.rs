@@ -6,7 +6,7 @@ use core::future::Future;
 use core::num::NonZeroU32;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -26,9 +26,15 @@ use smithay_client_toolkit::{
     reexports::calloop_wayland_source::WaylandSource,
     reexports::client::{
         delegate_noop,
-        globals::registry_queue_init,
-        protocol::{wl_buffer, wl_output, wl_shm, wl_subsurface::WlSubsurface, wl_surface},
-        Connection, Dispatch, QueueHandle,
+        globals::{registry_queue_init, GlobalListContents},
+        protocol::{
+            wl_buffer, wl_output, wl_registry, wl_shm, wl_subsurface::WlSubsurface, wl_surface,
+        },
+        Connection, Dispatch, QueueHandle, WEnum,
+    },
+    reexports::protocols::wp::color_representation::v1::client::{
+        wp_color_representation_manager_v1::{self, WpColorRepresentationManagerV1},
+        wp_color_representation_surface_v1::{Coefficients, Range, WpColorRepresentationSurfaceV1},
     },
     reexports::protocols::wp::commit_timing::v1::client::{
         wp_commit_timer_v1::WpCommitTimerV1, wp_commit_timing_manager_v1::WpCommitTimingManagerV1,
@@ -38,6 +44,7 @@ use smithay_client_toolkit::{
     },
     reexports::protocols::wp::linux_dmabuf::zv1::client::{
         zwp_linux_buffer_params_v1, zwp_linux_dmabuf_feedback_v1,
+        zwp_linux_dmabuf_v1::{self, ZwpLinuxDmabufV1},
     },
     reexports::protocols::wp::presentation_time::client::{
         wp_presentation::{self, WpPresentation},
@@ -70,17 +77,16 @@ use crate::display_aspect::{
 };
 use crate::dmabufimport::DmaBufImportCache;
 use crate::paddedrows::dmabuf_plane_layout;
-use crate::pixel::{frame_byte_size, rgba_rb_offsets};
-use crate::videoconvert::display::{display_sink_caps, DisplayInput};
-use crate::videoconvert::yuv420_to_rgb_into;
+use crate::pixel::{carries_yuv, even_dims_required, frame_byte_size, row_bytes};
 use crate::videoflip::frame_orientation;
+use crate::videofx::any_geometry;
 use crate::worker_ready::Handshake;
-use crate::yuvmatrix::YuvRgbMatrix;
 #[cfg(feature = "metadata")]
 use crate::{
     drmcard::{draw_composition, same_composition, Card, DEFAULT_CARD},
     overlaycomposition::{RENDER_OVERLAYS_NAME, RENDER_OVERLAYS_PROPERTY},
 };
+use g2g_core::caps_parse::parse_raw_format;
 use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, Target};
@@ -89,10 +95,10 @@ use g2g_core::meta::{Orientation, OrientationSet};
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
-    ClockSync, Colorimetry, ConfigureOutcome, ElementMetadata, G2gError, HardwareError, OutputSink,
-    PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PixelAspect, PresentationPacer,
-    PropError, PropKind, PropValue, PropertySpec, RawVideoFormat, MAX_LATENESS_PROPERTY,
-    PROCESSING_DEADLINE_PROPERTY, QOS_INTERVAL_PROPERTY, SYNC_PROPERTY,
+    ClockSync, Colorimetry, ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError,
+    MatrixCoefficients, OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket,
+    PixelAspect, PresentationPacer, PropError, PropKind, PropValue, PropertySpec, RawVideoFormat,
+    MAX_LATENESS_PROPERTY, PROCESSING_DEADLINE_PROPERTY, QOS_INTERVAL_PROPERTY, SYNC_PROPERTY,
 };
 
 enum WorkerCmd {
@@ -102,16 +108,12 @@ enum WorkerCmd {
 
 enum QueuedPixels {
     System(SystemSlice),
-    Imported {
-        dmabuf: OwnedDmaBuf,
-        format: RawVideoFormat,
-        drm_format: u32,
-    },
+    Imported(OwnedDmaBuf),
 }
 
 struct QueuedFrame {
     pixels: QueuedPixels,
-    matrix: YuvRgbMatrix,
+    colorimetry: Colorimetry,
     presented: PresentedFrame,
     orientation: Orientation,
     ack: tokio::sync::oneshot::Sender<()>,
@@ -210,13 +212,11 @@ pub struct WaylandSink {
     app_id: String,
     cmd_tx: Option<CalloopSender<WorkerCmd>>,
     worker: Option<JoinHandle<()>>,
-    width: u32,
-    height: u32,
-    input: Option<DisplayInput>,
-    pixel_aspect: PixelAspect,
+    picture: Option<Picture>,
+    colorimetry: Colorimetry,
+    compositor_formats: OnceLock<CompositorFormats>,
     force_aspect_ratio: bool,
     fullscreen: bool,
-    matrix: YuvRgbMatrix,
     frames_presented: Arc<AtomicU64>,
     latency: Arc<LatencyRecorder>,
     frames_dropped: Arc<AtomicU64>,
@@ -244,8 +244,7 @@ impl core::fmt::Debug for WaylandSink {
         f.debug_struct("WaylandSink")
             .field("title", &self.title)
             .field("app_id", &self.app_id)
-            .field("width", &self.width)
-            .field("height", &self.height)
+            .field("picture", &self.picture)
             .field(
                 "frames_presented",
                 &self.frames_presented.load(Ordering::Relaxed),
@@ -267,13 +266,11 @@ impl WaylandSink {
             app_id: String::from("io.glass2glass.WaylandSink"),
             cmd_tx: None,
             worker: None,
-            width: 0,
-            height: 0,
-            input: None,
-            pixel_aspect: PixelAspect::Any,
+            picture: None,
+            colorimetry: Colorimetry::UNKNOWN,
+            compositor_formats: OnceLock::new(),
             force_aspect_ratio: true,
             fullscreen: false,
-            matrix: YuvRgbMatrix::new(Colorimetry::UNKNOWN),
             frames_presented: Arc::new(AtomicU64::new(0)),
             latency: Arc::new(LatencyRecorder::new()),
             frames_dropped: Arc::new(AtomicU64::new(0)),
@@ -356,6 +353,18 @@ impl WaylandSink {
         self.pacer.clock_sync()
     }
 
+    fn compositor_formats(&self) -> &CompositorFormats {
+        self.compositor_formats.get_or_init(|| {
+            probe_compositor_formats().unwrap_or_else(|error| {
+                g2g_core::g2g_error!(
+                    self,
+                    "cannot read the Wayland compositor's formats: {error}"
+                );
+                CompositorFormats::default()
+            })
+        })
+    }
+
     fn shutdown(&mut self) {
         if let Some(tx) = self.cmd_tx.take() {
             let _ = tx.send(WorkerCmd::Shutdown);
@@ -380,9 +389,70 @@ impl PipelineClock for WaylandClock {
     }
 }
 
-const NATIVE_FORMATS: &[RawVideoFormat] = &[RawVideoFormat::Nv12];
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Picture {
+    format: RawVideoFormat,
+    width: u32,
+    height: u32,
+    display_width: u32,
+    display_height: u32,
+}
+
+impl Picture {
+    fn of(caps: &Caps, force_aspect_ratio: bool) -> Result<Self, G2gError> {
+        let Caps::RawVideo {
+            format,
+            width: Dim::Fixed(width),
+            height: Dim::Fixed(height),
+            pixel_aspect,
+            ..
+        } = *caps
+        else {
+            return Err(G2gError::CapsMismatch);
+        };
+        let (even_width, even_height) = even_dims_required(format);
+        if (even_width && width % 2 != 0) || (even_height && height % 2 != 0) {
+            return Err(G2gError::CapsMismatch);
+        }
+        let (display_width, display_height) = if force_aspect_ratio {
+            display_size(width, height, pixel_aspect)
+        } else {
+            (width, height)
+        };
+        Ok(Self {
+            format,
+            width,
+            height,
+            display_width,
+            display_height,
+        })
+    }
+}
+
+#[derive(Debug, Default)]
+struct CompositorFormats {
+    shm: Vec<RawVideoFormat>,
+    dmabuf: Vec<RawVideoFormat>,
+}
+
+impl CompositorFormats {
+    fn accepted_caps(&self) -> CapsSet {
+        let mut formats: Vec<RawVideoFormat> = Vec::new();
+        for format in self.shm.iter().chain(&self.dmabuf) {
+            if !formats.contains(format) {
+                formats.push(*format);
+            }
+        }
+        // decoders produce NV12, and the solver prefers the first alternative
+        formats.sort_by_key(|format| *format != RawVideoFormat::Nv12);
+        CapsSet::from_alternatives(formats.into_iter().map(any_geometry).collect())
+    }
+}
+
 // drm_fourcc.h
 const DRM_FORMAT_MOD_LINEAR: u64 = 0;
+const DRM_FORMAT_ARGB8888: u32 = u32::from_le_bytes(*b"AR24");
+const DRM_FORMAT_XRGB8888: u32 = u32::from_le_bytes(*b"XR24");
 
 fn drm_format(format: RawVideoFormat) -> Option<u32> {
     let (fourcc, _) = DRM_FOURCC_FORMATS
@@ -391,13 +461,119 @@ fn drm_format(format: RawVideoFormat) -> Option<u32> {
     Some(u32::from_le_bytes(fourcc.as_bytes().try_into().ok()?))
 }
 
-fn accepted_caps() -> CapsSet {
-    display_sink_caps(NATIVE_FORMATS)
+fn raw_video_format(drm_format: u32) -> Option<RawVideoFormat> {
+    let fourcc = drm_format.to_le_bytes();
+    let (_, gst_name) = DRM_FOURCC_FORMATS
+        .iter()
+        .find(|(known, _)| known.as_bytes() == fourcc)?;
+    parse_raw_format(gst_name)
+}
+
+fn shm_format(format: RawVideoFormat) -> Option<wl_shm::Format> {
+    // wl_shm codes ARGB8888 and XRGB8888 as 0 and 1 instead of their DRM fourccs
+    match drm_format(format)? {
+        DRM_FORMAT_ARGB8888 => Some(wl_shm::Format::Argb8888),
+        DRM_FORMAT_XRGB8888 => Some(wl_shm::Format::Xrgb8888),
+        code => wl_shm::Format::try_from(code).ok(),
+    }
+}
+
+fn drm_format_of_shm(format: WEnum<wl_shm::Format>) -> u32 {
+    match format {
+        WEnum::Value(wl_shm::Format::Argb8888) => DRM_FORMAT_ARGB8888,
+        WEnum::Value(wl_shm::Format::Xrgb8888) => DRM_FORMAT_XRGB8888,
+        WEnum::Value(format) => format as u32,
+        WEnum::Unknown(code) => code,
+    }
+}
+
+#[derive(Default)]
+struct FormatProbe {
+    shm: Vec<u32>,
+    dmabuf: Vec<u32>,
+}
+
+impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for FormatProbe {
+    fn event(
+        _: &mut Self,
+        _: &wl_registry::WlRegistry,
+        _: wl_registry::Event,
+        _: &GlobalListContents,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wl_shm::WlShm, ()> for FormatProbe {
+    fn event(
+        probe: &mut Self,
+        _: &wl_shm::WlShm,
+        event: wl_shm::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_shm::Event::Format { format } = event {
+            probe.shm.push(drm_format_of_shm(format));
+        }
+    }
+}
+
+impl Dispatch<ZwpLinuxDmabufV1, ()> for FormatProbe {
+    fn event(
+        probe: &mut Self,
+        _: &ZwpLinuxDmabufV1,
+        event: zwp_linux_dmabuf_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let zwp_linux_dmabuf_v1::Event::Modifier {
+            format,
+            modifier_hi,
+            modifier_lo,
+        } = event
+        {
+            if (u64::from(modifier_hi) << 32 | u64::from(modifier_lo)) == DRM_FORMAT_MOD_LINEAR {
+                probe.dmabuf.push(format);
+            }
+        }
+    }
+}
+
+fn probe_compositor_formats() -> Result<CompositorFormats, Box<dyn std::error::Error>> {
+    let conn = Connection::connect_to_env()?;
+    let (globals, mut queue) = registry_queue_init::<FormatProbe>(&conn)?;
+    let qh = queue.handle();
+    globals.bind::<wl_shm::WlShm, _, _>(&qh, 1..=1, ())?;
+    // linux-dmabuf sends its format table as modifier events to version 3 only
+    let dmabuf = globals.bind::<ZwpLinuxDmabufV1, _, _>(&qh, 3..=3, ()).ok();
+    let mut probe = FormatProbe::default();
+    queue.roundtrip(&mut probe)?;
+    if let Some(dmabuf) = dmabuf {
+        dmabuf.destroy();
+    }
+    let known = |codes: &[u32]| codes.iter().copied().filter_map(raw_video_format).collect();
+    Ok(CompositorFormats {
+        shm: known(&probe.shm),
+        dmabuf: known(&probe.dmabuf),
+    })
+}
+
+fn importable_caps() -> CapsSet {
+    CapsSet::from_alternatives(
+        DRM_FOURCC_FORMATS
+            .iter()
+            .filter_map(|(_, gst_name)| parse_raw_format(gst_name))
+            .map(any_geometry)
+            .collect(),
+    )
 }
 
 impl PadTemplates for WaylandSink {
     fn pad_templates() -> Vec<PadTemplate> {
-        Vec::from([PadTemplate::sink(accepted_caps())])
+        Vec::from([PadTemplate::sink(importable_caps())])
     }
 }
 
@@ -451,36 +627,32 @@ impl AsyncElement for WaylandSink {
     }
 
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::Accepts(accepted_caps())
+        CapsConstraint::Accepts(self.compositor_formats().accepted_caps())
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         self.pacer.adopt_framerate(absolute_caps);
-        let input = DisplayInput::from_caps(absolute_caps, NATIVE_FORMATS)?;
-        let (w, h, colorimetry, pixel_aspect) = (
-            input.width,
-            input.height,
-            input.colorimetry,
-            input.pixel_aspect,
-        );
-        if w % 2 != 0 || h % 2 != 0 {
+        let picture = Picture::of(absolute_caps, self.force_aspect_ratio)?;
+        if let Caps::RawVideo { colorimetry, .. } = absolute_caps {
+            self.colorimetry = *colorimetry;
+        }
+        let formats = self.compositor_formats();
+        if !formats.shm.contains(&picture.format) && !formats.dmabuf.contains(&picture.format) {
+            g2g_core::g2g_error!(
+                self,
+                "the compositor takes no {} buffers",
+                picture.format.gst_name()
+            );
             return Err(G2gError::CapsMismatch);
         }
-        self.input = Some(input);
-        self.matrix = YuvRgbMatrix::new(colorimetry);
 
         // RtspSrc's first caps carry placeholder dimensions until the SPS arrives
         if self.worker.is_some() {
-            if (w, h, pixel_aspect) == (self.width, self.height, self.pixel_aspect) {
+            if self.picture == Some(picture) {
                 return Ok(ConfigureOutcome::Accepted);
             }
             self.shutdown();
         }
-        let (display_width, display_height) = if self.force_aspect_ratio {
-            display_size(w, h, pixel_aspect)
-        } else {
-            (w, h)
-        };
 
         let (tx, rx) = channel::<WorkerCmd>();
         let presented = Arc::clone(&self.frames_presented);
@@ -508,10 +680,7 @@ impl AsyncElement for WaylandSink {
             .name(String::from("g2g-waylandsink"))
             .spawn(move || {
                 if let Err(e) = worker_main(
-                    w,
-                    h,
-                    display_width,
-                    display_height,
+                    picture,
                     fullscreen,
                     force_aspect_ratio,
                     #[cfg(feature = "metadata")]
@@ -540,9 +709,7 @@ impl AsyncElement for WaylandSink {
 
         self.cmd_tx = Some(tx);
         self.worker = Some(join);
-        self.width = w;
-        self.height = h;
-        self.pixel_aspect = pixel_aspect;
+        self.picture = Some(picture);
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -550,7 +717,7 @@ impl AsyncElement for WaylandSink {
         ElementMetadata::new(
             "Wayland video sink",
             "Sink/Video",
-            "Presents NV12 video to a Wayland surface (software SHM)",
+            "Presents raw video to a Wayland surface through wl_shm or linux-dmabuf",
             crate::AARON_BOXER,
         )
     }
@@ -677,32 +844,32 @@ impl AsyncElement for WaylandSink {
                         g2g_core::g2g_log!(self, "late-drop pts={}", timing.pts_ns);
                         return Ok(());
                     }
-                    let input = self.input.ok_or(G2gError::NotConfigured)?;
+                    let picture = self.picture.ok_or(G2gError::NotConfigured)?;
+                    let formats = self.compositor_formats();
                     let pixels = match domain {
                         MemoryDomain::DmaBuf(dmabuf) => {
-                            let format = input.negotiated;
-                            let Some(drm_format) = drm_format(format) else {
+                            if !formats.dmabuf.contains(&picture.format) {
                                 g2g_core::g2g_error!(
                                     self,
-                                    "{} dma-bufs have no DRM format code to import them by",
-                                    format.gst_name()
+                                    "the compositor takes no linear {} dma-bufs",
+                                    picture.format.gst_name()
                                 );
                                 return Err(G2gError::CapsMismatch);
-                            };
-                            QueuedPixels::Imported {
-                                dmabuf,
-                                format,
-                                drm_format,
                             }
+                            QueuedPixels::Imported(dmabuf)
                         }
                         MemoryDomain::System(pixels) => {
-                            let pixels = match input.convert_frame(pixels.as_slice())? {
-                                Some(converted) => SystemSlice::from_boxed(converted),
-                                None => pixels,
-                            };
-                            if pixels.as_slice().len()
-                                < frame_byte_size(RawVideoFormat::Nv12, self.width, self.height)
-                            {
+                            if !formats.shm.contains(&picture.format) {
+                                g2g_core::g2g_error!(
+                                    self,
+                                    "the compositor takes {} only as dma-bufs, put videoconvert ahead of waylandsink",
+                                    picture.format.gst_name()
+                                );
+                                return Err(G2gError::CapsMismatch);
+                            }
+                            let frame_bytes =
+                                frame_byte_size(picture.format, picture.width, picture.height);
+                            if pixels.as_slice().len() < frame_bytes {
                                 return Err(G2gError::CapsMismatch);
                             }
                             QueuedPixels::System(pixels)
@@ -722,7 +889,7 @@ impl AsyncElement for WaylandSink {
                             });
                     tx.send(WorkerCmd::Frame(QueuedFrame {
                         pixels,
-                        matrix: self.matrix,
+                        colorimetry: self.colorimetry,
                         presented: PresentedFrame {
                             arrival_ns: timing.arrival_ns,
                             deadline,
@@ -815,6 +982,26 @@ struct TimedCommits {
     timer: WpCommitTimerV1,
 }
 
+struct ColorRepresentation {
+    surface: WpColorRepresentationSurfaceV1,
+    shown: Option<(Coefficients, Range)>,
+}
+
+fn coefficients_and_range(colorimetry: Colorimetry) -> (Coefficients, Range) {
+    let conversion = colorimetry.yuv_conversion();
+    let coefficients = match conversion.matrix {
+        MatrixCoefficients::Bt709 => Coefficients::Bt709,
+        MatrixCoefficients::Bt2020Ncl => Coefficients::Bt2020,
+        _ => Coefficients::Bt601,
+    };
+    let range = if conversion.full_range {
+        Range::Full
+    } else {
+        Range::Limited
+    };
+    (coefficients, range)
+}
+
 struct WorkerState {
     registry_state: RegistryState,
     output_state: OutputState,
@@ -832,6 +1019,7 @@ struct WorkerState {
     picture_subsurface: WlSubsurface,
     picture_viewport: WpViewport,
     qh: QueueHandle<WorkerState>,
+    format: RawVideoFormat,
     width: u32,
     height: u32,
     display_width: u32,
@@ -849,6 +1037,8 @@ struct WorkerState {
     presentation: WpPresentation,
     presentation_clock: Option<u32>,
     timed_commits: Option<TimedCommits>,
+    color_representation: Option<ColorRepresentation>,
+    supported_coefficients: Vec<(Coefficients, Range)>,
     commit_lead_ns: Arc<AtomicU64>,
     unresolved_feedback: usize,
     last_feedback_ns: u64,
@@ -862,12 +1052,11 @@ struct WorkerState {
     overlay: Option<OverlaySurface>,
 }
 
+const XRGB8888_BYTES_PER_PIXEL: usize = 4;
+
 #[allow(clippy::too_many_arguments)]
 fn worker_main(
-    width: u32,
-    height: u32,
-    display_width: u32,
-    display_height: u32,
+    picture: Picture,
     fullscreen: bool,
     force_aspect_ratio: bool,
     #[cfg(feature = "metadata")] overlay_device: Option<std::path::PathBuf>,
@@ -882,6 +1071,7 @@ fn worker_main(
     commit_lead_ns: Arc<AtomicU64>,
     ready: Arc<Handshake>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let (width, height) = (picture.width, picture.height);
     let conn = Connection::connect_to_env()?;
     let (globals, event_queue) = registry_queue_init(&conn)?;
     let qh = event_queue.handle();
@@ -922,6 +1112,14 @@ fn worker_main(
         }),
         _ => None,
     };
+    let color_representation =
+        match globals.bind::<WpColorRepresentationManagerV1, _, _>(&qh, 1..=1, ()) {
+            Ok(manager) if carries_yuv(picture.format) => Some(ColorRepresentation {
+                surface: manager.get_surface(&picture_surface, &qh, ()),
+                shown: None,
+            }),
+            _ => None,
+        };
     g2g_core::g2g_log!(
         Target::category(short_type_name::<WaylandSink>()),
         "{}",
@@ -949,7 +1147,7 @@ fn worker_main(
     };
     window.commit();
 
-    let mut pool = SlotPool::new((width * height * 4) as usize, &shm)?;
+    let mut pool = SlotPool::new(frame_byte_size(picture.format, width, height), &shm)?;
     let (black_buffer, black_pixel) = pool.create_buffer(
         1,
         1,
@@ -974,10 +1172,11 @@ fn worker_main(
         picture_subsurface,
         picture_viewport,
         qh: qh.clone(),
+        format: picture.format,
         width,
         height,
-        display_width,
-        display_height,
+        display_width: picture.display_width,
+        display_height: picture.display_height,
         force_aspect_ratio,
         configured_size: (None, None),
         configured: false,
@@ -991,6 +1190,8 @@ fn worker_main(
         presentation,
         presentation_clock: None,
         timed_commits,
+        color_representation,
+        supported_coefficients: Vec::new(),
         commit_lead_ns,
         unresolved_feedback: 0,
         last_feedback_ns: 0,
@@ -1114,42 +1315,31 @@ impl WorkerState {
         Ok(appeared)
     }
 
-    fn fill_shm_buffer(
-        &mut self,
-        pixels: &SystemSlice,
-        matrix: &YuvRgbMatrix,
-    ) -> Result<(), G2gError> {
-        let width = self.width as i32;
-        let height = self.height as i32;
-        let stride = self.width as i32 * 4;
-
-        let buffer = self.buffer.get_or_insert_with(|| {
-            self.pool
-                .create_buffer(width, height, stride, wl_shm::Format::Xrgb8888)
-                .expect("create_buffer")
-                .0
-        });
-        let canvas = match self.pool.canvas(buffer) {
-            Some(canvas) => canvas,
-            None => {
-                let (new_buf, canvas) = self
-                    .pool
-                    .create_buffer(width, height, stride, wl_shm::Format::Xrgb8888)
-                    .expect("create_buffer (double-buffer)");
-                *buffer = new_buf;
-                canvas
+    fn fill_shm_buffer(&mut self, pixels: &SystemSlice) -> Result<(), G2gError> {
+        let frame_bytes = frame_byte_size(self.format, self.width, self.height);
+        let hardware = || G2gError::Hardware(HardwareError::Other);
+        // sctk's Buffer::canvas covers plane 0 only, the slot covers every plane
+        let buffer = match self.buffer.take() {
+            Some(buffer) if buffer.slot().canvas(&mut self.pool).is_some() => buffer,
+            _ => {
+                let format = shm_format(self.format).ok_or(G2gError::CapsMismatch)?;
+                let stride = i32::try_from(row_bytes(self.format, self.width as usize))
+                    .map_err(|_| G2gError::CapsMismatch)?;
+                let slot = self.pool.new_slot(frame_bytes).map_err(|_| hardware())?;
+                self.pool
+                    .create_buffer_in(&slot, self.width as i32, self.height as i32, stride, format)
+                    .map_err(|_| hardware())?
             }
         };
-        nv12_to_xrgb8888(pixels.as_slice(), self.width, self.height, matrix, canvas)
+        let canvas = buffer.slot().canvas(&mut self.pool).ok_or_else(hardware)?;
+        canvas[..frame_bytes].copy_from_slice(&pixels.as_slice()[..frame_bytes]);
+        self.buffer = Some(buffer);
+        Ok(())
     }
 
-    fn import(
-        &mut self,
-        dmabuf: &OwnedDmaBuf,
-        format: RawVideoFormat,
-        drm_format: u32,
-    ) -> Result<wl_buffer::WlBuffer, G2gError> {
-        let (layout, size) = dmabuf_plane_layout(dmabuf, format, self.width, self.height)
+    fn import(&mut self, dmabuf: &OwnedDmaBuf) -> Result<wl_buffer::WlBuffer, G2gError> {
+        let drm_format = drm_format(self.format).ok_or(G2gError::CapsMismatch)?;
+        let (layout, size) = dmabuf_plane_layout(dmabuf, self.format, self.width, self.height)
             .ok_or(G2gError::CapsMismatch)?;
         let (dmabuf_state, qh) = (&self.dmabuf_state, &self.qh);
         let (width, height) = (self.width as i32, self.height as i32);
@@ -1193,7 +1383,7 @@ impl WorkerState {
     fn draw(&mut self, queued: QueuedFrame) {
         let QueuedFrame {
             pixels,
-            matrix,
+            colorimetry,
             presented,
             orientation,
             ack,
@@ -1204,23 +1394,19 @@ impl WorkerState {
         let height = self.height as i32;
         let attach = match pixels {
             QueuedPixels::System(pixels) => {
-                if self.fill_shm_buffer(&pixels, &matrix).is_err() {
+                if self.fill_shm_buffer(&pixels).is_err() {
                     let _ = ack.send(());
                     return;
                 }
                 None
             }
-            QueuedPixels::Imported {
-                dmabuf,
-                format,
-                drm_format,
-            } => match self.import(&dmabuf, format, drm_format) {
+            QueuedPixels::Imported(dmabuf) => match self.import(&dmabuf) {
                 Ok(wl_buffer) => Some((wl_buffer, dmabuf)),
                 Err(error) => {
                     g2g_core::g2g_error!(
                         Target::category(short_type_name::<WaylandSink>()),
                         "the compositor cannot show this dma-buf as linear {}: {error:?}",
-                        format.gst_name()
+                        self.format.gst_name()
                     );
                     self.exit = true;
                     return;
@@ -1265,6 +1451,7 @@ impl WorkerState {
             },
             _ => None,
         };
+        self.set_color_representation(colorimetry);
         let surface = &self.picture_surface;
         // weston repaints a subsurface for its own commits only once a parent commit has placed it on an output
         let commit_parent = turned || !self.picture_has_buffer || overlay_appeared;
@@ -1322,6 +1509,29 @@ impl WorkerState {
             let _ = stale.send(());
         }
         self.pending_ack = Some(ack);
+    }
+}
+
+impl WorkerState {
+    fn set_color_representation(&mut self, colorimetry: Colorimetry) {
+        let Some(representation) = &mut self.color_representation else {
+            return;
+        };
+        let wanted = coefficients_and_range(colorimetry);
+        if representation.shown == Some(wanted) {
+            return;
+        }
+        representation.shown = Some(wanted);
+        if self.supported_coefficients.contains(&wanted) {
+            representation
+                .surface
+                .set_coefficients_and_range(wanted.0, wanted.1);
+        } else {
+            g2g_core::g2g_log!(
+                Target::category(short_type_name::<WaylandSink>()),
+                "the compositor converts with its default matrix, it takes no {wanted:?}"
+            );
+        }
     }
 }
 
@@ -1614,6 +1824,25 @@ impl Dispatch<WpPresentationFeedback, PresentedFrame> for WorkerState {
     }
 }
 
+impl Dispatch<WpColorRepresentationManagerV1, ()> for WorkerState {
+    fn event(
+        state: &mut Self,
+        _: &WpColorRepresentationManagerV1,
+        event: wp_color_representation_manager_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wp_color_representation_manager_v1::Event::SupportedCoefficientsAndRanges {
+            coefficients: WEnum::Value(coefficients),
+            range: WEnum::Value(range),
+        } = event
+        {
+            state.supported_coefficients.push((coefficients, range));
+        }
+    }
+}
+
 delegate_dispatch2!(WorkerState);
 delegate_registry!(WorkerState);
 delegate_noop!(WorkerState: ignore WpViewporter);
@@ -1622,6 +1851,7 @@ delegate_noop!(WorkerState: ignore WpFifoManagerV1);
 delegate_noop!(WorkerState: ignore WpFifoV1);
 delegate_noop!(WorkerState: ignore WpCommitTimingManagerV1);
 delegate_noop!(WorkerState: ignore WpCommitTimerV1);
+delegate_noop!(WorkerState: ignore WpColorRepresentationSurfaceV1);
 
 #[cfg(feature = "metadata")]
 struct OverlayBuffer {
@@ -1773,32 +2003,6 @@ fn buffer_transform(orientation: Orientation) -> wl_output::Transform {
     }
 }
 
-fn nv12_to_xrgb8888(
-    src: &[u8],
-    width: u32,
-    height: u32,
-    matrix: &YuvRgbMatrix,
-    canvas: &mut [u8],
-) -> Result<(), G2gError> {
-    let (w, h) = (width as usize, height as usize);
-    let xrgb_bytes = w * h * XRGB8888_BYTES_PER_PIXEL;
-    if src.len() < frame_byte_size(RawVideoFormat::Nv12, width, height) || canvas.len() < xrgb_bytes
-    {
-        return Err(G2gError::CapsMismatch);
-    }
-    yuv420_to_rgb_into(
-        src,
-        (w, h),
-        true,
-        rgba_rb_offsets(RawVideoFormat::Bgra8),
-        matrix,
-        &mut canvas[..xrgb_bytes],
-    );
-    Ok(())
-}
-
-const XRGB8888_BYTES_PER_PIXEL: usize = 4;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1926,17 +2130,53 @@ mod tests {
     }
 
     #[test]
-    fn caps_constraint_takes_nv12_first_and_converted_formats() {
-        let sink = WaylandSink::new();
-        let CapsConstraint::Accepts(set) = sink.caps_constraint_as_sink() else {
-            panic!("expected Accepts");
+    fn accepts_the_compositor_formats_nv12_first() {
+        let formats = CompositorFormats {
+            shm: alloc::vec![
+                RawVideoFormat::Bgrx8,
+                RawVideoFormat::Nv12,
+                RawVideoFormat::Yuyv
+            ],
+            dmabuf: alloc::vec![RawVideoFormat::Nv12, RawVideoFormat::Uyvy],
         };
-        let alternatives = set.alternatives();
+        let expected: Vec<Caps> = [
+            RawVideoFormat::Nv12,
+            RawVideoFormat::Bgrx8,
+            RawVideoFormat::Yuyv,
+            RawVideoFormat::Uyvy,
+        ]
+        .into_iter()
+        .map(any_geometry)
+        .collect();
+        assert_eq!(formats.accepted_caps().alternatives(), expected.as_slice());
+    }
+
+    #[test]
+    fn shm_codes_map_to_formats_and_back() {
+        // wl_shm codes XRGB8888 as 1, every other format as its DRM fourcc
+        let xrgb = drm_format_of_shm(WEnum::Value(wl_shm::Format::Xrgb8888));
+        assert_eq!(raw_video_format(xrgb), Some(RawVideoFormat::Bgrx8));
         assert_eq!(
-            alternatives[0],
-            crate::videofx::any_geometry(RawVideoFormat::Nv12)
+            shm_format(RawVideoFormat::Bgrx8),
+            Some(wl_shm::Format::Xrgb8888)
         );
-        assert!(alternatives.contains(&crate::videofx::any_geometry(RawVideoFormat::I420)));
+        let nv12 = drm_format_of_shm(WEnum::Value(wl_shm::Format::Nv12));
+        assert_eq!(raw_video_format(nv12), Some(RawVideoFormat::Nv12));
+        assert_eq!(shm_format(RawVideoFormat::Nv12), Some(wl_shm::Format::Nv12));
+        let rgb565 = drm_format_of_shm(WEnum::Value(wl_shm::Format::Rgb565));
+        assert_eq!(raw_video_format(rgb565), None);
+    }
+
+    #[test]
+    fn colour_representation_follows_the_caps_colorimetry() {
+        assert_eq!(
+            coefficients_and_range(Colorimetry::BT709),
+            (Coefficients::Bt709, Range::Limited)
+        );
+        assert_eq!(
+            coefficients_and_range(Colorimetry::UNKNOWN),
+            (Coefficients::Bt601, Range::Limited)
+        );
     }
 
     #[test]
@@ -2103,100 +2343,6 @@ mod tests {
             Some(0),
             "the target frame is running-time zero after a flushing seek"
         );
-    }
-
-    fn convert(
-        src: &[u8],
-        width: u32,
-        height: u32,
-        matrix: &YuvRgbMatrix,
-    ) -> Result<Vec<u8>, G2gError> {
-        let mut canvas = alloc::vec![0u8; (width * height) as usize * XRGB8888_BYTES_PER_PIXEL];
-        nv12_to_xrgb8888(src, width, height, matrix, &mut canvas)?;
-        Ok(canvas)
-    }
-
-    #[test]
-    fn nv12_to_xrgb_yields_correct_byte_count() {
-        // 4x2 NV12 is 12 bytes in and 32 bytes of XRGB8888 out
-        let src = alloc::vec![16u8; 12];
-        let out = convert(&src, 4, 2, &YuvRgbMatrix::new(Colorimetry::UNKNOWN)).unwrap();
-        assert_eq!(out.len(), 32);
-    }
-
-    #[test]
-    fn nv12_to_xrgb_neutral_grey_pixel_round_trips() {
-        // limited-range Y 126 with neutral chroma is grey 128
-        let mut src = alloc::vec![0u8; 6];
-        for px in &mut src[..4] {
-            *px = 126; // Y
-        }
-        src[4] = 128; // U
-        src[5] = 128; // V
-        let out = convert(&src, 2, 2, &YuvRgbMatrix::new(Colorimetry::UNKNOWN)).unwrap();
-        for px in out.as_chunks::<4>().0 {
-            assert!((125..=131).contains(&px[0]), "blue out of range: {}", px[0]);
-            assert!(
-                (125..=131).contains(&px[1]),
-                "green out of range: {}",
-                px[1]
-            );
-            assert!((125..=131).contains(&px[2]), "red out of range: {}", px[2]);
-            assert_eq!(px[3], 0xFF, "alpha must be 0xFF");
-        }
-    }
-
-    #[test]
-    fn configure_takes_the_convert_matrix_from_the_caps() {
-        let src = alloc::vec![81u8, 81, 81, 81, 90, 240];
-        let nv12_caps = |colorimetry| Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
-            width: Dim::Fixed(2),
-            height: Dim::Fixed(2),
-            framerate: Rate::Any,
-            interlace: g2g_core::Interlace::Any,
-            colorimetry,
-            pixel_aspect: g2g_core::PixelAspect::Any,
-        };
-        // CI has no compositor for the worker to connect to
-        let mut sink = WaylandSink::new();
-        let convert = |sink: &WaylandSink| convert(&src, 2, 2, &sink.matrix).unwrap();
-
-        let _ = sink.configure_pipeline(&nv12_caps(Colorimetry::UNKNOWN));
-        let untagged = convert(&sink);
-        let _ = sink.configure_pipeline(&nv12_caps(Colorimetry::BT601));
-        assert_eq!(untagged, convert(&sink), "untagged converts as BT.601");
-        let _ = sink.configure_pipeline(&nv12_caps(Colorimetry::BT709));
-        assert_ne!(untagged, convert(&sink), "BT.709 converts differently");
-    }
-
-    #[test]
-    fn nv12_to_xrgb_matches_videoconvert_to_bgra() {
-        const WIDTH: u32 = 4;
-        const HEIGHT: u32 = 2;
-        let src: Vec<u8> = (0..12u8).map(|i| i * 20).collect();
-        let expected = crate::videoconvert::convert(
-            &src,
-            RawVideoFormat::Nv12,
-            RawVideoFormat::Bgra8,
-            WIDTH as usize,
-            HEIGHT as usize,
-            Colorimetry::UNKNOWN,
-        );
-        let out = convert(
-            &src,
-            WIDTH,
-            HEIGHT,
-            &YuvRgbMatrix::new(Colorimetry::UNKNOWN),
-        )
-        .unwrap();
-        assert_eq!(out, expected.to_vec());
-    }
-
-    #[test]
-    fn nv12_to_xrgb_rejects_truncated_source() {
-        let src = alloc::vec![0u8; 8]; // Need 12 for 4x2 NV12.
-        assert!(convert(&src, 4, 2, &YuvRgbMatrix::new(Colorimetry::UNKNOWN)).is_err());
     }
 
     #[test]
