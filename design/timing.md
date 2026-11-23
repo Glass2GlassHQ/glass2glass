@@ -441,12 +441,25 @@ commits, and the compositor reports the time the frame reached the screen or tha
 it was discarded. Presented and discarded feedback are the sink's presented and
 dropped counts, and the latency sample is the presentation time minus the frame's
 arrival. The sink moves the presentation time onto the elected clock by reading
-that clock and subtracting how long ago, on the compositor's clock, the frame was
-shown, then records the signed difference from that frame's deadline
+that clock and adding the presentation time's offset from now on the compositor's
+clock, which mutter can report as later than the feedback's arrival, then records the signed difference from that frame's deadline
 (`PresentationPacer::last_deadline_ns`, captured where `judge` derived it, so the
 reading is against the anchor the frame was actually held to). At end of stream
 the sink waits for the feedback of the frames it has committed, until 250 ms pass
-with no feedback, since a compositor sends none for a surface it is not painting.
+with no feedback, since a compositor sends none for a surface it is not painting,
+and counts the frames still without feedback as dropped.
+
+When the compositor offers both `wp_fifo_v1` and `wp_commit_timing_v1` (mutter
+does, Weston 13 does not), `WaylandSink` stops waiting for frame callbacks. The
+pacer wakes the sink one display refresh before a frame's deadline, the refresh
+being the one the last presentation feedback reported, and the sink commits the
+frame with a fifo barrier and the deadline, moved onto the compositor's clock, as
+its target time. The compositor then shows it at the first refresh at or after the
+target. On a 30 Hz mutter desktop, 60 frames of `videotestsrc` in a release build
+land a median 3 to 15 ms after their deadlines, depending on the phase of the
+deadlines against the refresh, against 15 to 21 ms when the sink commits at the
+deadline and waits for frame callbacks. Without both protocols the sink commits at
+the deadline and waits for the frame callback.
 `deadline_error_samples()` returns the run's samples, capped like the latency
 samples and empty for an unpaced sink. In an A/V graph the elected clock is the
 audio sink's, which makes the series the video-against-audio sync error: its p95 is

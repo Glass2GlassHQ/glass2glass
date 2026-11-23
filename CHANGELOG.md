@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2530: Commit `waylandsink` frames at target times with `wp_fifo_v1` and `wp_commit_timing_v1`.
 - M2529: Time `waylandsink` frames with `wp_presentation` feedback.
 - M2528: Release evicted dma-buf imports in `kmssink` and `waylandsink`.
 - M2527: Blend overlays in `kmssink` without an ARGB plane and scale to the display.

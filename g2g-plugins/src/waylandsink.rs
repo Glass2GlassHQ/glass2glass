@@ -30,6 +30,12 @@ use smithay_client_toolkit::{
         protocol::{wl_buffer, wl_output, wl_shm, wl_subsurface::WlSubsurface, wl_surface},
         Connection, Dispatch, QueueHandle,
     },
+    reexports::protocols::wp::commit_timing::v1::client::{
+        wp_commit_timer_v1::WpCommitTimerV1, wp_commit_timing_manager_v1::WpCommitTimingManagerV1,
+    },
+    reexports::protocols::wp::fifo::v1::client::{
+        wp_fifo_manager_v1::WpFifoManagerV1, wp_fifo_v1::WpFifoV1,
+    },
     reexports::protocols::wp::linux_dmabuf::zv1::client::{
         zwp_linux_buffer_params_v1, zwp_linux_dmabuf_feedback_v1,
     },
@@ -215,6 +221,7 @@ pub struct WaylandSink {
     latency: Arc<LatencyRecorder>,
     frames_dropped: Arc<AtomicU64>,
     last_frame_callback_ns: Arc<AtomicU64>,
+    commit_lead_ns: Arc<AtomicU64>,
     pacing: PacingPolicy,
     pacer: PresentationPacer,
     last_present_done_ns: u64,
@@ -271,6 +278,7 @@ impl WaylandSink {
             latency: Arc::new(LatencyRecorder::new()),
             frames_dropped: Arc::new(AtomicU64::new(0)),
             last_frame_callback_ns: Arc::new(AtomicU64::new(0)),
+            commit_lead_ns: Arc::new(AtomicU64::new(0)),
             pacing: PacingPolicy::default(),
             pacer: PresentationPacer::for_video_sink(),
             last_present_done_ns: 0,
@@ -482,6 +490,8 @@ impl AsyncElement for WaylandSink {
         self.last_frame_callback_ns
             .store(monotonic_ns(), Ordering::Relaxed);
         let last_frame_callback_ns = Arc::clone(&self.last_frame_callback_ns);
+        self.commit_lead_ns.store(0, Ordering::Relaxed);
+        let commit_lead_ns = Arc::clone(&self.commit_lead_ns);
         let title = self.title.clone();
         let app_id = self.app_id.clone();
         let fullscreen = self.fullscreen;
@@ -514,6 +524,7 @@ impl AsyncElement for WaylandSink {
                     latency,
                     deadline_errors,
                     last_frame_callback_ns,
+                    commit_lead_ns,
                     ready_for_worker,
                 ) {
                     std::eprintln!("g2g-waylandsink worker error: {e:?}");
@@ -651,7 +662,12 @@ impl AsyncElement for WaylandSink {
                     }
                     let t_in = monotonic_ns();
                     let presented = self.frames_presented.load(Ordering::Relaxed);
-                    let pace = self.pacer.judge(&timing, presented);
+                    let commit_lead_ns = self.commit_lead_ns.load(Ordering::Relaxed);
+                    let pace = match self.pacer.judge(&timing, presented) {
+                        g2g_core::Pace::Wait(n) if n <= commit_lead_ns => g2g_core::Pace::Now,
+                        g2g_core::Pace::Wait(n) => g2g_core::Pace::Wait(n - commit_lead_ns),
+                        pace => pace,
+                    };
                     let deadline_ns = self.pacer.last_deadline_ns();
                     let wait_ns = match pace {
                         g2g_core::Pace::Wait(n) => n,
@@ -794,6 +810,11 @@ impl AsyncElement for WaylandSink {
     }
 }
 
+struct TimedCommits {
+    fifo: WpFifoV1,
+    timer: WpCommitTimerV1,
+}
+
 struct WorkerState {
     registry_state: RegistryState,
     output_state: OutputState,
@@ -827,6 +848,8 @@ struct WorkerState {
     deadline_errors: Arc<std::sync::Mutex<Vec<i64>>>,
     presentation: WpPresentation,
     presentation_clock: Option<u32>,
+    timed_commits: Option<TimedCommits>,
+    commit_lead_ns: Arc<AtomicU64>,
     unresolved_feedback: usize,
     last_feedback_ns: u64,
     last_frame_callback_ns: Arc<AtomicU64>,
@@ -856,6 +879,7 @@ fn worker_main(
     latency: Arc<LatencyRecorder>,
     deadline_errors: Arc<std::sync::Mutex<Vec<i64>>>,
     last_frame_callback_ns: Arc<AtomicU64>,
+    commit_lead_ns: Arc<AtomicU64>,
     ready: Arc<Handshake>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let conn = Connection::connect_to_env()?;
@@ -887,6 +911,26 @@ fn worker_main(
         subcompositor.create_subsurface(window.wl_surface().clone(), &qh);
     let picture_viewport = viewporter.get_viewport(&picture_surface, &qh, ());
     picture_subsurface.set_desync();
+    let fifo_manager = globals.bind::<WpFifoManagerV1, _, _>(&qh, 1..=1, ()).ok();
+    let commit_timing_manager = globals
+        .bind::<WpCommitTimingManagerV1, _, _>(&qh, 1..=1, ())
+        .ok();
+    let timed_commits = match (fifo_manager, commit_timing_manager) {
+        (Some(fifo_manager), Some(commit_timing_manager)) => Some(TimedCommits {
+            fifo: fifo_manager.get_fifo(&picture_surface, &qh, ()),
+            timer: commit_timing_manager.get_timer(&picture_surface, &qh, ()),
+        }),
+        _ => None,
+    };
+    g2g_core::g2g_log!(
+        Target::category(short_type_name::<WaylandSink>()),
+        "{}",
+        if timed_commits.is_some() {
+            "commits frames at their deadlines with wp_fifo_v1 and wp_commit_timing_v1"
+        } else {
+            "paces commits by frame callbacks"
+        }
+    );
     #[cfg(feature = "metadata")]
     let overlay = match overlay_device {
         Some(device) => Some(
@@ -946,6 +990,8 @@ fn worker_main(
         deadline_errors,
         presentation,
         presentation_clock: None,
+        timed_commits,
+        commit_lead_ns,
         unresolved_feedback: 0,
         last_feedback_ns: 0,
         last_frame_callback_ns,
@@ -976,6 +1022,9 @@ fn worker_main(
         let feedback_silent =
             monotonic_ns().saturating_sub(state.last_feedback_ns) >= FRAME_CALLBACK_SILENCE_NS;
         if state.closing && (state.unresolved_feedback == 0 || feedback_silent) {
+            state
+                .dropped
+                .fetch_add(state.unresolved_feedback as u64, Ordering::Relaxed);
             state.exit = true;
         }
     }
@@ -1206,6 +1255,16 @@ impl WorkerState {
         };
         #[cfg(not(feature = "metadata"))]
         let overlay_appeared = false;
+        let target = match (&self.timed_commits, &presented.deadline) {
+            (Some(_), Some(deadline)) => match self.presentation_time_of(deadline) {
+                Some(target_ns) => Some(Duration::from_nanos(target_ns)),
+                None => {
+                    self.exit = true;
+                    return;
+                }
+            },
+            _ => None,
+        };
         let surface = &self.picture_surface;
         // weston repaints a subsurface for its own commits only once a parent commit has placed it on an output
         let commit_parent = turned || !self.picture_has_buffer || overlay_appeared;
@@ -1213,8 +1272,24 @@ impl WorkerState {
             // wayland applies a sync subsurface's state with its parent's next commit
             self.picture_subsurface.set_sync();
         }
-        // smithay-client-toolkit passes the surface to `CompositorHandler::frame` in `FrameCallbackData`
-        surface.frame(&self.qh, FrameCallbackData(surface.clone()));
+        match &self.timed_commits {
+            Some(timed) => {
+                timed.fifo.wait_barrier();
+                timed.fifo.set_barrier();
+                if let Some(target) = target {
+                    let seconds = target.as_secs();
+                    timed.timer.set_timestamp(
+                        (seconds >> 32) as u32,
+                        seconds as u32,
+                        target.subsec_nanos(),
+                    );
+                }
+            }
+            None => {
+                // smithay-client-toolkit passes the surface to `CompositorHandler::frame` in `FrameCallbackData`
+                surface.frame(&self.qh, FrameCallbackData(surface.clone()));
+            }
+        }
         self.presentation.feedback(surface, &self.qh, presented);
         self.unresolved_feedback += 1;
         self.last_feedback_ns = monotonic_ns();
@@ -1239,6 +1314,10 @@ impl WorkerState {
         self.orientation = orientation;
         self.picture_has_buffer = true;
 
+        if self.timed_commits.is_some() {
+            let _ = ack.send(());
+            return;
+        }
         if let Some(stale) = self.pending_ack.take() {
             let _ = stale.send(());
         }
@@ -1440,6 +1519,25 @@ fn clock_now_ns(clock: u32) -> Option<u64> {
 }
 
 impl WorkerState {
+    fn presentation_time_of(&self, deadline: &PresentationDeadline) -> Option<u64> {
+        let Some(clock) = self.presentation_clock else {
+            g2g_core::g2g_error!(
+                Target::category(short_type_name::<WaylandSink>()),
+                "the compositor sent no presentation clock id"
+            );
+            return None;
+        };
+        let Some(now_ns) = clock_now_ns(clock) else {
+            g2g_core::g2g_error!(
+                Target::category(short_type_name::<WaylandSink>()),
+                "cannot read the compositor's presentation clock {clock}"
+            );
+            return None;
+        };
+        let until_deadline_ns = deadline.deadline_ns.saturating_sub(deadline.clock.now_ns());
+        Some(now_ns.saturating_add(until_deadline_ns))
+    }
+
     fn resolve_feedback(&mut self) {
         self.unresolved_feedback -= 1;
         self.last_feedback_ns = monotonic_ns();
@@ -1460,8 +1558,16 @@ impl Dispatch<WpPresentationFeedback, PresentedFrame> for WorkerState {
                 tv_sec_hi,
                 tv_sec_lo,
                 tv_nsec,
+                refresh,
                 ..
-            } => nanoseconds(u64::from(tv_sec_hi) << 32 | u64::from(tv_sec_lo), tv_nsec),
+            } => {
+                if state.timed_commits.is_some() {
+                    state
+                        .commit_lead_ns
+                        .store(u64::from(refresh), Ordering::Relaxed);
+                }
+                nanoseconds(u64::from(tv_sec_hi) << 32 | u64::from(tv_sec_lo), tv_nsec)
+            }
             wp_presentation_feedback::Event::Discarded => {
                 state.dropped.fetch_add(1, Ordering::Relaxed);
                 state.resolve_feedback();
@@ -1479,7 +1585,8 @@ impl Dispatch<WpPresentationFeedback, PresentedFrame> for WorkerState {
             state.exit = true;
             return;
         };
-        let Some(since_shown_ns) = clock_now_ns(clock).map(|now| now.saturating_sub(shown_ns))
+        // mutter reports presentation times later than the feedback arrives
+        let Some(shown_from_now_ns) = clock_now_ns(clock).map(|now| shown_ns as i64 - now as i64)
         else {
             g2g_core::g2g_error!(
                 Target::category(short_type_name::<WaylandSink>()),
@@ -1489,13 +1596,16 @@ impl Dispatch<WpPresentationFeedback, PresentedFrame> for WorkerState {
             return;
         };
         if frame.arrival_ns != 0 {
-            let shown_monotonic_ns = monotonic_ns().saturating_sub(since_shown_ns);
+            let shown_monotonic_ns = monotonic_ns().saturating_add_signed(shown_from_now_ns);
             state
                 .latency
                 .record(shown_monotonic_ns.saturating_sub(frame.arrival_ns));
         }
         if let Some(deadline) = &frame.deadline {
-            let shown_on_clock_ns = deadline.clock.now_ns().saturating_sub(since_shown_ns);
+            let shown_on_clock_ns = deadline
+                .clock
+                .now_ns()
+                .saturating_add_signed(shown_from_now_ns);
             let mut errors = state.deadline_errors.lock().expect("deadline errors lock");
             if errors.len() < PER_FRAME_SAMPLE_CAPACITY {
                 errors.push(shown_on_clock_ns as i64 - deadline.deadline_ns as i64);
@@ -1508,6 +1618,10 @@ delegate_dispatch2!(WorkerState);
 delegate_registry!(WorkerState);
 delegate_noop!(WorkerState: ignore WpViewporter);
 delegate_noop!(WorkerState: ignore WpViewport);
+delegate_noop!(WorkerState: ignore WpFifoManagerV1);
+delegate_noop!(WorkerState: ignore WpFifoV1);
+delegate_noop!(WorkerState: ignore WpCommitTimingManagerV1);
+delegate_noop!(WorkerState: ignore WpCommitTimerV1);
 
 #[cfg(feature = "metadata")]
 struct OverlayBuffer {
