@@ -718,9 +718,11 @@ browser that already holds both outputs reuses it without an element.
 (Zhang et al. 2022) over the `ObjectDetection` nodes of each frame. Every
 detection on a confirmed track gets a `Tracking { object_id }` node and a
 `Detection -Tracks-> Tracking` relation, the shape the hosted Python element
-writes and `analyticsoverlay show-track=true` draws. Nothing else on the frame
-changes, and a frame with no `AnalyticsMeta` passes through without advancing
-the tracker, so a detector that skips frames does not age the tracks.
+writes and `analyticsoverlay show-track=true` draws. A tracked detection's box
+becomes its track's Kalman-filtered box, as Ultralytics reports tracked objects,
+which keeps detector noise off the screen. Nothing else on the frame changes,
+and a frame with no `AnalyticsMeta` passes through without advancing the
+tracker, so a detector that skips frames does not age the tracks.
 
 Each track is a constant-velocity Kalman filter over box centre, aspect ratio and
 height in normalised coordinates, with the SORT noise terms. A frame first

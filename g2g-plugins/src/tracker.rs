@@ -561,6 +561,17 @@ impl Tracker {
             let Some(object_id) = id else {
                 continue;
             };
+            // ultralytics reports a tracked object at its filtered box, not the detector's
+            let filtered = self
+                .tracks
+                .iter()
+                .find(|track| track.id == object_id)
+                .map(|track| track.filter.bbox());
+            if let (Some(bbox), AnalyticsNode::Detection(detection)) =
+                (filtered, &mut meta.nodes[node])
+            {
+                detection.bbox = bbox;
+            }
             let tracking = meta.push(AnalyticsNode::Tracking(Tracking { object_id }));
             meta.relate(node, tracking, RelationKind::Tracks);
         }
@@ -854,5 +865,40 @@ mod tests {
             .collect();
         assert_eq!(ids, [(first, 1), (second, 2)]);
         assert_eq!(meta.nodes.len(), nodes_before + 2, "one node per track");
+    }
+
+    #[tokio::test]
+    async fn a_tracked_box_moves_less_than_its_noisy_detections() {
+        const NOISE: f32 = 0.02;
+        const FRAMES: usize = 20;
+        let mut tracker = Tracker::new();
+        let mut sink = FrameSink::default();
+        for index in 0..FRAMES {
+            let x = 0.4 + NOISE * (index % 2) as f32;
+            let mut meta = AnalyticsMeta::new();
+            meta.add_detection(detection(x, 0.4, CONFIDENT));
+            tracker
+                .process(PipelinePacket::DataFrame(frame(Some(meta))), &mut sink)
+                .await
+                .unwrap();
+        }
+        let shown_x: Vec<f32> = sink
+            .frames
+            .iter()
+            .skip(FRAMES / 2)
+            .map(|frame| {
+                let meta = frame.meta.get::<AnalyticsMeta>().unwrap();
+                let AnalyticsNode::Detection(detection) = &meta.nodes[0] else {
+                    panic!("the detection stays the first node");
+                };
+                detection.bbox.x
+            })
+            .collect();
+        let spread = shown_x.iter().copied().fold(f32::MIN, f32::max)
+            - shown_x.iter().copied().fold(f32::MAX, f32::min);
+        assert!(
+            spread < NOISE / 2.0,
+            "shown boxes spread {spread} for detections spread {NOISE}"
+        );
     }
 }
