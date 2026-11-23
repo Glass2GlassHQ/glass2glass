@@ -482,7 +482,11 @@ pub(crate) fn map_axis_scaled(
     denominator: usize,
     src_n: usize,
 ) -> (usize, usize, u32) {
-    let pos = ((2 * out as i64 + 1) * numerator as i64 * 32768) / denominator as i64 - 32768;
+    let center = (2 * out as i64 + 1) * 32768;
+    let pos = center.checked_mul(numerator as i64).map_or_else(
+        || ((i128::from(center) * numerator as i128) / denominator as i128) as i64,
+        |product| product / denominator as i64,
+    ) - 32768;
     let max = ((src_n - 1) as i64) << 16;
     let pos = pos.clamp(0, max);
     let i0 = (pos >> 16) as usize;

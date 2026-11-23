@@ -31,7 +31,9 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
+use wgpu::util::DeviceExt;
 
 use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::memory::{DomainSet, MemoryDomainKind};
@@ -57,6 +59,8 @@ use crate::gpu::{
     texture_layout, texture_of, GpuContext, WgpuTextureLayout,
 };
 use crate::overlay_image::OverlayImage;
+#[cfg(feature = "metadata")]
+use crate::overlaycomposition::{RENDER_OVERLAYS_NAME, RENDER_OVERLAYS_PROPERTY};
 use crate::videoconvert::display::{display_sink_caps, DisplayInput};
 use crate::yuvmatrix::{dither_step, YuvToRgbWeights, DITHER_NOISE_SCALE, DITHER_NOISE_WEIGHTS};
 
@@ -91,6 +95,17 @@ const FRAGMENT_RGBA: &str = r#"
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
     return textureSample(src_tex, src_smp, in.uv);
+}
+"#;
+
+const FRAGMENT_IMAGE: &str = r#"
+@group(0) @binding(0) var src_tex: texture_2d<f32>;
+@group(0) @binding(1) var src_smp: sampler;
+@group(0) @binding(2) var<uniform> uv_region: vec4<f32>;
+
+@fragment
+fn fs(in: VsOut) -> @location(0) vec4<f32> {
+    return textureSample(src_tex, src_smp, uv_region.xy + in.uv * uv_region.zw);
 }
 "#;
 
@@ -282,6 +297,8 @@ impl BlitBindings {
 }
 
 const PICTURE_SIZE_BYTES: u64 = 8;
+const IMAGE_UV_BYTES: u64 = 16;
+const FULL_IMAGE_UV: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BlitLayout {
@@ -402,6 +419,18 @@ impl BlitPipeline {
                 count: None,
             });
         }
+        if compositing == BlitCompositing::OverTarget {
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding: bindings.picture_size_binding(),
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(IMAGE_UV_BYTES),
+                },
+                count: None,
+            });
+        }
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("wgpu-sink-bgl"),
             entries: &entries,
@@ -454,7 +483,11 @@ impl BlitPipeline {
         resources: &BlitResources,
         target: BlitTarget<'_>,
     ) {
-        let BlitTarget { view, viewport } = target;
+        let BlitTarget {
+            view,
+            viewport,
+            image_uv,
+        } = target;
         let bindings = blit_bindings(layout);
         // A two-plane NV12 texture cannot be bound whole, only through its two
         // plane views.
@@ -483,6 +516,27 @@ impl BlitPipeline {
             entries.push(wgpu::BindGroupEntry {
                 binding: bindings.picture_size_binding(),
                 resource: resources.picture_size.as_entire_binding(),
+            });
+        }
+        let uv_uniform;
+        if self.compositing == BlitCompositing::OverTarget {
+            let mut bytes = [0; IMAGE_UV_BYTES as usize];
+            for (channel, value) in bytes
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(image_uv.unwrap_or(FULL_IMAGE_UV))
+            {
+                *channel = value.to_le_bytes();
+            }
+            uv_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("wgpu-sink-image-uv"),
+                contents: &bytes,
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: bindings.picture_size_binding(),
+                resource: uv_uniform.as_entire_binding(),
             });
         }
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -524,6 +578,7 @@ impl BlitPipeline {
 pub(crate) struct BlitTarget<'a> {
     pub view: &'a wgpu::TextureView,
     pub viewport: ViewportRectangle,
+    pub image_uv: Option<[f32; 4]>,
 }
 
 /// The sampler and picture size uniform a blit binds besides the source planes.
@@ -713,6 +768,8 @@ pub struct WgpuSink {
     /// PTS pacing + QoS late-drop: idle until the runner hands over a clock, and
     /// the default lateness bound is 5 ms past the frame end.
     pacer: PresentationPacer,
+    #[cfg(feature = "metadata")]
+    render_overlays: bool,
 }
 
 impl core::fmt::Debug for WgpuSink {
@@ -773,6 +830,7 @@ struct PackedYuv16Blit {
 struct UploadedImage {
     texture: wgpu::Texture,
     generation: u64,
+    pixels: Arc<[u8]>,
 }
 
 const OVERLAY_SHADER: &str = "
@@ -860,7 +918,7 @@ impl VideoRenderer {
             device,
             target_format,
             WgpuTextureLayout::Rgba.into(),
-            FRAGMENT_RGBA,
+            FRAGMENT_IMAGE,
             BlitCompositing::OverTarget,
         );
         Self {
@@ -1086,7 +1144,11 @@ impl VideoRenderer {
             &texture,
             layout,
             &self.resources,
-            BlitTarget { view, viewport },
+            BlitTarget {
+                view,
+                viewport,
+                image_uv: None,
+            },
         );
         self.ctx.queue.submit([encoder.finish()]);
         Ok(viewport)
@@ -1174,8 +1236,23 @@ impl VideoRenderer {
         image: &OverlayImage,
         view: &wgpu::TextureView,
     ) -> Result<(), G2gError> {
+        self.draw_image_region(image, view, None)
+    }
+
+    fn draw_image_region(
+        &mut self,
+        image: &OverlayImage,
+        view: &wgpu::TextureView,
+        image_uv: Option<[f32; 4]>,
+    ) -> Result<(), G2gError> {
         let row_bytes = image.width.checked_mul(4).ok_or(G2gError::CapsMismatch)?;
-        if (image.rgba.len() as u64) < u64::from(row_bytes) * u64::from(image.height) {
+        let max_size = self.ctx.device.limits().max_texture_dimension_2d;
+        if image.width == 0
+            || image.height == 0
+            || image.width > max_size
+            || image.height > max_size
+            || (image.rgba.len() as u64) < u64::from(row_bytes) * u64::from(image.height)
+        {
             return Err(G2gError::CapsMismatch);
         }
         let size = wgpu::Extent3d {
@@ -1187,7 +1264,9 @@ impl VideoRenderer {
             .image_upload
             .as_ref()
             .filter(|uploaded| uploaded.texture.size() == size);
-        if current.is_none_or(|uploaded| uploaded.generation != image.generation) {
+        if current.is_none_or(|uploaded| {
+            uploaded.generation != image.generation || !Arc::ptr_eq(&uploaded.pixels, &image.rgba)
+        }) {
             let texture = match current {
                 Some(uploaded) => uploaded.texture.clone(),
                 None => self.ctx.device.create_texture(&wgpu::TextureDescriptor {
@@ -1214,6 +1293,7 @@ impl VideoRenderer {
             self.image_upload = Some(UploadedImage {
                 texture,
                 generation: image.generation,
+                pixels: image.rgba.clone(),
             });
         }
         let texture = &self.image_upload.as_ref().expect("uploaded above").texture;
@@ -1232,9 +1312,60 @@ impl VideoRenderer {
             BlitTarget {
                 view,
                 viewport: image.placement,
+                image_uv,
             },
         );
         self.ctx.queue.submit([encoder.finish()]);
+        Ok(())
+    }
+
+    #[cfg(feature = "metadata")]
+    fn draw_composition(
+        &mut self,
+        composition: &g2g_core::OverlayCompositionMeta,
+        view: &wgpu::TextureView,
+        viewport: ViewportRectangle,
+    ) -> Result<(), G2gError> {
+        let source = self.source.ok_or(G2gError::NotConfigured)?;
+        let viewport_edge = |edge: u32, output: u32, input: u32| {
+            ((u64::from(edge) * u64::from(output) + u64::from(input) / 2) / u64::from(input)) as u32
+        };
+        for rectangle in composition.rectangles() {
+            let placement = rectangle.placement();
+            let Some(clip) = placement.clipped_to(source.width, source.height) else {
+                continue;
+            };
+            let x = viewport_edge(clip.left, viewport.width, source.width);
+            let y = viewport_edge(clip.top, viewport.height, source.height);
+            let right = viewport_edge(clip.left + clip.width, viewport.width, source.width);
+            let bottom = viewport_edge(clip.top + clip.height, viewport.height, source.height);
+            if x == right || y == bottom {
+                continue;
+            }
+            let uv = [
+                (i64::from(clip.left) - i64::from(placement.x)) as f32 / placement.width as f32,
+                (i64::from(clip.top) - i64::from(placement.y)) as f32 / placement.height as f32,
+                clip.width as f32 / placement.width as f32,
+                clip.height as f32 / placement.height as f32,
+            ];
+            let (width, height) = rectangle.pixel_size();
+            self.draw_image_region(
+                &OverlayImage {
+                    placement: ViewportRectangle {
+                        x: viewport.x + x,
+                        y: viewport.y + y,
+                        width: right - x,
+                        height: bottom - y,
+                    },
+                    width,
+                    height,
+                    rgba: rectangle.pixels().clone(),
+                    generation: 0,
+                },
+                view,
+                Some(uv),
+            )?;
+        }
         Ok(())
     }
 
@@ -1366,6 +1497,8 @@ impl WgpuSink {
             target,
             presented: 0,
             pacer: PresentationPacer::for_video_sink(),
+            #[cfg(feature = "metadata")]
+            render_overlays: false,
         }
     }
 
@@ -1463,6 +1596,31 @@ impl WgpuSink {
     /// owned texture. The path [`process`](AsyncElement::process) and the
     /// windowed present sink share, past pacing.
     pub fn present_frame(&mut self, domain: &MemoryDomain) -> Result<(), G2gError> {
+        self.present_with(domain, |_, _, _| Ok(()))
+    }
+
+    #[cfg(feature = "metadata")]
+    pub(crate) fn present_composited_frame(
+        &mut self,
+        frame: &g2g_core::Frame,
+    ) -> Result<(), G2gError> {
+        self.present_with(&frame.domain, |renderer, view, viewport| {
+            if let Some(composition) = frame.meta.get::<g2g_core::OverlayCompositionMeta>() {
+                renderer.draw_composition(composition, view, viewport)?;
+            }
+            Ok(())
+        })
+    }
+
+    fn present_with(
+        &mut self,
+        domain: &MemoryDomain,
+        overlays: impl FnOnce(
+            &mut VideoRenderer,
+            &wgpu::TextureView,
+            ViewportRectangle,
+        ) -> Result<(), G2gError>,
+    ) -> Result<(), G2gError> {
         // Acquire the destination view. For a surface, hold the SurfaceTexture
         // until after submit so it can be presented.
         let surface_frame = match &self.target {
@@ -1492,7 +1650,8 @@ impl WgpuSink {
             (Target::Surface { .. }, None) => unreachable!("returned above on no frame"),
         };
         let target_size = self.target_size();
-        self.renderer.draw(domain, &dst_view, target_size)?;
+        let viewport = self.renderer.draw(domain, &dst_view, target_size)?;
+        overlays(&mut self.renderer, &dst_view, viewport)?;
         if let Some(frame) = surface_frame {
             self.ctx.queue.present(frame);
         }
@@ -1585,11 +1744,23 @@ impl AsyncElement for WgpuSink {
             QOS_INTERVAL_PROPERTY,
             SYNC_PROPERTY,
             FORCE_ASPECT_RATIO_PROPERTY,
+            #[cfg(feature = "metadata")]
+            RENDER_OVERLAYS_PROPERTY,
         ]
+    }
+
+    #[cfg(feature = "metadata")]
+    fn meta_requests(&self) -> g2g_core::meta::MetaRequests {
+        crate::overlaycomposition::render_requests(self.render_overlays)
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         match name {
+            #[cfg(feature = "metadata")]
+            RENDER_OVERLAYS_NAME => {
+                self.render_overlays = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
             FORCE_ASPECT_RATIO_NAME => {
                 self.renderer
                     .set_force_aspect_ratio(value.as_bool().ok_or(PropError::Type)?);
@@ -1604,6 +1775,8 @@ impl AsyncElement for WgpuSink {
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
+            #[cfg(feature = "metadata")]
+            RENDER_OVERLAYS_NAME => Some(PropValue::Bool(self.render_overlays)),
             FORCE_ASPECT_RATIO_NAME => Some(PropValue::Bool(self.renderer.force_aspect_ratio())),
             _ => self.pacer.get_property(name),
         }
@@ -1630,6 +1803,10 @@ impl AsyncElement for WgpuSink {
                     let paced = self.pacer.judge(&frame.timing, self.presented);
                     if !wait_to_present(paced).await {
                         return Ok(());
+                    }
+                    #[cfg(feature = "metadata")]
+                    if self.render_overlays {
+                        return self.present_composited_frame(&frame);
                     }
                     self.present_frame(&frame.domain)?;
                 }
@@ -1736,6 +1913,116 @@ mod tests {
             presentable_format(Bgra8UnormSrgb, &[Bgra8UnormSrgb]),
             Bgra8UnormSrgb
         );
+    }
+
+    #[cfg(feature = "metadata")]
+    #[tokio::test]
+    async fn overlay_composition_reaches_the_wgpu_viewport() {
+        use crate::appsink::{register_appsink_pull, AppSink, Pull};
+        use crate::overlaycomposition::OverlayComposition;
+        use crate::videotestsrc::{Pattern, VideoTestSrc};
+        use g2g_core::runtime::{run_graph, GraphNodeRef};
+        use g2g_core::{Graph, OverlayCompositionMeta, OverlayPlacement, OverlayRectangle};
+
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
+        let Some(ctx) = shared_ctx().await else {
+            std::eprintln!("no wgpu adapter; skipping the overlay composition readback");
+            return;
+        };
+        let rectangles = OverlayCompositionMeta::new(alloc::vec![
+            OverlayRectangle::new(
+                OverlayPlacement {
+                    x: -1,
+                    y: 0,
+                    width: 2,
+                    height: 1
+                },
+                2,
+                1,
+                [255, 0, 0, 255, 0, 255, 0, 255].into(),
+            )
+            .unwrap(),
+            OverlayRectangle::new(
+                OverlayPlacement {
+                    x: 1,
+                    y: 0,
+                    width: 2,
+                    height: 1
+                },
+                2,
+                1,
+                [0, 0, 128, 128, 0, 0, 0, 0].into(),
+            )
+            .unwrap(),
+        ]);
+        let mut sink = WgpuSink::offscreen(ctx.clone(), 4, 4);
+        assert!(!sink.meta_requests().wants::<OverlayCompositionMeta>());
+        sink.set_property("render-overlays", PropValue::Bool(true))
+            .unwrap();
+        assert!(sink.meta_requests().wants::<OverlayCompositionMeta>());
+        let black = [0, 0, 0, 255];
+        let mut expected = [black; 16];
+        expected[4] = [0, 255, 0, 255];
+        expected[5] = [0, 0, 128, 255];
+
+        for split in [false, true] {
+            let composition = rectangles.clone();
+            let overlay =
+                OverlayComposition::new().with_draw(move |_, _| Some(composition.clone()));
+            let mut graph = Graph::new();
+            let source = graph.add_source(GraphNodeRef::source(
+                VideoTestSrc::new(4, 2, 25, 1).with_pattern(Pattern::Black),
+            ));
+            let overlay = graph.add_transform(GraphNodeRef::element(overlay));
+            let display = graph.add_sink(GraphNodeRef::element_ref(&mut sink));
+            graph.link(source, overlay).unwrap();
+            let pull = if split {
+                let channel = "m2519-fallback";
+                let pull = register_appsink_pull(channel);
+                let tee = graph.add_tee(2);
+                let app =
+                    graph.add_sink(GraphNodeRef::element(AppSink::new().with_channel(channel)));
+                graph.link(overlay, tee.input()).unwrap();
+                graph.link(tee.out(0), display).unwrap();
+                graph.link(tee.out(1), app).unwrap();
+                Some(pull)
+            } else {
+                graph.link(overlay, display).unwrap();
+                None
+            };
+            let stats = run_graph(graph, &g2g_core::clock::MonotonicClock, 4)
+                .await
+                .unwrap();
+            assert_eq!(stats.frames_consumed, 1 + u64::from(split));
+            assert_eq!(sink.read_target().unwrap(), expected.as_flattened());
+            if let Some(pull) = pull {
+                let Pull::Frame(frame) = pull.try_pull() else {
+                    panic!("no fallback frame")
+                };
+                assert!(frame.meta.get::<OverlayCompositionMeta>().is_none());
+                assert_eq!(
+                    frame.domain.as_system_slice().unwrap(),
+                    expected[4..12].as_flattened()
+                );
+            }
+        }
+
+        // The same draw path works when the video is already a device texture.
+        let texture = source_texture(&ctx, 4, 2, [black; 8].as_flattened());
+        let mut frame = wgpu_frame(&ctx, 4, 2, texture, 0);
+        frame.meta.attach(rectangles);
+        let uncomposited = frame.share();
+        sink.process(PipelinePacket::DataFrame(frame), &mut NullSink)
+            .await
+            .unwrap();
+        assert_eq!(sink.read_target().unwrap(), expected.as_flattened());
+
+        sink.set_property("render-overlays", PropValue::Bool(false))
+            .unwrap();
+        sink.process(PipelinePacket::DataFrame(uncomposited), &mut NullSink)
+            .await
+            .unwrap();
+        assert_eq!(sink.read_target().unwrap(), [black; 16].as_flattened());
     }
 
     #[tokio::test]

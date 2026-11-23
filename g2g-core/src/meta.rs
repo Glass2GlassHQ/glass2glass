@@ -1485,6 +1485,127 @@ mod on {
         }
     }
 
+    /// Where an overlay bitmap is drawn, in stored-picture pixels. Negative
+    /// coordinates place part or all of the bitmap outside the picture.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct OverlayPlacement {
+        pub x: i32,
+        pub y: i32,
+        pub width: u32,
+        pub height: u32,
+    }
+
+    impl OverlayPlacement {
+        /// The visible region in picture coordinates, with an exclusive end.
+        pub fn clipped_to(self, width: u32, height: u32) -> Option<super::CropRectangle> {
+            let clip = |start: i32, extent: u32, limit: u32| {
+                let start = i64::from(start);
+                let end = (start + i64::from(extent)).min(i64::from(limit));
+                let start = start.max(0);
+                (end > start).then(|| (start as u32, (end - start) as u32))
+            };
+            let (left, width) = clip(self.x, self.width, width)?;
+            let (top, height) = clip(self.y, self.height, height)?;
+            Some(super::CropRectangle {
+                left,
+                top,
+                width,
+                height,
+            })
+        }
+    }
+
+    /// A top-down, tightly packed, premultiplied RGBA8 bitmap and its placement.
+    /// The bitmap is immutable and can be shared by successive video frames.
+    #[derive(Clone, PartialEq, Eq)]
+    pub struct OverlayRectangle {
+        placement: OverlayPlacement,
+        pixel_width: u32,
+        pixel_height: u32,
+        pixels: Arc<[u8]>,
+    }
+
+    impl core::fmt::Debug for OverlayRectangle {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.debug_struct("OverlayRectangle")
+                .field("placement", &self.placement)
+                .field("pixel_size", &self.pixel_size())
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl OverlayRectangle {
+        /// Return `None` for empty geometry or a bitmap of the wrong length.
+        /// `pixels` must already have its RGB channels premultiplied by alpha.
+        pub fn new(
+            placement: OverlayPlacement,
+            pixel_width: u32,
+            pixel_height: u32,
+            pixels: Arc<[u8]>,
+        ) -> Option<Self> {
+            let len =
+                crate::RawVideoFormat::Rgba8.unpadded_frame_bytes(pixel_width, pixel_height)?;
+            if placement.width == 0
+                || placement.height == 0
+                || len == 0
+                || (pixels.len() as u64) != len
+            {
+                return None;
+            }
+            Some(Self {
+                placement,
+                pixel_width,
+                pixel_height,
+                pixels,
+            })
+        }
+
+        pub fn placement(&self) -> OverlayPlacement {
+            self.placement
+        }
+
+        pub fn pixel_size(&self) -> (u32, u32) {
+            (self.pixel_width, self.pixel_height)
+        }
+
+        pub fn pixels(&self) -> &Arc<[u8]> {
+            &self.pixels
+        }
+    }
+
+    /// Ordered overlay rectangles. Later entries are drawn over earlier ones.
+    #[derive(Debug, Default, Clone, PartialEq, Eq)]
+    pub struct OverlayCompositionMeta(Arc<[OverlayRectangle]>);
+
+    impl OverlayCompositionMeta {
+        pub fn new(rectangles: Vec<OverlayRectangle>) -> Self {
+            Self(rectangles.into())
+        }
+
+        pub fn rectangles(&self) -> &[OverlayRectangle] {
+            &self.0
+        }
+    }
+
+    impl FrameMeta for OverlayCompositionMeta {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+        fn clone_box(&self) -> Box<dyn FrameMeta> {
+            Box::new(self.clone())
+        }
+        fn propagate(&self, transform: Transform) -> Propagation {
+            match transform {
+                Transform::Copy => Propagation::Keep,
+                // The placement is in the original picture's coordinates.
+                Transform::Scale | Transform::Crop | Transform::Encode => Propagation::Drop,
+            }
+        }
+    }
+
     /// The SMPTE ST 12M timecode a coded picture carries (H.264 `pic_timing` /
     /// H.265 `time_code` SEI, or a container timecode track): where this frame
     /// sits on the source's own clock, which is what an edit list, a broadcast

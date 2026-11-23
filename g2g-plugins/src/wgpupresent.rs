@@ -61,6 +61,8 @@ use std::sync::mpsc::{channel, Sender as CommandSender};
 use crate::clock::wait_to_present;
 use crate::display_aspect::{display_size, FORCE_ASPECT_RATIO_NAME, FORCE_ASPECT_RATIO_PROPERTY};
 use crate::gpu::GpuContext;
+#[cfg(feature = "metadata")]
+use crate::overlaycomposition::{RENDER_OVERLAYS_NAME, RENDER_OVERLAYS_PROPERTY};
 #[cfg(target_os = "linux")]
 use crate::waylandwindow::run_window;
 use crate::wgpusink::WgpuSink;
@@ -74,7 +76,7 @@ use crate::windowworker::{
 use crate::worker_ready::Handshake;
 use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::log::{short_type_name, LogName, LogSource, Target};
-use g2g_core::memory::{DomainSet, MemoryDomain, MemoryDomainKind};
+use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     g2g_error, AsyncElement, BusHandle, Caps, CapsConstraint, ClockCandidate, ClockPriority,
@@ -99,9 +101,8 @@ const WINDOW_READY_POLL: Duration = Duration::from_millis(50);
 const FOLLOW_VIDEO: u32 = 0;
 
 /// Sink-side handle set. Only `Send + Sync` state lives here so the multi-thread
-/// runner can move the sink between tasks; the worker's frame payload is the
-/// frame's memory domain, moved across untouched (a GPU texture handle, or the
-/// system-memory slice, never a copy).
+/// runner can move the sink between tasks. Each frame moves to the worker
+/// with its memory domain and any overlays the worker should draw.
 ///
 /// # Example
 ///
@@ -120,7 +121,7 @@ pub struct WgpuPresentSink {
     /// Requested window size; [`FOLLOW_VIDEO`] means the negotiated geometry.
     window_width: u32,
     window_height: u32,
-    cmd_tx: Option<CommandSender<WorkerCmd<MemoryDomain>>>,
+    cmd_tx: Option<CommandSender<WorkerCmd<Frame>>>,
     worker: Option<JoinHandle<()>>,
     /// Caps the window's renderer opens with, from the last `configure_pipeline`.
     caps: Option<Caps>,
@@ -129,6 +130,8 @@ pub struct WgpuPresentSink {
     height: u32,
     pixel_aspect: PixelAspect,
     force_aspect_ratio: bool,
+    #[cfg(feature = "metadata")]
+    render_overlays: bool,
     present_mode: wgpu::PresentMode,
     frames_presented: Arc<AtomicU64>,
     window_closed: Arc<AtomicBool>,
@@ -185,6 +188,8 @@ impl WgpuPresentSink {
             height: 0,
             pixel_aspect: PixelAspect::Any,
             force_aspect_ratio: true,
+            #[cfg(feature = "metadata")]
+            render_overlays: false,
             present_mode: wgpu::PresentMode::Fifo,
             frames_presented: Arc::new(AtomicU64::new(0)),
             window_closed: Arc::default(),
@@ -332,7 +337,7 @@ impl WgpuPresentSink {
             return Ok(());
         }
         let caps = self.caps.clone().ok_or(G2gError::NotConfigured)?;
-        let (tx, rx) = channel::<WorkerCmd<MemoryDomain>>();
+        let (tx, rx) = channel::<WorkerCmd<Frame>>();
         let presented = Arc::clone(&self.frames_presented);
         let window_closed = Arc::clone(&self.window_closed);
         let latency = Arc::clone(&self.latency);
@@ -548,6 +553,8 @@ impl AsyncElement for WgpuPresentSink {
             )
             .with_default("0"),
             FORCE_ASPECT_RATIO_PROPERTY,
+            #[cfg(feature = "metadata")]
+            RENDER_OVERLAYS_PROPERTY,
             PropertySpec::new("present-mode", PropKind::Str, "wgpu surface present mode")
                 .with_default(FIFO_PRESENT_MODE)
                 .with_enum_values("fifo | mailbox"),
@@ -559,8 +566,18 @@ impl AsyncElement for WgpuPresentSink {
         PROPS
     }
 
+    #[cfg(feature = "metadata")]
+    fn meta_requests(&self) -> g2g_core::meta::MetaRequests {
+        crate::overlaycomposition::render_requests(self.render_overlays)
+    }
+
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         match name {
+            #[cfg(feature = "metadata")]
+            RENDER_OVERLAYS_NAME => {
+                self.render_overlays = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
             "title" => {
                 self.title = value.as_str().ok_or(PropError::Type)?.into();
                 Ok(())
@@ -603,6 +620,8 @@ impl AsyncElement for WgpuPresentSink {
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
+            #[cfg(feature = "metadata")]
+            RENDER_OVERLAYS_NAME => Some(PropValue::Bool(self.render_overlays)),
             "title" => Some(PropValue::Str(self.title.clone())),
             #[cfg(target_os = "linux")]
             "app-id" => Some(PropValue::Str(self.app_id.clone())),
@@ -657,20 +676,29 @@ impl AsyncElement for WgpuPresentSink {
                 self.pacer.adopt_framerate(caps);
             }
             match packet {
-                PipelinePacket::DataFrame(Frame { domain, timing, .. }) => {
+                PipelinePacket::DataFrame(frame) => {
                     self.open_window()?;
                     // PTS pacing: hold the frame until its deadline on the elected
                     // clock, or drop it when it is already too late (the QoS
                     // bound) or outside the segment. Unpaced without a clock:
                     // present as fast as the compositor allows.
                     let presented = self.frames_presented.load(Ordering::Relaxed);
-                    if !wait_to_present(self.pacer.judge(&timing, presented)).await {
+                    if !wait_to_present(self.pacer.judge(&frame.timing, presented)).await {
                         return Ok(());
                     }
                     let tx = self.cmd_tx.as_ref().ok_or(G2gError::NotConfigured)?;
                     // Block until the worker presents this frame (paced by the
                     // compositor's release of the swapchain image).
-                    present_on_worker(tx, domain, timing.arrival_ns, &self.window_closed).await?;
+                    #[cfg(feature = "metadata")]
+                    let frame = {
+                        let mut frame = frame;
+                        if !self.render_overlays {
+                            frame.meta.remove::<g2g_core::OverlayCompositionMeta>();
+                        }
+                        frame
+                    };
+                    let arrival_ns = frame.timing.arrival_ns;
+                    present_on_worker(tx, frame, arrival_ns, &self.window_closed).await?;
                     Ok(())
                 }
                 PipelinePacket::CapsChanged(_) => Ok(()),
@@ -713,10 +741,13 @@ struct SurfaceRenderer {
 }
 
 impl WindowRenderer for SurfaceRenderer {
-    type Frame = MemoryDomain;
+    type Frame = Frame;
 
     fn present(&mut self, frame: &Self::Frame) -> Result<(), G2gError> {
-        self.sink.present_frame(frame)
+        #[cfg(feature = "metadata")]
+        return self.sink.present_composited_frame(frame);
+        #[cfg(not(feature = "metadata"))]
+        self.sink.present_frame(&frame.domain)
     }
 
     fn resize(&mut self, width: u32, height: u32) {
@@ -927,7 +958,7 @@ fn create_surface_on(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use g2g_core::{Dim, PushOutcome, Rate, VideoCodec};
+    use g2g_core::{Dim, MemoryDomain, PushOutcome, Rate, VideoCodec};
 
     struct NullSink;
     impl OutputSink for NullSink {

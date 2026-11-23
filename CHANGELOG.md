@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2519: Add `overlaycomposition` with software blending and wgpu sink rendering.
 - M2518: Add `timecodestamper` for SMPTE timecode on raw video.
 - M2517: Add `audiosegmentclip` and `videosegmentclip` for raw media.
 - M2516: `mpegpsdemux` reads DVD LPCM as raw audio.

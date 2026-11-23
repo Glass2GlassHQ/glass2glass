@@ -5,6 +5,15 @@
 //! Shared software-blend primitive for the CPU overlays and compositor.
 //! Integer source-over, no float intrinsics, `no_std` baseline.
 
+#[cfg(feature = "metadata")]
+use alloc::vec::Vec;
+
+#[cfg(feature = "metadata")]
+use g2g_core::{meta::PlaneLayout, G2gError};
+
+#[cfg(feature = "metadata")]
+use crate::{pixel::chroma_420_size, yuvmatrix::YuvRgbMatrix};
+
 /// Source-over blend of one RGBA `src` pixel onto `canvas` at byte offset `d`,
 /// modulating the source alpha by `galpha` (0..=255). Integer math; keeps an
 /// opaque canvas opaque. Callers clip `d` into the canvas first (no bounds
@@ -54,6 +63,22 @@ pub(crate) fn over_px(canvas: &mut [u8], d: usize, src: [u8; 4]) {
             ((src[c] as u32 * sa + canvas[d + c] as u32 * keep + out_a / 2) / out_a) as u8;
     }
     canvas[d + 3] = out_a as u8;
+}
+
+/// Blend a premultiplied source onto a straight-alpha destination.
+#[cfg(feature = "metadata")]
+pub(crate) fn over_premultiplied(dst: &mut [u8; 4], src: [u8; 4]) {
+    let alpha = u32::from(src[3]);
+    if alpha == 0 {
+        return;
+    }
+    let keep = u32::from(dst[3]) * (255 - alpha);
+    let out_alpha = alpha * 255 + keep;
+    for c in 0..3 {
+        let color = u32::from(src[c]) * 255 * 255 + u32::from(dst[c]) * keep;
+        dst[c] = ((color + out_alpha / 2) / out_alpha).min(255) as u8;
+    }
+    dst[3] = ((out_alpha + 127) / 255) as u8;
 }
 
 /// An RGBA8 pixel buffer plus the geometry needed to clip against it, for the
@@ -207,4 +232,94 @@ mod tests {
         blend_px(&mut b, 0, [255, 255, 255, 128], 255);
         assert_eq!(a, b);
     }
+}
+
+// rgba pixels keep alpha in their fourth byte
+#[cfg(feature = "metadata")]
+const ALPHA_OF_TWO_PIXELS: u64 = u64::from_ne_bytes([0, 0, 0, 0xFF, 0, 0, 0, 0xFF]);
+
+#[cfg(feature = "metadata")]
+fn transparent_pair(pixels: &[u8; 8]) -> bool {
+    u64::from_ne_bytes(*pixels) & ALPHA_OF_TWO_PIXELS == 0
+}
+
+#[cfg(feature = "metadata")]
+fn unpremultiplied(sum: u32, alpha: u32) -> i32 {
+    (sum * 255 / alpha) as i32
+}
+
+#[cfg(feature = "metadata")]
+fn blend_luma(luma: &mut u8, pixel: &[u8; 4], matrix: &YuvRgbMatrix) {
+    let alpha = pixel[3];
+    if alpha == 0 {
+        return;
+    }
+    let [r, g, b] = [0, 1, 2].map(|c| unpremultiplied(pixel[c] as u32, alpha as u32));
+    *luma = blend_u8(*luma, matrix.rgb_to_luma(r, g, b) as u8, alpha);
+}
+
+#[cfg(feature = "metadata")]
+pub(crate) fn blend_layer_into_nv12(
+    layer: &[u8],
+    frame: &mut [u8],
+    layout: &PlaneLayout,
+    (width, height): (usize, usize),
+    matrix: &YuvRgbMatrix,
+) -> Result<(), G2gError> {
+    let layer_rows: Vec<&[u8]> = layer.chunks_exact(width * 4).take(height).collect();
+    for (y, layer_row) in layer_rows.iter().enumerate() {
+        let range = layout
+            .row_range(0, y, width)
+            .ok_or(G2gError::CapsMismatch)?;
+        let luma_row = frame.get_mut(range).ok_or(G2gError::CapsMismatch)?;
+        let (luma_pairs, luma_last) = luma_row.as_chunks_mut::<2>();
+        let (layer_pairs, layer_last) = layer_row.as_chunks::<8>();
+        for (luma_pair, layer_pair) in luma_pairs.iter_mut().zip(layer_pairs) {
+            if transparent_pair(layer_pair) {
+                continue;
+            }
+            for (luma, pixel) in luma_pair.iter_mut().zip(layer_pair.as_chunks::<4>().0) {
+                blend_luma(luma, pixel, matrix);
+            }
+        }
+        for (luma, pixel) in luma_last.iter_mut().zip(layer_last.as_chunks::<4>().0) {
+            blend_luma(luma, pixel, matrix);
+        }
+    }
+    let (chroma_w, chroma_h) = chroma_420_size(width, height);
+    for chroma_y in 0..chroma_h {
+        let range = layout
+            .row_range(1, chroma_y, 2 * chroma_w)
+            .ok_or(G2gError::CapsMismatch)?;
+        let chroma_row = frame.get_mut(range).ok_or(G2gError::CapsMismatch)?;
+        let rows = &layer_rows[2 * chroma_y..(2 * chroma_y + 2).min(height)];
+        for chroma_x in 0..chroma_w {
+            let columns = 2 * chroma_x..(2 * chroma_x + 2).min(width);
+            let drawn = rows
+                .iter()
+                .any(|row| match row.as_chunks::<8>().0.get(chroma_x) {
+                    Some(pair) => !transparent_pair(pair),
+                    None => columns.clone().any(|x| row[x * 4 + 3] != 0),
+                });
+            if !drawn {
+                continue;
+            }
+            let mut sums = [0u32; 4];
+            for row in rows {
+                for x in columns.clone() {
+                    for (sum, value) in sums.iter_mut().zip(&row[x * 4..][..4]) {
+                        *sum += *value as u32;
+                    }
+                }
+            }
+            let samples = (rows.len() * columns.len()) as u32;
+            let alpha = (sums[3] / samples) as u8;
+            let [r, g, b] = [0, 1, 2].map(|c| unpremultiplied(sums[c], sums[3]));
+            let (_, u, v) = matrix.rgb_to_yuv(r, g, b);
+            let uv = &mut chroma_row[2 * chroma_x..][..2];
+            uv[0] = blend_u8(uv[0], u as u8, alpha);
+            uv[1] = blend_u8(uv[1], v as u8, alpha);
+        }
+    }
+    Ok(())
 }

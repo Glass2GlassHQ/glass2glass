@@ -4,6 +4,29 @@ Timed text and its renderers: subtitle parsing, the CPU and GPU overlay
 elements, closed captions in and out of a video bitstream, bitmap subtitle
 formats, and teletext. Part of the design in [README.md](README.md).
 
+## overlaycomposition
+
+With the `metadata` feature, `OverlayCompositionMeta` carries an ordered list of
+premultiplied RGBA8 bitmaps. Each rectangle has signed picture coordinates,
+separate bitmap and destination sizes, and shared immutable pixel data.
+`OverlayComposition::with_draw` receives each frame and its negotiated picture
+size. It adds its rectangles above any composition already on the frame.
+A launch pipeline can also use `overlaycomposition` to consume compositions
+attached by an upstream element.
+
+Set `wgpusink render-overlays=true` to draw the composition in the same wgpu
+target as the video. The sink requests the metadata during allocation
+negotiation. It maps the rectangles into the picture viewport, including
+letterboxing and clipping. A GPU-resident video frame stays on its device.
+Use `render-overlays` when building the graph so the request takes effect at
+negotiation.
+
+When downstream makes no composition request, `overlaycomposition` blends the
+rectangles into system-memory RGBA, BGRA, or NV12 video and removes the
+composition metadata. A tee needs the request on every branch to defer
+rendering. Place the element after geometry changes for sink-rendered overlays
+in the final picture coordinates.
+
 ## textoverlay
 
 `textoverlay::TextOverlay` is the `textoverlay` and `subtitleoverlay` analog. It

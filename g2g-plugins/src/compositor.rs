@@ -55,7 +55,7 @@ use alloc::vec::Vec;
 use crate::padprop::split_pad_name;
 use crate::paint::{blend_px, blend_u8, source_px};
 use crate::pixel::{chroma_420_size, frame_byte_size, planar_planes, tight_plane};
-use crate::videoscale::{axis_samples, bilerp};
+use crate::videoscale::{axis_samples, bilerp, map_axis};
 use crate::yuvmatrix::YuvRgbMatrix;
 use g2g_core::caps::{
     framerate_q16_from_fraction, framerate_q16_period_ns, framerate_q16_to_fraction,
@@ -1261,15 +1261,13 @@ pub(crate) fn blend_over_scaled(
     if sw == 0 || sh == 0 || dw == 0 || dh == 0 {
         return;
     }
-    let source_columns = axis_samples(sw, dw, 0);
-    let source_rows = axis_samples(sh, dh, 0);
     let columns = visible(x0, dw, cw);
+    let source_columns: Vec<_> = columns.clone().map(|x| map_axis(x, dw, sw)).collect();
     for ddy in visible(y0, dh, ch) {
-        let (top, bottom, fy) = source_rows[ddy];
+        let (top, bottom, fy) = map_axis(ddy, dh, sh);
         let (top, bottom) = (top * sw, bottom * sw);
-        let row = (y0 + ddy as i32) as usize * cw;
-        for ddx in columns.clone() {
-            let (left, right, fx) = source_columns[ddx];
+        let row = (i64::from(y0) + ddy as i64) as usize * cw;
+        for (ddx, &(left, right, fx)) in columns.clone().zip(&source_columns) {
             let mut px = [0u8; 4];
             for (c, out) in px.iter_mut().enumerate() {
                 let at = |x: usize, y: usize| src[(y + x) * 4 + c];
@@ -1282,7 +1280,7 @@ pub(crate) fn blend_over_scaled(
                     fy,
                 );
             }
-            let d = (row + (x0 + ddx as i32) as usize) * 4;
+            let d = (row + (i64::from(x0) + ddx as i64) as usize) * 4;
             paint(canvas, d, px, galpha);
         }
     }

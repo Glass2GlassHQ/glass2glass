@@ -431,6 +431,8 @@ pub mod colorspace;
 pub mod deinterlace;
 pub mod gamma;
 pub mod gaussianblur;
+#[cfg(feature = "metadata")]
+pub mod overlaycomposition;
 pub mod smooth;
 pub mod tensorconvert;
 #[cfg(feature = "metadata")]

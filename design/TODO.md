@@ -477,8 +477,12 @@ unless it says otherwise.
   that includes the VBI lines: `Caps::RawVideo` here is active picture, and no
   source produces the 720x525 interleaved frame line 21 sits in.
 - **Overlays:** `cairooverlay`, `rsvgoverlay`, `gdkpixbufoverlay`, `qroverlay` /
-  `debugqroverlay`, `overlaycomposition`, `faceoverlay`, `zxing`,
+  `debugqroverlay`, `faceoverlay`, `zxing`,
   `objectdetectionoverlay` (vs `analyticsoverlay`).
+- **Overlay scanout:** submit `OverlayCompositionMeta` rectangles on separate
+  DRM/KMS planes or as Wayland DMA-BUF subsurfaces for compositor-managed plane
+  assignment. Reuse static overlay buffers and blend when separate submission
+  is unavailable.
 - **Video transforms:** `interlace`, `ivtc` / `combdetect`, `fieldanalysis`,
   `smpte` / `smptealpha`, `shapewipe`, `alphacolor`, `lcms`,
   `simplevideomark` / `simplevideomarkdetect`,

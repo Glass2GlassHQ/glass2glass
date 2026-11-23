@@ -1025,6 +1025,12 @@ pub fn default_registry() -> Registry {
         || Box::new(crate::timeoverlay::TimeOverlay::new()),
     ));
     #[cfg(feature = "metadata")]
+    reg.register_launch(LaunchFactory::of::<
+        crate::overlaycomposition::OverlayComposition,
+    >("overlaycomposition", || {
+        Box::new(crate::overlaycomposition::OverlayComposition::new())
+    }));
+    #[cfg(feature = "metadata")]
     reg.register_launch(
         LaunchFactory::of::<crate::timecodestamper::TimecodeStamper>("timecodestamper", || {
             Box::new(crate::timecodestamper::TimecodeStamper::new())

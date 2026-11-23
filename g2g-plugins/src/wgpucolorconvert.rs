@@ -197,6 +197,7 @@ impl WgpuColorConvert {
             BlitTarget {
                 view: &view,
                 viewport: ViewportRectangle::whole(output.width(), output.height()),
+                image_uv: None,
             },
         );
         queue.submit([encoder.finish()]);
