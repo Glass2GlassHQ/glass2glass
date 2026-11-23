@@ -1993,8 +1993,7 @@ pub mod streamdec;
 #[cfg(feature = "gstreamer")]
 pub mod gstwrap;
 
-// Wayland display sink (NV12 -> XRGB8888 via wl_shm). Linux-only;
-// desktop-dev convenience sink — see module docs.
+// Wayland display sink. Linux-only.
 #[cfg(all(target_os = "linux", feature = "wayland-sink"))]
 pub mod waylandsink;
 

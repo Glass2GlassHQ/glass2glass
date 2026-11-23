@@ -2,28 +2,26 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
-//! Wayland display sink (desktop dev convenience).
+//! Wayland display sink.
 //!
 //! Opens an `xdg_toplevel` window on the running Wayland compositor and
-//! presents NV12 `DataFrame`s into it. A system-memory frame takes the
-//! software path: NV12 → XRGB8888 conversion (in the caps colorimetry's
-//! matrix and range) into a `wl_shm` pool, then `attach` + `commit` per
-//! frame. A dma-buf frame is imported through `zwp_linux_dmabuf_v1` as a
-//! linear buffer in the negotiated format with no copy, and the compositor converts it with its
-//! own matrix, since the caps colorimetry has no way to reach it.
+//! presents raw video into it. A dma-buf frame is imported through
+//! `zwp_linux_dmabuf_v1` as a linear buffer in the negotiated format with no
+//! copy, and the compositor converts it with its own matrix, since the caps
+//! colorimetry has no way to reach it. A system-memory frame is converted to
+//! NV12 if it is in another format, then to XRGB8888 (in the caps
+//! colorimetry's matrix and range) straight into a `wl_shm` buffer on the
+//! worker thread, about 2 ms per 1080p frame on a modern x86 core.
 //!
-//! This is the **dev sink**, not the production sink:
-//! - Latency is whatever the compositor's frame callback delivers (one
-//!   compositor refresh, typically ~16 ms at 60 Hz).
-//! - The XRGB8888 conversion runs on the Wayland worker thread, straight
-//!   into the `wl_shm` buffer; at 1080p30 the CPU cost is real (each frame
-//!   is ~2 ms of YUV→RGB on a modern x86 core).
-//! - The software path has no GPU upload.
+//! The compositor sets two things this sink cannot:
+//! - Latency is at least one wait for the compositor's `frame` callback, one
+//!   refresh (about 16 ms at 60 Hz) while its renderer keeps up.
+//! - A buffer reaches the screen on a hardware plane only when the
+//!   compositor and its driver accept it there. Otherwise the compositor's
+//!   renderer, usually the GPU, composites it on every refresh.
 //!
-//! The production sink is [`crate::kmssink::KmsSink`], which scans NV12
-//! out directly through KMS without colour conversion. Use the KMS sink
-//! when you need low latency or are deploying to embedded; use this one
-//! to *see what's going on* while iterating on the pipeline.
+//! [`crate::kmssink::KmsSink`] drives the display without a compositor,
+//! which needs DRM master.
 //!
 //! ## Pipeline shape
 //!
@@ -45,7 +43,6 @@
 //!
 //! ## Constraints (v1)
 //!
-//! - NV12 input only.
 //! - Mid-stream geometry change tears down the existing worker and
 //!   spawns a fresh one. Same-dims `CapsChanged` is a no-op.
 //! - The window opens at the video's display size and follows any size the

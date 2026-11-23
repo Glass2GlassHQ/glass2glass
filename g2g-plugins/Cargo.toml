@@ -534,14 +534,12 @@ gstreamer = ["std"]
 # KMS/DRM video sink: NV12 dumb-buffer scanout via the primary plane on the
 # active CRTC. Pulls `drm` (libdrm bindings), `drm-ffi` + `drm-fourcc`; Linux-only,
 # implies std. Requires DRM master (drop to tty or run with a DRM lease);
-# usually conflicts with a running Wayland/X11 compositor. NV12 input only —
-# pair with `FfmpegH264Dec::with_output_format(OutputFormat::Nv12)`.
+# usually conflicts with a running Wayland/X11 compositor.
 kms-sink = ["std", "dep:drm", "dep:drm-ffi", "dep:drm-fourcc"]
-# Wayland display sink: NV12 in, software-converted to XRGB8888 in a
-# `wl_shm` pool, attached to an `xdg_toplevel` window. Linux-only, implies
-# std. Pulls smithay-client-toolkit (which transitively brings wayland-*).
-# This is the desktop-dev convenience sink; KmsSink is the production
-# low-latency path.
+# Wayland display sink: an `xdg_toplevel` window that imports dma-bufs or
+# converts system memory into a `wl_shm` pool. Linux-only, implies std. Pulls
+# smithay-client-toolkit (which transitively brings wayland-*) and `drm` for
+# overlay buffers.
 wayland-sink = ["std", "dep:smithay-client-toolkit", "dep:drm"]
 # Vendor-neutral OpenGL ES display sink (`GlSink`, M891): system-memory NV12 or
 # RGBA presented through EGL on a Wayland `xdg_toplevel`, with the NV12->RGB

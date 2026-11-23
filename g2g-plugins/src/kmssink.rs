@@ -2,13 +2,10 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
-//! Linux KMS/DRM display sink for NV12 frames.
+//! Linux KMS/DRM display sink.
 //!
 //! Direct scanout to a connected display via the primary plane on the
-//! first usable CRTC. Consumes NV12 `DataFrame`s (the layout
-//! [`crate::ffmpegdec::FfmpegH264Dec`] emits when configured with
-//! [`crate::ffmpegdec::OutputFormat::Nv12`]) and presents them with vsync
-//! page-flips.
+//! first usable CRTC, presenting each frame with a vsync page-flip.
 //!
 //! Pipeline:
 //!
@@ -25,9 +22,12 @@
 //!   returns `EBUSY` (`PermissionDenied`). Test from a tty
 //!   (`Ctrl+Alt+F3`) or via DRM lease. Production embedded deployments
 //!   typically run without a compositor.
-//! - **NV12 only.** I420 callers must reconfigure the decoder
-//!   (`with_output_format(OutputFormat::Nv12)`); the sink rejects everything
-//!   else with `CapsMismatch`.
+//! - **System memory only, copied every frame.** A frame in another format is
+//!   converted to NV12, then copied on the CPU into a dumb buffer. Dma-bufs
+//!   are not imported, so a camera or hardware decoder's buffer is
+//!   downloaded first.
+//! - **Primary plane only.** Some display controllers have no NV12 on the
+//!   primary plane, the STM32MP257's among them.
 //! - **Fixed input dims.** The dumb-buffer pool is allocated at
 //!   negotiation time. Mid-stream `CapsChanged` to a different geometry is
 //!   not supported in v1 (decoder/source resolution must stay constant for
