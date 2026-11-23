@@ -224,7 +224,6 @@ pub struct WaylandSink {
     commit_lead_ns: Arc<AtomicU64>,
     pacing: PacingPolicy,
     pacer: PresentationPacer,
-    last_present_done_ns: u64,
     deadline_errors: Arc<std::sync::Mutex<Vec<i64>>>,
     schedule_drift: ScheduleDriftTrace,
     #[cfg(feature = "metadata")]
@@ -278,7 +277,6 @@ impl WaylandSink {
             commit_lead_ns: Arc::new(AtomicU64::new(0)),
             pacing: PacingPolicy::default(),
             pacer: PresentationPacer::for_video_sink(),
-            last_present_done_ns: 0,
             deadline_errors: Arc::new(std::sync::Mutex::new(Vec::new())),
             schedule_drift: ScheduleDriftTrace::default(),
             #[cfg(feature = "metadata")]
@@ -876,7 +874,6 @@ impl AsyncElement for WaylandSink {
                         }
                         _ => return Err(G2gError::UnsupportedDomain),
                     };
-                    let t_ready = monotonic_ns();
 
                     let tx = self.cmd_tx.as_ref().ok_or(G2gError::NotConfigured)?;
                     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
@@ -923,16 +920,15 @@ impl AsyncElement for WaylandSink {
                             drop(ack_rx);
                         }
                     }
-                    let t_done = monotonic_ns();
-                    let gap = t_done.saturating_sub(self.last_present_done_ns);
-                    self.last_present_done_ns = t_done;
                     // the elected clock is the audio sink's in an A/V graph
                     let clock_now_ns = self.pacer.clock_sync().map(|s| s.now_ns());
                     if let (Some(deadline), Some(clock_now)) = (deadline_ns, clock_now_ns) {
-                        if let Some(drift) =
-                            self.schedule_drift
-                                .sample(t_done, clock_now, timing.pts_ns, deadline)
-                        {
+                        if let Some(drift) = self.schedule_drift.sample(
+                            monotonic_ns(),
+                            clock_now,
+                            timing.pts_ns,
+                            deadline,
+                        ) {
                             g2g_core::g2g_log!(
                                 self,
                                 "pace clock-mono={}us media-mono={}us deadline-mono={}us \
@@ -946,16 +942,6 @@ impl AsyncElement for WaylandSink {
                             );
                         }
                     }
-                    g2g_core::g2g_log!(
-                        self,
-                        "pts={} age_in={}us wait={}us slept={}us conv+ack={}us gap={}us",
-                        timing.pts_ns,
-                        t_in.saturating_sub(timing.arrival_ns) / 1_000,
-                        wait_ns / 1_000,
-                        t_ready.saturating_sub(t_in) / 1_000,
-                        t_done.saturating_sub(t_ready) / 1_000,
-                        gap / 1_000
-                    );
                     Ok(())
                 }
                 PipelinePacket::Segment(seg) => {
