@@ -10,7 +10,7 @@
 //! A program stream is a run of packs, each a `00 00 01 BA` header followed by
 //! the PES packets belonging to it. There is no PAT/PMT: a stream is identified
 //! by its PES `stream_id` (0xE0..=0xEF video, 0xC0..=0xDF audio) and, for the
-//! `private_stream_1` (0xBD) DVD carries AC-3 and subpictures on, by the
+//! `private_stream_1` (0xBD) DVD carries AC-3, LPCM and subpictures on, by the
 //! substream id byte that opens its payload. Streams are therefore discovered by
 //! observing packets rather than read from a table, so a probe has to see some
 //! data before it knows what a file holds.
@@ -24,9 +24,7 @@
 //! demuxer parses to refine the video pad's caps via `CapsChanged` before the
 //! first access unit, so the chain needs no `mpegvideoparse` ahead of the
 //! decoder (the demuxer already cuts the video at picture boundaries). Scope: video,
-//! MPEG audio, AC-3 and DVD subpictures. LPCM (0xA0..=0xA7) and DTS
-//! (0x88..=0x8F) substreams, the program stream map (0xBC) and seeking are not
-//! handled. CPU, `no_std` baseline.
+//! MPEG audio, AC-3, DVD LPCM and DVD subpictures. CPU, `no_std` baseline.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -38,6 +36,7 @@ use g2g_core::frame::Frame;
 use g2g_core::log::Target;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{ElementSeekRoute, SeekController, StreamSelectController};
+use g2g_core::time::{ns_to_ticks, ticks_to_ns};
 use g2g_core::{
     g2g_error, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps,
     CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
@@ -46,6 +45,7 @@ use g2g_core::{
     Segment, Stream, StreamCollection, StreamType, SubPictureFormat, VideoCodec,
 };
 
+use crate::avidemux::{audio_caps, pcm_alternatives};
 use crate::demuxseek::{DemuxSeek, SharedSegment, TailRead};
 use crate::mpeg2video::Mpeg2TimestampSynth;
 pub use crate::mpeg2video::{parse_sequence_header, SequenceHeader};
@@ -60,6 +60,7 @@ const PS_END: u8 = 0xB9;
 /// `private_stream_1`: AC-3, DTS, LPCM and DVD subpictures, told apart by the
 /// substream id byte that opens the PES payload.
 const PS_PRIVATE_1: u8 = 0xBD;
+const PS_CLOCK_HZ: u32 = g2g_core::mediaclock::MediaClock::VIDEO_RATE_HZ;
 
 /// Largest number of distinct elementary streams recorded from one file. A
 /// program stream declares nothing up front, so the set grows as packets are
@@ -86,12 +87,13 @@ pub struct PsElementaryStream {
 
 impl PsElementaryStream {
     /// Which selection forwards this stream, or `None` for one g2g does not
-    /// carry (LPCM / DTS substreams, a private stream with no known substream).
+    /// carry (DTS substreams, a private stream with no known substream).
     pub fn kind(&self) -> Option<PsStream> {
         match (self.stream_id, self.substream_id) {
             (0xE0..=0xEF, _) => Some(PsStream::Mpeg2),
             (0xC0..=0xDF, _) => Some(PsStream::Mp2),
             (PS_PRIVATE_1, Some(0x80..=0x87)) => Some(PsStream::Ac3),
+            (PS_PRIVATE_1, Some(sub)) if LPCM_SUBSTREAMS.contains(&sub) => Some(PsStream::Lpcm),
             (PS_PRIVATE_1, Some(0x20..=0x3F)) => Some(PsStream::SubPicture),
             _ => None,
         }
@@ -118,7 +120,203 @@ pub struct PsUnit {
     /// and for video before any sequence header has parsed. Per unit rather than
     /// per file because a program stream can splice clips of different geometry.
     pub sequence: Option<SequenceHeader>,
+    /// The PCM layout of a DVD LPCM unit, whose bytes are already little-endian.
+    pub lpcm: Option<DvdLpcmFormat>,
     pub data: Vec<u8>,
+}
+
+/// Sample layout declared by a DVD LPCM substream header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DvdLpcmFormat {
+    bits: u8,
+    channels: u8,
+    sample_rate: u32,
+}
+
+impl DvdLpcmFormat {
+    fn parse(flags: u8) -> Option<Self> {
+        let depth = flags >> 6;
+        (depth < 3).then(|| Self {
+            bits: 16 + depth * 4,
+            channels: 1 + (flags & 7),
+            sample_rate: [48_000, 96_000, 44_100, 32_000][usize::from((flags >> 4) & 3)],
+        })
+    }
+
+    /// Caps of the interleaved PCM samples, with 20-bit samples padded to 24 bits.
+    pub fn caps(self) -> Caps {
+        audio_caps(
+            if self.bits == 16 {
+                AudioFormat::PcmS16Le
+            } else {
+                AudioFormat::PcmS24Le
+            },
+            self.channels,
+            self.sample_rate,
+        )
+    }
+
+    // 16-bit samples are packed by channel frame. Higher depths pack four
+    // samples at a time, so collect enough groups for a whole channel frame.
+    fn block_bytes(self) -> usize {
+        let channels = usize::from(self.channels);
+        let bits = usize::from(self.bits);
+        if bits == 16 {
+            return channels * 2;
+        }
+        let group_samples = 4;
+        let samples = channels * group_samples
+            / g2g_core::caps::greatest_common_divisor(channels as u64, group_samples as u64)
+                as usize;
+        samples * bits / 8
+    }
+
+    fn unpack(self, data: &[u8]) -> Vec<u8> {
+        if self.bits == 16 {
+            let mut pcm = data.to_vec();
+            crate::pcmendian::swap_endian(&mut pcm, 2);
+            return pcm;
+        }
+        // Mono divides the four-sample block into two independently packed pairs.
+        let group_samples = if self.channels == 1 { 2 } else { 4 };
+        let group_bytes = group_samples * usize::from(self.bits) / 8;
+        let mut pcm = Vec::with_capacity(data.len() / group_bytes * group_samples * 3);
+        for group in data.chunks_exact(group_bytes) {
+            let (high, low) = group.split_at(group_samples * 2);
+            for (index, [msb, mid]) in high.as_chunks::<2>().0.iter().copied().enumerate() {
+                let lsb = if self.bits == 24 {
+                    low[index]
+                } else if index % 2 == 0 {
+                    low[index / 2] & 0xf0
+                } else {
+                    low[index / 2] << 4
+                };
+                pcm.extend_from_slice(&[lsb, mid, msb]);
+            }
+        }
+        pcm
+    }
+
+    fn frames(self, pcm_bytes: usize) -> u64 {
+        let sample_bytes = if self.bits == 16 { 2 } else { 3 };
+        (pcm_bytes / (usize::from(self.channels) * sample_bytes)) as u64
+    }
+
+    fn coded_frames(self, bytes: usize) -> u64 {
+        bytes as u64 * 8 / (u64::from(self.bits) * u64::from(self.channels))
+    }
+
+    fn offset_90khz(self, frames: u64) -> u64 {
+        ns_to_ticks(ticks_to_ns(frames, self.sample_rate), PS_CLOCK_HZ)
+    }
+}
+
+#[derive(Debug)]
+struct LpcmAligner {
+    initial_format: DvdLpcmFormat,
+    format: DvdLpcmFormat,
+    // At most one incomplete packing block is left between PES packets.
+    tail: Vec<u8>,
+    synced: bool,
+    stamp: Option<u64>,
+    frames_since_stamp: u64,
+}
+
+impl LpcmAligner {
+    fn new(format: DvdLpcmFormat) -> Self {
+        Self {
+            initial_format: format,
+            format,
+            tail: Vec::new(),
+            synced: false,
+            stamp: None,
+            frames_since_stamp: 0,
+        }
+    }
+
+    fn set_format(&mut self, format: DvdLpcmFormat) {
+        if self.format != format {
+            let initial_format = self.initial_format;
+            *self = Self::new(format);
+            self.initial_format = initial_format;
+        }
+    }
+
+    fn push(
+        &mut self,
+        substream: u8,
+        pts: Option<u64>,
+        first_access: Option<usize>,
+        data: &[u8],
+        out: &mut Vec<PsUnit>,
+    ) {
+        if let Some(at) = first_access {
+            if at > data.len() {
+                return;
+            }
+            let block = self.format.block_bytes();
+            // Some muxers stamp the PES header at offset zero even when the
+            // packing block is split there. Apply its stamp at the next block.
+            let adjustment = if self.synced {
+                (block - (self.tail.len() + at) % block) % block
+            } else {
+                0
+            };
+            let Some((prefix, suffix)) = data.split_at_checked(at + adjustment) else {
+                self.emit(substream, data, out);
+                return;
+            };
+            if self.synced {
+                self.emit(substream, prefix, out);
+            } else {
+                // A file or seek may start mid-access-unit. The pointer gives
+                // the phase of any whole packing blocks before the boundary.
+                let prefix = &prefix[prefix.len() % block..];
+                let back = self
+                    .format
+                    .offset_90khz(self.format.coded_frames(prefix.len()));
+                self.stamp = pts.map(|pts| pts.saturating_sub(back));
+                self.emit(substream, prefix, out);
+            }
+            self.synced = true;
+            if let Some(pts) = pts {
+                let ahead = self
+                    .format
+                    .offset_90khz(self.format.coded_frames(adjustment));
+                self.stamp = Some(pts.saturating_add(ahead));
+                self.frames_since_stamp = 0;
+            }
+            self.emit(substream, suffix, out);
+        } else if self.synced {
+            self.emit(substream, data, out);
+        }
+    }
+
+    fn emit(&mut self, substream: u8, bytes: &[u8], out: &mut Vec<PsUnit>) {
+        self.tail.extend_from_slice(bytes);
+        let block = self.format.block_bytes();
+        let complete = self.tail.len() / block * block;
+        if complete == 0 {
+            return;
+        }
+        let data = self.format.unpack(&self.tail[..complete]);
+        self.tail.drain(..complete);
+        let pts = self
+            .stamp
+            .map(|stamp| stamp.saturating_add(self.format.offset_90khz(self.frames_since_stamp)));
+        self.frames_since_stamp = self
+            .frames_since_stamp
+            .saturating_add(self.format.frames(data.len()));
+        out.push(PsUnit {
+            stream_id: PS_PRIVATE_1,
+            substream_id: Some(substream),
+            pts_90khz: pts,
+            dts_90khz: None,
+            sequence: None,
+            lpcm: Some(self.format),
+            data,
+        });
+    }
 }
 
 // the leading units take their pts from a fresh synthesis that also places the first stamped one
@@ -365,6 +563,7 @@ impl AudioAligner {
                     pts_90khz: self.pts_90khz,
                     dts_90khz: self.dts_90khz,
                     sequence: None,
+                    lpcm: None,
                     data: unit,
                 });
                 // a unit with no stamp of its own is left unstamped, the stamp just spent is behind it
@@ -503,6 +702,7 @@ impl VideoReframer {
                 pts_90khz: pts,
                 dts_90khz: dts,
                 sequence: None,
+                lpcm: None,
                 data: core::mem::take(&mut self.buf),
             });
         }
@@ -565,6 +765,7 @@ impl VideoReframer {
                             pts_90khz: pts,
                             dts_90khz: dts,
                             sequence: None,
+                            lpcm: None,
                             data: unit,
                         });
                     }
@@ -607,6 +808,7 @@ pub struct PsDemuxer {
     video_heads: Vec<(u8, Vec<u8>)>,
     /// Audio frame realignment, one per audio stream / substream.
     audio: Vec<AudioAligner>,
+    lpcm: Vec<(u8, LpcmAligner)>,
     /// How many entries of `completed` the sequence-header scan has examined, so
     /// each unit is read once however often the scan runs.
     seq_scanned: usize,
@@ -712,6 +914,9 @@ impl PsDemuxer {
             r.flush(*stream_id, &mut self.completed);
         }
         self.audio.clear();
+        for (_, lpcm) in &mut self.lpcm {
+            lpcm.tail.clear();
+        }
         self.spu.clear();
         self.sequence_from_completed();
         self.end_of_stream = true;
@@ -815,13 +1020,50 @@ impl PsDemuxer {
                 self.record(stream_id, Some(sub));
                 self.push_spu(sub, pts, rest);
             }
-            // LPCM and DTS substreams are recorded so a probe can name them, but not demuxed
-            sub if LPCM_SUBSTREAMS.contains(&sub) || DTS_SUBSTREAMS.contains(&sub) => {
+            sub if LPCM_SUBSTREAMS.contains(&sub) => self.push_lpcm(sub, pts, rest),
+            // DTS substreams are recorded so a probe can name them.
+            sub if DTS_SUBSTREAMS.contains(&sub) => {
                 self.record(stream_id, Some(sub));
             }
             // anything else is not a substream this parser knows
             _ => {}
         }
+    }
+
+    fn push_lpcm(&mut self, sub: u8, pts: Option<u64>, data: &[u8]) {
+        self.record(PS_PRIVATE_1, Some(sub));
+        let Some((&[_, first_hi, first_lo, _, flags, _], data)) = data.split_first_chunk::<6>()
+        else {
+            return;
+        };
+        let Some(format) = DvdLpcmFormat::parse(flags) else {
+            return;
+        };
+        // The one-based pointer counts from the byte after the pointer itself.
+        // Three LPCM header bytes are between that base and the packed samples.
+        let first_access = match u16::from_be_bytes([first_hi, first_lo]) {
+            0 => None,
+            pointer @ 4.. => Some(usize::from(pointer - 4)),
+            _ => return,
+        };
+        let index = self
+            .lpcm
+            .iter()
+            .position(|(stream, _)| *stream == sub)
+            .unwrap_or_else(|| {
+                self.lpcm.push((sub, LpcmAligner::new(format)));
+                self.lpcm.len() - 1
+            });
+        let lpcm = &mut self.lpcm[index].1;
+        lpcm.set_format(format);
+        lpcm.push(sub, pts, first_access, data, &mut self.completed);
+    }
+
+    fn lpcm_caps(&self, sub: u8) -> Option<Caps> {
+        self.lpcm
+            .iter()
+            .find(|(id, _)| *id == sub)
+            .map(|(_, pcm)| pcm.initial_format.caps())
     }
 
     /// Feed one PES payload to its stream's frame aligner, creating one on first
@@ -957,6 +1199,7 @@ impl PsDemuxer {
             pts_90khz: pending.pts_90khz,
             dts_90khz: None,
             sequence: None,
+            lpcm: None,
             data: pending.data,
         });
     }
@@ -1086,6 +1329,8 @@ pub enum PsStream {
     /// The first AC-3 stream: a `private_stream_1` substream 0x80..=0x87, the DVD
     /// carriage of Dolby Digital.
     Ac3,
+    /// DVD LPCM (private substreams 0xA0..=0xA7), unpacked to raw PCM.
+    Lpcm,
     /// The first DVD subpicture stream: a `private_stream_1` substream
     /// 0x20..=0x3F. Each cue is one subpicture unit, reassembled across the PES
     /// packets that carry it.
@@ -1230,6 +1475,7 @@ impl PsDemux {
                 sample_rate: 0,
                 channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             },
+            PsStream::Lpcm => audio_caps(AudioFormat::PcmS16Le, 2, 48_000),
             PsStream::SubPicture => Caps::SubPicture {
                 format: SubPictureFormat::VobSub,
             },
@@ -1265,7 +1511,7 @@ impl PsDemux {
             .demux
             .streams()
             .iter()
-            .filter_map(Self::es_to_stream)
+            .filter_map(|es| Self::es_to_stream(&self.demux, es))
             .collect();
         if streams.is_empty() {
             return;
@@ -1279,17 +1525,17 @@ impl PsDemux {
     }
 
     /// Map one observed elementary stream to a [`Stream`] for the collection.
-    fn es_to_stream(es: &PsElementaryStream) -> Option<Stream> {
+    fn es_to_stream(demux: &PsDemuxer, es: &PsElementaryStream) -> Option<Stream> {
         let kind = es.kind()?;
         let stream_type = match kind {
             PsStream::Mpeg2 => StreamType::Video,
-            PsStream::Mp2 | PsStream::Ac3 => StreamType::Audio,
+            PsStream::Mp2 | PsStream::Ac3 | PsStream::Lpcm => StreamType::Audio,
             PsStream::SubPicture => StreamType::Text,
         };
         Some(Stream::new(
             stream_id(es),
             stream_type,
-            Self::output_caps(kind),
+            observed_caps(demux, es, kind)?,
         ))
     }
 
@@ -1334,10 +1580,10 @@ impl PsDemux {
             // The sequence header is only known once a video packet has been
             // parsed, so the refinement rides ahead of the frame it describes,
             // and follows a mid-stream splice that changes it.
-            if let Some(caps) = Self::refined_video_caps(self.stream, u.sequence) {
+            if let Some(caps) = u.refined_caps(self.stream) {
                 if self.last_caps.as_ref() != Some(&caps) {
-                    self.last_caps = Some(caps.clone());
-                    out.push(PipelinePacket::CapsChanged(caps)).await?;
+                    out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
+                    self.last_caps = Some(caps);
                 }
             }
             // The `.idx` needs the video's geometry, which is only known once a
@@ -1353,7 +1599,7 @@ impl PsDemux {
                     out.push(PipelinePacket::DataFrame(frame)).await?;
                 }
             }
-            let duration_ns = cue_duration_ns(self.stream, &u.data);
+            let duration_ns = u.duration_ns(self.stream);
             let keyframe = unit_is_keyframe(self.stream, &u.data);
             let frame = Frame::new(
                 MemoryDomain::System(SystemSlice::from_boxed(u.data.into_boxed_slice())),
@@ -1410,7 +1656,7 @@ fn first_stream_of_kind(demux: &PsDemuxer, stream: PsStream) -> Option<PsElement
         .streams()
         .iter()
         .copied()
-        .find(|es| es.kind() == Some(stream))
+        .find(|es| es.kind() == Some(stream) && observed_caps(demux, es, stream).is_some())
 }
 
 /// Whether a unit begins an independently-decodable point. An MPEG video access
@@ -1419,7 +1665,7 @@ fn first_stream_of_kind(demux: &PsDemuxer, stream: PsStream) -> Option<PsElement
 fn unit_is_keyframe(stream: PsStream, data: &[u8]) -> bool {
     match stream {
         PsStream::Mpeg2 => crate::annexb::au_is_keyframe(VideoCodec::Mpeg2, data),
-        PsStream::Mp2 | PsStream::Ac3 | PsStream::SubPicture => true,
+        PsStream::Mp2 | PsStream::Ac3 | PsStream::Lpcm | PsStream::SubPicture => true,
     }
 }
 
@@ -1434,6 +1680,21 @@ fn cue_duration_ns(stream: PsStream, data: &[u8]) -> u64 {
     crate::vobsub::spu_timing(data)
         .and_then(|(start, stop)| stop.map(|stop| stop.saturating_sub(start)))
         .unwrap_or(0)
+}
+
+impl PsUnit {
+    fn refined_caps(&self, stream: PsStream) -> Option<Caps> {
+        self.lpcm
+            .map(DvdLpcmFormat::caps)
+            .or_else(|| PsDemux::refined_video_caps(stream, self.sequence))
+    }
+
+    fn duration_ns(&self, stream: PsStream) -> u64 {
+        match self.lpcm {
+            Some(format) => ticks_to_ns(format.frames(self.data.len()), format.sample_rate),
+            None => cue_duration_ns(stream, &self.data),
+        }
+    }
 }
 
 fn ns_from_90khz(t: Option<u64>) -> Option<u64> {
@@ -1475,6 +1736,9 @@ impl AsyncElement for PsDemux {
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let stream = self.stream;
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
+            Caps::ByteStream {
+                encoding: ByteStreamEncoding::MpegPs,
+            } if stream == PsStream::Lpcm => CapsSet::from_alternatives(lpcm_alternatives()),
             Caps::ByteStream {
                 encoding: ByteStreamEncoding::MpegPs,
             } => CapsSet::one(Self::output_caps(stream)),
@@ -1555,7 +1819,7 @@ impl AsyncElement for PsDemux {
             "MPEG program stream demuxer",
             "Codec/Demuxer",
             "Demuxes an MPEG-1 / MPEG-2 program stream (.mpg / .vob): MPEG video, \
-             MPEG audio, AC-3, and DVD subpictures",
+             MPEG audio, AC-3, DVD LPCM, and DVD subpictures",
             crate::AARON_BOXER,
         )
     }
@@ -1597,12 +1861,12 @@ static PSDEMUX_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "stream",
         PropKind::Str,
-        "elementary stream to emit: mpeg2 | mp2 (or mp3) | ac3 | subpicture",
+        "elementary stream to emit: mpeg2 | mp2 (or mp3) | ac3 | lpcm | subpicture",
     ),
     PropertySpec::new(
         "stream-id",
         PropKind::Uint,
-        "PES stream_id (the substream id for ac3 and subpicture) of the stream to emit among those carrying `stream` (0 = the first of them)",
+        "PES stream_id (the substream id for ac3, lpcm and subpicture) of the stream to emit among those carrying `stream` (0 = the first of them)",
     ),
 ];
 
@@ -1613,6 +1877,7 @@ fn ps_stream_from_str(s: &str) -> Option<PsStream> {
         // one stream id range carries every MPEG audio layer
         "mp2" | "mp3" => Some(PsStream::Mp2),
         "ac3" => Some(PsStream::Ac3),
+        "lpcm" => Some(PsStream::Lpcm),
         "subpicture" => Some(PsStream::SubPicture),
         _ => None,
     }
@@ -1624,21 +1889,30 @@ pub(crate) fn ps_stream_to_str(stream: PsStream) -> &'static str {
         PsStream::Mpeg2 => "mpeg2",
         PsStream::Mp2 => "mp2",
         PsStream::Ac3 => "ac3",
+        PsStream::Lpcm => "lpcm",
         PsStream::SubPicture => "subpicture",
     }
 }
 
+fn lpcm_alternatives() -> Vec<Caps> {
+    [AudioFormat::PcmS16Le, AudioFormat::PcmS24Le]
+        .into_iter()
+        .flat_map(pcm_alternatives)
+        .collect()
+}
+
 impl PadTemplates for PsDemux {
     fn pad_templates() -> Vec<PadTemplate> {
-        let source = CapsSet::from_alternatives(Vec::from([
+        let mut source = Vec::from([
             Self::output_caps(PsStream::Mpeg2),
             Self::output_caps(PsStream::Mp2),
             Self::output_caps(PsStream::Ac3),
             Self::output_caps(PsStream::SubPicture),
-        ]));
+        ]);
+        source.extend(lpcm_alternatives());
         Vec::from([
             PadTemplate::sink(CapsSet::one(Self::input_caps())),
-            PadTemplate::source(source),
+            PadTemplate::source(CapsSet::from_alternatives(source)),
         ])
     }
 }
@@ -1670,14 +1944,24 @@ pub fn forwardable_streams(demux: &PsDemuxer) -> Vec<PsStreamInfo> {
         if stream == PsStream::SubPicture {
             continue;
         }
+        let Some(caps) = observed_caps(demux, es, stream) else {
+            continue;
+        };
         out.push(PsStreamInfo {
             stream,
-            caps: PsDemux::output_caps(stream),
+            caps,
             video: stream == PsStream::Mpeg2,
             elementary: *es,
         });
     }
     out
+}
+
+fn observed_caps(demux: &PsDemuxer, es: &PsElementaryStream, kind: PsStream) -> Option<Caps> {
+    if kind == PsStream::Lpcm {
+        return demux.lpcm_caps(es.substream_id?);
+    }
+    Some(PsDemux::output_caps(kind))
 }
 
 // the codec of each audio or video stream in a probed program stream that no `PsStream` carries
@@ -1697,7 +1981,11 @@ const VIDEO_HEAD_LEN: usize = 16;
 
 fn unsupported_codec(demux: &PsDemuxer, es: &PsElementaryStream) -> Option<&'static str> {
     match (es.stream_id, es.substream_id) {
-        (PS_PRIVATE_1, Some(substream)) if LPCM_SUBSTREAMS.contains(&substream) => Some("pcm_dvd"),
+        (PS_PRIVATE_1, Some(substream))
+            if LPCM_SUBSTREAMS.contains(&substream) && demux.lpcm_caps(substream).is_none() =>
+        {
+            Some("pcm_dvd")
+        }
         (PS_PRIVATE_1, Some(substream)) if DTS_SUBSTREAMS.contains(&substream) => Some("dts"),
         // a video stream id names no codec, so an AVS stream there reads as MPEG-2 by default
         (stream_id, _) if VIDEO_STREAM_IDS.contains(&stream_id) => demux
@@ -1737,12 +2025,11 @@ pub struct PsDemuxN {
     demux: PsDemuxer,
     /// Port `i` emits this elementary stream.
     ports: Vec<PsStream>,
-    /// Whether port `i` has emitted its opening `CapsChanged` yet.
-    announced: Vec<bool>,
     selected_streams: Vec<Option<PsElementaryStream>>,
-    /// The geometry port `i` last announced, so a mid-stream change re-announces
+    /// The caps port `i` last announced, so a mid-stream change re-announces
     /// and an unchanged one does not.
-    refined: Vec<Option<SequenceHeader>>,
+    refined: Vec<Option<Caps>>,
+    seed_lpcm: Vec<Option<Caps>>,
     bus: Option<BusHandle>,
     collection_posted: bool,
     /// App-driven stream selection: the app names the stream id each port should
@@ -1781,17 +2068,17 @@ impl PsDemuxN {
     /// Panics if `ports` is empty (a fan-out needs a port).
     pub fn new(ports: Vec<PsStream>) -> Self {
         assert!(!ports.is_empty(), "PsDemuxN needs at least one output port");
-        let announced = alloc::vec![false; ports.len()];
         let selected_streams = alloc::vec![None; ports.len()];
         let refined = alloc::vec![None; ports.len()];
+        let seed_lpcm = alloc::vec![None; ports.len()];
         let segment = SharedSegment::new(ports.len());
         let config_sent = alloc::vec![false; ports.len()];
         Self {
             demux: PsDemuxer::new(),
             ports,
-            announced,
             selected_streams,
             refined,
+            seed_lpcm,
             bus: None,
             collection_posted: false,
             stream_select: None,
@@ -1822,6 +2109,16 @@ impl PsDemuxN {
     /// negotiates at the real size instead of a `Range` placeholder's minimum.
     pub fn with_video_geometry(mut self, geometry: SequenceHeader) -> Self {
         self.seed_geometry = Some(geometry);
+        self
+    }
+
+    #[cfg(feature = "std")]
+    pub(crate) fn with_lpcm_caps<'a>(mut self, caps: impl IntoIterator<Item = &'a Caps>) -> Self {
+        for ((port, seed), caps) in self.ports.iter().zip(&mut self.seed_lpcm).zip(caps) {
+            if *port == PsStream::Lpcm {
+                *seed = Some(caps.clone());
+            }
+        }
         self
     }
 
@@ -1865,8 +2162,7 @@ impl PsDemuxN {
             if self.ports[port] != stream || self.selected_streams[port] != Some(es) {
                 self.ports[port] = stream;
                 self.selected_streams[port] = Some(es);
-                self.announced[port] = false; // re-emit caps for the new stream
-                self.refined[port] = None;
+                self.refined[port] = None; // re-emit caps for the new stream
             }
             active.push(id.clone());
         }
@@ -1894,7 +2190,7 @@ impl PsDemuxN {
             .demux
             .streams()
             .iter()
-            .filter_map(PsDemux::es_to_stream)
+            .filter_map(|es| PsDemux::es_to_stream(&self.demux, es))
             .collect();
         if streams.is_empty() {
             return;
@@ -1953,29 +2249,17 @@ impl PsDemuxN {
         let opening_start_ns = decoded_ns.unwrap_or(self.held_until_first_stamp.opening_ns());
         let pts_ns = presented_ns.unwrap_or(FrameTiming::PTS_NONE);
         let dts_ns = decoded_ns.unwrap_or(FrameTiming::DTS_NONE);
-        if !self.announced[port] {
-            // Announce what `port_output_caps` declared: a seeded video
-            // port solved at its Fixed geometry, and the runner's
-            // mid-stream check rejects a Range placeholder on that link.
-            let caps = match (kind, self.seed_geometry) {
-                (PsStream::Mpeg2, Some(seq)) => Caps::CompressedVideo {
-                    codec: VideoCodec::Mpeg2,
-                    width: Dim::Fixed(seq.width),
-                    height: Dim::Fixed(seq.height),
-                    framerate: Rate::Fixed(seq.framerate_q16),
-                    colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                    pixel_aspect: seq.pixel_aspect,
-                    alignment: g2g_core::BitstreamAlignment::Unspecified,
-                },
-                _ => PsDemux::output_caps(kind),
-            };
-            out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
-            self.announced[port] = true;
-            // A seeded announce already names the geometry; the parsed
-            // sequence header then only re-announces a real change.
-            if let (PsStream::Mpeg2, Some(seq)) = (kind, self.seed_geometry) {
-                self.refined[port] = Some(seq);
-            }
+        if self.refined[port].is_none() {
+            // LPCM already has a concrete layout from this unit. Seeded
+            // video ports announce the fixed geometry negotiated at startup.
+            let caps = u
+                .lpcm
+                .map(DvdLpcmFormat::caps)
+                .or_else(|| self.port_output_caps(port))
+                .ok_or(G2gError::CapsMismatch)?;
+            out.push_to(port, PipelinePacket::CapsChanged(caps.clone()))
+                .await?;
+            self.refined[port] = Some(caps);
         }
         self.segment
             .send_before_unit(port, opening_start_ns, presented_ns, 0, out)
@@ -1991,28 +2275,17 @@ impl PsDemuxN {
                 out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
             }
         }
-        if kind == PsStream::Mpeg2 {
-            if let Some(seq) = u.sequence {
-                self.held_picture_ns = crate::compositor::frame_period_ns(seq.framerate_q16);
-                if self.refined[port] != Some(seq) {
-                    self.refined[port] = Some(seq);
-                    out.push_to(
-                        port,
-                        PipelinePacket::CapsChanged(Caps::CompressedVideo {
-                            codec: VideoCodec::Mpeg2,
-                            width: Dim::Fixed(seq.width),
-                            height: Dim::Fixed(seq.height),
-                            framerate: Rate::Fixed(seq.framerate_q16),
-                            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                            pixel_aspect: seq.pixel_aspect,
-                            alignment: g2g_core::BitstreamAlignment::Unspecified,
-                        }),
-                    )
+        if let Some(seq) = u.sequence {
+            self.held_picture_ns = crate::compositor::frame_period_ns(seq.framerate_q16);
+        }
+        if let Some(caps) = u.refined_caps(kind) {
+            if self.refined[port].as_ref() != Some(&caps) {
+                out.push_to(port, PipelinePacket::CapsChanged(caps.clone()))
                     .await?;
-                }
+                self.refined[port] = Some(caps);
             }
         }
-        let duration_ns = cue_duration_ns(kind, &u.data);
+        let duration_ns = u.duration_ns(kind);
         let keyframe = unit_is_keyframe(kind, &u.data);
         let frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(u.data.into_boxed_slice())),
@@ -2059,18 +2332,14 @@ impl MultiOutputElement for PsDemuxN {
     /// branch against its codec at startup. `None` for an out-of-range port.
     fn port_output_caps(&self, port: usize) -> Option<Caps> {
         let stream = *self.ports.get(port)?;
-        match (stream, self.seed_geometry) {
-            (PsStream::Mpeg2, Some(seq)) => Some(Caps::CompressedVideo {
-                codec: VideoCodec::Mpeg2,
-                width: Dim::Fixed(seq.width),
-                height: Dim::Fixed(seq.height),
-                framerate: Rate::Fixed(seq.framerate_q16),
-                colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                pixel_aspect: seq.pixel_aspect,
-                alignment: g2g_core::BitstreamAlignment::Unspecified,
-            }),
-            _ => Some(PsDemux::output_caps(stream)),
-        }
+        Some(
+            self.seed_lpcm[port]
+                .as_ref()
+                .filter(|_| stream == PsStream::Lpcm)
+                .cloned()
+                .or_else(|| PsDemux::refined_video_caps(stream, self.seed_geometry))
+                .unwrap_or_else(|| PsDemux::output_caps(stream)),
+        )
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {

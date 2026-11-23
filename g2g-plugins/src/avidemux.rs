@@ -139,7 +139,7 @@ fn video_caps(codec: VideoCodec, width: Dim, height: Dim) -> Caps {
 /// Compressed audio negotiates on the `0/0` "unknown until parsed" layout, the
 /// convention `tsdemux` / `qtdemux` share; PCM has no parser downstream to
 /// refine it, so it negotiates and runs on the layout the `strf` declared.
-fn audio_caps(format: AudioFormat, channels: u8, sample_rate: u32) -> Caps {
+pub(crate) fn audio_caps(format: AudioFormat, channels: u8, sample_rate: u32) -> Caps {
     Caps::Audio {
         format,
         channels,

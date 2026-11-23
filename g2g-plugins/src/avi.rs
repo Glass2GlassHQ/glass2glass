@@ -43,6 +43,7 @@ use crate::riff::{
 };
 use crate::waveformat::{
     audio_format, format_tag_name, sample_frame_len, tagged_audio, wave_format_tag, WaveFormatEx,
+    WAVE_FORMAT_XAN_DPCM,
 };
 
 /// The form type of the first `RIFF` list.
@@ -326,8 +327,11 @@ fn parse_strl(data: &[u8], range: core::ops::Range<usize>) -> Option<AviStream> 
     let stream_type = read_fourcc(strh, STRH_TYPE)?;
     let kind = match stream_type {
         STREAM_TYPE_VIDEO => parse_video_format(strh, strf),
-        STREAM_TYPE_AUDIO if read_fourcc(strh, STRH_HANDLER) == Some(XAN_DPCM_HANDLER) => None,
-        STREAM_TYPE_AUDIO => parse_audio_format(strf),
+        STREAM_TYPE_AUDIO => {
+            let tag_override = (read_fourcc(strh, STRH_HANDLER) == Some(XAN_DPCM_HANDLER))
+                .then_some(WAVE_FORMAT_XAN_DPCM);
+            parse_audio_format(strf, tag_override)
+        }
         _ => None,
     };
     let (kind, codec_config) = kind.unwrap_or_else(|| {
@@ -449,11 +453,11 @@ fn tagged_video(_compression: FourCc) -> Option<VideoCodec> {
 /// An audio stream's format from its `WAVEFORMATEX`, plus the `cbSize` extra
 /// bytes (an AAC stream's `AudioSpecificConfig`), bounded by what the chunk
 /// actually holds rather than by the declared `cbSize`.
-fn parse_audio_format(strf: &[u8]) -> Option<(AviStreamKind, Vec<u8>)> {
+fn parse_audio_format(strf: &[u8], tag_override: Option<u16>) -> Option<(AviStreamKind, Vec<u8>)> {
     if strf.len() < WAVEFORMAT_LEN {
         return None;
     }
-    let tag = read_u16(strf, WAVEFORMAT_TAG)?;
+    let tag = tag_override.unwrap_or(read_u16(strf, WAVEFORMAT_TAG)?);
     let typed = audio_format(tag, read_u16(strf, WAVEFORMAT_BITS)?);
     let channels = read_u16(strf, WAVEFORMAT_CHANNELS)?;
     let sample_rate = read_u32(strf, WAVEFORMAT_SAMPLE_RATE)?;
@@ -466,7 +470,12 @@ fn parse_audio_format(strf: &[u8]) -> Option<(AviStreamKind, Vec<u8>)> {
             channels: channels as u8,
             sample_rate,
         };
-        return Some((kind, strf.to_vec()));
+        let mut config = strf.to_vec();
+        if let Some(tag) = tag_override {
+            config[WAVEFORMAT_TAG..WAVEFORMAT_TAG + size_of::<u16>()]
+                .copy_from_slice(&tag.to_le_bytes());
+        }
+        return Some((kind, config));
     };
     let extra = match read_u16(strf, WAVEFORMAT_EXTRA_SIZE) {
         Some(declared) => {

@@ -18,6 +18,11 @@ pub(crate) const WAVE_FORMAT_IMA_ADPCM: u16 = 0x0011;
 pub(crate) const WAVE_FORMAT_MP3: u16 = 0x0055;
 const WAVE_FORMAT_AAC: u16 = 0x00FF;
 const WAVE_FORMAT_AC3: u16 = 0x2000;
+#[cfg(feature = "ffmpeg-long-tail")]
+pub(crate) const WAVE_FORMAT_DTS: u16 = 0x2001;
+pub(crate) const WAVE_FORMAT_XAN_DPCM: u16 = 0x594a;
+#[cfg(feature = "ffmpeg-long-tail")]
+pub(crate) const WAVE_FORMAT_TTA1: u16 = 0x77a1;
 
 /// The `wBitsPerSample` of a compressed payload, which has no sample depth. A
 /// reader takes any value for it.

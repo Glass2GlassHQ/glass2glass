@@ -6,6 +6,10 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2516: `mpegpsdemux` reads DVD LPCM as raw audio.
+- M2515: `avidemux` reads Xan DPCM audio.
+- M2514: `matroskademux` reads True Audio tracks.
+- M2513: `matroskademux` reads DTS audio tracks.
 - M2512: `udpsrc` reassembles interlaced JPEG fields over RTP.
 - M2511: `udpsrc` receives progressive Motion JPEG over RTP.
 - M2510: `udpsrc` receives spatially scalable VP9 over RTP.

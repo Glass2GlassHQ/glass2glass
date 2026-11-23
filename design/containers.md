@@ -698,7 +698,13 @@ search reads. `MkvDemux` wraps it with a per-codec
 `MkvStream` selection, H.264 / H.265 / VP8 / VP9 / AV1 / MJPEG video and AAC /
 Opus / AC-3 / FLAC / Vorbis / PCM audio, defaulting to VP9. An `A_PCM/*` track
 takes the PCM format its byte order and `BitDepth` name, the `WAVEFORMATEX`
-table WAV and AVI use, and big-endian samples are swapped at demux. A track's `ContentEncodings` chain is undone at demux, highest
+table WAV and AVI use, and big-endian samples are swapped at demux. With
+`ffmpeg-long-tail`, native DTS and True Audio tracks use tagged audio caps and
+carry one coded packet per block frame. True Audio takes its TTA1 header from
+`CodecPrivate` when present. For files without it, the demuxer builds the header
+from the track's audio parameters and the Segment duration.
+
+A track's `ContentEncodings` chain is undone at demux, highest
 `ContentEncodingOrder` first, on the blocks and on the `CodecPrivate` as each
 step's scope names: zlib (`zlib-rs`), header stripping, and with
 `matroska-compression` bzip2 (`libbz2-rs-sys`) and LZO1X (`lzo`). A block that does not decode or
@@ -1258,7 +1264,8 @@ and back to the first chunk, then sends each chunk as its bytes arrive
 puts an entry on the first chunk read. Without an `idx1` only MJPEG and
 uncompressed chunks are keyframes, as in the whole-file parse. In any other run
 the file is held whole and parsed at EOS. Its duration is the end of the longest
-stream by its `strh` `dwLength`.
+stream by its `strh` `dwLength`. With `ffmpeg-long-tail`, an audio stream with
+the `Axan` handler uses the Xan DPCM codec even when its format header says PCM.
 
 A `moof` can hold one `traf` per track, as ffmpeg and mediamtx write by
 default. A `trun` with a `data_offset` reads its samples at that offset from its
@@ -1500,20 +1507,26 @@ the MPEG-2 `01`-marker layout with its stuffing and the flat 8-byte MPEG-1 one,
 and reads the PES packets between them. A stream that ends without a single pack
 header was not a program stream, so `PsDemuxer::flush` fails it with
 `CapsMismatch`. `PsDemux` and `PsDemuxN` wrap it with a
-`PsStream` selection of `Mpeg2` video, `Mp2` audio, `Ac3` and `SubPicture`. Two
-things make it unlike `TsDemux`.
+`PsStream` selection of `Mpeg2` video, `Mp2` audio, `Ac3`, `Lpcm` and
+`SubPicture`. Two things make it unlike `TsDemux`.
 
 ### Stream discovery
 
 There is no PAT or PMT. A stream is identified by its PES `stream_id`,
 0xE0..=0xEF video and 0xC0..=0xDF audio, and, for the `private_stream_1` 0xBD
-that DVD carries AC-3 and subpictures on, by the substream id byte opening its
-payload, 0x80..=0x87 AC-3 behind a 4-byte DVD substream header and 0x20..=0x3F
-subpicture. Streams are therefore discovered by observing packets, so the
+that DVD carries AC-3, LPCM and subpictures on, by the substream id byte opening
+its payload. AC-3 uses 0x80..=0x87, LPCM uses 0xA0..=0xA7 and subpictures use
+0x20..=0x3F. Streams are discovered by observing packets, so the
 `playbin` and `decodebin` probe hooks report what the probe window has actually
 shown rather than reading a table, and geometry comes from the video's own
 sequence header, `00 00 01 B3`, which the demuxer parses to fix the video caps
 via `CapsChanged`.
+
+DVD LPCM takes its rate, channels and bit depth from the private substream
+header. The demuxer uses the first access unit pointer to place the PES
+timestamp, carries incomplete packing blocks across PES packets, and emits
+interleaved S16LE or S24LE. It pads 20-bit samples at the low end to preserve
+their amplitude and sends new caps before samples whenever the layout changes.
 
 A selection forwards only the first stream of its codec the parser has seen, so
 a second audio language never interleaves with the first. That is the stream

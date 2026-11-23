@@ -858,7 +858,8 @@ impl PsProbe {
     fn demux(&self) -> Box<dyn DynMultiOutputElement> {
         Box::new(
             crate::psdemux::PsDemuxN::new(self.infos.iter().map(|i| i.stream).collect())
-                .with_selected_streams(self.infos.iter().map(|i| Some(i.elementary)).collect()),
+                .with_selected_streams(self.infos.iter().map(|i| Some(i.elementary)).collect())
+                .with_lpcm_caps(self.infos.iter().map(|i| &i.caps)),
         )
     }
 
@@ -1015,6 +1016,7 @@ fn build_ps_subpicture_overlay(
         GraphNodeRef::demux(
             PsDemuxN::new(ports)
                 .with_selected_streams(selected)
+                .with_lpcm_caps(infos.iter().map(|i| &i.caps))
                 .with_video_geometry(geometry),
         ),
         port_count,
@@ -1155,7 +1157,11 @@ fn ps_select(
     let selected: Vec<_> = sel.iter().map(|&i| selected[i]).collect();
     let caps: Vec<Caps> = sel.iter().map(|&i| caps[i].clone()).collect();
     Some((
-        Box::new(crate::psdemux::PsDemuxN::new(ports).with_selected_streams(selected)),
+        Box::new(
+            crate::psdemux::PsDemuxN::new(ports)
+                .with_selected_streams(selected)
+                .with_lpcm_caps(&caps),
+        ),
         caps,
     ))
 }

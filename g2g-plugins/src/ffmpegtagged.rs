@@ -72,6 +72,9 @@ pub(crate) fn audio_codec_id(tag: CodecTag) -> Option<Id> {
         )
     };
     let id = match tag.namespace {
+        TagNamespace::Riff if tag.tag == u32::from(crate::waveformat::WAVE_FORMAT_TTA1) => {
+            Some(Id::TTA)
+        }
         TagNamespace::Riff => table_codec_id(riff, tag.tag),
         TagNamespace::Mov => table_codec_id(mov, tag.tag).or_else(|| {
             let twocc = tag.tag & TWOCC_MASK;

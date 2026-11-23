@@ -283,6 +283,7 @@ fn the_stream_property_round_trips() {
         ("mpeg2", PsStream::Mpeg2),
         ("mp2", PsStream::Mp2),
         ("ac3", PsStream::Ac3),
+        ("lpcm", PsStream::Lpcm),
         ("subpicture", PsStream::SubPicture),
     ] {
         el.set_property("stream", PropValue::Str(name.into()))
@@ -291,8 +292,132 @@ fn the_stream_property_round_trips() {
         assert_eq!(el.get_property("stream"), Some(PropValue::Str(name.into())));
     }
     assert!(el
-        .set_property("stream", PropValue::Str("lpcm".into()))
+        .set_property("stream", PropValue::Str("unknown-stream".into()))
         .is_err());
+}
+
+#[tokio::test]
+async fn dvd_lpcm_carries_partial_blocks_and_refines_caps_before_samples() {
+    let lpcm = |flags: u8, pointer: u16, pts, samples: &[u8]| {
+        let [hi, lo] = pointer.to_be_bytes();
+        let mut payload = Vec::from([1, hi, lo, 0, flags, 0x80]);
+        payload.extend_from_slice(samples);
+        pes_private(0xa0, pts, &payload)
+    };
+    // A stereo 20-bit group stores the upper words first, then the low nibbles.
+    let group = [0x12, 0x34, 0xfe, 0xdc, 0x68, 0xac, 0x80, 0x00, 0x57, 0x9b];
+    let expected = [
+        0x50, 0x34, 0x12, 0x70, 0xdc, 0xfe, 0x90, 0xac, 0x68, 0xb0, 0, 0x80,
+    ];
+    let mut file = PACK.to_vec();
+    file.extend(lpcm(0x41, 4, Some(90_000), &group[..3]));
+    file.extend(lpcm(
+        0x41,
+        11,
+        Some(90_004),
+        &[&group[3..], &group].concat(),
+    ));
+    file.extend(lpcm(0x10, 4, Some(90_008), &[0x34, 0x12]));
+    let sink = demux(&file, PsStream::Lpcm).await;
+    let frames = sink.frames();
+    assert_eq!(
+        frames.iter().map(|frame| bytes(frame)).collect::<Vec<_>>(),
+        [expected.to_vec(), expected.to_vec(), vec![0x12, 0x34]]
+    );
+    assert_eq!(frames[0].timing.pts_ns, 1_000_000_000);
+    assert_eq!(frames[1].timing.pts_ns, 1_000_044_444);
+    assert_eq!(frames[0].timing.duration_ns, 41_667);
+    let audio = |format, channels, sample_rate| Caps::Audio {
+        format,
+        channels,
+        sample_rate,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+    };
+    assert_eq!(
+        sink.caps_changes(),
+        [
+            audio(AudioFormat::PcmS24Le, 2, 48_000),
+            audio(AudioFormat::PcmS16Le, 1, 96_000),
+        ]
+    );
+    let markers: Vec<_> = sink
+        .packets
+        .iter()
+        .filter_map(|packet| match packet {
+            PipelinePacket::CapsChanged(_) => Some(true),
+            PipelinePacket::DataFrame(_) => Some(false),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(markers, [true, false, false, true, false]);
+}
+
+#[tokio::test]
+async fn dvd_lpcm_matches_ffmpeg_through_the_launch_graph() {
+    use g2g_core::runtime::{parse_launch, run_graph};
+
+    if !have_ffmpeg() {
+        return;
+    }
+    for (sample, wire, raw, rate, stage) in [
+        ("s16", "S16LE", "s16le", "48000", "decodebin"),
+        (
+            "s32",
+            "S24LE",
+            "s24le",
+            "96000",
+            "mpegpsdemux name=d d.audio_0",
+        ),
+    ] {
+        let (vob, reference, output) = (
+            temp_path(&format!("lpcm-{sample}.vob")),
+            temp_path(&format!("lpcm-{sample}-reference.raw")),
+            temp_path(&format!("lpcm-{sample}-output.raw")),
+        );
+        ffmpeg(&[
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("aevalsrc=0.6*sin(2*PI*516*t)|0.4*sin(2*PI*709*t):s={rate}"),
+            "-t",
+            "0.034",
+            "-c:a",
+            "pcm_dvd",
+            "-sample_fmt",
+            sample,
+            "-f",
+            "dvd",
+            vob.to_str().unwrap(),
+        ]);
+        ffmpeg(&[
+            "-i",
+            vob.to_str().unwrap(),
+            "-map",
+            "0:a:0",
+            "-c:a",
+            &format!("pcm_{raw}"),
+            "-f",
+            raw,
+            reference.to_str().unwrap(),
+        ]);
+        let line = format!(
+            "filesrc location={} ! {stage} ! audio/x-raw,format={wire},rate={rate},channels=2 ! filesink location={}",
+            vob.display(), output.display(),
+        );
+        let graph = parse_launch(&default_registry(), &line)
+            .unwrap_or_else(|err| panic!("parse {line}: {err}"));
+        run_graph(graph, &g2g_core::clock::MonotonicClock, 4)
+            .await
+            .unwrap_or_else(|err| panic!("run {line}: {err:?}"));
+        let pcm = std::fs::read(&output).unwrap();
+        let expected = std::fs::read(&reference).unwrap();
+        assert!(!pcm.is_empty());
+        assert_eq!(pcm.len(), expected.len(), "{wire} PCM length");
+        assert!(pcm == expected, "{wire} samples match the FFmpeg decode");
+        for path in [vob, reference, output] {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 // ---- MPEG-1 program stream ----

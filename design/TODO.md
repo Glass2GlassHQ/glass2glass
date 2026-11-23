@@ -336,11 +336,6 @@ libraries installed.
 - **WebVTT track writing** (mkv, mp4 `wvtt`): blocked on a reference peer.
   ffmpeg reads only the WebM `D_WEBVTT/*` carriage (different block payload)
   and cannot write WebVTT into MP4 at all; reading both stays supported.
-- **Corpus sweep bugs** (calliope TESTING techniques 21-23, paths under
-  `~/.cache/calliope` on hercules):
-  - Demuxers drop streams gst's parsebin exposes: DTS in `filter/242_4.mkv`, TTA,
-    pcm_dvd LPCM in `coolitnow-partial.vob`, and the xan_dpcm audio of
-    `wc4-xan` AVIs.
 - **Opus end trim in fragmented MP4:** the fragmented `mp4mux` layout writes
   its `moov` before the stream ends, so the `elst` duration is 0 and the end
   trim is only in the last sample's duration, which gst's `qtdemux` ignores (a

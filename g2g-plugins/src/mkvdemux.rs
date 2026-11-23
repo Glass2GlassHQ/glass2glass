@@ -1284,6 +1284,10 @@ fn resolve_stream_id(demux: &MatroskaDemuxer, id: &str) -> Option<(MkvStream, u6
 /// which go as three packets, the way `OggDemux` forwards them. An AAC config
 /// ADTS cannot carry (ER AAC, ELD, USAC) leads the track's raw blocks.
 fn config_headers(demux: &MatroskaDemuxer, codec: MkvCodec, track: u64) -> Vec<Vec<u8>> {
+    #[cfg(feature = "ffmpeg-long-tail")]
+    if let Some(header) = demux.tta_config_header(track) {
+        return alloc::vec![header];
+    }
     let Some(private) = demux.codec_private(track) else {
         return Vec::new();
     };

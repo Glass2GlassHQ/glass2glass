@@ -48,6 +48,8 @@ use crate::dvbsub::{page_id_blob, parse_page_ids, segment_span, PageIds, DEFAULT
 use crate::fifobuffer::FifoBuffer;
 use crate::subparse::ASS_SCRIPT_HEADER;
 use crate::vobsub::{idx_config_text, parse_idx};
+#[cfg(feature = "ffmpeg-long-tail")]
+use crate::waveformat::{WaveFormatEx, WAVE_FORMAT_DTS, WAVE_FORMAT_TTA1};
 
 /// EBML / Matroska element IDs (kept whole, length marker included). The demuxer
 /// skips the EBML header by its size and ignores TrackType (the CodecID pins the
@@ -967,6 +969,8 @@ pub struct MatroskaDemuxer {
     /// Per-track `CodecPrivate` decoder-init bytes (track number, bytes), kept
     /// beside `tracks` so `MkvTrack` stays `Copy`. Empty entries are not stored.
     codec_privates: Vec<(u64, Vec<u8>)>,
+    #[cfg(feature = "ffmpeg-long-tail")]
+    tta_formats: Vec<(u64, WaveFormatEx)>,
     /// Per-track `ContentEncoding` chain (track number, steps), kept beside
     /// `tracks` for the same reason as `codec_privates`. Only tracks whose blocks
     /// carry one are stored; their blocks are decoded before they are queued.
@@ -1028,6 +1032,8 @@ impl MatroskaDemuxer {
             duration_ns: None,
             tracks: Vec::new(),
             codec_privates: Vec::new(),
+            #[cfg(feature = "ffmpeg-long-tail")]
+            tta_formats: Vec::new(),
             block_encodings: Vec::new(),
             opus_block_shifts: Vec::new(),
             vorbis_lacing: Vec::new(),
@@ -1178,13 +1184,44 @@ impl MatroskaDemuxer {
         Some(self.duration_ns?.saturating_add(self.reorder_shift_ns))
     }
 
-    /// The `CodecPrivate` decoder-init bytes for a track number, if the track
-    /// carried a non-empty one (FLAC's native `fLaC` STREAMINFO header).
+    /// Decoder-init bytes for a track number, from its non-empty `CodecPrivate`
+    /// or a synthesized tagged-codec header.
     pub fn codec_private(&self, track: u64) -> Option<&[u8]> {
         self.codec_privates
             .iter()
             .find(|(n, _)| *n == track)
             .map(|(_, p)| p.as_slice())
+    }
+
+    // Native True Audio normally carries the file header as CodecPrivate.
+    // FFmpeg-written files can omit it and rely on TrackEntry and Info.
+    #[cfg(feature = "ffmpeg-long-tail")]
+    pub(crate) fn tta_config_header(&self, track: u64) -> Option<Vec<u8>> {
+        let &(_, format) = self
+            .tta_formats
+            .iter()
+            .find(|(number, _)| *number == track)?;
+        const TTA_HEADER_LEN: usize = 22;
+        if let Some(header) = self
+            .codec_private(track)
+            .and_then(|private| private.get(..TTA_HEADER_LEN))
+            .filter(|header| header.starts_with(b"TTA1"))
+        {
+            return Some(format.to_bytes(Some(header)));
+        }
+        let samples =
+            g2g_core::time::ns_to_ticks(self.duration_ns.unwrap_or_default(), format.sample_rate);
+        let samples = u32::try_from(samples).unwrap_or_default();
+        let mut header = Vec::with_capacity(TTA_HEADER_LEN);
+        header.extend_from_slice(b"TTA1");
+        header.extend_from_slice(&1u16.to_le_bytes()); // unencrypted PCM
+        header.extend_from_slice(&format.channels.to_le_bytes());
+        header.extend_from_slice(&format.bits.to_le_bytes());
+        header.extend_from_slice(&format.sample_rate.to_le_bytes());
+        header.extend_from_slice(&samples.to_le_bytes());
+        let checksum = zlib_rs::crc32::crc32(0, &header);
+        header.extend_from_slice(&checksum.to_le_bytes());
+        Some(format.to_bytes(Some(&header)))
     }
 
     pub fn unmapped_codec_ids(&self) -> &[String] {
@@ -1429,6 +1466,10 @@ impl MatroskaDemuxer {
                                 self.codec_privates
                                     .push((parsed.track.number, parsed.codec_private));
                             }
+                            #[cfg(feature = "ffmpeg-long-tail")]
+                            if let Some(format) = parsed.tta_format {
+                                self.tta_formats.push((parsed.track.number, format));
+                            }
                             if !parsed.tags.is_empty() {
                                 self.track_entry_tags
                                     .push((parsed.track.number, parsed.tags));
@@ -1586,7 +1627,13 @@ fn parse_info_duration(info: &[u8], timestamp_scale: u64) -> Option<u64> {
     if !ticks.is_finite() || ticks <= 0.0 || ticks > MAX_DURATION_TICKS {
         return None;
     }
-    Some((ticks as u64).saturating_mul(timestamp_scale))
+    let whole_ticks = ticks as u64;
+    let fractional_ns = ((ticks - whole_ticks as f64) * timestamp_scale as f64) as u64;
+    Some(
+        whole_ticks
+            .saturating_mul(timestamp_scale)
+            .saturating_add(fractional_ns),
+    )
 }
 
 /// Largest `Duration` tick count accepted: at the default 1 ms scale this is a
@@ -1803,6 +1850,8 @@ struct ParsedTrack {
     unmapped_codec_id: Option<String>,
     opus_block_shift: Option<OpusBlockShift>,
     vorbis_lacing: Option<VorbisLacing>,
+    #[cfg(feature = "ffmpeg-long-tail")]
+    tta_format: Option<WaveFormatEx>,
 }
 
 fn parse_tracks(body: &[u8], content_key: ContentKeyLookup<'_>) -> Vec<ParsedTrack> {
@@ -1928,12 +1977,26 @@ fn parse_track_entry(body: &[u8], content_key: ContentKeyLookup<'_>) -> Option<P
             .unwrap_or(MkvCodec::Other),
         codec => codec,
     };
+    #[cfg(feature = "ffmpeg-long-tail")]
+    let native_audio = native_audio_tag(codec_id).map(|tag| WaveFormatEx {
+        tag,
+        channels: u16::from(channels.max(1)),
+        sample_rate: if sample_rate == 0 { 8000 } else { sample_rate },
+        byte_rate: 0,
+        block_align: 0,
+        bits: u16::try_from(bit_depth).unwrap_or_default(),
+    });
     // matroskadec hands a `V_FFV1` CodecPrivate over as the extradata, which on the tagged path follows a BITMAPINFOHEADER
     let codec_private = match codec {
         MkvCodec::TaggedVideo(_) if without_nul_padding(codec_id) == FFV1_CODEC_ID.as_bytes() => {
             crate::avi::bitmap_info_header(FFV1_FOURCC, width, height, &codec_private)
         }
         _ => codec_private,
+    };
+    #[cfg(feature = "ffmpeg-long-tail")]
+    let codec_private = match native_audio.filter(|format| format.tag == WAVE_FORMAT_DTS) {
+        Some(format) => format.to_bytes(None),
+        None => codec_private,
     };
     let opus_block_shift = match codec {
         MkvCodec::Opus => OpusBlockShift::new(number, &codec_private, codec_delay_ns),
@@ -1946,6 +2009,8 @@ fn parse_track_entry(body: &[u8], content_key: ContentKeyLookup<'_>) -> Option<P
     Some(ParsedTrack {
         opus_block_shift,
         vorbis_lacing,
+        #[cfg(feature = "ffmpeg-long-tail")]
+        tta_format: native_audio.filter(|format| format.tag == WAVE_FORMAT_TTA1),
         unmapped_codec_id: unmapped_av_codec_id(codec, codec_id, &codec_private),
         track: MkvTrack {
             number,
@@ -2119,9 +2184,24 @@ fn uncompressed_codec(codec_id: &[u8], colour_space: [u8; 4]) -> Option<MkvCodec
         .map(MkvCodec::RawVideo)
 }
 
-// the wrappers whose `CodecPrivate` carries an AVI or QuickTime codec header, which a tagged codec rides
+#[cfg(feature = "ffmpeg-long-tail")]
+fn native_audio_tag(codec_id: &[u8]) -> Option<u16> {
+    match without_nul_padding(codec_id) {
+        b"A_DTS" | b"A_DTS/EXPRESS" | b"A_DTS/LOSSLESS" => Some(WAVE_FORMAT_DTS),
+        b"A_TTA1" => Some(WAVE_FORMAT_TTA1),
+        _ => None,
+    }
+}
+
+// Native tagged audio and wrappers that already carry an AVI or QuickTime header.
 #[cfg(feature = "ffmpeg-long-tail")]
 fn tagged_codec(codec_id: &[u8], codec_private: &[u8]) -> Option<MkvCodec> {
+    if let Some(tag) = native_audio_tag(codec_id) {
+        return Some(MkvCodec::TaggedAudio(CodecTag {
+            namespace: TagNamespace::Riff,
+            tag: u32::from(tag),
+        }));
+    }
     const BITMAPINFO_LEN: usize = 40;
     const WAVEFORMAT_LEN: usize = 14;
     const WAVEFORMAT_TAG: core::ops::Range<usize> = 0..2;
@@ -3927,6 +4007,46 @@ mod tests {
             body.extend_from_slice(&elem(&[0xE1], &a));
         }
         elem(&[0xAE], &body)
+    }
+
+    #[cfg(feature = "ffmpeg-long-tail")]
+    #[test]
+    fn a_tta_track_uses_its_file_header_or_the_segment_duration() {
+        let audio = [
+            elem(&[ID_CHANNELS as u8], &[1]),
+            elem(&[ID_SAMPLING_FREQ as u8], &8000f32.to_be_bytes()),
+            elem(&[0x62, 0x64], &[16]),
+        ]
+        .concat();
+        let entry = [
+            elem(&[0xD7], &[1]),
+            elem(&[0x86], b"A_TTA1"),
+            elem(&[0xE1], &audio),
+        ]
+        .concat();
+        let info = elem(
+            &ID_INFO.to_be_bytes(),
+            &elem(&[0x44, 0x89], &250.125f64.to_be_bytes()),
+        );
+        let file_header =
+            b"TTA1\x01\x00\x01\x00\x10\x00\x40\x1f\x00\x00\xd0\x07\x00\x00\x00\x5f\xdc\x8e";
+        for private in [None, Some(file_header.as_slice())] {
+            let mut entry = entry.clone();
+            if let Some(private) = private {
+                entry.extend(elem(&[0x63, 0xA2], private));
+            }
+            let tracks = elem(&ID_TRACKS.to_be_bytes(), &elem(&[0xAE], &entry));
+            let segment = elem(&ID_SEGMENT.to_be_bytes(), &[tracks, info.clone()].concat());
+            let mut demux = MatroskaDemuxer::new();
+            demux.push_data(&segment);
+            let config = demux.tta_config_header(1).expect("TTA configuration");
+            let header = &config[config.len() - file_header.len()..];
+            if let Some(private) = private {
+                assert_eq!(header, private);
+            } else {
+                assert_eq!(&header[14..18], &2001u32.to_le_bytes());
+            }
+        }
     }
 
     /// A full single-segment WebM: EBML header, Tracks (VP9 video + Opus audio),

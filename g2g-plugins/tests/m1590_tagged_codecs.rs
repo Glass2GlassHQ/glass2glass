@@ -120,6 +120,44 @@ async fn an_ffv1_matroska_track_decodes_with_its_codec_private() {
 }
 
 #[tokio::test]
+async fn a_native_dts_matroska_track_decodes_without_codec_private() {
+    const INPUT: &str = "tagged_dts.mka";
+    let decoded = decode(
+        &fixture(INPUT),
+        "audioconvert ! audio/x-raw,format=S16LE,rate=48000,channels=1",
+        "mkv-dts",
+    )
+    .await;
+    assert_eq!(decoded, expected(&format!("{INPUT}.s16le")));
+}
+
+#[tokio::test]
+async fn a_native_tta_matroska_track_decodes_its_short_final_packet() {
+    // FFmpeg writes this fixture without CodecPrivate.
+    const INPUT: &str = "tagged_tta.mka";
+    let decoded = decode(
+        &fixture(INPUT),
+        &format!("audioconvert ! {AUDIO_CAPS}"),
+        "mkv-tta",
+    )
+    .await;
+    assert_eq!(decoded, expected(&format!("{INPUT}.s16le")));
+}
+
+#[tokio::test]
+async fn an_avi_audio_handler_overrides_the_pcm_format_tag_for_xan_dpcm() {
+    // Two synthetic Xan packets in an AVI with the same Axan/PCM headers as WC4.
+    const INPUT: &str = "tagged_xan_dpcm.avi";
+    let decoded = decode(
+        &fixture(INPUT),
+        &format!("audioconvert ! {AUDIO_CAPS}"),
+        "xan-dpcm",
+    )
+    .await;
+    assert_eq!(decoded, expected(&format!("{INPUT}.s16le")));
+}
+
+#[tokio::test]
 async fn an_avi_adpcm_track_decodes_with_its_block_align() {
     let tail = format!("audioconvert ! {AUDIO_CAPS}");
     let decoded = decode(&fixture(ZMBV_AVI), &tail, "adpcm-ms").await;
