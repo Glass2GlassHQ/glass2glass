@@ -216,14 +216,19 @@ fn import_dmabuf(
         return Err(G2gError::CapsMismatch);
     }
     let device = &gpu.device;
-    let imported = gpu.dmabuf_imports.get_or_import(dmabuf, size, || {
-        // SAFETY: the fd is a live dma-buf owned by `dmabuf` for this call.
-        let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(dmabuf.as_raw()) }
-            .try_clone_to_owned()
-            .map_err(|_| G2gError::Hardware(g2g_core::HardwareError::Other))?;
-        // SAFETY: `fd` is a dma-buf of at least `size` bytes, checked above, on an AMD device.
-        unsafe { HipExternalBuffer::import(fd, size, device.ordinal()) }.map(Arc::new)
-    })?;
+    let imported = gpu.dmabuf_imports.get_or_import(
+        dmabuf,
+        size,
+        || {
+            // SAFETY: the fd is a live dma-buf owned by `dmabuf` for this call.
+            let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(dmabuf.as_raw()) }
+                .try_clone_to_owned()
+                .map_err(|_| G2gError::Hardware(g2g_core::HardwareError::Other))?;
+            // SAFETY: `fd` is a dma-buf of at least `size` bytes, checked above, on an AMD device.
+            unsafe { HipExternalBuffer::import(fd, size, device.ordinal()) }.map(Arc::new)
+        },
+        |_| Ok(()),
+    )?;
     let ready = HipEvent::new(device)?;
     gpu.stream.record(&ready)?;
     let len = usize::try_from(size).map_err(|_| G2gError::CapsMismatch)?;

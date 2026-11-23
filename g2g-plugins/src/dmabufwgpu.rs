@@ -159,12 +159,17 @@ impl DmaBufImporter {
         size: u64,
     ) -> Result<wgpu::Buffer, G2gError> {
         self.await_producer(device, dmabuf).await?;
-        self.imports.get_or_import(dmabuf, size, || {
-            // SAFETY: `device` carries VK_EXT_external_memory_dma_buf; the fd is a
-            // live dma-buf owned by `dmabuf` for this call and is duplicated before
-            // Vulkan takes ownership.
-            unsafe { import_dmabuf(device, dmabuf.as_raw(), size) }
-        })
+        self.imports.get_or_import(
+            dmabuf,
+            size,
+            || {
+                // SAFETY: `device` carries VK_EXT_external_memory_dma_buf; the fd is a
+                // live dma-buf owned by `dmabuf` for this call and is duplicated before
+                // Vulkan takes ownership.
+                unsafe { import_dmabuf(device, dmabuf.as_raw(), size) }
+            },
+            |_| Ok(()),
+        )
     }
 
     /// Cross-process GPU sync: if the producer attached a timeline semaphore

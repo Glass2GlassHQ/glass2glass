@@ -1059,33 +1059,41 @@ impl WorkerState {
             .ok_or(G2gError::CapsMismatch)?;
         let (dmabuf_state, qh) = (&self.dmabuf_state, &self.qh);
         let (width, height) = (self.width as i32, self.height as i32);
-        self.imports.get_or_import(dmabuf, size, || {
-            let params = dmabuf_state
-                .create_params(qh)
-                .map_err(|_| G2gError::UnsupportedDomain)?;
-            // SAFETY: the fd is a live dma-buf owned by `dmabuf`, and the request is written before this returns.
-            let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(dmabuf.as_raw()) };
-            for index in 0..layout.count() {
-                let plane = layout.plane(index).ok_or(G2gError::CapsMismatch)?;
-                let to_u32 =
-                    |value: usize| u32::try_from(value).map_err(|_| G2gError::CapsMismatch);
-                params.add(
-                    fd,
-                    index as u32,
-                    to_u32(plane.offset)?,
-                    to_u32(plane.stride)?,
-                    DRM_FORMAT_MOD_LINEAR,
+        self.imports.get_or_import(
+            dmabuf,
+            size,
+            || {
+                let params = dmabuf_state
+                    .create_params(qh)
+                    .map_err(|_| G2gError::UnsupportedDomain)?;
+                // SAFETY: the fd is a live dma-buf owned by `dmabuf`, and the request is written before this returns.
+                let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(dmabuf.as_raw()) };
+                for index in 0..layout.count() {
+                    let plane = layout.plane(index).ok_or(G2gError::CapsMismatch)?;
+                    let to_u32 =
+                        |value: usize| u32::try_from(value).map_err(|_| G2gError::CapsMismatch);
+                    params.add(
+                        fd,
+                        index as u32,
+                        to_u32(plane.offset)?,
+                        to_u32(plane.stride)?,
+                        DRM_FORMAT_MOD_LINEAR,
+                    );
+                }
+                let (wl_buffer, _) = params.create_immed(
+                    width,
+                    height,
+                    drm_format,
+                    zwp_linux_buffer_params_v1::Flags::empty(),
+                    qh,
                 );
-            }
-            let (wl_buffer, _) = params.create_immed(
-                width,
-                height,
-                drm_format,
-                zwp_linux_buffer_params_v1::Flags::empty(),
-                qh,
-            );
-            Ok(wl_buffer)
-        })
+                Ok(wl_buffer)
+            },
+            |wl_buffer| {
+                wl_buffer.destroy();
+                Ok(())
+            },
+        )
     }
 
     fn draw(&mut self, queued: QueuedFrame) {

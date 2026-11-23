@@ -689,33 +689,38 @@ impl Scanout {
             dmabuf_plane_layout(dmabuf, RawVideoFormat::Nv12, self.width, self.height)
                 .ok_or(G2gError::CapsMismatch)?;
         let (card, width, height) = (&self.card, self.width, self.height);
-        self.imports.get_or_import(dmabuf, size, || {
-            // SAFETY: the fd is a live dma-buf owned by `dmabuf` for this call.
-            let fd = unsafe { BorrowedFd::borrow_raw(dmabuf.as_raw()) };
-            let handle = card.prime_fd_to_buffer(fd).map_err(hardware)?;
-            let mut framebuffer = Nv12Framebuffer {
-                width,
-                height,
-                handles: [None; 4],
-                pitches: [0; 4],
-                offsets: [0; 4],
-            };
-            for index in 0..layout.count() {
-                let plane = layout.plane(index).ok_or(G2gError::CapsMismatch)?;
-                let to_u32 =
-                    |value: usize| u32::try_from(value).map_err(|_| G2gError::CapsMismatch);
-                *framebuffer
-                    .handles
-                    .get_mut(index)
-                    .ok_or(G2gError::CapsMismatch)? = Some(handle);
-                framebuffer.pitches[index] = to_u32(plane.stride)?;
-                framebuffer.offsets[index] = to_u32(plane.offset)?;
-            }
-            let added = card.add_planar_framebuffer(&framebuffer, FbCmd2Flags::empty());
-            // drm keeps the buffer alive while a framebuffer uses it
-            card.close_buffer(handle).map_err(hardware)?;
-            added.map_err(hardware)
-        })
+        self.imports.get_or_import(
+            dmabuf,
+            size,
+            || {
+                // SAFETY: the fd is a live dma-buf owned by `dmabuf` for this call.
+                let fd = unsafe { BorrowedFd::borrow_raw(dmabuf.as_raw()) };
+                let handle = card.prime_fd_to_buffer(fd).map_err(hardware)?;
+                let mut framebuffer = Nv12Framebuffer {
+                    width,
+                    height,
+                    handles: [None; 4],
+                    pitches: [0; 4],
+                    offsets: [0; 4],
+                };
+                for index in 0..layout.count() {
+                    let plane = layout.plane(index).ok_or(G2gError::CapsMismatch)?;
+                    let to_u32 =
+                        |value: usize| u32::try_from(value).map_err(|_| G2gError::CapsMismatch);
+                    *framebuffer
+                        .handles
+                        .get_mut(index)
+                        .ok_or(G2gError::CapsMismatch)? = Some(handle);
+                    framebuffer.pitches[index] = to_u32(plane.stride)?;
+                    framebuffer.offsets[index] = to_u32(plane.offset)?;
+                }
+                let added = card.add_planar_framebuffer(&framebuffer, FbCmd2Flags::empty());
+                // drm keeps the buffer alive while a framebuffer uses it
+                card.close_buffer(handle).map_err(hardware)?;
+                added.map_err(hardware)
+            },
+            |framebuffer| card.destroy_framebuffer(framebuffer).map_err(hardware),
+        )
     }
 
     fn present(

@@ -8,7 +8,7 @@ use std::os::fd::BorrowedFd;
 use g2g_core::memory::OwnedDmaBuf;
 use g2g_core::{G2gError, HardwareError};
 
-// a dma-buf not seen once this many are held means the producer's pool changed
+// producer pools hand round fewer buffers than this
 const MAX_CACHED_IMPORTS: usize = 16;
 
 #[derive(Debug)]
@@ -37,16 +37,21 @@ impl<T: Clone> DmaBufImportCache<T> {
         dmabuf: &OwnedDmaBuf,
         size: u64,
         import: impl FnOnce() -> Result<T, G2gError>,
+        release: impl FnOnce(T) -> Result<(), G2gError>,
     ) -> Result<T, G2gError> {
         // SAFETY: the fd is a live dma-buf owned by `dmabuf` for this call.
         let fd = unsafe { BorrowedFd::borrow_raw(dmabuf.as_raw()) };
         let key = (dmabuf_inode(fd)?, size);
-        if let Some((_, imported)) = self.imports.iter().find(|(known, _)| *known == key) {
-            return Ok(imported.clone());
+        if let Some(position) = self.imports.iter().position(|(known, _)| *known == key) {
+            let entry = self.imports.remove(position);
+            let imported = entry.1.clone();
+            self.imports.push(entry);
+            return Ok(imported);
         }
         let imported = import()?;
         if self.imports.len() >= MAX_CACHED_IMPORTS {
-            self.imports.clear();
+            let (_, oldest) = self.imports.remove(0);
+            release(oldest)?;
         }
         self.imports.push((key, imported.clone()));
         Ok(imported)
@@ -59,4 +64,44 @@ fn dmabuf_inode(fd: BorrowedFd<'_>) -> Result<u64, G2gError> {
     let error = |_| G2gError::Hardware(HardwareError::Other);
     let file = std::fs::File::from(fd.try_clone_to_owned().map_err(error)?);
     Ok(file.metadata().map_err(error)?.ino())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::fd::IntoRawFd;
+
+    // sockets stand in for dma-bufs, each with an inode of its own
+    fn buffer() -> OwnedDmaBuf {
+        let (socket, _) = std::os::unix::net::UnixStream::pair().unwrap();
+        // SAFETY: the fd is a freshly opened socket this call gives up.
+        unsafe { OwnedDmaBuf::from_raw(socket.into_raw_fd(), 0, 0) }
+    }
+
+    #[test]
+    fn a_full_cache_releases_the_least_recently_used_import() {
+        let buffers: Vec<OwnedDmaBuf> = (0..=MAX_CACHED_IMPORTS).map(|_| buffer()).collect();
+        let mut cache = DmaBufImportCache::new();
+        let mut released = Vec::new();
+        let mut get = |cache: &mut DmaBufImportCache<usize>, index: usize| {
+            cache
+                .get_or_import(
+                    &buffers[index],
+                    0,
+                    || Ok(index),
+                    |oldest| {
+                        released.push(oldest);
+                        Ok(())
+                    },
+                )
+                .unwrap()
+        };
+        for index in 0..MAX_CACHED_IMPORTS {
+            assert_eq!(get(&mut cache, index), index);
+        }
+        assert_eq!(get(&mut cache, 0), 0);
+        assert_eq!(get(&mut cache, MAX_CACHED_IMPORTS), MAX_CACHED_IMPORTS);
+        drop(get);
+        assert_eq!(released, [1], "the oldest import not used since goes");
+    }
 }
