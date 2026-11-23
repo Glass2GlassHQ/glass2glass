@@ -24,27 +24,32 @@ use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, Target};
 use g2g_core::memory::{DomainSet, MemoryDomain, MemoryDomainKind, OwnedDmaBuf};
-use g2g_core::meta::{Orientation, OrientationSet};
+use g2g_core::meta::{Orientation, OrientationSet, PlaneLayout};
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
     ClockSync, ConfigureOutcome, ElementMetadata, G2gError, HardwareError, OutputSink, PadTemplate,
-    PadTemplates, PipelineClock, PipelinePacket, PresentationPacer, PropError, PropKind, PropValue,
-    PropertySpec, RawVideoFormat, MAX_LATENESS_PROPERTY, PROCESSING_DEADLINE_PROPERTY,
-    QOS_INTERVAL_PROPERTY, SYNC_PROPERTY,
+    PadTemplates, PipelineClock, PipelinePacket, PixelAspect, PresentationPacer, PropError,
+    PropKind, PropValue, PropertySpec, RawVideoFormat, MAX_LATENESS_PROPERTY,
+    PROCESSING_DEADLINE_PROPERTY, QOS_INTERVAL_PROPERTY, SYNC_PROPERTY,
 };
 
 use crate::clock::wait_to_present;
+use crate::display_aspect::{display_size, letterbox, ViewportRectangle};
 use crate::dmabufimport::DmaBufImportCache;
+use crate::dmabufmap::DmaBufReadMap;
 use crate::drm_plane_rotation::{require_unrotated, PlaneRotation};
 use crate::drmcard::{Card, DEFAULT_CARD};
-use crate::paddedrows::dmabuf_plane_layout;
+use crate::paddedrows::{dmabuf_plane_layout, single_stride_layout};
+use crate::pixel::plane_shapes;
 use crate::videoconvert::display::{display_sink_caps, DisplayInput};
 use crate::videoflip::frame_orientation;
 #[cfg(feature = "metadata")]
 use crate::{
     drmcard::{draw_composition, same_composition},
-    overlaycomposition::{RENDER_OVERLAYS_NAME, RENDER_OVERLAYS_PROPERTY},
+    overlaycomposition::{composition_layer, RENDER_OVERLAYS_NAME, RENDER_OVERLAYS_PROPERTY},
+    paint::blend_layer_into_nv12,
+    yuvmatrix::YuvRgbMatrix,
 };
 
 const PICTURE_FORMAT: DrmFourcc = DrmFourcc::Nv12;
@@ -298,19 +303,17 @@ fn choose_planes(
         return Err("the primary plane does not take XRGB8888");
     }
     let under_composition: Vec<usize> = background.into_iter().chain([picture]).collect();
-    if !with_composition {
-        return Ok(PlaneChoice {
-            picture,
-            background,
-            composition: None,
-            zpos_to_set: stack(planes, &under_composition)
-                .ok_or("the picture cannot go above the primary plane")?,
-        });
+    let without_composition = PlaneChoice {
+        picture,
+        background,
+        composition: None,
+        zpos_to_set: stack(planes, &under_composition)
+            .ok_or("the picture cannot go above the primary plane")?,
+    };
+    if !with_composition || planes[picture].zpos.is_none() {
+        return Ok(without_composition);
     }
-    if planes[picture].zpos.is_none() {
-        return Err("the picture plane has no zpos to stack the composition above");
-    }
-    let (composition, zpos) = of_kind(PlaneKind::Overlay)
+    let above_picture = of_kind(PlaneKind::Overlay)
         .filter(|&index| {
             index != picture
                 && planes[index].lists(DrmFourcc::Argb8888)
@@ -319,8 +322,10 @@ fn choose_planes(
         .find_map(|index| {
             let order: Vec<usize> = under_composition.iter().copied().chain([index]).collect();
             Some((index, stack(planes, &order)?))
-        })
-        .ok_or("no overlay plane that goes above the picture takes ARGB8888")?;
+        });
+    let Some((composition, zpos)) = above_picture else {
+        return Ok(without_composition);
+    };
     Ok(PlaneChoice {
         picture,
         background,
@@ -329,19 +334,11 @@ fn choose_planes(
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Rectangle {
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
-}
-
 fn centred(
     (mode_width, mode_height): (u32, u32),
     (width, height): (u32, u32),
-) -> Option<Rectangle> {
-    Some(Rectangle {
+) -> Option<ViewportRectangle> {
+    Some(ViewportRectangle {
         x: mode_width.checked_sub(width)? / 2,
         y: mode_height.checked_sub(height)? / 2,
         width,
@@ -365,7 +362,7 @@ fn show_on_plane(
     crtc: crtc::Handle,
     framebuffer: framebuffer::Handle,
     (width, height): (u32, u32),
-    on_screen: Rectangle,
+    on_screen: ViewportRectangle,
     rotation: Option<u64>,
 ) {
     let properties = &plane.properties;
@@ -579,6 +576,13 @@ enum Picture<'a> {
     DmaBuf(OwnedDmaBuf),
 }
 
+#[cfg(feature = "metadata")]
+#[derive(Debug)]
+enum CompositionScanout {
+    Plane(CompositionBuffers),
+    BlendedIntoPicture { layer: Vec<u8> },
+}
+
 #[derive(Debug)]
 struct Scanout {
     // drm turns off the planes showing a closing file's framebuffers
@@ -587,25 +591,27 @@ struct Scanout {
     planes: PlaneChoice,
     mode_blob: property::Value<'static>,
     background: Option<framebuffer::Handle>,
-    width: u32,
-    height: u32,
+    input: DisplayInput,
+    scales: bool,
     slots: Vec<Slot>,
     front: usize,
     imports: DmaBufImportCache<framebuffer::Handle>,
     displayed_dmabuf: Option<OwnedDmaBuf>,
     queued_dmabuf: Option<OwnedDmaBuf>,
     #[cfg(feature = "metadata")]
-    composition: Option<CompositionBuffers>,
+    composition: Option<CompositionScanout>,
     modeset_done: bool,
     flip_pending: bool,
 }
 
+fn slot_layout(slot: &Slot, (width, height): (u32, u32)) -> Result<PlaneLayout, G2gError> {
+    single_stride_layout(RawVideoFormat::Nv12, width, height, 0, slot.db.pitch())
+        .map(|(layout, _)| layout)
+        .ok_or(G2gError::CapsMismatch)
+}
+
 impl Scanout {
-    fn open(
-        path: &Path,
-        (width, height): (u32, u32),
-        with_composition: bool,
-    ) -> Result<Self, G2gError> {
+    fn open(path: &Path, input: DisplayInput, with_composition: bool) -> Result<Self, G2gError> {
         let target = Target::category(short_type_name::<KmsSink>());
         let card = Card::open(path)?;
         card.set_client_capability(ClientCapability::UniversalPlanes, true)
@@ -627,25 +633,19 @@ impl Scanout {
             g2g_core::g2g_error!(target, "{}: {reason}", path.display());
             G2gError::Hardware(HardwareError::Other)
         })?;
-        let mode_size = output.mode_size();
-        if centred(mode_size, (width, height)).is_none() {
-            g2g_core::g2g_error!(
-                target,
-                "the {width}x{height} picture is larger than the {}x{} display mode",
-                mode_size.0,
-                mode_size.1
-            );
-            return Err(G2gError::CapsMismatch);
-        }
         let mode_blob = card.create_property_blob(&output.mode).map_err(hardware)?;
         let background = match planes.background {
-            Some(_) => Some(black_framebuffer(&card, mode_size)?),
+            Some(_) => Some(black_framebuffer(&card, output.mode_size())?),
             None => None,
         };
         #[cfg(feature = "metadata")]
-        let composition = match planes.composition {
-            Some(_) => Some(CompositionBuffers::new(&card, (width, height))?),
-            None => None,
+        let composition = match (with_composition, planes.composition) {
+            (false, _) => None,
+            (true, Some(_)) => Some(CompositionScanout::Plane(CompositionBuffers::new(
+                &card,
+                (input.width, input.height),
+            )?)),
+            (true, None) => Some(CompositionScanout::BlendedIntoPicture { layer: Vec::new() }),
         };
         Ok(Self {
             card,
@@ -653,8 +653,8 @@ impl Scanout {
             planes,
             mode_blob,
             background,
-            width,
-            height,
+            input,
+            scales: false,
             slots: Vec::new(),
             front: 0,
             imports: DmaBufImportCache::new(),
@@ -671,24 +671,29 @@ impl Scanout {
         self.output.planes[self.planes.picture].rotation.as_ref()
     }
 
-    fn fill_slot(&mut self, nv12: &[u8]) -> Result<framebuffer::Handle, G2gError> {
+    fn fill_slot(
+        &mut self,
+        nv12: &[u8],
+        layout: &PlaneLayout,
+    ) -> Result<framebuffer::Handle, G2gError> {
+        let size = (self.input.width, self.input.height);
         if self.slots.is_empty() {
-            self.slots = nv12_slots(&self.card, (self.width, self.height))?;
+            self.slots = nv12_slots(&self.card, size)?;
         }
         let back = (self.front + 1) % self.slots.len();
         let slot = &mut self.slots[back];
-        let pitch = slot.db.pitch();
+        let slot_layout = slot_layout(slot, size)?;
         let mut mapping = self.card.map_dumb_buffer(&mut slot.db).map_err(hardware)?;
-        copy_nv12(nv12, self.width, self.height, pitch, mapping.as_mut())?;
+        copy_nv12(nv12, layout, mapping.as_mut(), &slot_layout, size)?;
         self.front = back;
         Ok(slot.fb)
     }
 
     fn import(&mut self, dmabuf: &OwnedDmaBuf) -> Result<framebuffer::Handle, G2gError> {
-        let (layout, size) =
-            dmabuf_plane_layout(dmabuf, RawVideoFormat::Nv12, self.width, self.height)
-                .ok_or(G2gError::CapsMismatch)?;
-        let (card, width, height) = (&self.card, self.width, self.height);
+        let (width, height) = (self.input.width, self.input.height);
+        let (layout, size) = dmabuf_plane_layout(dmabuf, RawVideoFormat::Nv12, width, height)
+            .ok_or(G2gError::CapsMismatch)?;
+        let card = &self.card;
         self.imports.get_or_import(
             dmabuf,
             size,
@@ -723,6 +728,45 @@ impl Scanout {
         )
     }
 
+    fn copy_into_slot(&mut self, picture: Picture<'_>) -> Result<framebuffer::Handle, G2gError> {
+        let (width, height) = (self.input.width, self.input.height);
+        match picture {
+            Picture::System(nv12) => {
+                let tight = PlaneLayout::tight(RawVideoFormat::Nv12, width, height)
+                    .ok_or(G2gError::CapsMismatch)?;
+                self.fill_slot(nv12, &tight)
+            }
+            Picture::DmaBuf(dmabuf) => {
+                let (layout, _) = dmabuf_plane_layout(&dmabuf, RawVideoFormat::Nv12, width, height)
+                    .ok_or(G2gError::CapsMismatch)?;
+                let mapped = DmaBufReadMap::read(&dmabuf)?;
+                self.fill_slot(mapped.from_fd_start(), &layout)
+            }
+        }
+    }
+
+    #[cfg(feature = "metadata")]
+    fn blend_into_front_slot(
+        &mut self,
+        composition: &g2g_core::OverlayCompositionMeta,
+    ) -> Result<(), G2gError> {
+        let Some(CompositionScanout::BlendedIntoPicture { layer }) = &mut self.composition else {
+            return Ok(());
+        };
+        let size = (self.input.width, self.input.height);
+        let drawn = composition_layer(composition, size, layer)?;
+        let slot = &mut self.slots[self.front];
+        let slot_layout = slot_layout(slot, size)?;
+        let mut mapping = self.card.map_dumb_buffer(&mut slot.db).map_err(hardware)?;
+        blend_layer_into_nv12(
+            drawn,
+            mapping.as_mut(),
+            &slot_layout,
+            (size.0 as usize, size.1 as usize),
+            &YuvRgbMatrix::new(self.input.colorimetry),
+        )
+    }
+
     fn present(
         &mut self,
         picture: Picture<'_>,
@@ -732,15 +776,42 @@ impl Scanout {
         if self.flip_pending {
             self.wait_for_flip()?;
         }
-        let (framebuffer, dmabuf) = match picture {
-            Picture::System(nv12) => (self.fill_slot(nv12)?, None),
-            Picture::DmaBuf(dmabuf) => (self.import(&dmabuf)?, Some(dmabuf)),
+        #[cfg(feature = "metadata")]
+        let blended = match (&mut self.composition, composition) {
+            (Some(CompositionScanout::Plane(buffers)), composition) => {
+                buffers.update(
+                    &self.card,
+                    composition,
+                    (self.input.width, self.input.height),
+                )?;
+                None
+            }
+            (Some(CompositionScanout::BlendedIntoPicture { .. }), composition) => composition,
+            (None, _) => None,
         };
         #[cfg(feature = "metadata")]
-        if let Some(buffers) = &mut self.composition {
-            buffers.update(&self.card, composition, (self.width, self.height))?;
+        let blends = blended.is_some();
+        #[cfg(not(feature = "metadata"))]
+        let blends = false;
+        let (framebuffer, dmabuf) = match picture {
+            Picture::DmaBuf(dmabuf) if !blends => (self.import(&dmabuf)?, Some(dmabuf)),
+            picture => (self.copy_into_slot(picture)?, None),
+        };
+        #[cfg(feature = "metadata")]
+        if let Some(composition) = &blended {
+            self.blend_into_front_slot(composition)?;
         }
-        let request = self.request(framebuffer, orientation)?;
+        if !self.modeset_done {
+            let scaled = self.request(framebuffer, orientation, self.scaled(orientation))?;
+            let test = AtomicCommitFlags::TEST_ONLY | AtomicCommitFlags::ALLOW_MODESET;
+            self.scales = self.card.atomic_commit(test, scaled).is_ok();
+        }
+        let on_screen = if self.scales {
+            self.scaled(orientation)
+        } else {
+            self.centred(orientation)?
+        };
+        let request = self.request(framebuffer, orientation, on_screen)?;
         let flags = if self.modeset_done {
             AtomicCommitFlags::PAGE_FLIP_EVENT | AtomicCommitFlags::NONBLOCK
         } else {
@@ -753,10 +824,41 @@ impl Scanout {
         Ok(())
     }
 
+    fn shown_size(&self, orientation: Orientation) -> (u32, u32) {
+        let input = &self.input;
+        let (width, height) = display_size(input.width, input.height, input.pixel_aspect);
+        if orientation.swaps_dims() {
+            (height, width)
+        } else {
+            (width, height)
+        }
+    }
+
+    fn scaled(&self, orientation: Orientation) -> ViewportRectangle {
+        let (width, height) = self.shown_size(orientation);
+        let (mode_width, mode_height) = self.output.mode_size();
+        letterbox(width, height, PixelAspect::SQUARE, mode_width, mode_height)
+    }
+
+    fn centred(&self, orientation: Orientation) -> Result<ViewportRectangle, G2gError> {
+        let (width, height) = self.shown_size(orientation);
+        let mode_size = self.output.mode_size();
+        centred(mode_size, (width, height)).ok_or_else(|| {
+            g2g_core::g2g_error!(
+                Target::category(short_type_name::<KmsSink>()),
+                "the plane cannot scale and the {width}x{height} picture is larger than the {}x{} display mode",
+                mode_size.0,
+                mode_size.1
+            );
+            G2gError::CapsMismatch
+        })
+    }
+
     fn request(
         &self,
         framebuffer: framebuffer::Handle,
         orientation: Orientation,
+        on_screen: ViewportRectangle,
     ) -> Result<AtomicModeReq, G2gError> {
         let output = &self.output;
         let crtc = output.crtc;
@@ -793,13 +895,7 @@ impl Scanout {
                 );
             }
         }
-        let size = (self.width, self.height);
-        let shown_size = if orientation.swaps_dims() {
-            (self.height, self.width)
-        } else {
-            size
-        };
-        let on_screen = centred(output.mode_size(), shown_size).ok_or(G2gError::CapsMismatch)?;
+        let size = (self.input.width, self.input.height);
         let picture_plane = &output.planes[self.planes.picture];
         show_on_plane(
             &mut request,
@@ -811,7 +907,9 @@ impl Scanout {
             rotation_value(picture_plane.rotation.as_ref(), orientation)?,
         );
         #[cfg(feature = "metadata")]
-        if let (Some(index), Some(buffers)) = (self.planes.composition, &self.composition) {
+        if let (Some(index), Some(CompositionScanout::Plane(buffers))) =
+            (self.planes.composition, &self.composition)
+        {
             let plane = &output.planes[index];
             match buffers.framebuffer() {
                 Some(composition) => show_on_plane(
@@ -1027,11 +1125,11 @@ impl AsyncElement for KmsSink {
 
         // RtspSrc's first caps carry placeholder dimensions until the SPS arrives
         self.input = Some(input);
-        let same_size = self
+        let same_input = self
             .scanout
             .as_ref()
-            .is_some_and(|scanout| (scanout.width, scanout.height) == (w, h));
-        if same_size {
+            .is_some_and(|scanout| scanout.input == input);
+        if same_input {
             return Ok(ConfigureOutcome::Accepted);
         }
         self.scanout = None;
@@ -1039,7 +1137,7 @@ impl AsyncElement for KmsSink {
         let with_composition = self.render_overlays;
         #[cfg(not(feature = "metadata"))]
         let with_composition = false;
-        self.scanout = Some(Scanout::open(&self.device_path, (w, h), with_composition)?);
+        self.scanout = Some(Scanout::open(&self.device_path, input, with_composition)?);
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -1191,23 +1289,27 @@ impl AsyncElement for KmsSink {
 
 fn copy_nv12(
     src: &[u8],
-    width: u32,
-    height: u32,
-    pitch: u32,
+    src_layout: &PlaneLayout,
     dst: &mut [u8],
+    dst_layout: &PlaneLayout,
+    (width, height): (u32, u32),
 ) -> Result<(), G2gError> {
-    if src.len() < crate::pixel::frame_byte_size(g2g_core::RawVideoFormat::Nv12, width, height) {
-        return Err(G2gError::CapsMismatch);
+    let shapes = plane_shapes(RawVideoFormat::Nv12, width as usize, height as usize)
+        .ok_or(G2gError::CapsMismatch)?;
+    for (plane, &(row_bytes, rows)) in shapes.iter().enumerate() {
+        for row in 0..rows {
+            let source = src_layout
+                .row_range(plane, row, row_bytes)
+                .and_then(|range| src.get(range))
+                .ok_or(G2gError::CapsMismatch)?;
+            dst_layout
+                .row_range(plane, row, row_bytes)
+                .and_then(|range| dst.get_mut(range))
+                .ok_or(G2gError::Hardware(HardwareError::Other))?
+                .copy_from_slice(source);
+        }
     }
-    crate::paddedrows::unpack_tight(
-        src,
-        g2g_core::RawVideoFormat::Nv12,
-        width as usize,
-        height as usize,
-        pitch as usize,
-        dst,
-    )
-    .ok_or(G2gError::Hardware(HardwareError::Other))
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1311,22 +1413,39 @@ mod tests {
         }
     }
 
+    fn pitched(pitch: u32) -> PlaneLayout {
+        single_stride_layout(RawVideoFormat::Nv12, 4, 2, 0, pitch)
+            .unwrap()
+            .0
+    }
+
     #[test]
     fn copy_nv12_packs_planes_at_pitch() {
         // 4x2 NV12 into rows 8 bytes apart
         let src: Vec<u8> = (0..12).collect();
         let mut dst = vec![0u8; 8 * 3];
-        copy_nv12(&src, 4, 2, 8, &mut dst).unwrap();
+        let tight = PlaneLayout::tight(RawVideoFormat::Nv12, 4, 2).unwrap();
+        copy_nv12(&src, &tight, &mut dst, &pitched(8), (4, 2)).unwrap();
         assert_eq!(&dst[0..4], &[0, 1, 2, 3]);
         assert_eq!(&dst[8..12], &[4, 5, 6, 7]);
         assert_eq!(&dst[16..20], &[8, 9, 10, 11]);
     }
 
     #[test]
+    fn copy_nv12_reads_a_padded_source_at_its_pitch() {
+        let src: Vec<u8> = (0..18).collect();
+        let mut dst = vec![0u8; 12];
+        let tight = PlaneLayout::tight(RawVideoFormat::Nv12, 4, 2).unwrap();
+        copy_nv12(&src, &pitched(6), &mut dst, &tight, (4, 2)).unwrap();
+        assert_eq!(dst, [0, 1, 2, 3, 6, 7, 8, 9, 12, 13, 14, 15]);
+    }
+
+    #[test]
     fn copy_nv12_rejects_truncated_src() {
         let src = vec![0u8; 10]; // Need 12 for 4x2 NV12.
         let mut dst = vec![0u8; 24];
-        assert!(copy_nv12(&src, 4, 2, 8, &mut dst).is_err());
+        let tight = PlaneLayout::tight(RawVideoFormat::Nv12, 4, 2).unwrap();
+        assert!(copy_nv12(&src, &tight, &mut dst, &pitched(8), (4, 2)).is_err());
     }
 
     #[derive(Debug)]
@@ -1522,20 +1641,21 @@ mod tests {
     }
 
     #[test]
-    fn composition_never_goes_under_the_picture() {
+    fn composition_with_no_plane_above_the_picture_goes_on_no_plane() {
         let mut planes = stm32mp257_planes();
         planes[1].zpos = Some(Zpos::Fixed(1));
         planes[2].zpos = Some(Zpos::Fixed(1));
         let planes: Vec<_> = planes.iter().collect();
-        assert!(choose_planes(&planes, true).is_err());
-        assert!(choose_planes(&planes, false).is_ok());
+        let choice = choose_planes(&planes, true).unwrap();
+        assert_eq!(choice.composition, None);
+        assert_eq!(choice, choose_planes(&planes, false).unwrap());
     }
 
     #[test]
     fn picture_sits_in_the_middle_of_the_mode() {
         assert_eq!(
             centred((1024, 600), (640, 480)),
-            Some(Rectangle {
+            Some(ViewportRectangle {
                 x: 192,
                 y: 60,
                 width: 640,

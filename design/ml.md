@@ -446,7 +446,13 @@ setting zpos 0, 1 and 2 since the LTDC's zpos is settable and Weston leaves
 planes 42 and 49 both at 2. Tracking at 15 fps detection presents all 300
 camera frames with no late drops, against 155 under Weston, at 31.6% system
 CPU against 46.4%. Nothing renders on the GPU per frame, so inference no longer
-delays the display. The LTDC has no writeback connector, so the plane
+delays the display. With tracked boxes moved on every frame (`hold-last`) the
+same run takes 34.8%. On a card with no ARGB8888 plane above the picture,
+`kmssink` copies the frame into a dumb buffer and blends the composition there.
+Forced onto that path, the camera run presents 300 of 300 frames at 46.5% CPU.
+`kmssink` scales the picture to the display mode at its display aspect when a
+test-only commit accepts it, else shows it at its size. The LTDC refuses to
+scale NV12 ("Scaling is not supported with yuv pixel format"). The LTDC has no writeback connector, so the plane
 composite cannot be read back, and a recording blends the same
 graph into an H.264 file instead.
 

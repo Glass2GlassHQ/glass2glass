@@ -7,6 +7,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 ## Unreleased
 
 - M2528: Release evicted dma-buf imports in `kmssink` and `waylandsink`.
+- M2527: Blend overlays in `kmssink` without an ARGB plane and scale to the display.
 - M2526: Move tracked boxes between detections in `analyticsjoin hold-last`.
 - M2525: Report tracked detections at their Kalman-filtered boxes in `tracker`.
 - M2524: Scan out dma-bufs and overlay compositions on `kmssink` planes with atomic commits.

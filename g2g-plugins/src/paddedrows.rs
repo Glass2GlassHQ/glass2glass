@@ -230,32 +230,6 @@ pub(crate) fn pack_tight(
     Some(())
 }
 
-/// Copy the tightly packed frame in `src` into `dst` with plane 0's rows
-/// `first_stride` bytes apart, the inverse of [`pack_tight`]. `None` when
-/// either buffer is short of what the geometry claims.
-#[cfg(all(target_os = "linux", feature = "kms-sink"))]
-pub(crate) fn unpack_tight(
-    src: &[u8],
-    format: RawVideoFormat,
-    w: usize,
-    h: usize,
-    first_stride: usize,
-    dst: &mut [u8],
-) -> Option<()> {
-    let mut read = 0usize;
-    for plane in padded_planes(format, w, h, 0, first_stride)? {
-        for row in 0..plane.rows {
-            let start = plane.offset.checked_add(plane.stride.checked_mul(row)?)?;
-            let end = start.checked_add(plane.row_bytes)?;
-            let next_read = read.checked_add(plane.row_bytes)?;
-            dst.get_mut(start..end)?
-                .copy_from_slice(src.get(read..next_read)?);
-            read = next_read;
-        }
-    }
-    Some(())
-}
-
 /// The meta describing a padded frame's rows, `None` when the geometry and the
 /// stride do not fit together.
 #[cfg(all(

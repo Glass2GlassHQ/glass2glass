@@ -448,7 +448,12 @@ pub mod videodiff;
 pub mod videoanalyse;
 // `scenechange`: SAD-based shot-change detector.
 mod display_aspect;
-#[cfg(any(feature = "wgpu-sink", feature = "gl-render", feature = "wayland-sink"))]
+#[cfg(any(
+    feature = "wgpu-sink",
+    feature = "gl-render",
+    feature = "wayland-sink",
+    feature = "kms-sink"
+))]
 pub use display_aspect::ViewportRectangle;
 #[cfg(any(feature = "wgpu-sink", feature = "gl-render"))]
 mod filled_rectangles;

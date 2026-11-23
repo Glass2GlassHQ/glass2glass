@@ -52,13 +52,22 @@ pub(crate) fn display_aspect(
     )
 }
 
-#[cfg(any(feature = "wgpu-sink", feature = "wayland-sink", feature = "gl-render"))]
+#[cfg(any(
+    feature = "wgpu-sink",
+    feature = "wayland-sink",
+    feature = "gl-render",
+    feature = "kms-sink"
+))]
 fn saturate(value: u128) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 // gst's video sinks keep the stored height when the display aspect divides it, else the stored width
-#[cfg(any(feature = "wgpu-present", feature = "wayland-sink"))]
+#[cfg(any(
+    feature = "wgpu-present",
+    feature = "wayland-sink",
+    feature = "kms-sink"
+))]
 pub(crate) fn display_size(width: u32, height: u32, pixel_aspect: PixelAspect) -> (u32, u32) {
     let Some((numerator, denominator)) = display_aspect(width, height, pixel_aspect) else {
         return (width, height);
@@ -99,7 +108,12 @@ pub(crate) fn scaled_pixel_aspect(
     }
 }
 
-#[cfg(any(feature = "wgpu-sink", feature = "gl-render", feature = "wayland-sink"))]
+#[cfg(any(
+    feature = "wgpu-sink",
+    feature = "gl-render",
+    feature = "wayland-sink",
+    feature = "kms-sink"
+))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ViewportRectangle {
     pub x: u32,
@@ -108,7 +122,12 @@ pub struct ViewportRectangle {
     pub height: u32,
 }
 
-#[cfg(any(feature = "wgpu-sink", feature = "gl-render", feature = "wayland-sink"))]
+#[cfg(any(
+    feature = "wgpu-sink",
+    feature = "gl-render",
+    feature = "wayland-sink",
+    feature = "kms-sink"
+))]
 impl ViewportRectangle {
     pub(crate) fn whole(width: u32, height: u32) -> Self {
         Self {
@@ -145,7 +164,12 @@ pub(crate) fn picture_point_in(
 }
 
 // the largest rectangle with the picture's display aspect, centred in the target
-#[cfg(any(feature = "wgpu-sink", feature = "gl-render", feature = "wayland-sink"))]
+#[cfg(any(
+    feature = "wgpu-sink",
+    feature = "gl-render",
+    feature = "wayland-sink",
+    feature = "kms-sink"
+))]
 pub(crate) fn letterbox(
     width: u32,
     height: u32,
