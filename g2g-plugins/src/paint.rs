@@ -185,55 +185,6 @@ pub(crate) fn ycbcr_to_rgb(y: u8, cr: u8, cb: u8, matrix: YcbcrMatrix) -> (u8, u
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_rect_hanging_off_the_corner_paints_only_inside() {
-        const SIDE: i32 = 3;
-        const INK: [u8; 4] = [9, 9, 9, 255];
-        let mut pixels = [0u8; (SIDE * SIDE * 4) as usize];
-        let mut canvas = Canvas {
-            pixels: &mut pixels,
-            width: SIDE,
-            height: SIDE,
-        };
-        canvas.fill_rect(-1, -1, 2, 2, INK);
-        assert_eq!(pixels[..4], INK);
-        assert!(pixels[4..].iter().all(|&byte| byte == 0));
-    }
-
-    #[test]
-    fn opaque_source_overwrites() {
-        let mut buf = [10u8, 20, 30, 255];
-        blend_px(&mut buf, 0, [200, 100, 50, 255], 255);
-        assert_eq!(buf, [200, 100, 50, 255]);
-    }
-
-    #[test]
-    fn zero_alpha_leaves_canvas_untouched() {
-        let mut buf = [10u8, 20, 30, 255];
-        blend_px(&mut buf, 0, [200, 100, 50, 0], 255);
-        assert_eq!(buf, [10, 20, 30, 255]);
-    }
-
-    #[test]
-    fn galpha_modulates_source_alpha() {
-        // galpha 0 must paint nothing even for an opaque source.
-        let mut buf = [10u8, 20, 30, 255];
-        blend_px(&mut buf, 0, [200, 100, 50, 255], 0);
-        assert_eq!(buf, [10, 20, 30, 255]);
-
-        // galpha 128 on an opaque source is the same as a ~50%-alpha source.
-        let mut a = [0u8, 0, 0, 0];
-        let mut b = [0u8, 0, 0, 0];
-        blend_px(&mut a, 0, [255, 255, 255, 255], 128);
-        blend_px(&mut b, 0, [255, 255, 255, 128], 255);
-        assert_eq!(a, b);
-    }
-}
-
 // rgba pixels keep alpha in their fourth byte
 #[cfg(feature = "metadata")]
 const ALPHA_OF_TWO_PIXELS: u64 = u64::from_ne_bytes([0, 0, 0, 0xFF, 0, 0, 0, 0xFF]);
@@ -322,4 +273,53 @@ pub(crate) fn blend_layer_into_nv12(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_rect_hanging_off_the_corner_paints_only_inside() {
+        const SIDE: i32 = 3;
+        const INK: [u8; 4] = [9, 9, 9, 255];
+        let mut pixels = [0u8; (SIDE * SIDE * 4) as usize];
+        let mut canvas = Canvas {
+            pixels: &mut pixels,
+            width: SIDE,
+            height: SIDE,
+        };
+        canvas.fill_rect(-1, -1, 2, 2, INK);
+        assert_eq!(pixels[..4], INK);
+        assert!(pixels[4..].iter().all(|&byte| byte == 0));
+    }
+
+    #[test]
+    fn opaque_source_overwrites() {
+        let mut buf = [10u8, 20, 30, 255];
+        blend_px(&mut buf, 0, [200, 100, 50, 255], 255);
+        assert_eq!(buf, [200, 100, 50, 255]);
+    }
+
+    #[test]
+    fn zero_alpha_leaves_canvas_untouched() {
+        let mut buf = [10u8, 20, 30, 255];
+        blend_px(&mut buf, 0, [200, 100, 50, 0], 255);
+        assert_eq!(buf, [10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn galpha_modulates_source_alpha() {
+        // galpha 0 must paint nothing even for an opaque source.
+        let mut buf = [10u8, 20, 30, 255];
+        blend_px(&mut buf, 0, [200, 100, 50, 255], 0);
+        assert_eq!(buf, [10, 20, 30, 255]);
+
+        // galpha 128 on an opaque source is the same as a ~50%-alpha source.
+        let mut a = [0u8, 0, 0, 0];
+        let mut b = [0u8, 0, 0, 0];
+        blend_px(&mut a, 0, [255, 255, 255, 255], 128);
+        blend_px(&mut b, 0, [255, 255, 255, 128], 255);
+        assert_eq!(a, b);
+    }
 }
