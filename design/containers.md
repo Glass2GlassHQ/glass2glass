@@ -2079,7 +2079,9 @@ over UDP with a one second timeout.
 
 A media segment or live reload that fails with a transport error, 5xx, 404 or 425
 is retried three times with a 250 ms doubling backoff, gst adaptivedemux2's
-`max-retries` default, in both `DashSrc` and `HlsSrc`. On a live DASH segment,
+`max-retries` default, in both `DashSrc` and `HlsSrc`. A buffered fetch that
+hits an early EOF retries the whole request, including the requested byte range.
+On a live DASH segment,
 repeated 404 or 425 answers count against that budget at most once per segment
 duration. Startup manifest and playlist fetches do not retry. A live DASH
 segment that still answers 4xx or 5xx, or drops the connection, after its retries

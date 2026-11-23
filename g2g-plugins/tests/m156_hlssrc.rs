@@ -1117,8 +1117,13 @@ type RangeLog = Arc<Mutex<Vec<Option<(usize, usize)>>>>;
 /// Serve one resource `all.m4s` (init + fragments concatenated) honouring HTTP
 /// `Range` requests with `206 Partial Content`, plus the byte-range playlist
 /// (`/cmaf.m3u8`) and a master naming it (`/master.m3u8`). Returns the server's
-/// base URL and the log of `all.m4s` ranges.
-fn serve_byterange(resource: Vec<u8>, playlist: String) -> (String, RangeLog) {
+/// base URL and the log of `all.m4s` ranges. The first response for `truncate_once`
+/// closes halfway through the advertised body.
+fn serve_byterange(
+    resource: Vec<u8>,
+    playlist: String,
+    mut truncate_once: Option<(usize, usize)>,
+) -> (String, RangeLog) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let ranges = RangeLog::default();
@@ -1174,8 +1179,14 @@ fn serve_byterange(resource: Vec<u8>, playlist: String) -> (String, RangeLog) {
                     "HTTP/1.1 {status}\r\nContent-Length: {}\r\n{extra}Connection: close\r\n\r\n",
                     body.len()
                 );
+                let body = if truncate_once.is_some() && range == truncate_once {
+                    truncate_once = None;
+                    &body[..body.len() / 2]
+                } else {
+                    &body
+                };
                 let _ = stream.write_all(header.as_bytes());
-                let _ = stream.write_all(&body);
+                let _ = stream.write_all(body);
             } else {
                 let _ = stream.write_all(
                     b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -1204,7 +1215,7 @@ fn byterange_playlist(init_len: usize, fragments: &[Vec<u8>]) -> String {
 }
 
 #[tokio::test]
-async fn byterange_single_file_cmaf_fetches_subranges_and_demuxes() {
+async fn byterange_single_file_cmaf_retries_a_truncated_response_and_demuxes() {
     let aus = access_units();
     let fmp4 = make_fmp4(&aus).await;
     let (init, segs) = split_fmp4(&fmp4);
@@ -1232,7 +1243,8 @@ async fn byterange_single_file_cmaf_fetches_subranges_and_demuxes() {
         segs[1].len(),
         segs[2].len(),
     );
-    let (base, _) = serve_byterange(resource.clone(), playlist);
+    let first_fragment = Some((init_len, init_len + segs[0].len() - 1));
+    let (base, ranges) = serve_byterange(resource.clone(), playlist, first_fragment);
 
     let mut src = HlsSrc::new(format!("{base}/cmaf.m3u8"));
     src.configure_pipeline(&Caps::ByteStream {
@@ -1241,6 +1253,16 @@ async fn byterange_single_file_cmaf_fetches_subranges_and_demuxes() {
     .unwrap();
     let mut sink = CaptureSink::default();
     src.run(&mut sink).await.unwrap();
+    assert_eq!(
+        ranges
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|&&range| range == first_fragment)
+            .count(),
+        2,
+        "the interrupted byte range is requested again"
+    );
 
     // The reassembled byte stream is init + the three fragments, byte-exact: each
     // came from its own Range request against the single resource.
@@ -1275,7 +1297,7 @@ async fn the_fanout_probe_fetches_only_the_init_byte_range() {
     for s in &segs {
         resource.extend_from_slice(s);
     }
-    let (base, ranges) = serve_byterange(resource, byterange_playlist(init.len(), &segs));
+    let (base, ranges) = serve_byterange(resource, byterange_playlist(init.len(), &segs), None);
 
     let fanout = hls_uri_fanout(&Registry::new(), &format!("{base}/master.m3u8"))
         .unwrap()

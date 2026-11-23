@@ -47,7 +47,7 @@ pub(crate) fn net_err(e: reqwest::Error) -> G2gError {
     crate::httperror::http_err(e)
 }
 
-// a body that breaks off after the response head is past the retries, so it ends the run
+// The streaming caller has passed the retry boundary once it starts reading the body.
 #[cfg(feature = "dash")]
 pub(crate) fn body_read_err(url: &str, e: reqwest::Error) -> G2gError {
     g2g_core::g2g_error!(&FetchLog, "{url}: {e}");
@@ -98,10 +98,12 @@ impl FetchFailure {
             Some(status) if status.is_server_error() => Some(RetryReason::ServerOrTransport),
             Some(_) => None,
             None => {
+                // reqwest's Response::chunk also reports interrupted reads as decode errors.
                 let transport = error.is_timeout()
                     || error.is_connect()
                     || error.is_request()
-                    || error.is_body();
+                    || error.is_body()
+                    || error.is_decode();
                 transport.then_some(RetryReason::ServerOrTransport)
             }
         }
@@ -201,6 +203,7 @@ pub(crate) fn is_origin_failure(error: &G2gError) -> bool {
                 | HttpTransportFailure::Connect
                 | HttpTransportFailure::Request
                 | HttpTransportFailure::Body
+                | HttpTransportFailure::Decode
         ),
         _ => false,
     }
