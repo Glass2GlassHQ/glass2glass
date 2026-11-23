@@ -5,7 +5,7 @@
 //! Closed-caption combiner (`no_std`): the `cccombiner` analog. A video
 //! stream on input 0 and a closed-caption stream on input 1 go in, the same video
 //! comes out with each frame carrying the caption triples that belong with it as
-//! [`CaptionMeta`](g2g_core::meta::CaptionMeta). The pixels are untouched, so this
+//! [`CaptionMeta`]. The pixels are untouched, so this
 //! is the point where captions rejoin a decoded stream: `cccombiner ! h264enc !
 //! ccinsert` (meta-sourced) puts them back in the bitstream's SEI, and a
 //! caption-aware sink reads them off the frame.
