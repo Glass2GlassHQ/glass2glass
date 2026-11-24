@@ -146,6 +146,7 @@ pub struct NvEnc {
     frame_no: u32,
     emitted: u64,
     caps_sent: bool,
+    input_arrivals: crate::ptsmap::PendingByPts<u64>,
     /// Latched IDR request. Starts `true` so the very first frame is a keyframe;
     /// a downstream PLI re-latches it.
     force_keyframe: bool,
@@ -331,6 +332,7 @@ impl NvEnc {
             frame_no: 0,
             emitted: 0,
             caps_sent: false,
+            input_arrivals: Default::default(),
             force_keyframe: true,
             configured: false,
         }
@@ -964,6 +966,7 @@ impl NvEnc {
         let feedback = crate::encoder_base::emit_packets(
             &mut self.caps_sent,
             &mut self.emitted,
+            &mut self.input_arrivals,
             packets,
             &caps,
             out,
@@ -1296,6 +1299,8 @@ impl AsyncElement for NvEnc {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    self.input_arrivals
+                        .insert(frame.timing.pts_ns, frame.timing.arrival_ns);
                     let input = match &frame.domain {
                         MemoryDomain::Cuda(buf) => EncodeInput::Cuda(buf),
                         #[cfg(target_os = "windows")]

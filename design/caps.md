@@ -989,8 +989,9 @@ on whole instead of splitting it on first-slice flags. A re-framing h264parse or
 h265parse refines its output to AccessUnit, as gst's parsers default to. So do
 `ffmpegenc` for H.264/H.265, `nvenc`, `mfh264enc` and `openh264enc`, which emit one
 picture per buffer. The remote wire format carries the field, so a receiving
-parser passes each picture on as it arrives instead of holding it until the next
-one starts.
+parser passes on the first pictures as they arrive too. Without it the parser holds
+each picture until the next one starts, until two buffers in a row have opened on an
+access unit, so a still screen that sends one frame never shows it.
 
 A codec with no typed `VideoCodec` / `AudioFormat` still decodes when libavcodec
 has a decoder for it, behind the `ffmpeg-long-tail` feature. `avidemux`, the mp4

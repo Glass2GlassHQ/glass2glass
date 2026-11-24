@@ -236,6 +236,7 @@ pub struct GstWrap {
     output_raw_format: Option<RawVideoFormat>,
     lent_samples: Vec<LentSample>,
     caps_sent: bool,
+    input_arrivals: crate::ptsmap::PendingByPts<u64>,
     emitted: u64,
     configured: bool,
 }
@@ -252,6 +253,7 @@ impl GstWrap {
             output_raw_format: None,
             lent_samples: Vec::new(),
             caps_sent: false,
+            input_arrivals: Default::default(),
             emitted: 0,
             configured: false,
         }
@@ -697,6 +699,8 @@ impl AsyncElement for GstWrap {
             let p = self.handle.ok_or(G2gError::NotConfigured)?;
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    self.input_arrivals
+                        .insert(frame.timing.pts_ns, frame.timing.arrival_ns);
                     let pts_ns = frame.timing.pts_ns;
                     if let MemoryDomain::DmaBuf(dmabuf) = &frame.domain {
                         dmabuf.require_linear(g2g_core::log::short_type_name::<Self>())?;
@@ -728,16 +732,30 @@ impl AsyncElement for GstWrap {
                     // `announce_caps` is Some after `configure_pipeline`; cloning
                     // releases the borrow so `emit_packets` can take `&mut self`.
                     let caps = self.announce_caps.clone().ok_or(G2gError::NotConfigured)?;
-                    emit_packets(&mut self.caps_sent, &mut self.emitted, frames, &caps, out)
-                        .await?;
+                    emit_packets(
+                        &mut self.caps_sent,
+                        &mut self.emitted,
+                        &mut self.input_arrivals,
+                        frames,
+                        &caps,
+                        out,
+                    )
+                    .await?;
                 }
                 PipelinePacket::Eos => {
                     // SAFETY: `p` is valid; signals EOS on the appsrc feed.
                     unsafe { g2g_gstwrap_eos(p.0) };
                     let frames = self.drain_to_eos(p).await?;
                     let caps = self.announce_caps.clone().ok_or(G2gError::NotConfigured)?;
-                    emit_packets(&mut self.caps_sent, &mut self.emitted, frames, &caps, out)
-                        .await?;
+                    emit_packets(
+                        &mut self.caps_sent,
+                        &mut self.emitted,
+                        &mut self.input_arrivals,
+                        frames,
+                        &caps,
+                        out,
+                    )
+                    .await?;
                     // The runner forwards the EOS sentinel after `process(Eos)`.
                 }
                 PipelinePacket::CapsChanged(_) => {}

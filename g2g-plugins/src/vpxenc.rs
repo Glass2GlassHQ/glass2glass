@@ -63,6 +63,7 @@ pub struct VpxEnc {
     enc: Option<VpxContext>,
     emitted: u64,
     caps_sent: bool,
+    input_arrivals: crate::ptsmap::PendingByPts<u64>,
     configured: bool,
 }
 
@@ -100,6 +101,7 @@ impl VpxEnc {
             enc: None,
             emitted: 0,
             caps_sent: false,
+            input_arrivals: Default::default(),
             configured: false,
         }
     }
@@ -192,6 +194,7 @@ impl VpxEnc {
         let feedback = crate::encoder_base::emit_packets(
             &mut self.caps_sent,
             &mut self.emitted,
+            &mut self.input_arrivals,
             packets,
             &caps,
             out,
@@ -551,6 +554,8 @@ impl AsyncElement for VpxEnc {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    self.input_arrivals
+                        .insert(frame.timing.pts_ns, frame.timing.arrival_ns);
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;

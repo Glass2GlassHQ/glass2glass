@@ -220,6 +220,7 @@ pub struct AtEnc {
     access_units_out: u64,
     emitted: u64,
     caps_sent: bool,
+    input_arrivals: crate::ptsmap::PendingByPts<u64>,
 }
 
 impl core::fmt::Debug for AtEnc {
@@ -251,6 +252,7 @@ impl AtEnc {
             access_units_out: 0,
             emitted: 0,
             caps_sent: false,
+            input_arrivals: Default::default(),
         }
     }
 
@@ -328,6 +330,7 @@ impl AtEnc {
         crate::encoder_base::emit_packets(
             &mut self.caps_sent,
             &mut self.emitted,
+            &mut self.input_arrivals,
             access_units,
             &caps,
             out,
@@ -444,6 +447,8 @@ impl AsyncElement for AtEnc {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    self.input_arrivals
+                        .insert(frame.timing.pts_ns, frame.timing.arrival_ns);
                     let pcm = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;

@@ -176,6 +176,7 @@ pub struct OpenH264Enc {
     slice_count_pending: bool,
     emitted: u64,
     caps_sent: bool,
+    input_arrivals: crate::ptsmap::PendingByPts<u64>,
 }
 
 impl core::fmt::Debug for OpenH264Enc {
@@ -207,6 +208,7 @@ impl OpenH264Enc {
             slice_count_pending: false,
             emitted: 0,
             caps_sent: false,
+            input_arrivals: Default::default(),
         }
     }
 
@@ -328,6 +330,7 @@ impl OpenH264Enc {
         let feedback = crate::encoder_base::emit_packets(
             &mut self.caps_sent,
             &mut self.emitted,
+            &mut self.input_arrivals,
             Vec::from([(access_unit, pts_ns)]),
             &caps,
             out,
@@ -586,6 +589,8 @@ impl AsyncElement for OpenH264Enc {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    self.input_arrivals
+                        .insert(frame.timing.pts_ns, frame.timing.arrival_ns);
                     let i420 = frame
                         .domain
                         .require_system_slice(short_type_name::<Self>())?;

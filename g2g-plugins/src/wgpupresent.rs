@@ -284,6 +284,13 @@ impl WgpuPresentSink {
         self
     }
 
+    /// Record glass-to-glass latency into `latency`, which the caller can read
+    /// after the sink is gone.
+    pub fn with_latency_histogram(mut self, latency: Arc<LatencyHistogram>) -> Self {
+        self.latency = latency;
+        self
+    }
+
     /// QoS late-drop bound: once PTS pacing is engaged, a frame past its
     /// end by more than `ns` is dropped instead of presented late, so the
     /// sink catches up. The default is 5 ms, `u64::MAX` never drops.

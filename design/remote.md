@@ -220,6 +220,12 @@ same auto-plug `decodebin` uses. `software-decode=true` forces `ffmpegdec`.
 The Linux client decodes with `ffmpegdec` and the Windows client with
 `d3d12h264dec`, whose textures `wgpusink` presents on the decoder's device.
 
+On exit the client prints glass-to-glass latency: the time from the host's
+capture to the present, from the frame's arrival stamp. Encoders keep that stamp
+by pts, and `remotewt` shifts it by half the QUIC round trip. The histogram's
+buckets are powers of two, so the line gives the exact mean and max and only an
+upper bound for p99.
+
 The browser client is the same WebTransport session and message channel, decoded with
 WebCodecs into a canvas. Pointer lock and `navigator.keyboard.lock` are the
 capture side. Chrome is the target. Firefox stays untested until the native

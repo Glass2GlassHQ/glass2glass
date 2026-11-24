@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2573: Keep the capture stamp through the encoders and print glass-to-glass latency when `g2g-desktop client` exits.
 - M2572: Hand each plane of a dma-buf frame to the GStreamer bridge shell, not just the first.
 - M2571: Carry caps alignment over the remote wire and mark the H.264/H.265 encoders `alignment=au`.
 - M2570: Carry the dma-buf modifier across `unixfd`, `localdmabuf` and the GStreamer bridge.

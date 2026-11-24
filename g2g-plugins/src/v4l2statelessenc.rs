@@ -592,6 +592,7 @@ pub struct V4l2StatelessEnc<C: V4l2StatelessEncoder> {
     force_keyframe: bool,
     emitted: u64,
     caps_sent: bool,
+    input_arrivals: crate::ptsmap::PendingByPts<u64>,
 }
 
 impl<C: V4l2StatelessEncoder> Default for V4l2StatelessEnc<C> {
@@ -611,6 +612,7 @@ impl<C: V4l2StatelessEncoder> V4l2StatelessEnc<C> {
             force_keyframe: false,
             emitted: 0,
             caps_sent: false,
+            input_arrivals: Default::default(),
         }
     }
 
@@ -752,6 +754,7 @@ impl<C: V4l2StatelessEncoder> V4l2StatelessEnc<C> {
         let feedback = crate::encoder_base::emit_packets(
             &mut self.caps_sent,
             &mut self.emitted,
+            &mut self.input_arrivals,
             Vec::from([(coded, pts_ns)]),
             &caps,
             out,
@@ -932,6 +935,8 @@ impl<C: V4l2StatelessEncoder> AsyncElement for V4l2StatelessEnc<C> {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    self.input_arrivals
+                        .insert(frame.timing.pts_ns, frame.timing.arrival_ns);
                     let pts_ns = frame.timing.pts_ns;
                     self.encode_frame(frame.domain, pts_ns, out).await?;
                 }

@@ -2,10 +2,10 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::collections::BTreeMap;
-
 use g2g_core::frame::Frame;
 use g2g_core::meta::FrameMetaSet;
+
+use crate::ptsmap::PendingByPts;
 
 // what an output picture inherits from the access unit it decodes
 #[derive(Debug, Default)]
@@ -23,12 +23,8 @@ impl InputStamp {
     }
 }
 
-// a unit the decoder drops never has its stamp taken
-const MAX_PENDING_INPUT_STAMPS: usize = 1024;
-
-// keyed by pts, the one value a decoder carries from a unit to the picture it decodes
 #[derive(Debug, Default)]
-pub(crate) struct PendingInputStamps(BTreeMap<u64, InputStamp>);
+pub(crate) struct PendingInputStamps(PendingByPts<InputStamp>);
 
 impl PendingInputStamps {
     pub(crate) fn insert(&mut self, pts_ns: u64, stamp: InputStamp) {
@@ -36,12 +32,9 @@ impl PendingInputStamps {
             return;
         }
         self.0.insert(pts_ns, stamp);
-        while self.0.len() > MAX_PENDING_INPUT_STAMPS {
-            self.0.pop_first();
-        }
     }
 
     pub(crate) fn take(&mut self, pts_ns: u64) -> InputStamp {
-        self.0.remove(&pts_ns).unwrap_or_default()
+        self.0.take(pts_ns).unwrap_or_default()
     }
 }

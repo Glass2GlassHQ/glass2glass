@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
 use g2g_core::element::DynAsyncElement;
+use g2g_core::metrics::LatencyHistogram;
 use g2g_core::runtime::Observer;
 #[cfg(target_os = "linux")]
 use g2g_core::runtime::{parse_element, ParseError, SourceLoop};
@@ -580,6 +581,7 @@ async fn client(flags: Flags) -> Result<(), Box<dyn Error>> {
     };
     let trace = open_trace(flags.get("trace").map(Path::new))?;
     let observer = Observer::new();
+    let glass_to_glass = Arc::new(LatencyHistogram::new());
     let session = tokio::select! {
         session = run_client(
             &host,
@@ -587,6 +589,7 @@ async fn client(flags: Flags) -> Result<(), Box<dyn Error>> {
             &settings,
             trace.clone().map(|trace| trace as Arc<dyn VisitRecorder>),
             &observer,
+            &glass_to_glass,
         ) => Some(session),
         interrupted = tokio::signal::ctrl_c() => {
             interrupted?;
@@ -608,6 +611,18 @@ async fn client(flags: Flags) -> Result<(), Box<dyn Error>> {
             }
         }
         Some(Err(_)) => {}
+    }
+    let latency = glass_to_glass.snapshot();
+    let nanos_to_ms = |ns: u64| ns as f64 / 1.0e6;
+    // LatencyHistogram buckets are powers of two, so a percentile is only the bucket's upper edge
+    match latency.count {
+        0 => eprintln!("g2g-desktop client: glass-to-glass: no presented frame carried a capture time"),
+        count => eprintln!(
+            "g2g-desktop client: glass-to-glass mean {:.1} ms, max {:.1} ms, p99 under {:.1} ms, over {count} frames",
+            nanos_to_ms(latency.mean_ns),
+            nanos_to_ms(latency.max_ns),
+            nanos_to_ms(latency.p99_ns),
+        ),
     }
     // the observer's element probes hold the trace writer until they drop
     drop(observer);

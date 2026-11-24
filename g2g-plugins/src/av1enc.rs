@@ -102,6 +102,7 @@ pub struct Av1Enc {
     next_frameno: u64,
     emitted: u64,
     caps_sent: bool,
+    input_arrivals: crate::ptsmap::PendingByPts<u64>,
     /// A downstream element (e.g. a WebRTC sink on a remote PLI) asked for a
     /// keyframe; the next `encode` overrides the frame type to Key and clears it.
     force_keyframe: bool,
@@ -155,6 +156,7 @@ impl Av1Enc {
             next_frameno: 0,
             emitted: 0,
             caps_sent: false,
+            input_arrivals: Default::default(),
             force_keyframe: false,
             bitrate_bps: None,
             quantizer: None,
@@ -300,6 +302,7 @@ impl Av1Enc {
         let feedback = crate::encoder_base::emit_packets(
             &mut self.caps_sent,
             &mut self.emitted,
+            &mut self.input_arrivals,
             batch,
             &caps,
             out,
@@ -318,6 +321,7 @@ impl Av1Enc {
                 crate::encoder_base::emit_packets(
                     &mut self.caps_sent,
                     &mut self.emitted,
+                    &mut self.input_arrivals,
                     drained,
                     &caps,
                     out,
@@ -711,6 +715,8 @@ impl AsyncElement for Av1Enc {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    self.input_arrivals
+                        .insert(frame.timing.pts_ns, frame.timing.arrival_ns);
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;

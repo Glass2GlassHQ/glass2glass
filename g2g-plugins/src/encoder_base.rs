@@ -16,6 +16,8 @@ use g2g_core::{
     Reconfigure, VideoCodec,
 };
 
+use crate::ptsmap::PendingByPts;
+
 /// Push a batch of encoded `(payload, pts_ns)` packets downstream.
 ///
 /// `caps` is announced via `CapsChanged` once, before the first frame is ever
@@ -75,6 +77,7 @@ impl PacketPayload for MemoryDomain {
 pub(crate) async fn emit_packets(
     caps_sent: &mut bool,
     emitted: &mut u64,
+    input_arrivals: &mut PendingByPts<u64>,
     packets: Vec<(impl PacketPayload, u64)>,
     caps: &Caps,
     out: &mut dyn OutputSink,
@@ -92,6 +95,7 @@ pub(crate) async fn emit_packets(
             FrameTiming {
                 pts_ns,
                 dts_ns: pts_ns,
+                arrival_ns: input_arrivals.take(pts_ns).unwrap_or(0),
                 keyframe,
                 ..FrameTiming::default()
             },
@@ -188,6 +192,7 @@ mod tests {
         emit_packets(
             &mut false,
             &mut 0,
+            &mut PendingByPts::default(),
             Vec::from([(idr, 0u64), (inter, 1)]),
             &h264,
             &mut sink,
@@ -200,6 +205,7 @@ mod tests {
         emit_packets(
             &mut false,
             &mut 0,
+            &mut PendingByPts::default(),
             Vec::from([(Vec::from([1u8]), 0u64)]),
             &caps(),
             &mut sink,
@@ -218,6 +224,7 @@ mod tests {
         let fb = emit_packets(
             &mut sent,
             &mut emitted,
+            &mut PendingByPts::default(),
             Vec::from([(Vec::from([1u8, 2, 3]), 0u64)]),
             &caps(),
             &mut sink,
@@ -233,6 +240,7 @@ mod tests {
         let fb = emit_packets(
             &mut sent,
             &mut emitted,
+            &mut PendingByPts::default(),
             Vec::from([(Vec::from([4u8]), 1u64)]),
             &caps(),
             &mut sink,
@@ -247,6 +255,7 @@ mod tests {
         let fb = emit_packets(
             &mut sent,
             &mut emitted,
+            &mut PendingByPts::default(),
             Vec::from([(Vec::from([5u8]), 2u64)]),
             &caps(),
             &mut sink,
@@ -257,15 +266,56 @@ mod tests {
         assert_eq!(fb.bitrate_bps, None);
     }
 
+    #[derive(Default)]
+    struct ArrivalSink(Vec<u64>);
+    impl OutputSink for ArrivalSink {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            if let Some(PipelinePacket::DataFrame(frame)) = packet_slot.take() {
+                self.0.push(frame.timing.arrival_ns);
+            }
+            core::task::Poll::Ready(Ok(PushOutcome::Accepted))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_packet_carries_the_arrival_of_the_input_with_its_pts() {
+        let mut arrivals = PendingByPts::default();
+        arrivals.insert(10, 1_000);
+        arrivals.insert(20, 2_000);
+        let mut sink = ArrivalSink::default();
+        emit_packets(
+            &mut false,
+            &mut 0,
+            &mut arrivals,
+            Vec::from([(Vec::from([1u8]), 20u64), (Vec::from([2u8]), 30)]),
+            &caps(),
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        assert_eq!(sink.0, [2_000, 0], "a pts no input had stays unstamped");
+    }
+
     #[tokio::test]
     async fn empty_batch_emits_nothing() {
         let mut sent = false;
         let mut emitted = 0;
         let mut sink = OutcomeSink(PushOutcome::Accepted);
         let no_packets: Vec<(Vec<u8>, u64)> = Vec::new();
-        let fb = emit_packets(&mut sent, &mut emitted, no_packets, &caps(), &mut sink)
-            .await
-            .unwrap();
+        let fb = emit_packets(
+            &mut sent,
+            &mut emitted,
+            &mut PendingByPts::default(),
+            no_packets,
+            &caps(),
+            &mut sink,
+        )
+        .await
+        .unwrap();
         assert!(!fb.force_keyframe);
         assert_eq!(fb.bitrate_bps, None);
         assert!(!sent, "caps stay unannounced until real data arrives");

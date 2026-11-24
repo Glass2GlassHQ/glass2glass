@@ -6,6 +6,7 @@ use g2g_core::log::Target;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
+use g2g_core::metrics::LatencyHistogram;
 use g2g_core::runtime::{
     parse_chain, GraphNode, GraphNodeRef, Observer, ParseError, RunBuilder, RunStats, VisitRecorder,
 };
@@ -283,6 +284,7 @@ pub async fn run_client(
     settings: &ClientSettings,
     trace: Option<Arc<dyn VisitRecorder>>,
     observer: &Observer,
+    glass_to_glass: &Arc<LatencyHistogram>,
 ) -> Result<RunStats, ClientError> {
     // a caller-mode source binds nothing, the address is unused
     let unbound = SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0));
@@ -304,7 +306,8 @@ pub async fn run_client(
     let window = WgpuPresentSink::new()
         .with_title(WINDOW_TITLE)
         .with_sync(false)
-        .with_present_mode(wgpu::PresentMode::Mailbox);
+        .with_present_mode(wgpu::PresentMode::Mailbox)
+        .with_latency_histogram(Arc::clone(glass_to_glass));
     let (cursor_shapes, mut sink) =
         show_host_cursor(grab_keyboard(window, settings), settings.inputs);
     let window_input = settings.inputs.then(|| sink.input_events());

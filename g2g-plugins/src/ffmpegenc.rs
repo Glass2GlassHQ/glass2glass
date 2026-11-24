@@ -319,6 +319,7 @@ pub struct FfmpegVideoEnc {
     frame_no: i64,
     emitted: u64,
     caps_sent: bool,
+    input_arrivals: crate::ptsmap::PendingByPts<u64>,
     /// A downstream PLI latched a keyframe request; the next encode forces an IDR.
     force_keyframe: bool,
     /// Shed-layer idle (`Bitrate(0)`): most frames are skipped unencoded;
@@ -380,6 +381,7 @@ impl FfmpegVideoEnc {
             frame_no: 0,
             emitted: 0,
             caps_sent: false,
+            input_arrivals: Default::default(),
             force_keyframe: false,
             idle: false,
             idle_skip: 0,
@@ -752,6 +754,7 @@ impl FfmpegVideoEnc {
         let feedback = crate::encoder_base::emit_packets(
             &mut self.caps_sent,
             &mut self.emitted,
+            &mut self.input_arrivals,
             batch,
             &caps,
             out,
@@ -1275,6 +1278,8 @@ impl AsyncElement for FfmpegVideoEnc {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    self.input_arrivals
+                        .insert(frame.timing.pts_ns, frame.timing.arrival_ns);
                     // Shed-layer idle: skip the encode for most frames, keeping
                     // a sparse keep-alive cadence so the resume signal (which
                     // rides push outcomes) can still reach this element.

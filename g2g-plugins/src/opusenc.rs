@@ -323,6 +323,7 @@ pub struct OpusEnc {
     /// advanced one frame duration per emitted packet.
     next_pts_ns: Option<u64>,
     caps_sent: bool,
+    input_arrivals: crate::ptsmap::PendingByPts<u64>,
     emitted: u64,
     configured: bool,
 }
@@ -370,6 +371,7 @@ impl OpusEnc {
             buf_f32: Vec::new(),
             next_pts_ns: None,
             caps_sent: false,
+            input_arrivals: Default::default(),
             emitted: 0,
             configured: false,
         }
@@ -602,6 +604,7 @@ impl OpusEnc {
         let feedback = crate::encoder_base::emit_packets(
             &mut self.caps_sent,
             &mut self.emitted,
+            &mut self.input_arrivals,
             packets,
             &caps,
             out,
@@ -833,6 +836,8 @@ impl AsyncElement for OpusEnc {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    self.input_arrivals
+                        .insert(frame.timing.pts_ns, frame.timing.arrival_ns);
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;

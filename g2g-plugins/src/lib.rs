@@ -129,6 +129,35 @@ mod fifobuffer;
     all(target_os = "linux", feature = "v4l2"),
 ))]
 mod inputstamp;
+// The pts-keyed map behind `inputstamp` and the encoders' arrival stamps.
+#[cfg(any(
+    feature = "metadata",
+    feature = "av1-encode",
+    feature = "vpx",
+    feature = "opus",
+    all(any(target_os = "linux", windows), feature = "nvenc"),
+    all(target_os = "macos", feature = "audiotoolbox-aac"),
+    feature = "gstreamer",
+    all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg"
+    ),
+    all(any(target_os = "linux", windows), feature = "nvdec"),
+    all(
+        any(target_os = "linux", target_os = "windows"),
+        feature = "vulkan-video"
+    ),
+    feature = "dav1d",
+    feature = "rav1d",
+    all(target_os = "android", feature = "mediacodec"),
+    all(target_os = "macos", feature = "vtdecode"),
+    all(target_os = "windows", feature = "mf-decode"),
+    all(target_os = "windows", feature = "mf-encode"),
+    all(target_os = "windows", feature = "d3d12-decode"),
+    all(target_os = "linux", feature = "openh264"),
+    all(target_os = "linux", feature = "v4l2"),
+))]
+mod ptsmap;
 // `audioreverse`: the audio half of reverse playback, the analog of `areverse`.
 pub mod audioreverse;
 pub mod audiotestsrc;
