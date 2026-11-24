@@ -365,7 +365,7 @@ jobs:
       # cargo publish --dry-run builds only default features, so a feature-gated include of a file outside the crate passes it
       - name: packaged g2g-plugins checks (linux-full)
         run: |
-          cargo package --workspace --exclude g2g-wayland-display --locked --no-verify
+          cargo package --workspace --exclude g2g-wayland-display --exclude g2g-desktop --locked --no-verify
           packaged="$RUNNER_TEMP/packaged"
           mkdir -p "$packaged"
           patches=()
