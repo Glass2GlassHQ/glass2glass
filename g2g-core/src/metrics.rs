@@ -4,7 +4,7 @@
 
 //! Lightweight metrics primitives for glass-to-glass observability.
 //!
-//! This module is `no_std + alloc` compatible. The histogram uses log2
+//! This module is `no_std + alloc` compatible. The histogram uses log-linear
 //! buckets in nanoseconds and an array of atomic counters, so it can be
 //! shared across threads via `Arc<LatencyHistogram>` without locking.
 //!
@@ -14,11 +14,12 @@
 
 use portable_atomic::{AtomicU64, Ordering};
 
-/// Number of log2 buckets. Bucket `k` covers durations in
-/// `[2^k, 2^(k+1))` nanoseconds. Bucket 0 covers `[0, 2)`; bucket 31
-/// covers `[2^31, 2^32) ns ≈ [2.1 s, 4.3 s)`. Anything larger lands in
-/// the overflow bucket.
-const NUM_BUCKETS: usize = 32;
+/// Each power of two splits into `SUB_BUCKETS` equal buckets, so a bucket's
+/// upper edge is at most 1/16 above any value in it. Durations from
+/// 2^32 ns (about 4.3 s) up land in the overflow bucket.
+const SUB_BUCKET_BITS: u32 = 4;
+const SUB_BUCKETS: usize = 1 << SUB_BUCKET_BITS;
+const NUM_BUCKETS: usize = SUB_BUCKETS + (32 - SUB_BUCKET_BITS as usize) * SUB_BUCKETS;
 
 /// Lock-free latency distribution recorded in nanoseconds.
 ///
@@ -37,43 +38,8 @@ pub struct LatencyHistogram {
 
 impl LatencyHistogram {
     pub const fn new() -> Self {
-        // Can't `[AtomicU64::new(0); N]` because `AtomicU64` isn't `Copy`.
-        // Spell out the array — 32 entries is annoying but const.
         Self {
-            buckets: [
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-            ],
+            buckets: [const { AtomicU64::new(0) }; NUM_BUCKETS],
             overflow: AtomicU64::new(0),
             count: AtomicU64::new(0),
             sum_ns: AtomicU64::new(0),
@@ -118,7 +84,7 @@ impl LatencyHistogram {
 
         let mean_ns = sum.checked_div(count).unwrap_or(0);
         // Bucket-edge estimates can overshoot the actual max when many
-        // samples cluster in one log2 bucket. Clamp so p99 <= max.
+        // samples cluster in one bucket. Clamp so p99 <= max.
         let cap = if max > 0 { max } else { u64::MAX };
         let p50 = percentile_ns(&bucket_counts, overflow, count, 50).min(cap);
         let p95 = percentile_ns(&bucket_counts, overflow, count, 95).min(cap);
@@ -152,16 +118,25 @@ pub struct LatencySnapshot {
 }
 
 fn bucket_of(ns: u64) -> usize {
-    if ns < 2 {
-        return 0;
+    if ns < SUB_BUCKETS as u64 {
+        return ns as usize;
     }
-    // floor(log2(ns)) via leading_zeros. ns >= 2 so this is in [1, 63].
-    (63 - ns.leading_zeros()) as usize
+    let shift = 63 - ns.leading_zeros() - SUB_BUCKET_BITS;
+    let sub_bucket = (ns >> shift) as usize - SUB_BUCKETS;
+    (shift as usize + 1) * SUB_BUCKETS + sub_bucket
+}
+
+fn bucket_upper_edge_ns(index: usize) -> u64 {
+    if index < SUB_BUCKETS {
+        return index as u64 + 1;
+    }
+    let shift = index / SUB_BUCKETS - 1;
+    let sub_bucket = (index % SUB_BUCKETS) as u64;
+    (SUB_BUCKETS as u64 + sub_bucket + 1) << shift
 }
 
 /// Estimate the percentile boundary as the *upper* edge of the bucket
-/// containing the rank. Coarse (factor-of-2 resolution) but enough to
-/// catch regressions.
+/// containing the rank, at most 1/16 above the true value.
 fn percentile_ns(buckets: &[u64; NUM_BUCKETS], overflow: u64, count: u64, pct: u8) -> u64 {
     if count == 0 {
         return 0;
@@ -171,9 +146,7 @@ fn percentile_ns(buckets: &[u64; NUM_BUCKETS], overflow: u64, count: u64, pct: u
     for (i, &c) in buckets.iter().enumerate() {
         acc = acc.saturating_add(c);
         if acc >= target {
-            // Upper edge of bucket i is 2^(i+1) ns. Cap at u64::MAX for
-            // the top bucket to avoid overflow.
-            return 1u64.checked_shl((i + 1) as u32).unwrap_or(u64::MAX);
+            return bucket_upper_edge_ns(i);
         }
     }
     if overflow > 0 {
@@ -226,11 +199,35 @@ mod tests {
     #[test]
     fn bucket_of_handles_edges() {
         assert_eq!(bucket_of(0), 0);
-        assert_eq!(bucket_of(1), 0);
-        assert_eq!(bucket_of(2), 1);
-        assert_eq!(bucket_of(3), 1);
-        assert_eq!(bucket_of(4), 2);
-        assert_eq!(bucket_of(1_000_000), 19); // ~1ms -> 2^19 = 524288, 2^20 = 1048576
+        assert_eq!(bucket_of(15), 15);
+        assert_eq!(bucket_of(16), 16);
+        assert_eq!(bucket_of(31), 31);
+        assert_eq!(bucket_of(32), 32);
+        assert_eq!(bucket_of(33), 32);
+        assert_eq!(bucket_of(34), 33);
+        assert_eq!(bucket_of((1 << 32) - 1), NUM_BUCKETS - 1);
+        assert_eq!(bucket_of(1 << 32), NUM_BUCKETS);
+        for ns in [0, 15, 16, 33, 1_000_000, 36_000_000, (1 << 32) - 1] {
+            let upper = bucket_upper_edge_ns(bucket_of(ns));
+            assert!(ns < upper && upper - ns <= ns / 16 + 1, "{ns} -> {upper}");
+        }
+    }
+
+    #[test]
+    fn percentiles_resolve_milliseconds() {
+        let h = LatencyHistogram::new();
+        // one sample every 10 us from 30 ms to 40 ms
+        let sample_ns = |i: u64| 30_000_000 + i * 10_000;
+        for i in 0..1000 {
+            h.record(sample_ns(i));
+        }
+        let s = h.snapshot();
+        for (reported, true_ns) in [(s.p50_ns, sample_ns(499)), (s.p99_ns, sample_ns(989))] {
+            assert!(
+                reported >= true_ns && reported <= true_ns + true_ns / 16,
+                "reported {reported} ns for {true_ns} ns"
+            );
+        }
     }
 
     #[test]

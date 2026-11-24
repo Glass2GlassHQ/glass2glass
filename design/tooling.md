@@ -197,7 +197,7 @@ topological order. Each transform and sink arm holds an `Arc<ElementProbe>`
 (`runtime/instrument.rs`). On every `DataFrame` it samples its input link's fill
 through `LinkReceiver::fill_percent` and times the `process()` call wall-clock
 with `metrics::monotonic_ns` around the `await`, recording into the lock-free
-log2 `LatencyHistogram`, so the hot-path cost is a handful of relaxed atomics and
+log-linear `LatencyHistogram`, so the hot-path cost is a handful of relaxed atomics and
 no allocation.
 
 Once every arm has joined, the runner snapshots each probe into the report, and
