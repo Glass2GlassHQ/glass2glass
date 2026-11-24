@@ -68,11 +68,11 @@ use crate::waylandwindow::run_window;
 use crate::wgpusink::WgpuSink;
 #[cfg(target_os = "windows")]
 use crate::win32window::run_window;
-#[cfg(target_os = "linux")]
-use crate::windowworker::CursorShapes;
 use crate::windowworker::{
     present_on_worker, worker_gone, WindowParams, WindowRenderer, WorkerChannels, WorkerCmd,
 };
+#[cfg(target_os = "linux")]
+use crate::windowworker::{ClipboardLink, CursorShapes};
 use crate::worker_ready::Handshake;
 use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::log::{short_type_name, LogName, LogSource, Target};
@@ -139,6 +139,8 @@ pub struct WgpuPresentSink {
     input: Option<tokio::sync::mpsc::UnboundedSender<crate::windowinput::WindowInput>>,
     #[cfg(target_os = "linux")]
     cursor_shapes: Option<CursorShapes>,
+    #[cfg(target_os = "linux")]
+    clipboard: Option<ClipboardLink>,
     latency: Arc<LatencyHistogram>,
     /// Why the worker could not bring its window up, sent once by the worker and
     /// read while waiting for the readiness handshake, so a setup failure is
@@ -197,6 +199,8 @@ impl WgpuPresentSink {
             input: None,
             #[cfg(target_os = "linux")]
             cursor_shapes: None,
+            #[cfg(target_os = "linux")]
+            clipboard: None,
             latency: Arc::new(LatencyHistogram::new()),
             startup_error: None,
             log_name: LogName::new(),
@@ -218,6 +222,20 @@ impl WgpuPresentSink {
     pub fn with_cursor_shapes(mut self, shapes: CursorShapes) -> Self {
         self.cursor_shapes = Some(shapes);
         self
+    }
+
+    // the window's selection takes each remote text, and the receiver yields text the user copies while the window has focus
+    #[cfg(target_os = "linux")]
+    pub fn sync_clipboard(
+        &mut self,
+        remote_texts: tokio::sync::watch::Receiver<Option<String>>,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<String> {
+        let (local_texts, receiver) = tokio::sync::mpsc::unbounded_channel();
+        self.clipboard = Some(ClipboardLink {
+            remote_texts,
+            local_texts,
+        });
+        receiver
     }
 
     pub fn with_title<S: Into<String>>(mut self, title: S) -> Self {
@@ -347,6 +365,8 @@ impl WgpuPresentSink {
         let input = self.input.clone();
         #[cfg(target_os = "linux")]
         let cursor_shapes = self.cursor_shapes.clone();
+        #[cfg(target_os = "linux")]
+        let clipboard = self.clipboard.clone();
         let (window_width, window_height) =
             self.window_size(self.width, self.height, self.pixel_aspect);
         let params = WindowParams {
@@ -376,6 +396,8 @@ impl WgpuPresentSink {
                     input,
                     #[cfg(target_os = "linux")]
                     cursor_shapes,
+                    #[cfg(target_os = "linux")]
+                    clipboard,
                 };
                 #[cfg(target_os = "linux")]
                 let build = |conn: &Connection,

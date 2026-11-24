@@ -19,7 +19,9 @@ use smithay_client_toolkit::data_device_manager::data_device::{
     DataDevice, DataDeviceData, DataDeviceHandler,
 };
 use smithay_client_toolkit::data_device_manager::data_offer::{DataOfferHandler, DragOffer};
-use smithay_client_toolkit::data_device_manager::data_source::{DataSourceHandler, DragSource};
+use smithay_client_toolkit::data_device_manager::data_source::{
+    CopyPasteSource, DataSourceHandler, DragSource,
+};
 use smithay_client_toolkit::data_device_manager::{DataDeviceManagerState, WritePipe};
 use smithay_client_toolkit::dispatch2::Dispatch2;
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
@@ -56,7 +58,10 @@ const DRAG_BUTTON: PointerButton = PointerButton::Middle;
 const DRAG_ICON_SIZE: u32 = 16;
 const DRAG_ICON_COLOR_ARGB: u32 = 0xFF30_C050;
 pub(crate) const DRAG_PAYLOAD: &str = "dragged text";
-const DRAG_MIME_TYPE: &str = "text/plain;charset=utf-8";
+const TEXT_MIME_TYPE: &str = "text/plain;charset=utf-8";
+// linux input-event-codes.h KEY_C, the client copies CLIPBOARD_TEXT when it goes down
+pub(crate) const COPY_KEY: u32 = 46;
+pub(crate) const CLIPBOARD_TEXT: &str = "copied text";
 const DRAG_START: (u32, u32) = (20, 20);
 // the client sets this cursor whenever the pointer enters its window
 pub(crate) const CURSOR_SIZE: u32 = 8;
@@ -81,6 +86,7 @@ pub(crate) enum ClientEvent {
     Button { code: u32, pressed: bool },
     DropAccepted,
     Dropped(String),
+    Clipboard(String),
 }
 
 struct Client {
@@ -91,6 +97,7 @@ struct Client {
     data_device_manager: DataDeviceManagerState,
     data_device: Option<DataDevice>,
     drag: Option<(DragSource, wl_surface::WlSurface)>,
+    copy: Option<CopyPasteSource>,
     cursor: Option<wl_surface::WlSurface>,
     shm: Shm,
     pool: SlotPool,
@@ -151,6 +158,19 @@ impl Client {
         surface.commit();
     }
 
+    fn copy(&mut self, qh: &QueueHandle<Self>, serial: u32) {
+        let source = self
+            .data_device_manager
+            .create_copy_paste_source(qh, [TEXT_MIME_TYPE]);
+        source.set_selection(
+            self.data_device
+                .as_ref()
+                .expect("the seat has a data device"),
+            serial,
+        );
+        self.copy = Some(source);
+    }
+
     fn start_drag(&mut self, qh: &QueueHandle<Self>, serial: u32) {
         let data_device = self
             .data_device
@@ -158,7 +178,7 @@ impl Client {
             .expect("the seat has a data device");
         let source = self.data_device_manager.create_drag_and_drop_source(
             qh,
-            [DRAG_MIME_TYPE],
+            [TEXT_MIME_TYPE],
             DndAction::Copy,
         );
         let icon = self.compositor.create_surface(qh);
@@ -359,6 +379,7 @@ fn run_client(socket: PathBuf, events: mpsc::UnboundedSender<ClientEvent>) {
         data_device_manager,
         data_device: None,
         drag: None,
+        copy: None,
         cursor: None,
         pool: SlotPool::new(pool_bytes, &shm).expect("shm pool"),
         shm,
@@ -476,14 +497,19 @@ impl Dispatch2<wl_keyboard::WlKeyboard, Client> for KeyboardEvents {
         _: &wl_keyboard::WlKeyboard,
         event: wl_keyboard::Event,
         _: &Connection,
-        _: &QueueHandle<Client>,
+        qh: &QueueHandle<Client>,
     ) {
         let event = match event {
             wl_keyboard::Event::Enter { .. } => ClientEvent::KeyboardEnter,
-            wl_keyboard::Event::Key { key, state, .. } => ClientEvent::Key {
-                code: key,
-                pressed: state == WEnum::Value(wl_keyboard::KeyState::Pressed),
-            },
+            wl_keyboard::Event::Key {
+                key, state, serial, ..
+            } => {
+                let pressed = state == WEnum::Value(wl_keyboard::KeyState::Pressed);
+                if key == COPY_KEY && pressed {
+                    client.copy(qh, serial);
+                }
+                ClientEvent::Key { code: key, pressed }
+            }
             _ => return,
         };
         let _ = client.events.send(event);
@@ -540,12 +566,33 @@ impl DataDeviceHandler for Client {
         _: &wl_surface::WlSurface,
     ) {
         let offer = drag_offer(data_device);
-        offer.accept_mime_type(offer.serial, Some(String::from(DRAG_MIME_TYPE)));
+        offer.accept_mime_type(offer.serial, Some(String::from(TEXT_MIME_TYPE)));
         offer.set_actions(DndAction::Copy, DndAction::Copy);
     }
     fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
     fn motion(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice, _: f64, _: f64) {}
-    fn selection(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
+    fn selection(&mut self, _: &Connection, _: &QueueHandle<Self>, data_device: &WlDataDevice) {
+        let Some(offer) = data_device
+            .data::<DataDeviceData>()
+            .and_then(DataDeviceData::selection_offer)
+        else {
+            return;
+        };
+        if !offer.with_mime_types(|mime_types| mime_types.iter().any(|mime| mime == TEXT_MIME_TYPE))
+        {
+            return;
+        }
+        let mut pipe = offer
+            .receive(String::from(TEXT_MIME_TYPE))
+            .expect("the selection offers text");
+        let events = self.events.clone();
+        // this thread also serves the selection when this client copied it
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            pipe.read_to_string(&mut text).expect("reads the clipboard");
+            let _ = events.send(ClientEvent::Clipboard(text));
+        });
+    }
     fn drop_performed(
         &mut self,
         connection: &Connection,
@@ -554,7 +601,7 @@ impl DataDeviceHandler for Client {
     ) {
         let offer = drag_offer(data_device);
         let mut pipe = offer
-            .receive(String::from(DRAG_MIME_TYPE))
+            .receive(String::from(TEXT_MIME_TYPE))
             .expect("the dropped offer has the mime type");
         let connection = connection.clone();
         let events = self.events.clone();
@@ -613,11 +660,16 @@ impl DataSourceHandler for Client {
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
-        _: &WlDataSource,
+        source: &WlDataSource,
         _: String,
         mut pipe: WritePipe,
     ) {
-        pipe.write_all(DRAG_PAYLOAD.as_bytes())
+        let copied = self
+            .copy
+            .as_ref()
+            .is_some_and(|copy| copy.inner() == source);
+        let payload = if copied { CLIPBOARD_TEXT } else { DRAG_PAYLOAD };
+        pipe.write_all(payload.as_bytes())
             .expect("writes the payload");
     }
     fn cancelled(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource) {

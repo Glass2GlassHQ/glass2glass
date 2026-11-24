@@ -34,6 +34,15 @@ pub const WHEEL_UNITS_PER_NOTCH: i32 = 120;
 // weston and mutter scroll 10 pixels per wheel notch
 pub const WHEEL_PIXELS_PER_NOTCH: f64 = 10.0;
 
+// wayland and X11 names for plain text, most specific first, which smithay's X11 window manager maps to atoms
+pub const CLIPBOARD_TEXT_MIME_TYPES: [&str; 5] = [
+    "text/plain;charset=utf-8",
+    "UTF8_STRING",
+    "text/plain",
+    "TEXT",
+    "STRING",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowInput {
     Focus(bool),

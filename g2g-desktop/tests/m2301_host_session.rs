@@ -37,6 +37,8 @@ const RUN_TIMEOUT: Duration = Duration::from_secs(30);
 const LINK_CAPACITY: usize = 2;
 const HID_A: u16 = 0x04;
 const CURSOR_SIDE: u32 = 4;
+const HOST_CLIPBOARD: &str = "copied on the host";
+const CLIENT_CLIPBOARD: &str = "copied on the client";
 
 struct CountingSink {
     frames: Arc<AtomicU64>,
@@ -102,11 +104,12 @@ fn capture(registry_source: &str) -> HostCapture {
         ],
         encoder: HostEncoder::Software,
         cursor_shapes: None,
+        clipboard_texts: None,
     }
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn client_sees_host_video_and_cursor_and_host_receives_client_input() {
+async fn client_sees_host_video_cursor_and_clipboard_and_host_receives_client_input() {
     let settings = HostSettings {
         token: TOKEN.into(),
         bitrate: BITRATE,
@@ -126,8 +129,11 @@ async fn client_sees_host_video_and_cursor_and_host_receives_client_input() {
     };
     let (cursor_sender, cursor_shapes) = watch::channel(None);
     cursor_sender.send_replace(Some(cursor_shape.clone()));
+    let (clipboard_sender, clipboard_texts) = watch::channel(None);
+    clipboard_sender.send_replace(Some(String::from(HOST_CLIPBOARD)));
     let capture = HostCapture {
         cursor_shapes: Some(cursor_shapes),
+        clipboard_texts: Some(clipboard_texts),
         ..capture(&source)
     };
     let (client, mut input) = client_source(&listener, &cert_hash, TOKEN);
@@ -153,6 +159,7 @@ async fn client_sees_host_video_and_cursor_and_host_receives_client_input() {
             y: i32::from(HEIGHT) / 2,
             display: 0,
         },
+        Event::Clipboard(String::from(CLIENT_CLIPBOARD)),
     ];
     let mut writer = PacketWriter::new(Side::Client);
     for event in &sent {
@@ -180,10 +187,11 @@ async fn client_sees_host_video_and_cursor_and_host_receives_client_input() {
     }
     assert_eq!(delivered, sent);
     let mut reader = PacketReader::new(Side::Client);
-    let from_host = reader
-        .read(&input.incoming.try_recv().expect("the host sent the cursor"))
-        .expect("a valid host packet");
-    let expected = CursorImage::new(
+    let mut from_host = Vec::new();
+    while let Ok(packet) = input.incoming.try_recv() {
+        from_host.push(reader.read(&packet).expect("a valid host packet"));
+    }
+    let cursor = CursorImage::new(
         CURSOR_SIDE as u16,
         CURSOR_SIDE as u16,
         1,
@@ -191,7 +199,14 @@ async fn client_sees_host_video_and_cursor_and_host_receives_client_input() {
         cursor_shape.rgba,
     )
     .unwrap();
-    assert_eq!(from_host, Some(Event::Cursor(expected)));
+    assert!(
+        from_host.contains(&Some(Event::Cursor(cursor))),
+        "the host sent the cursor: {from_host:?}"
+    );
+    assert!(
+        from_host.contains(&Some(Event::Clipboard(String::from(HOST_CLIPBOARD)))),
+        "the host sent its clipboard: {from_host:?}"
+    );
     assert_eq!(
         *sizes.borrow(),
         Some(ScreenSize {

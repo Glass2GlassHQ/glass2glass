@@ -17,13 +17,21 @@
 //! that arrives before the surface is mappable is held and drawn then.
 
 use core::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::io::{Read, Write};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use alloc::boxed::Box;
+use alloc::string::String;
 
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, FrameCallbackData},
+    data_device_manager::{
+        data_device::{DataDevice, DataDeviceData, DataDeviceHandler},
+        data_offer::{DataOfferHandler, DragOffer},
+        data_source::{CopyPasteSource, DataSourceHandler},
+        DataDeviceManagerState, WritePipe,
+    },
     delegate_dispatch2, delegate_registry,
     output::{OutputHandler, OutputState},
     reexports::calloop::{
@@ -33,8 +41,12 @@ use smithay_client_toolkit::{
     reexports::calloop_wayland_source::WaylandSource,
     reexports::client::{
         globals::registry_queue_init,
-        protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
-        Connection, QueueHandle,
+        protocol::{
+            wl_data_device::WlDataDevice, wl_data_device_manager::DndAction,
+            wl_data_source::WlDataSource, wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm,
+            wl_surface,
+        },
+        Connection, Proxy, QueueHandle,
     },
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
@@ -58,10 +70,11 @@ use smithay_client_toolkit::{
 
 use crate::cursorshape::{CursorShape, CURSOR_BYTES_PER_PIXEL};
 use crate::windowinput::{
-    PointerButton, WindowInput, WHEEL_PIXELS_PER_NOTCH, WHEEL_UNITS_PER_NOTCH,
+    PointerButton, WindowInput, CLIPBOARD_TEXT_MIME_TYPES, WHEEL_PIXELS_PER_NOTCH,
+    WHEEL_UNITS_PER_NOTCH,
 };
 use crate::windowworker::{
-    PresentReports, WindowParams, WindowRenderer, WorkerChannels, WorkerCmd,
+    ClipboardLink, PresentReports, WindowParams, WindowRenderer, WorkerChannels, WorkerCmd,
 };
 use crate::worker_ready::Handshake;
 use g2g_core::log::Target;
@@ -116,6 +129,28 @@ pub(crate) fn run_window<R: WindowRenderer>(
     window.commit();
 
     let renderer = build_renderer(&conn, window.wl_surface(), width, height)?;
+    let clipboard =
+        channels
+            .clipboard
+            .and_then(|link| match DataDeviceManagerState::bind(&globals, &qh) {
+                Ok(manager) => Some(WindowClipboard {
+                    link,
+                    manager,
+                    device: None,
+                    source: None,
+                    offered: None,
+                    offer_pending: false,
+                    input_serial: None,
+                    synced: Arc::default(),
+                }),
+                Err(e) => {
+                    g2g_core::g2g_warn!(
+                        Target::category(log_tag),
+                        "the compositor has no clipboard: {e}"
+                    );
+                    None
+                }
+            });
 
     let mut state = WindowWorker {
         registry_state: RegistryState::new(&globals),
@@ -145,6 +180,7 @@ pub(crate) fn run_window<R: WindowRenderer>(
             buffer: None,
             enter_serial: None,
         },
+        clipboard,
     };
 
     loop_handle.insert_source(
@@ -176,6 +212,7 @@ pub(crate) fn run_window<R: WindowRenderer>(
     while !state.exit {
         event_loop.dispatch(Some(Duration::from_millis(100)), &mut state)?;
         state.follow_cursor_shape();
+        state.follow_remote_clipboard();
     }
     Ok(())
 }
@@ -205,6 +242,21 @@ struct WindowWorker<R: WindowRenderer> {
     pointer: Option<wl_pointer::WlPointer>,
     shm: Shm,
     cursor: PointerCursor,
+    clipboard: Option<WindowClipboard>,
+}
+
+struct WindowClipboard {
+    link: ClipboardLink,
+    manager: DataDeviceManagerState,
+    device: Option<DataDevice>,
+    source: Option<CopyPasteSource>,
+    // the text this window's selection serves
+    offered: Option<String>,
+    offer_pending: bool,
+    // wayland lets a client set the selection only with the serial of a recent input event
+    input_serial: Option<u32>,
+    // the text last set or read in either direction, so neither side echoes it back
+    synced: Arc<Mutex<Option<String>>>,
 }
 
 struct PointerCursor {
@@ -251,6 +303,54 @@ impl<R: WindowRenderer> WindowWorker<R> {
         }
         self.window.set_min_size(Some((width, height)));
         self.window.commit();
+    }
+
+    fn follow_remote_clipboard(&mut self) {
+        let Some(clipboard) = &mut self.clipboard else {
+            return;
+        };
+        if !clipboard.link.remote_texts.has_changed().unwrap_or(false) {
+            return;
+        }
+        let Some(text) = clipboard.link.remote_texts.borrow_and_update().clone() else {
+            return;
+        };
+        clipboard.offered = Some(text);
+        clipboard.offer_pending = true;
+        self.offer_clipboard();
+    }
+
+    fn note_input_serial(&mut self, serial: u32) {
+        let Some(clipboard) = &mut self.clipboard else {
+            return;
+        };
+        clipboard.input_serial = Some(serial);
+        if clipboard.offer_pending {
+            self.offer_clipboard();
+        }
+    }
+
+    fn offer_clipboard(&mut self) {
+        let Some(clipboard) = &mut self.clipboard else {
+            return;
+        };
+        let (Some(text), Some(device), Some(serial)) = (
+            &clipboard.offered,
+            &clipboard.device,
+            clipboard.input_serial,
+        ) else {
+            return;
+        };
+        *clipboard
+            .synced
+            .lock()
+            .expect("no thread panics holding the synced text") = Some(text.clone());
+        let source = clipboard
+            .manager
+            .create_copy_paste_source(&self.qh, CLIPBOARD_TEXT_MIME_TYPES);
+        source.set_selection(device, serial);
+        clipboard.source = Some(source);
+        clipboard.offer_pending = false;
     }
 
     fn follow_cursor_shape(&mut self) {
@@ -449,6 +549,9 @@ impl<R: WindowRenderer> SeatHandler for WindowWorker<R> {
                     Ok(keyboard) => self.keyboard = Some(keyboard),
                     Err(e) => g2g_core::g2g_error!(log, "cannot read the keyboard: {e}"),
                 }
+                if let Some(clipboard) = &mut self.clipboard {
+                    clipboard.device = Some(clipboard.manager.get_data_device(qh, &seat));
+                }
             }
             Capability::Pointer if self.pointer.is_none() => {
                 match self.seat_state.get_pointer(qh, &seat) {
@@ -492,10 +595,11 @@ impl<R: WindowRenderer> KeyboardHandler for WindowWorker<R> {
         _: &QueueHandle<Self>,
         _: &wl_keyboard::WlKeyboard,
         _: &wl_surface::WlSurface,
-        _: u32,
+        serial: u32,
         _: &[u32],
         _: &[Keysym],
     ) {
+        self.note_input_serial(serial);
         self.send_input(WindowInput::Focus(true));
     }
 
@@ -515,9 +619,10 @@ impl<R: WindowRenderer> KeyboardHandler for WindowWorker<R> {
         _: &Connection,
         _: &QueueHandle<Self>,
         _: &wl_keyboard::WlKeyboard,
-        _: u32,
+        serial: u32,
         event: KeyEvent,
     ) {
+        self.note_input_serial(serial);
         self.send_input(WindowInput::Key {
             scancode: event.raw_code,
             down: true,
@@ -619,6 +724,148 @@ impl<R: WindowRenderer> PointerHandler for WindowWorker<R> {
             }
         }
     }
+}
+
+impl<R: WindowRenderer> DataDeviceHandler for WindowWorker<R> {
+    fn enter(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &WlDataDevice,
+        _: f64,
+        _: f64,
+        _: &wl_surface::WlSurface,
+    ) {
+    }
+
+    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
+
+    fn motion(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice, _: f64, _: f64) {}
+
+    fn selection(&mut self, _: &Connection, _: &QueueHandle<Self>, data_device: &WlDataDevice) {
+        let Some(clipboard) = &self.clipboard else {
+            return;
+        };
+        let Some(offer) = data_device
+            .data::<DataDeviceData>()
+            .and_then(DataDeviceData::selection_offer)
+        else {
+            return;
+        };
+        let mime_type = offer.with_mime_types(|offered| {
+            CLIPBOARD_TEXT_MIME_TYPES
+                .iter()
+                .find(|text| offered.iter().any(|mime| mime == *text))
+                .map(|text| String::from(*text))
+        });
+        let Some(mime_type) = mime_type else {
+            return;
+        };
+        let log = Target::category(self.reports.log_tag);
+        let mut pipe = match offer.receive(mime_type) {
+            Ok(pipe) => pipe,
+            Err(e) => {
+                g2g_core::g2g_warn!(log, "cannot read the clipboard: {e}");
+                return;
+            }
+        };
+        let synced = Arc::clone(&clipboard.synced);
+        let local_texts = clipboard.link.local_texts.clone();
+        // the copying client writes the text, and that is this thread when the window set the selection
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            if let Err(e) = pipe.read_to_string(&mut text) {
+                g2g_core::g2g_warn!(log, "cannot read the clipboard: {e}");
+                return;
+            }
+            let mut synced = synced
+                .lock()
+                .expect("no thread panics holding the synced text");
+            if synced.as_deref() == Some(text.as_str()) {
+                return;
+            }
+            *synced = Some(text.clone());
+            let _ = local_texts.send(text);
+        });
+    }
+
+    fn drop_performed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
+}
+
+impl<R: WindowRenderer> DataOfferHandler for WindowWorker<R> {
+    fn source_actions(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &mut DragOffer,
+        _: DndAction,
+    ) {
+    }
+
+    fn selected_action(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &mut DragOffer,
+        _: DndAction,
+    ) {
+    }
+}
+
+impl<R: WindowRenderer> DataSourceHandler for WindowWorker<R> {
+    fn accept_mime(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &WlDataSource,
+        _: Option<String>,
+    ) {
+    }
+
+    fn send_request(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        source: &WlDataSource,
+        _: String,
+        mut pipe: WritePipe,
+    ) {
+        let Some(clipboard) = &self.clipboard else {
+            return;
+        };
+        let ours = clipboard
+            .source
+            .as_ref()
+            .is_some_and(|ours| ours.inner() == source);
+        let Some(text) = clipboard.offered.as_ref().filter(|_| ours) else {
+            return;
+        };
+        if let Err(e) = pipe.write_all(text.as_bytes()) {
+            g2g_core::g2g_warn!(
+                Target::category(self.reports.log_tag),
+                "cannot hand out the clipboard: {e}"
+            );
+        }
+    }
+
+    fn cancelled(&mut self, _: &Connection, _: &QueueHandle<Self>, source: &WlDataSource) {
+        let Some(clipboard) = &mut self.clipboard else {
+            return;
+        };
+        if clipboard
+            .source
+            .as_ref()
+            .is_some_and(|ours| ours.inner() == source)
+        {
+            clipboard.source = None;
+        }
+    }
+
+    fn dnd_dropped(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource) {}
+
+    fn dnd_finished(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource) {}
+
+    fn action(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource, _: DndAction) {}
 }
 
 delegate_dispatch2!(@<R: WindowRenderer> WindowWorker<R>);

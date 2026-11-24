@@ -4,10 +4,11 @@
 
 #![cfg(all(target_os = "linux", feature = "display"))]
 
+mod render_node;
 mod wayland_client;
 
 use std::os::fd::{BorrowedFd, OwnedFd};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::{DomainSet, MemoryDomain, MemoryDomainKind, OwnedDmaBuf};
@@ -30,8 +31,6 @@ use wayland_client::{
     WIDTH,
 };
 
-const DRI_DIRECTORY: &str = "/dev/dri";
-const RENDER_NODE_PREFIX: &str = "renderD";
 const LINUX_DMABUF_INTERFACE: &str = "zwp_linux_dmabuf_v1";
 // drm's abgr8888 is the RGBA the source outputs
 const OUTPUT_FOURCC: Fourcc = Fourcc::Abgr8888;
@@ -40,22 +39,6 @@ const NV12_CAPS: &str = "video/x-raw,format=NV12";
 const UPPER_YCBCR: [u8; 3] = [112, 166, 83];
 const LOWER_YCBCR: [u8; 3] = [91, 94, 186];
 const YCBCR_TOLERANCE: u8 = 2;
-
-fn render_nodes() -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(DRI_DIRECTORY) else {
-        return Vec::new();
-    };
-    let mut nodes: Vec<PathBuf> = entries
-        .map(|entry| entry.expect("lists /dev/dri").path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with(RENDER_NODE_PREFIX))
-        })
-        .collect();
-    nodes.sort();
-    nodes
-}
 
 struct DmaBufReader {
     gles: GlesRenderer,
@@ -263,7 +246,7 @@ async fn rgba_client_reaches_frames(
 
 #[tokio::test]
 async fn gpu_rendering_shares_a_dma_buf_with_a_sink_that_takes_one() {
-    for render_node in render_nodes() {
+    for render_node in render_node::render_nodes() {
         rgba_client_reaches_frames(&render_node, system_or_dmabuf(), MemoryDomainKind::DmaBuf)
             .await;
     }
@@ -271,7 +254,7 @@ async fn gpu_rendering_shares_a_dma_buf_with_a_sink_that_takes_one() {
 
 #[tokio::test]
 async fn gpu_rendering_copies_to_system_memory_for_a_system_sink() {
-    for render_node in render_nodes() {
+    for render_node in render_node::render_nodes() {
         let domains = DomainSet::only(MemoryDomainKind::System);
         rgba_client_reaches_frames(&render_node, domains, MemoryDomainKind::System).await;
     }
@@ -279,7 +262,7 @@ async fn gpu_rendering_copies_to_system_memory_for_a_system_sink() {
 
 #[tokio::test]
 async fn gpu_rendering_writes_nv12_planes_for_an_nv12_sink() {
-    for render_node in render_nodes() {
+    for render_node in render_node::render_nodes() {
         let reader = DmaBufReader::open(&render_node);
         let renders_planes =
             reader.renders_linear(Fourcc::R8) && reader.renders_linear(Fourcc::Gr88);
@@ -318,7 +301,7 @@ async fn gpu_rendering_writes_nv12_planes_for_an_nv12_sink() {
 
 #[tokio::test]
 async fn gpu_rendering_draws_the_drag_icon() {
-    for render_node in render_nodes() {
+    for render_node in render_node::render_nodes() {
         let channel = format!("m2541_gpu_drag_{}", render_node.display());
         drag_reaches_the_drop_target(gpu_source(&render_node), &channel).await;
     }
@@ -363,7 +346,7 @@ async fn vaapi_encodes_nv12_dma_bufs_from_the_display() {
     use g2g_plugins::ffmpegenc::{Backend, FfmpegVideoEnc, VaapiCodec};
     // waylanddisplaysrc repeats an undamaged picture once a second, so a few frames cover the client's first draw
     const ENCODED_FRAMES: u64 = 5;
-    for render_node in render_nodes() {
+    for render_node in render_node::render_nodes() {
         let reader = DmaBufReader::open(&render_node);
         if !(reader.renders_linear(Fourcc::R8) && reader.renders_linear(Fourcc::Gr88)) {
             continue;
@@ -419,7 +402,7 @@ async fn nvenc_encodes_dma_bufs_from_the_display_through_cuda() {
     const NVIDIA_DRIVER: &str = "nvidia";
     // waylanddisplaysrc repeats an undamaged picture once a second, so a few frames cover the client's first draw
     const ENCODED_FRAMES: u64 = 5;
-    for render_node in render_nodes() {
+    for render_node in render_node::render_nodes() {
         if render_node_driver(&render_node).ok().as_deref() != Some(NVIDIA_DRIVER) {
             continue;
         }

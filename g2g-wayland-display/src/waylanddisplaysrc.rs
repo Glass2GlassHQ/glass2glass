@@ -155,6 +155,7 @@ pub struct WaylandDisplay {
     names: DisplayNames,
     input: InputSender,
     cursor_shapes: watch::Receiver<Option<CursorShape>>,
+    clipboard_texts: watch::Receiver<Option<String>>,
 }
 
 impl WaylandDisplay {
@@ -192,6 +193,7 @@ impl WaylandDisplay {
         let (request_sender, requests) = channel();
         let (names_sender, names_receiver) = oneshot::channel();
         let (cursor_sender, cursor_shapes) = watch::channel(None);
+        let (clipboard_sender, clipboard_texts) = watch::channel(None);
         let handle = std::thread::Builder::new()
             .name(String::from("g2g-waylanddisplaysrc"))
             .spawn(move || {
@@ -202,6 +204,7 @@ impl WaylandDisplay {
                         input,
                         names: names_sender,
                         cursor_shapes: cursor_sender,
+                        clipboard_texts: clipboard_sender,
                     },
                 )
             })
@@ -225,6 +228,7 @@ impl WaylandDisplay {
             names,
             input: input_sender,
             cursor_shapes,
+            clipboard_texts,
         })
     }
 
@@ -245,6 +249,17 @@ impl WaylandDisplay {
         // a new receiver starts with the current shape, which may predate it
         shapes.mark_changed();
         shapes
+    }
+
+    // the text a Wayland or X11 client copied last, never the text set_clipboard gives
+    pub fn clipboard_texts(&self) -> watch::Receiver<Option<String>> {
+        let mut texts = self.clipboard_texts.clone();
+        texts.mark_changed();
+        texts
+    }
+
+    pub fn set_clipboard(&self, text: String) -> Result<(), G2gError> {
+        self.thread.send(DisplayRequest::SetClipboard(text))
     }
 
     async fn attach(&self, output: SessionOutput) -> Result<DisplaySession<'_>, G2gError> {

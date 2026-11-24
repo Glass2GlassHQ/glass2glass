@@ -19,13 +19,13 @@ use tokio::sync::mpsc;
 use wayland_client::{
     client_globals, connect_client, drag_icon_to, drag_reaches_the_drop_target, release_drag, rgb,
     rgb_at, shows_client, wait_for_client_event, wait_for_picture, ClientEvent, ZeroClock,
-    BYTES_PER_PIXEL, CURSOR_COLOR_ARGB, CURSOR_HOTSPOT, CURSOR_SIZE, DRAG_PAYLOAD, FRAMERATE,
-    HEIGHT, TIMEOUT, WIDTH,
+    BYTES_PER_PIXEL, CLIPBOARD_TEXT, COPY_KEY, CURSOR_COLOR_ARGB, CURSOR_HOTSPOT, CURSOR_SIZE,
+    DRAG_PAYLOAD, FRAMERATE, HEIGHT, TIMEOUT, WIDTH,
 };
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, ClientMessageEvent, ConnectionExt, CreateWindowAux, EventMask, PropMode,
-    Window, WindowClass,
+    SelectionNotifyEvent, SelectionRequestEvent, Window, WindowClass, SELECTION_NOTIFY_EVENT,
 };
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
@@ -663,6 +663,50 @@ fn window_under(connection: &RustConnection, root: Window, x: i16, y: i16) -> Op
     (child != x11rb::NONE).then_some(child)
 }
 
+// answers an X11 selection request with text, and with the targets list when asked for it
+fn serve_text(connection: &RustConnection, request: &SelectionRequestEvent, text: &str) {
+    let targets = intern(connection, "TARGETS");
+    let utf8_string = intern(connection, "UTF8_STRING");
+    let property = if request.target == targets {
+        connection
+            .change_property32(
+                PropMode::REPLACE,
+                request.requestor,
+                request.property,
+                AtomEnum::ATOM,
+                &[targets, utf8_string],
+            )
+            .expect("writes the targets");
+        request.property
+    } else if request.target == utf8_string {
+        connection
+            .change_property8(
+                PropMode::REPLACE,
+                request.requestor,
+                request.property,
+                request.target,
+                text.as_bytes(),
+            )
+            .expect("writes the text");
+        request.property
+    } else {
+        x11rb::NONE
+    };
+    let notify = SelectionNotifyEvent {
+        response_type: SELECTION_NOTIFY_EVENT,
+        sequence: 0,
+        time: request.time,
+        requestor: request.requestor,
+        selection: request.selection,
+        target: request.target,
+        property,
+    };
+    connection
+        .send_event(false, request.requestor, EventMask::NO_EVENT, notify)
+        .expect("answers the request");
+    connection.flush().expect("flushes");
+}
+
 fn run_xdnd_source(display: String, events: mpsc::UnboundedSender<XdndSourceEvent>) {
     let (connection, screen_number) = x11rb::connect(Some(&display)).expect("connects to Xwayland");
     let atoms = XdndAtoms::intern(&connection);
@@ -717,28 +761,7 @@ fn run_xdnd_source(display: String, events: mpsc::UnboundedSender<XdndSourceEven
                 continue;
             }
             Event::SelectionRequest(request) => {
-                connection
-                    .change_property8(
-                        PropMode::REPLACE,
-                        request.requestor,
-                        request.property,
-                        request.target,
-                        DRAG_PAYLOAD.as_bytes(),
-                    )
-                    .expect("writes the payload");
-                let notify = x11rb::protocol::xproto::SelectionNotifyEvent {
-                    response_type: x11rb::protocol::xproto::SELECTION_NOTIFY_EVENT,
-                    sequence: 0,
-                    time: request.time,
-                    requestor: request.requestor,
-                    selection: request.selection,
-                    target: request.target,
-                    property: request.property,
-                };
-                connection
-                    .send_event(false, request.requestor, EventMask::NO_EVENT, notify)
-                    .expect("answers the request");
-                connection.flush().expect("flushes");
+                serve_text(&connection, &request, DRAG_PAYLOAD);
                 continue;
             }
             _ => continue,
@@ -826,4 +849,144 @@ async fn an_x11_drag_drops_onto_a_wayland_window() {
         result = run_graph(graph, &ZeroClock, 2) => panic!("the graph ended first: {result:?}"),
         () = checks => {}
     }
+}
+
+const REMOTE_CLIPBOARD_TEXT: &str = "text from the remote client";
+const X11_CLIPBOARD_TEXT: &str = "text an X11 app copied";
+const SELECTION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
+
+async fn start_xwayland_display() -> WaylandDisplay {
+    WaylandDisplay::start(WaylandDisplaySettings {
+        width: WIDTH,
+        height: HEIGHT,
+        framerate_q16: FRAMERATE << 16,
+        render_node: String::from(SOFTWARE_RENDERING),
+        xwayland: true,
+    })
+    .await
+    .expect("the display starts")
+}
+
+async fn wait_for_clipboard(display: &WaylandDisplay, expected: &str) {
+    let mut texts = display.clipboard_texts();
+    let published = tokio::time::timeout(
+        TIMEOUT,
+        texts.wait_for(|text| text.as_deref() == Some(expected)),
+    )
+    .await;
+    assert!(
+        matches!(published, Ok(Ok(_))),
+        "the display publishes {expected:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_wayland_copy_is_published_and_a_remote_clipboard_reaches_wayland_clients() {
+    let display = start_software_display().await;
+    let input = display.input_sender();
+    let mut display_names = WaylandDisplaySrc::on_display(&display).display_names();
+    let mut events = connect_client(&mut display_names).await;
+    client_globals(&mut events).await;
+    wait_for_client_event(&mut events, &ClientEvent::KeyboardEnter).await;
+
+    input
+        .send(WindowInput::Key {
+            scancode: COPY_KEY,
+            down: true,
+        })
+        .expect("the display takes input");
+    wait_for_clipboard(&display, CLIPBOARD_TEXT).await;
+
+    display
+        .set_clipboard(String::from(REMOTE_CLIPBOARD_TEXT))
+        .expect("the display takes the clipboard");
+    wait_for_client_event(
+        &mut events,
+        &ClientEvent::Clipboard(String::from(REMOTE_CLIPBOARD_TEXT)),
+    )
+    .await;
+}
+
+fn run_x11_copier(display: String, text: &'static str) {
+    let (connection, screen_number) = x11rb::connect(Some(&display)).expect("connects to Xwayland");
+    let clipboard = intern(&connection, "CLIPBOARD");
+    let window = map_menu_window(&connection, screen_number, EventMask::NO_EVENT);
+    connection
+        .set_selection_owner(window, clipboard, x11rb::CURRENT_TIME)
+        .expect("takes the clipboard");
+    connection.flush().expect("flushes");
+    while let Ok(event) = connection.wait_for_event() {
+        if let Event::SelectionRequest(request) = event {
+            serve_text(&connection, &request, text);
+        }
+    }
+}
+
+fn x11_clipboard_text(display: String) -> String {
+    let (connection, screen_number) = x11rb::connect(Some(&display)).expect("connects to Xwayland");
+    let clipboard = intern(&connection, "CLIPBOARD");
+    let utf8_string = intern(&connection, "UTF8_STRING");
+    let pasted = intern(&connection, "G2G_PASTED");
+    let window = map_menu_window(&connection, screen_number, EventMask::NO_EVENT);
+    // the window manager takes the clipboard once the display offers the remote text
+    while connection
+        .get_selection_owner(clipboard)
+        .expect("sends the request")
+        .reply()
+        .expect("reads the owner")
+        .owner
+        == x11rb::NONE
+    {
+        std::thread::sleep(SELECTION_POLL_INTERVAL);
+    }
+    connection
+        .convert_selection(window, clipboard, utf8_string, pasted, x11rb::CURRENT_TIME)
+        .expect("asks for the clipboard");
+    connection.flush().expect("flushes");
+    loop {
+        let event = connection.wait_for_event().expect("Xwayland stays up");
+        let Event::SelectionNotify(notify) = event else {
+            continue;
+        };
+        assert_ne!(notify.property, x11rb::NONE, "the clipboard owner answers");
+        let property = connection
+            .get_property(true, window, pasted, AtomEnum::ANY, 0, PROPERTY_WORDS)
+            .expect("sends the request")
+            .reply()
+            .expect("reads the clipboard");
+        return String::from_utf8(property.value).expect("utf-8 text");
+    }
+}
+
+fn x11_display_name(display: &WaylandDisplay) -> String {
+    display
+        .names()
+        .x11_display
+        .clone()
+        .expect("the display runs Xwayland")
+}
+
+#[tokio::test]
+async fn an_x11_copy_is_published() {
+    let display = start_xwayland_display().await;
+    let x11_display = x11_display_name(&display);
+    std::thread::spawn(move || run_x11_copier(x11_display, X11_CLIPBOARD_TEXT));
+    wait_for_clipboard(&display, X11_CLIPBOARD_TEXT).await;
+}
+
+#[tokio::test]
+async fn a_remote_clipboard_reaches_x11_apps() {
+    let display = start_xwayland_display().await;
+    display
+        .set_clipboard(String::from(REMOTE_CLIPBOARD_TEXT))
+        .expect("the display takes the clipboard");
+    let x11_display = x11_display_name(&display);
+    let pasted = tokio::time::timeout(
+        TIMEOUT,
+        tokio::task::spawn_blocking(move || x11_clipboard_text(x11_display)),
+    )
+    .await
+    .expect("the X11 app reads the clipboard in time")
+    .expect("the X11 app's thread finishes");
+    assert_eq!(pasted, REMOTE_CLIPBOARD_TEXT);
 }

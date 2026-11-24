@@ -5,7 +5,7 @@
 use std::io;
 
 use g2g_plugins::windowinput::WindowInput;
-use g2g_wayland_display::waylanddisplaysrc::InputSender;
+use g2g_wayland_display::waylanddisplaysrc::{InputSender, WaylandDisplay};
 
 use crate::hid::evdev_from_usage;
 use crate::injection::{check_position, InjectError, InjectEvents, ScreenSize};
@@ -15,11 +15,16 @@ use crate::packet::{Event, RemovableDevice, POINTER_BUTTONS};
 pub struct WaylandDisplayInjector {
     screen: ScreenSize,
     input: InputSender,
+    display: WaylandDisplay,
 }
 
 impl WaylandDisplayInjector {
-    pub fn new(screen: ScreenSize, input: InputSender) -> Self {
-        Self { screen, input }
+    pub fn new(screen: ScreenSize, display: &WaylandDisplay) -> Self {
+        Self {
+            screen,
+            input: display.input_sender(),
+            display: display.clone(),
+        }
     }
 }
 
@@ -56,10 +61,15 @@ fn window_input(event: &Event, screen: ScreenSize) -> Result<WindowInput, Inject
 
 impl InjectEvents for WaylandDisplayInjector {
     fn inject(&mut self, event: &Event) -> Result<(), InjectError> {
+        let display_gone = || InjectError::Device(io::Error::from(io::ErrorKind::BrokenPipe));
+        if let Event::Clipboard(text) = event {
+            return self
+                .display
+                .set_clipboard(text.clone())
+                .map_err(|_| display_gone());
+        }
         let input = window_input(event, self.screen)?;
-        self.input
-            .send(input)
-            .map_err(|_| InjectError::Device(io::Error::from(io::ErrorKind::BrokenPipe)))
+        self.input.send(input).map_err(|_| display_gone())
     }
 }
 

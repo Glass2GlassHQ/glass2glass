@@ -259,7 +259,12 @@ forwarded.
 
 Clipboard: each side watches its clipboard and sends type 9 when the text
 changes and the other side did not just set it. A payload over the 64 KiB
-message cap is dropped.
+message cap is dropped. The `--run` host sends what `WaylandDisplay::clipboard_texts`
+publishes and hands received text to `WaylandDisplay::set_clipboard`. The Linux
+client passes `WgpuPresentSink::sync_clipboard` the host's texts, which its
+window sets as the selection once it has a keyboard serial, and forwards each
+selection the desktop sends the focused window. Both sides remember the last
+text that crossed, so neither echoes it.
 
 ## Windows service
 

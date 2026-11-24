@@ -84,6 +84,17 @@ pub(crate) struct WorkerChannels<Receiver> {
     pub(crate) input: Option<tokio::sync::mpsc::UnboundedSender<crate::windowinput::WindowInput>>,
     #[cfg(target_os = "linux")]
     pub(crate) cursor_shapes: Option<CursorShapes>,
+    #[cfg(target_os = "linux")]
+    pub(crate) clipboard: Option<ClipboardLink>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone)]
+pub(crate) struct ClipboardLink {
+    // texts the window's selection takes
+    pub(crate) remote_texts: tokio::sync::watch::Receiver<Option<String>>,
+    // texts the user copied while the window had focus
+    pub(crate) local_texts: tokio::sync::mpsc::UnboundedSender<String>,
 }
 
 #[cfg(target_os = "linux")]

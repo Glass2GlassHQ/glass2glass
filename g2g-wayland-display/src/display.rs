@@ -3,6 +3,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use std::borrow::Cow;
+use std::io::{Read, Write};
+use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -13,7 +15,10 @@ use g2g_core::log::Target;
 use g2g_core::memory::OwnedDmaBuf;
 use g2g_core::{G2gError, HardwareError};
 use g2g_plugins::cursorshape::{CursorShape, CURSOR_BYTES_PER_PIXEL};
-use g2g_plugins::windowinput::{WindowInput, WHEEL_PIXELS_PER_NOTCH, WHEEL_UNITS_PER_NOTCH};
+use g2g_plugins::datachannel::MAX_MESSAGE_SIZE;
+use g2g_plugins::windowinput::{
+    WindowInput, CLIPBOARD_TEXT_MIME_TYPES, WHEEL_PIXELS_PER_NOTCH, WHEEL_UNITS_PER_NOTCH,
+};
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::input::{Axis, AxisSource, ButtonState, InputTime, KeyState};
@@ -70,9 +75,11 @@ use smithay::wayland::output::{OutputHandler, OutputManagerState};
 use smithay::wayland::pointer_constraints::PointerConstraintsHandler;
 use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::selection::data_device::{
-    set_data_device_focus, DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler, WlOfferData,
+    clear_data_device_selection, current_data_device_selection_userdata,
+    request_data_device_client_selection, set_data_device_focus, set_data_device_selection,
+    DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler, WlOfferData,
 };
-use smithay::wayland::selection::SelectionHandler;
+use smithay::wayland::selection::{SelectionHandler, SelectionSource, SelectionTarget};
 use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
     XdgToplevelSurfaceData,
@@ -136,6 +143,7 @@ pub(crate) enum DisplayRequest {
     },
     Frame(FrameReply),
     Detach,
+    SetClipboard(String),
 }
 
 #[derive(Debug, Clone)]
@@ -159,6 +167,7 @@ pub(crate) struct DisplayChannels {
     pub(crate) input: Channel<WindowInput>,
     pub(crate) names: NamesReply,
     pub(crate) cursor_shapes: watch::Sender<Option<CursorShape>>,
+    pub(crate) clipboard_texts: watch::Sender<Option<String>>,
 }
 
 pub(crate) fn hardware_error(what: &str, error: impl core::fmt::Debug) -> G2gError {
@@ -175,10 +184,14 @@ pub(crate) fn run_display(
         input,
         names,
         cursor_shapes,
+        clipboard_texts,
     } = channels;
     let xwayland = settings.xwayland;
-    let (mut event_loop, mut state) = match start_display(settings, requests, input, cursor_shapes)
-    {
+    let published = Published {
+        cursor_shapes,
+        clipboard_texts,
+    };
+    let (mut event_loop, mut state) = match start_display(settings, requests, input, published) {
         Ok(started) => started,
         Err(error) => {
             let _ = names.send(Err(error.clone()));
@@ -239,7 +252,7 @@ fn start_display(
     settings: DisplaySettings,
     requests: Channel<DisplayRequest>,
     input: Channel<WindowInput>,
-    cursor_shapes: watch::Sender<Option<CursorShape>>,
+    published: Published,
 ) -> Result<(EventLoop<'static, DisplayState>, DisplayState), G2gError> {
     let event_loop: EventLoop<DisplayState> =
         EventLoop::try_new().map_err(|error| hardware_error("creating the event loop", error))?;
@@ -286,6 +299,9 @@ fn start_display(
             }
             ChannelEvent::Msg(DisplayRequest::Frame(reply)) => state.pending_reply = Some(reply),
             ChannelEvent::Msg(DisplayRequest::Detach) => state.detach(),
+            ChannelEvent::Msg(DisplayRequest::SetClipboard(text)) => {
+                state.set_remote_clipboard(text)
+            }
             ChannelEvent::Closed => state.stopped = true,
         })
         .map_err(|error| hardware_error("receiving display requests", error))?;
@@ -302,7 +318,7 @@ fn start_display(
         loop_handle,
         socket_name,
         settings,
-        cursor_shapes,
+        published,
     )?;
     state.publish_cursor();
     Ok((event_loop, state))
@@ -732,8 +748,37 @@ struct DisplayState {
     cursor_status: CursorImageStatus,
     cursor_theme: CursorTheme,
     cursor_size: u32,
-    cursor_shapes: watch::Sender<Option<CursorShape>>,
+    published: Published,
     stopped: bool,
+}
+
+// what the display publishes for the session, the host forwards both to its client
+struct Published {
+    cursor_shapes: watch::Sender<Option<CursorShape>>,
+    clipboard_texts: watch::Sender<Option<String>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ClipboardOwner {
+    X11,
+    Remote(Arc<str>),
+}
+
+fn text_mime_type(offered: &[String]) -> Option<String> {
+    CLIPBOARD_TEXT_MIME_TYPES
+        .iter()
+        .find(|text| offered.iter().any(|mime| mime == *text))
+        .map(|text| String::from(*text))
+}
+
+fn write_clipboard(fd: OwnedFd, text: &str) {
+    // linux pipes buffer 64 KiB, which holds any text the data channel carries
+    if let Err(error) = std::fs::File::from(fd).write_all(text.as_bytes()) {
+        g2g_core::g2g_warn!(
+            Target::category(LOG_CATEGORY),
+            "could not hand out the clipboard: {error}"
+        );
+    }
 }
 
 #[derive(Debug)]
@@ -937,7 +982,7 @@ impl DisplayState {
         loop_handle: LoopHandle<'static, DisplayState>,
         socket_name: String,
         settings: DisplaySettings,
-        cursor_shapes: watch::Sender<Option<CursorShape>>,
+        published: Published,
     ) -> Result<Self, G2gError> {
         let DisplaySettings {
             size,
@@ -1057,7 +1102,7 @@ impl DisplayState {
             cursor_status: CursorImageStatus::default_named(),
             cursor_theme: CursorTheme::load(&cursor_theme_name),
             cursor_size,
-            cursor_shapes,
+            published,
             stopped: false,
         })
     }
@@ -1079,6 +1124,79 @@ impl DisplayState {
         self.last_frame = None;
         self.damaged = true;
         Ok(())
+    }
+
+    fn set_remote_clipboard(&mut self, text: String) {
+        let mime_types: Vec<String> = CLIPBOARD_TEXT_MIME_TYPES
+            .iter()
+            .map(|mime| String::from(*mime))
+            .collect();
+        if let Some(window_manager) = self.window_manager.as_mut() {
+            if let Err(error) =
+                window_manager.new_selection(SelectionTarget::Clipboard, Some(mime_types.clone()))
+            {
+                warn_x11("could not offer the clipboard to X11", error);
+            }
+        }
+        set_data_device_selection(
+            &self.display_handle,
+            &self.seat,
+            mime_types,
+            ClipboardOwner::Remote(Arc::from(text)),
+        );
+    }
+
+    // publishes the text written into the returned pipe, which the copying client must be given
+    fn publish_clipboard_written_to(&mut self, offered: &[String]) -> Option<(String, OwnedFd)> {
+        let mime_type = text_mime_type(offered)?;
+        let (reader, writer) = match std::io::pipe() {
+            Ok(pipe) => pipe,
+            Err(error) => {
+                g2g_core::g2g_warn!(
+                    Target::category(LOG_CATEGORY),
+                    "no pipe for the clipboard: {error}"
+                );
+                return None;
+            }
+        };
+        let mut text = Vec::new();
+        let inserted = self.loop_handle.insert_source(
+            Generic::new(reader, Interest::READ, TriggerMode::Level),
+            move |_, reader, state| {
+                let mut chunk = [0u8; 4096];
+                // SAFETY: the reader stays inside this event source and is never dropped while dispatching.
+                let read = unsafe { reader.get_mut() }.read(&mut chunk)?;
+                if read > 0 && text.len() + read <= MAX_MESSAGE_SIZE {
+                    text.extend_from_slice(&chunk[..read]);
+                    return Ok(PostAction::Continue);
+                }
+                if read > 0 {
+                    g2g_core::g2g_warn!(
+                        Target::category(LOG_CATEGORY),
+                        "dropped a clipboard over {MAX_MESSAGE_SIZE} bytes"
+                    );
+                    return Ok(PostAction::Remove);
+                }
+                match String::from_utf8(core::mem::take(&mut text)) {
+                    Ok(text) => {
+                        state.published.clipboard_texts.send_replace(Some(text));
+                    }
+                    Err(_) => g2g_core::g2g_warn!(
+                        Target::category(LOG_CATEGORY),
+                        "dropped a clipboard that is not UTF-8"
+                    ),
+                }
+                Ok(PostAction::Remove)
+            },
+        );
+        if let Err(error) = inserted {
+            g2g_core::g2g_warn!(
+                Target::category(LOG_CATEGORY),
+                "could not read the clipboard: {error}"
+            );
+            return None;
+        }
+        Some((mime_type, OwnedFd::from(writer)))
     }
 
     fn detach(&mut self) {
@@ -1104,7 +1222,7 @@ impl DisplayState {
                 return;
             }
         };
-        self.cursor_shapes.send_if_modified(|current| {
+        self.published.cursor_shapes.send_if_modified(|current| {
             if *current == shape {
                 return false;
             }
@@ -1639,7 +1757,60 @@ impl SeatHandler for DisplayState {
 }
 
 impl SelectionHandler for DisplayState {
-    type SelectionUserData = ();
+    type SelectionUserData = ClipboardOwner;
+
+    fn new_selection(
+        &mut self,
+        target: SelectionTarget,
+        source: Option<SelectionSource>,
+        _seat: Seat<Self>,
+    ) {
+        if target != SelectionTarget::Clipboard {
+            return;
+        }
+        let mime_types = source.as_ref().map(SelectionSource::mime_types);
+        if let Some(window_manager) = self.window_manager.as_mut() {
+            if let Err(error) = window_manager.new_selection(target, mime_types.clone()) {
+                warn_x11("could not offer the clipboard to X11", error);
+            }
+        }
+        let Some((mime_type, fd)) = mime_types
+            .as_deref()
+            .and_then(|mime_types| self.publish_clipboard_written_to(mime_types))
+        else {
+            return;
+        };
+        // smithay stores the new selection on the seat only after new_selection returns
+        self.loop_handle.insert_idle(move |state| {
+            if let Err(error) = request_data_device_client_selection(&state.seat, mime_type, fd) {
+                g2g_core::g2g_warn!(
+                    Target::category(LOG_CATEGORY),
+                    "could not read the wayland clipboard: {error:?}"
+                );
+            }
+        });
+    }
+
+    fn send_selection(
+        &mut self,
+        target: SelectionTarget,
+        mime_type: String,
+        fd: OwnedFd,
+        _seat: Seat<Self>,
+        owner: &ClipboardOwner,
+    ) {
+        match owner {
+            ClipboardOwner::Remote(text) => write_clipboard(fd, text),
+            ClipboardOwner::X11 => {
+                let Some(window_manager) = self.window_manager.as_mut() else {
+                    return;
+                };
+                if let Err(error) = window_manager.send_selection(target, mime_type, fd) {
+                    warn_x11("could not read the X11 clipboard", error);
+                }
+            }
+        }
+    }
 }
 
 impl DataDeviceHandler for DisplayState {
@@ -1791,6 +1962,67 @@ impl XwmHandler for DisplayState {
     fn resize_request(&mut self, _: XwmId, _: X11Surface, _: u32, _: ResizeEdge) {}
 
     fn move_request(&mut self, _: XwmId, _: X11Surface, _: u32) {}
+
+    fn allow_selection_access(&mut self, _: XwmId, target: SelectionTarget) -> bool {
+        target == SelectionTarget::Clipboard
+    }
+
+    fn send_selection(
+        &mut self,
+        _: XwmId,
+        target: SelectionTarget,
+        mime_type: String,
+        fd: OwnedFd,
+    ) {
+        if target != SelectionTarget::Clipboard {
+            return;
+        }
+        let owner = current_data_device_selection_userdata(&self.seat).map(|owner| owner.clone());
+        match owner {
+            Some(ClipboardOwner::Remote(text)) => write_clipboard(fd, &text),
+            Some(ClipboardOwner::X11) => {}
+            None => {
+                if let Err(error) = request_data_device_client_selection(&self.seat, mime_type, fd)
+                {
+                    g2g_core::g2g_warn!(
+                        Target::category(LOG_CATEGORY),
+                        "could not read the wayland clipboard for X11: {error:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn new_selection(&mut self, _: XwmId, target: SelectionTarget, mime_types: Vec<String>) {
+        if target != SelectionTarget::Clipboard {
+            return;
+        }
+        set_data_device_selection(
+            &self.display_handle,
+            &self.seat,
+            mime_types.clone(),
+            ClipboardOwner::X11,
+        );
+        let Some((mime_type, fd)) = self.publish_clipboard_written_to(&mime_types) else {
+            return;
+        };
+        let Some(window_manager) = self.window_manager.as_mut() else {
+            return;
+        };
+        if let Err(error) = window_manager.send_selection(target, mime_type, fd) {
+            warn_x11("could not read the X11 clipboard", error);
+        }
+    }
+
+    fn cleared_selection(&mut self, _: XwmId, target: SelectionTarget) {
+        let x11_owned = matches!(
+            current_data_device_selection_userdata(&self.seat).as_deref(),
+            Some(ClipboardOwner::X11)
+        );
+        if target == SelectionTarget::Clipboard && x11_owned {
+            clear_data_device_selection(&self.display_handle, &self.seat);
+        }
+    }
 
     fn disconnected(&mut self, _: XwmId) {
         self.window_manager = None;

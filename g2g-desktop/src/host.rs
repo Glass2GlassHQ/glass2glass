@@ -307,6 +307,7 @@ pub struct HostCapture {
     pub nodes: Vec<GraphNode>,
     pub encoder: HostEncoder,
     pub cursor_shapes: Option<watch::Receiver<Option<CursorShape>>>,
+    pub clipboard_texts: Option<watch::Receiver<Option<String>>>,
 }
 
 impl fmt::Debug for HostCapture {
@@ -315,6 +316,7 @@ impl fmt::Debug for HostCapture {
             .field("nodes", &self.nodes.len())
             .field("encoder", &self.encoder)
             .field("cursor_shapes", &self.cursor_shapes)
+            .field("clipboard_texts", &self.clipboard_texts)
             .finish()
     }
 }
@@ -335,32 +337,35 @@ fn cursor_image(shape: Option<&CursorShape>) -> Result<CursorImage, PacketError>
     )
 }
 
-async fn forward_cursor(
-    shapes: Option<watch::Receiver<Option<CursorShape>>>,
+async fn forward_changes<T>(
+    values: Option<watch::Receiver<T>>,
     outgoing: &mpsc::UnboundedSender<Vec<u8>>,
+    event_for: impl Fn(&T) -> Option<Result<Event, PacketError>>,
 ) {
-    let Some(mut shapes) = shapes else {
+    let Some(mut values) = values else {
         return;
     };
     let log = Target::category(HOST_CATEGORY);
     let mut writer = PacketWriter::new(Side::Host);
     loop {
         tokio::select! {
-            changed = shapes.changed() => {
+            changed = values.changed() => {
                 if changed.is_err() {
                     return;
                 }
             }
             () = outgoing.closed() => return,
         }
-        let image = cursor_image(shapes.borrow_and_update().as_ref());
-        match image.and_then(|image| writer.write(&Event::Cursor(image))) {
+        let Some(event) = event_for(&values.borrow_and_update()) else {
+            continue;
+        };
+        match event.and_then(|event| writer.write(&event)) {
             Ok(packet) => {
                 if outgoing.send(packet).is_err() {
                     return;
                 }
             }
-            Err(e) => g2g_core::g2g_warn!(log, "dropped a cursor shape: {e}"),
+            Err(e) => g2g_core::g2g_warn!(log, "dropped a message to the client: {e}"),
         }
     }
 }
@@ -411,10 +416,15 @@ pub async fn run_session(
     if let Some(trace) = trace {
         run = run.with_visit_recorder(trace);
     }
-    let (run, (), ()) = tokio::join!(
+    let cursor_events =
+        |shape: &Option<CursorShape>| Some(cursor_image(shape.as_ref()).map(Event::Cursor));
+    let clipboard_events =
+        |text: &Option<String>| text.clone().map(|text| Ok(Event::Clipboard(text)));
+    let (run, (), (), ()) = tokio::join!(
         run.run(),
         forward_input(channel.incoming, events),
-        forward_cursor(capture.cursor_shapes, &channel.outgoing)
+        forward_changes(capture.cursor_shapes, &channel.outgoing, cursor_events),
+        forward_changes(capture.clipboard_texts, &channel.outgoing, clipboard_events)
     );
     run.map_err(HostError::Session)
 }

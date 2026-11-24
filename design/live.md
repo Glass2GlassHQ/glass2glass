@@ -264,6 +264,13 @@ GPU renderer rebuilds its output buffers when it attaches. When a run detaches,
 the display releases every key and button that run left held. A render failure
 fails the run that asked for the frame and leaves the display running.
 
+`WaylandDisplay::clipboard_texts()` publishes the text a Wayland or X11 client
+copies, read in one of `CLIPBOARD_TEXT_MIME_TYPES` and capped at 64 KiB.
+`set_clipboard` makes the display own the selection with that text, offered to
+Wayland clients and through the X11 window manager to X11 apps, and is never
+published back. A Wayland copy is read on the next loop pass, since smithay
+stores the new selection on the seat only after `new_selection` returns.
+
 `WaylandDisplay::cursor_shapes()` publishes the pointer image as a
 `CursorShape`: the `wl_shm` buffer of the surface the focused client set
 (re-read on each commit), a named cursor from the `XCURSOR_THEME` theme at

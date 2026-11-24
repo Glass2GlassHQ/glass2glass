@@ -279,6 +279,7 @@ async fn host_portal(
         nodes: vec![GraphNodeRef::source(source)],
         encoder: HostEncoder::Software,
         cursor_shapes: None,
+        clipboard_texts: None,
     };
     let ((), saved) = tokio::join!(
         serve(listener, settings, host_capture, Injector::new, trace),
@@ -331,13 +332,13 @@ async fn serve_headless_sessions(
     loop {
         let listener = HostListener::bind_when_free(address, certificate.clone(), settings).await?;
         let trace = open_trace(trace_path)?;
-        let input = display.input_sender();
         let host_capture = HostCapture {
             nodes: vec![GraphNodeRef::source(WaylandDisplaySrc::on_display(display))],
             encoder: encoder.clone(),
             cursor_shapes: Some(display.cursor_shapes()),
+            clipboard_texts: Some(display.clipboard_texts()),
         };
-        let open_injector = move |screen| Ok(WaylandDisplayInjector::new(screen, input.clone()));
+        let open_injector = |screen| Ok(WaylandDisplayInjector::new(screen, display));
         serve(listener, settings, host_capture, open_injector, trace).await;
     }
 }
@@ -407,6 +408,7 @@ async fn host_monitor(
         .with_fps(capture.fps);
     let host_capture = HostCapture {
         cursor_shapes: Some(source.cursor_shapes()),
+        clipboard_texts: None,
         nodes: vec![GraphNodeRef::source(source)],
         encoder: HostEncoder::MediaFoundation,
     };

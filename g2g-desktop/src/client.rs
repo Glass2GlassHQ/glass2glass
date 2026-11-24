@@ -155,6 +155,7 @@ fn cursor_shape(image: &CursorImage) -> Option<CursorShape> {
 pub async fn follow_host_events(
     mut messages: mpsc::UnboundedReceiver<Vec<u8>>,
     cursor_shapes: Option<watch::Sender<Option<CursorShape>>>,
+    host_clipboard: Option<watch::Sender<Option<String>>>,
 ) {
     let log = Target::category(CLIENT_CATEGORY);
     let mut reader = PacketReader::new(Side::Client);
@@ -163,6 +164,11 @@ pub async fn follow_host_events(
             Ok(Some(Event::Cursor(image))) => {
                 if let Some(shapes) = &cursor_shapes {
                     shapes.send_replace(cursor_shape(&image));
+                }
+            }
+            Ok(Some(Event::Clipboard(text))) => {
+                if let Some(host_clipboard) = &host_clipboard {
+                    host_clipboard.send_replace(Some(text));
                 }
             }
             Ok(Some(event)) => {
@@ -192,6 +198,47 @@ fn show_host_cursor(
     _inputs: bool,
 ) -> (Option<watch::Sender<Option<CursorShape>>>, WgpuPresentSink) {
     (None, sink)
+}
+
+async fn forward_local_clipboard(
+    mut copies: mpsc::UnboundedReceiver<String>,
+    outgoing: mpsc::UnboundedSender<Vec<u8>>,
+) {
+    let log = Target::category(CLIENT_CATEGORY);
+    let mut writer = PacketWriter::new(Side::Client);
+    while let Some(text) = copies.recv().await {
+        match writer.write(&Event::Clipboard(text)) {
+            Ok(packet) => {
+                if outgoing.send(packet).is_err() {
+                    return;
+                }
+            }
+            Err(e) => g2g_core::g2g_warn!(log, "dropped a clipboard: {e}"),
+        }
+    }
+}
+
+struct ClipboardSync {
+    host_texts: watch::Sender<Option<String>>,
+    local_copies: mpsc::UnboundedReceiver<String>,
+}
+
+#[cfg(target_os = "linux")]
+fn sync_clipboard(sink: &mut WgpuPresentSink, inputs: bool) -> Option<ClipboardSync> {
+    if !inputs {
+        return None;
+    }
+    let (host_texts, remote_texts) = watch::channel(None);
+    let local_copies = sink.sync_clipboard(remote_texts);
+    Some(ClipboardSync {
+        host_texts,
+        local_copies,
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sync_clipboard(_sink: &mut WgpuPresentSink, _inputs: bool) -> Option<ClipboardSync> {
+    None
 }
 
 fn client_graph(
@@ -247,19 +294,28 @@ pub async fn run_client(
         settings.inputs,
     );
     let window_input = settings.inputs.then(|| sink.input_events());
+    let (host_clipboard, local_copies) = sync_clipboard(&mut sink, settings.inputs)
+        .map(|sync| (sync.host_texts, sync.local_copies))
+        .unzip();
     let graph = client_graph(source, sink)?;
 
+    let clipboard_outgoing = data_channel.outgoing.clone();
     let forward = async {
         if let Some(window_input) = window_input {
             forward_window_input(window_input, data_channel.outgoing).await;
         }
     };
-    let follow = follow_host_events(data_channel.incoming, cursor_shapes);
+    let copies = async {
+        if let Some(local_copies) = local_copies {
+            forward_local_clipboard(local_copies, clipboard_outgoing).await;
+        }
+    };
+    let follow = follow_host_events(data_channel.incoming, cursor_shapes, host_clipboard);
     let clock = WallClock::new();
     let mut run = RunBuilder::new(graph, &clock, LINK_CAPACITY).with_observer(observer);
     if let Some(trace) = trace {
         run = run.with_visit_recorder(trace);
     }
-    let (run, (), ()) = tokio::join!(run.run(), forward, follow);
+    let (run, (), (), ()) = tokio::join!(run.run(), forward, copies, follow);
     run.map_err(ClientError::Session)
 }

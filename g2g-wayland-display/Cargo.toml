@@ -43,7 +43,7 @@ features = [
 ]
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-g2g-plugins = { workspace = true, features = ["std"] }
+g2g-plugins = { workspace = true, features = ["std", "wgpu-present"] }
 smithay-client-toolkit = { version = "0.21", default-features = false }
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 x11rb = "0.14"
