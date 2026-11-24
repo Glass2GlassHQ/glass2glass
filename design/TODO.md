@@ -35,8 +35,8 @@ The plan is [remote.md](remote.md).
 - `ximagesrc` for unattended X11 capture, and window capture.
 - `waylanddisplaysrc`: take the size and rate from a downstream caps filter, and
   support drag and drop.
-- `g2g-desktop host`: capture from `waylanddisplaysrc`, send client input into
-  it, and start an app in it with `--run`.
+- `g2g-desktop host --run`: keep the headless desktop and its app running
+  across client reconnects, and send the compositor's cursor to the client.
 - Opus audio from the host's default capture device, on a short queue that
   does not hold the picture.
 - Encode with `d3d11convert ! nvenc` on a Windows host with an NVIDIA GPU,

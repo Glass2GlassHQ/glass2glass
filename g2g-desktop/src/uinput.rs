@@ -14,7 +14,7 @@ use evdev::{
 };
 
 use crate::hid::evdev_from_usage;
-use crate::injection::{check_position, InjectError, ScreenSize};
+use crate::injection::{check_position, InjectError, InjectEvents, ScreenSize};
 use crate::packet::{Event, RemovableDevice};
 
 pub const KEYBOARD_NAME_PREFIX: &str = "g2g-desktop keyboard";
@@ -118,8 +118,10 @@ impl Injector {
             wheel: WheelRemainder::default(),
         })
     }
+}
 
-    pub fn inject(&mut self, event: &Event) -> Result<(), InjectError> {
+impl InjectEvents for Injector {
+    fn inject(&mut self, event: &Event) -> Result<(), InjectError> {
         match *event {
             Event::Key {
                 device,
@@ -168,7 +170,9 @@ impl Injector {
         }
         Ok(())
     }
+}
 
+impl Injector {
     fn keyboard(&mut self, device: u8) -> io::Result<&mut VirtualDevice> {
         match self.keyboards.entry(device) {
             Entry::Occupied(entry) => Ok(entry.into_mut()),

@@ -15,12 +15,15 @@ use g2g_core::runtime::{GraphNodeRef, VisitRecorder};
 use g2g_core::G2gError;
 use g2g_desktop::client::{run_client, ClientError, ClientSettings, ClientTransport};
 use g2g_desktop::host::{
-    check_token_len, inject, run_session, HostCapture, HostListener, HostSettings,
+    check_token_len, inject, run_session, HostCapture, HostEncoder, HostListener, HostSettings,
 };
+use g2g_desktop::injection::{InjectError, InjectEvents, ScreenSize};
 #[cfg(target_os = "windows")]
 use g2g_desktop::sendinput::Injector;
 #[cfg(target_os = "linux")]
 use g2g_desktop::uinput::Injector;
+#[cfg(target_os = "linux")]
+use g2g_desktop::waylanddisplayinput::WaylandDisplayInjector;
 #[cfg(target_os = "windows")]
 use g2g_plugins::d3d11screencapturesrc::{monitor_bounds, D3D11ScreenCaptureSrc};
 use g2g_plugins::perfetto_trace::PerfettoTrace;
@@ -29,6 +32,10 @@ use g2g_plugins::pipewirevideosrc::PipeWireVideoSrc;
 use g2g_plugins::remotewtio::generate_certificate;
 #[cfg(target_os = "linux")]
 use g2g_plugins::screencastportal::PortalSourceTypes;
+#[cfg(target_os = "linux")]
+use g2g_wayland_display::waylanddisplaysrc::{
+    render_node_driver, DisplayNames, WaylandDisplaySrc, SOFTWARE_RENDERING,
+};
 use tokio::sync::{mpsc, watch};
 
 const HOST_USAGE: &str =
@@ -39,7 +46,8 @@ const CLIENT_USAGE: &str =
     "  g2g-desktop client --host HOST --cert-hash SHA256 --token TOKEN [--port 8080] [--inputs true]
                      [--transport auto|quic|websocket] [--trace FILE]";
 #[cfg(target_os = "linux")]
-const PLATFORM_HOST_USAGE: &str = "";
+const PLATFORM_HOST_USAGE: &str =
+    "\n                   [--run COMMAND [--size 1920x1080] [--render-node /dev/dri/renderD128]]";
 #[cfg(target_os = "windows")]
 const PLATFORM_HOST_USAGE: &str =
     "\n                   [--monitor-index -1] [--quality-vs-speed 0-100]";
@@ -56,7 +64,7 @@ const HOST_FLAGS: [&str; 7] = [
     "trace",
 ];
 #[cfg(target_os = "linux")]
-const PLATFORM_HOST_FLAGS: [&str; 0] = [];
+const PLATFORM_HOST_FLAGS: [&str; 3] = ["run", "size", "render-node"];
 #[cfg(target_os = "windows")]
 const PLATFORM_HOST_FLAGS: [&str; 2] = ["monitor-index", "quality-vs-speed"];
 #[cfg(target_os = "windows")]
@@ -122,11 +130,59 @@ where
     Ok(optional(flags, name)?.unwrap_or(default))
 }
 
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy)]
+struct DisplaySize {
+    width: u32,
+    height: u32,
+}
+
+#[cfg(target_os = "linux")]
+fn parse_display_size(value: &str) -> Result<DisplaySize, Box<dyn Error>> {
+    let invalid = || format!("--size {value}: expected WIDTHxHEIGHT");
+    let (width, height) = value.split_once('x').ok_or_else(invalid)?;
+    Ok(DisplaySize {
+        width: width.parse().map_err(|_| invalid())?,
+        height: height.parse().map_err(|_| invalid())?,
+    })
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone)]
+struct HeadlessSettings {
+    command: String,
+    size: Option<DisplaySize>,
+    render_node: Option<String>,
+}
+
+#[cfg(target_os = "linux")]
+fn headless_settings(flags: &Flags) -> Result<Option<HeadlessSettings>, Box<dyn Error>> {
+    let Some(command) = flags.get("run") else {
+        if let Some(flag) = ["size", "render-node"]
+            .iter()
+            .find(|flag| flags.contains_key(**flag))
+        {
+            return Err(format!("--{flag} needs --run").into());
+        }
+        return Ok(None);
+    };
+    Ok(Some(HeadlessSettings {
+        command: command.clone(),
+        size: flags
+            .get("size")
+            .map(|size| parse_display_size(size))
+            .transpose()?,
+        render_node: flags.get("render-node").cloned(),
+    }))
+}
+
 #[derive(Debug, Clone)]
 struct CaptureSettings {
     fps: u32,
     #[cfg(target_os = "linux")]
     portal_restore_token_path: PathBuf,
+    #[cfg(target_os = "linux")]
+    headless: Option<HeadlessSettings>,
     #[cfg(target_os = "windows")]
     monitor_index: i32,
 }
@@ -162,6 +218,179 @@ fn open_trace(path: Option<&Path>) -> Result<Option<Arc<PerfettoTrace>>, Box<dyn
     .transpose()
 }
 
+async fn serve<I: InjectEvents>(
+    listener: HostListener,
+    settings: &HostSettings,
+    capture: HostCapture,
+    open_injector: impl Fn(ScreenSize) -> Result<I, InjectError>,
+    trace: Option<Arc<PerfettoTrace>>,
+) {
+    let (events, event_receiver) = mpsc::unbounded_channel();
+    let (sizes, size_receiver) = watch::channel(None);
+    let (session, injected) = tokio::join!(
+        run_session(
+            listener,
+            capture,
+            settings,
+            events,
+            sizes,
+            trace.clone().map(|trace| trace as Arc<dyn VisitRecorder>),
+        ),
+        inject(event_receiver, size_receiver, open_injector),
+    );
+    match session {
+        Ok(stats) => eprintln!("{}", stats.report()),
+        Err(e) => eprintln!("g2g-desktop host: {e}"),
+    }
+    if let Err(e) = injected {
+        eprintln!("g2g-desktop host: input injection: {e}");
+    }
+    if let Some(Err(e)) = trace.map(PerfettoTrace::finish) {
+        eprintln!("g2g-desktop host: --trace: {e}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn host_portal(
+    listener: HostListener,
+    settings: &HostSettings,
+    capture: &CaptureSettings,
+    trace: Option<Arc<PerfettoTrace>>,
+) {
+    let path = &capture.portal_restore_token_path;
+    let token = match std::fs::read_to_string(path) {
+        Ok(token) => token,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            eprintln!("g2g-desktop host: {}: {e}", path.display());
+            return;
+        }
+    };
+    let source = PipeWireVideoSrc::new()
+        .with_portal(PortalSourceTypes::Monitor)
+        .with_portal_restore_token(token)
+        .with_fps(capture.fps);
+    let saved_tokens = save_portal_restore_tokens(source.portal_restore_tokens(), path);
+    let host_capture = HostCapture {
+        nodes: vec![GraphNodeRef::source(source)],
+        encoder: HostEncoder::Software,
+        cursor_shapes: None,
+    };
+    let ((), saved) = tokio::join!(
+        serve(listener, settings, host_capture, Injector::new, trace),
+        saved_tokens
+    );
+    if let Err(e) = saved {
+        eprintln!("g2g-desktop host: saving the portal restore token: {e}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn headless_encoder(render_node: &str) -> std::io::Result<HostEncoder> {
+    if render_node == SOFTWARE_RENDERING {
+        return Ok(HostEncoder::Software);
+    }
+    let encoder = match render_node_driver(Path::new(render_node))?.as_str() {
+        "nvidia" => HostEncoder::Nvenc,
+        "amdgpu" | "i915" | "xe" => HostEncoder::Vaapi {
+            render_node: render_node.to_owned(),
+        },
+        _ => HostEncoder::Software,
+    };
+    Ok(encoder)
+}
+
+#[cfg(target_os = "linux")]
+async fn launch_app(
+    mut names: watch::Receiver<Option<DisplayNames>>,
+    command: &str,
+) -> Result<std::process::Child, Box<dyn Error>> {
+    let names = names
+        .wait_for(Option::is_some)
+        .await
+        .map_err(|_| "the headless display closed before it opened")?
+        .clone()
+        .expect("waited for the names");
+    let x11_display = names
+        .x11_display
+        .expect("the headless display runs Xwayland");
+    let app = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .env("WAYLAND_DISPLAY", names.wayland_socket)
+        .env("DISPLAY", x11_display)
+        .spawn()?;
+    Ok(app)
+}
+
+#[cfg(target_os = "linux")]
+async fn host_headless(
+    listener: HostListener,
+    settings: &HostSettings,
+    fps: u32,
+    headless: &HeadlessSettings,
+    trace: Option<Arc<PerfettoTrace>>,
+) {
+    let mut source = WaylandDisplaySrc::new().with_framerate(fps).with_xwayland();
+    if let Some(size) = headless.size {
+        source = source.with_size(size.width, size.height);
+    }
+    if let Some(render_node) = &headless.render_node {
+        source = source.with_render_node(render_node);
+    }
+    let encoder = match headless_encoder(source.render_node()) {
+        Ok(encoder) => encoder,
+        Err(e) => {
+            eprintln!("g2g-desktop host: {}: {e}", source.render_node());
+            return;
+        }
+    };
+    let input = source.input_sender();
+    let names = source.display_names();
+    let host_capture = HostCapture {
+        nodes: vec![GraphNodeRef::source(source)],
+        encoder,
+        cursor_shapes: None,
+    };
+    let open_injector = move |screen| Ok(WaylandDisplayInjector::new(screen, input.clone()));
+    let ((), app) = tokio::join!(
+        serve(listener, settings, host_capture, open_injector, trace),
+        launch_app(names, &headless.command)
+    );
+    let ended = app.map(|mut app| app.kill().and_then(|()| app.wait()));
+    match ended {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => eprintln!("g2g-desktop host: stopping --run: {e}"),
+        Err(e) => eprintln!("g2g-desktop host: --run: {e}"),
+    }
+}
+
+#[cfg(target_os = "windows")]
+async fn host_monitor(
+    listener: HostListener,
+    settings: &HostSettings,
+    capture: &CaptureSettings,
+    trace: Option<Arc<PerfettoTrace>>,
+) {
+    let monitor = match monitor_bounds(capture.monitor_index) {
+        Ok(monitor) => monitor,
+        Err(e) => {
+            eprintln!("g2g-desktop host: monitor {}: {e:?}", capture.monitor_index);
+            return;
+        }
+    };
+    let source = D3D11ScreenCaptureSrc::new()
+        .with_monitor_index(capture.monitor_index)
+        .with_fps(capture.fps);
+    let host_capture = HostCapture {
+        cursor_shapes: Some(source.cursor_shapes()),
+        nodes: vec![GraphNodeRef::source(source)],
+        encoder: HostEncoder::MediaFoundation,
+    };
+    let open_injector = move |screen| Injector::new(screen, monitor);
+    serve(listener, settings, host_capture, open_injector, trace).await;
+}
+
 async fn host_one(
     listener: HostListener,
     settings: HostSettings,
@@ -175,79 +404,13 @@ async fn host_one(
             return;
         }
     };
-    let (events, event_receiver) = mpsc::unbounded_channel();
-    let (sizes, size_receiver) = watch::channel(None);
     #[cfg(target_os = "linux")]
-    let (host_capture, open_injector, saved_tokens) = {
-        let path = &capture.portal_restore_token_path;
-        let token = match std::fs::read_to_string(path) {
-            Ok(token) => token,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(e) => {
-                eprintln!("g2g-desktop host: {}: {e}", path.display());
-                return;
-            }
-        };
-        let source = PipeWireVideoSrc::new()
-            .with_portal(PortalSourceTypes::Monitor)
-            .with_portal_restore_token(token)
-            .with_fps(capture.fps);
-        let saved_tokens = save_portal_restore_tokens(source.portal_restore_tokens(), path);
-        (
-            HostCapture {
-                nodes: vec![GraphNodeRef::source(source)],
-                cursor_shapes: None,
-            },
-            Injector::new,
-            saved_tokens,
-        )
-    };
+    match &capture.headless {
+        Some(headless) => host_headless(listener, &settings, capture.fps, headless, trace).await,
+        None => host_portal(listener, &settings, &capture, trace).await,
+    }
     #[cfg(target_os = "windows")]
-    let (host_capture, open_injector, saved_tokens) = {
-        let monitor = match monitor_bounds(capture.monitor_index) {
-            Ok(monitor) => monitor,
-            Err(e) => {
-                eprintln!("g2g-desktop host: monitor {}: {e:?}", capture.monitor_index);
-                return;
-            }
-        };
-        let source = D3D11ScreenCaptureSrc::new()
-            .with_monitor_index(capture.monitor_index)
-            .with_fps(capture.fps);
-        (
-            HostCapture {
-                cursor_shapes: Some(source.cursor_shapes()),
-                nodes: vec![GraphNodeRef::source(source)],
-            },
-            move |screen| Injector::new(screen, monitor),
-            std::future::ready(std::io::Result::Ok(())),
-        )
-    };
-    let (session, injected, saved) = tokio::join!(
-        run_session(
-            listener,
-            host_capture,
-            &settings,
-            events,
-            sizes,
-            trace.clone().map(|trace| trace as Arc<dyn VisitRecorder>),
-        ),
-        inject(event_receiver, size_receiver, open_injector),
-        saved_tokens
-    );
-    match session {
-        Ok(stats) => eprintln!("{}", stats.report()),
-        Err(e) => eprintln!("g2g-desktop host: {e}"),
-    }
-    if let Err(e) = injected {
-        eprintln!("g2g-desktop host: input injection: {e}");
-    }
-    if let Err(e) = saved {
-        eprintln!("g2g-desktop host: saving the portal restore token: {e}");
-    }
-    if let Some(Err(e)) = trace.map(PerfettoTrace::finish) {
-        eprintln!("g2g-desktop host: --trace: {e}");
-    }
+    host_monitor(listener, &settings, &capture, trace).await;
 }
 
 async fn host(flags: Flags) -> Result<(), Box<dyn Error>> {
@@ -256,6 +419,8 @@ async fn host(flags: Flags) -> Result<(), Box<dyn Error>> {
         fps: parsed(&flags, "fps", DEFAULT_FPS)?,
         #[cfg(target_os = "linux")]
         portal_restore_token_path: portal_restore_token_path()?,
+        #[cfg(target_os = "linux")]
+        headless: headless_settings(&flags)?,
         #[cfg(target_os = "windows")]
         monitor_index: parsed(&flags, "monitor-index", PRIMARY_MONITOR)?,
     };

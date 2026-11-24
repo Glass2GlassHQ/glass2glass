@@ -15,7 +15,9 @@ use g2g_core::runtime::{parse_element, parse_source, run_simple_pipeline, GraphN
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, G2gError, OutputSink, PipelinePacket,
 };
-use g2g_desktop::host::{run_session, HostCapture, HostError, HostListener, HostSettings};
+use g2g_desktop::host::{
+    run_session, HostCapture, HostEncoder, HostError, HostListener, HostSettings,
+};
 use g2g_desktop::injection::ScreenSize;
 use g2g_desktop::packet::{CursorImage, Event, PacketReader, PacketWriter, Side};
 use g2g_plugins::clock::WallClock;
@@ -98,6 +100,7 @@ fn capture(registry_source: &str) -> HostCapture {
             GraphNodeRef::Source(parse_source(&registry, registry_source).unwrap()),
             GraphNodeRef::Element(parse_element(&registry, "clocksync").unwrap()),
         ],
+        encoder: HostEncoder::Software,
         cursor_shapes: None,
     }
 }

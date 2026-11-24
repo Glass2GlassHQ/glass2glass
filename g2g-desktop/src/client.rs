@@ -16,11 +16,13 @@ use g2g_plugins::registry::default_registry;
 use g2g_plugins::remotewtsrc::RemoteWtSrc;
 use g2g_plugins::wgpu;
 use g2g_plugins::wgpupresent::WgpuPresentSink;
-use g2g_plugins::windowinput::{PointerButton, WindowInput};
+use g2g_plugins::windowinput::WindowInput;
 use tokio::sync::{mpsc, watch};
 
 use crate::hid::{usage_from_scancode, ScancodeSet};
-use crate::packet::{CursorImage, Event, EventKind, PacketReader, PacketWriter, Side};
+use crate::packet::{
+    CursorImage, Event, EventKind, PacketReader, PacketWriter, Side, POINTER_BUTTONS,
+};
 use crate::router::{InputRouter, Origin};
 
 const CLIENT_CATEGORY: &str = "g2g-desktop-client";
@@ -94,12 +96,11 @@ fn event_from(input: WindowInput) -> Option<Event> {
             display: DISPLAY,
         }),
         WindowInput::Button { button, down } => {
-            let button = match button {
-                PointerButton::Left => 0,
-                PointerButton::Right => 1,
-                PointerButton::Middle => 2,
-            };
-            Some(Event::Button { button, down })
+            let button = POINTER_BUTTONS.iter().position(|known| *known == button)?;
+            Some(Event::Button {
+                button: u8::try_from(button).ok()?,
+                down,
+            })
         }
         WindowInput::Wheel { dx, dy } => Some(Event::Wheel { dx, dy }),
     }

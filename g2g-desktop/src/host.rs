@@ -26,22 +26,14 @@ use g2g_plugins::remotewtsink::RemoteWtSink;
 use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, watch};
 
-use crate::injection::{InjectError, ScreenSize};
+use crate::injection::{InjectError, InjectEvents, ScreenSize};
 use crate::packet::{CursorImage, Event, PacketError, PacketReader, PacketWriter, Side};
-#[cfg(target_os = "windows")]
-use crate::sendinput::Injector;
-#[cfg(target_os = "linux")]
-use crate::uinput::Injector;
 
 const HOST_CATEGORY: &str = "g2g-desktop-host";
 const TOKEN_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_TOKEN_LEN: usize = 256;
 // glass-to-glass latency grows with link depth
 const LINK_CAPACITY: usize = 2;
-#[cfg(target_os = "linux")]
-const ENCODE: &str = "videoconvert ! ffmpegenc backend=software";
-#[cfg(target_os = "windows")]
-const ENCODE: &str = "d3d11convert ! mfh264enc hardware=true";
 
 #[derive(Debug, Clone)]
 pub struct HostSettings {
@@ -211,21 +203,57 @@ impl AsyncElement for CaptureSize {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostEncoder {
+    #[cfg(target_os = "linux")]
+    Software,
+    #[cfg(target_os = "linux")]
+    Vaapi { render_node: String },
+    #[cfg(target_os = "linux")]
+    Nvenc,
+    #[cfg(target_os = "windows")]
+    MediaFoundation,
+}
+
+impl HostEncoder {
+    fn launch_chain(&self, settings: &HostSettings) -> String {
+        let bitrate = settings.bitrate;
+        match self {
+            #[cfg(target_os = "linux")]
+            HostEncoder::Software => {
+                format!("videoconvert ! ffmpegenc backend=software bitrate={bitrate}")
+            }
+            // vah264enc takes gst's kbit/s
+            #[cfg(target_os = "linux")]
+            HostEncoder::Vaapi { render_node } => {
+                format!(
+                    "vah264enc device-path={render_node} bitrate={}",
+                    bitrate / 1000
+                )
+            }
+            #[cfg(target_os = "linux")]
+            HostEncoder::Nvenc => format!("dmabuftocuda ! nvenc bitrate={bitrate}"),
+            #[cfg(target_os = "windows")]
+            HostEncoder::MediaFoundation => {
+                let speed = settings
+                    .quality_vs_speed
+                    .map(|quality| format!(" quality-vs-speed={quality}"))
+                    .unwrap_or_default();
+                format!("d3d11convert ! mfh264enc hardware=true bitrate={bitrate}{speed}")
+            }
+        }
+    }
+}
+
 fn host_graph(
     capture: Vec<GraphNode>,
+    encoder: &HostEncoder,
     settings: &HostSettings,
     sink: RemoteWtSink,
     sizes: watch::Sender<Option<ScreenSize>>,
 ) -> Result<Graph<GraphNode>, HostError> {
-    #[cfg(target_os = "windows")]
-    let encoder_speed = settings
-        .quality_vs_speed
-        .map(|quality| format!(" quality-vs-speed={quality}"))
-        .unwrap_or_default();
-    #[cfg(not(target_os = "windows"))]
-    let encoder_speed = "";
-    let encode = format!("{ENCODE} bitrate={}{encoder_speed}", settings.bitrate);
-    let encode = parse_chain(&default_registry(), &encode).map_err(HostError::Launch)?;
+    let encode = parse_chain(&default_registry(), &encoder.launch_chain(settings))
+        .map_err(HostError::Launch)?;
     let mut capture = capture.into_iter();
     let mut graph = Graph::new();
     let mut previous = graph.add_source(capture.next().expect("capture starts with a source"));
@@ -248,6 +276,7 @@ fn host_graph(
 
 pub struct HostCapture {
     pub nodes: Vec<GraphNode>,
+    pub encoder: HostEncoder,
     pub cursor_shapes: Option<watch::Receiver<Option<CursorShape>>>,
 }
 
@@ -255,6 +284,7 @@ impl fmt::Debug for HostCapture {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HostCapture")
             .field("nodes", &self.nodes.len())
+            .field("encoder", &self.encoder)
             .field("cursor_shapes", &self.cursor_shapes)
             .finish()
     }
@@ -346,7 +376,7 @@ pub async fn run_session(
     if !bool::from(settings.token.as_bytes().ct_eq(&token)) {
         return Err(HostError::BadToken);
     }
-    let graph = host_graph(capture.nodes, settings, sink, sizes)?;
+    let graph = host_graph(capture.nodes, &capture.encoder, settings, sink, sizes)?;
     let clock = WallClock::new();
     let mut run = RunBuilder::new(graph, &clock, LINK_CAPACITY);
     if let Some(trace) = trace {
@@ -360,13 +390,13 @@ pub async fn run_session(
     run.map_err(HostError::Session)
 }
 
-pub async fn inject(
+pub async fn inject<I: InjectEvents>(
     mut events: mpsc::UnboundedReceiver<Event>,
     mut sizes: watch::Receiver<Option<ScreenSize>>,
-    open_injector: impl Fn(ScreenSize) -> Result<Injector, InjectError>,
+    open_injector: impl Fn(ScreenSize) -> Result<I, InjectError>,
 ) -> Result<(), InjectError> {
     let log = Target::category(HOST_CATEGORY);
-    let mut injector: Option<Injector> = None;
+    let mut injector: Option<I> = None;
     loop {
         tokio::select! {
             changed = sizes.changed() => {

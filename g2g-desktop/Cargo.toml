@@ -17,6 +17,7 @@ required-features = ["session"]
 [features]
 session = [
     "dep:g2g-core",
+    "dep:g2g-wayland-display",
     "g2g-plugins/webtransport",
     "g2g-plugins/d3d11-screen-capture",
     "g2g-plugins/d3d11-convert",
@@ -41,7 +42,8 @@ tokio = { version = "1", features = ["sync"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13"
 # cargo merges this optional entry only on linux, once a g2g-plugins feature in session turns it on
-g2g-plugins = { workspace = true, optional = true, features = ["ffmpeg", "portal"] }
+g2g-plugins = { workspace = true, optional = true, features = ["ffmpeg", "portal", "dmabuf-cuda", "nvenc"] }
+g2g-wayland-display = { path = "../g2g-wayland-display", optional = true, features = ["display"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62", optional = true, features = [

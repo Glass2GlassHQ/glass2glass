@@ -19,7 +19,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::hid::windows_scancode_from_usage;
-use crate::injection::{check_position, InjectError, ScreenSize};
+use crate::injection::{check_position, InjectError, InjectEvents, ScreenSize};
 use crate::packet::{Event, RemovableDevice};
 
 // keycode writes an extended key's E0 prefix byte into the high byte of its windows code
@@ -129,8 +129,10 @@ impl Injector {
             held_scancodes: BTreeMap::new(),
         })
     }
+}
 
-    pub fn inject(&mut self, event: &Event) -> Result<(), InjectError> {
+impl InjectEvents for Injector {
+    fn inject(&mut self, event: &Event) -> Result<(), InjectError> {
         match *event {
             Event::Key {
                 device,

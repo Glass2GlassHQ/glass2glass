@@ -4547,6 +4547,7 @@ dependencies = [
  "evdev",
  "g2g-core",
  "g2g-plugins",
+ "g2g-wayland-display",
  "keycode",
  "subtle",
  "tokio",

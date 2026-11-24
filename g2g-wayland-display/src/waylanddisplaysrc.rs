@@ -46,7 +46,7 @@ const NV12_OUTPUT: OutputFormat = OutputFormat {
     format: RawVideoFormat::Nv12,
     colorimetry: Colorimetry::BT709,
 };
-const SOFTWARE_RENDERING: &str = "software";
+pub const SOFTWARE_RENDERING: &str = "software";
 const DEFAULT_RENDER_NODE: &str = "/dev/dri/renderD128";
 const DEFAULT_WIDTH: u32 = 1920;
 const DEFAULT_HEIGHT: u32 = 1080;
@@ -65,6 +65,8 @@ pub fn render_node_driver(render_node: &Path) -> std::io::Result<String> {
         .map(str::to_owned)
         .ok_or_else(not_a_node)
 }
+
+pub type InputSender = Sender<WindowInput>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DisplayNames {
@@ -85,7 +87,7 @@ pub struct WaylandDisplaySrc {
     format: RawVideoFormat,
     configured: bool,
     clock_sync: Option<ClockSync>,
-    input_sender: Sender<WindowInput>,
+    input_sender: InputSender,
     input: Option<Channel<WindowInput>>,
     names: watch::Sender<Option<DisplayNames>>,
 }
@@ -158,7 +160,11 @@ impl WaylandDisplaySrc {
         self
     }
 
-    pub fn input_sender(&self) -> Sender<WindowInput> {
+    pub fn render_node(&self) -> &str {
+        &self.render_node
+    }
+
+    pub fn input_sender(&self) -> InputSender {
         self.input_sender.clone()
     }
 

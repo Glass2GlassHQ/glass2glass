@@ -5,6 +5,7 @@
 use core::fmt;
 
 use g2g_plugins::datachannel::MAX_MESSAGE_SIZE;
+use g2g_plugins::windowinput::PointerButton;
 
 const HEADER_LEN: usize = 8;
 const FROM_HOST: u8 = 1 << 0;
@@ -12,6 +13,12 @@ const DEVICE_REMOVED: u8 = 1 << 1;
 const KNOWN_FLAGS: u8 = FROM_HOST | DEVICE_REMOVED;
 const RGBA_BYTES_PER_PIXEL: usize = 4;
 const CURSOR_HEADER_LEN: usize = 8;
+// `Event::Button` numbers buttons by their index here
+pub const POINTER_BUTTONS: [PointerButton; 3] = [
+    PointerButton::Left,
+    PointerButton::Right,
+    PointerButton::Middle,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {

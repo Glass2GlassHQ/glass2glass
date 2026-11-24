@@ -6,7 +6,7 @@ use std::fmt;
 use std::io;
 
 use crate::hid::UnknownUsage;
-use crate::packet::EventKind;
+use crate::packet::{Event, EventKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScreenSize {
@@ -64,6 +64,10 @@ impl From<io::Error> for InjectError {
     fn from(e: io::Error) -> Self {
         InjectError::Device(e)
     }
+}
+
+pub trait InjectEvents {
+    fn inject(&mut self, event: &Event) -> Result<(), InjectError>;
 }
 
 pub fn check_position(x: i32, y: i32, display: u8, screen: ScreenSize) -> Result<(), InjectError> {

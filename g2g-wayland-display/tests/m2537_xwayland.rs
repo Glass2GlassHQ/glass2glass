@@ -10,7 +10,7 @@ use g2g_core::runtime::{run_graph, GraphNode};
 use g2g_core::{Graph, PipelineClock};
 use g2g_plugins::appsink::{register_appsink_pull, AppSink};
 use g2g_plugins::windowinput::WindowInput;
-use g2g_wayland_display::waylanddisplaysrc::WaylandDisplaySrc;
+use g2g_wayland_display::waylanddisplaysrc::{WaylandDisplaySrc, SOFTWARE_RENDERING};
 use tokio::sync::mpsc;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{ConnectionExt, CreateWindowAux, EventMask, WindowClass};
@@ -22,7 +22,6 @@ const HEIGHT: u32 = 128;
 const FRAMERATE: u32 = 30;
 const BYTES_PER_PIXEL: usize = 4;
 const TIMEOUT: Duration = Duration::from_secs(10);
-const SOFTWARE_RENDERING: &str = "software";
 const WINDOW_RGB: [u8; 3] = [0x20, 0x80, 0xC0];
 // linux input-event-codes.h KEY_A
 const KEY_A: u32 = 30;

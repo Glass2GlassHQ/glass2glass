@@ -11,7 +11,7 @@ use g2g_core::Graph;
 use g2g_plugins::appsink::{register_appsink_pull, AppSink};
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::windowinput::{PointerButton, WindowInput};
-use g2g_wayland_display::waylanddisplaysrc::WaylandDisplaySrc;
+use g2g_wayland_display::waylanddisplaysrc::{WaylandDisplaySrc, SOFTWARE_RENDERING};
 use wayland_client::{
     client_globals, connect_client, shows_client, wait_for_client_event, ClientEvent, ZeroClock,
     BYTES_PER_PIXEL, FRAMERATE, HEIGHT, TIMEOUT, WIDTH,
@@ -23,8 +23,6 @@ const GTK_REQUIRED_INTERFACE: &str = "wl_data_device_manager";
 const KEY_A: u32 = 30;
 const POINTER_X: u32 = 10;
 const POINTER_Y: u32 = 20;
-
-const SOFTWARE_RENDERING: &str = "software";
 
 #[tokio::test]
 async fn a_client_window_reaches_the_frames_and_input_reaches_the_client() {

@@ -143,6 +143,22 @@ The Linux host reads `portal-restore-token` from
 writes each token `PipeWireVideoSrc::portal_restore_tokens` publishes back to
 that file. Portal tokens are single-use, so the file always holds the newest one.
 
+With `--run COMMAND` the Linux host captures a headless desktop instead of the
+screen. Each connection starts `waylanddisplaysrc` with Xwayland at `--size`
+(default 1920x1080) on `--render-node`, then runs `sh -c COMMAND` with
+`WAYLAND_DISPLAY` and `DISPLAY` naming the new display, and kills it when the
+connection ends. The encoder follows the render node's kernel driver:
+
+```
+waylanddisplaysrc ! dmabuftocuda ! nvenc      # nvidia
+waylanddisplaysrc ! vah264enc                 # amdgpu, i915, xe
+waylanddisplaysrc ! videoconvert ! ffmpegenc  # any other driver, or software rendering
+```
+
+The dma-bufs reach `vah264enc` with no copy and `nvenc` after one device copy.
+Client input goes into the compositor through `WaylandDisplaySrc::input_sender`
+rather than uinput.
+
 Windows, every frame on the GPU from capture to the encoder:
 
 ```

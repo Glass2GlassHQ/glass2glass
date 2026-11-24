@@ -4,6 +4,7 @@
 
 #![cfg(all(target_os = "windows", feature = "session"))]
 
+use g2g_desktop::injection::InjectEvents;
 use g2g_desktop::injection::{InjectError, ScreenSize};
 use g2g_desktop::packet::Event;
 use g2g_desktop::sendinput::Injector;
