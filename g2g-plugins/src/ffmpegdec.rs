@@ -114,7 +114,7 @@ use ffmpeg_next as ffmpeg;
 
 use crate::inputstamp::{InputStamp, PendingInputStamps};
 use crate::yuv::downsample_chroma_420;
-use g2g_core::caps::{framerate_q16_period_ns, ASSUMED_FRAMERATE_Q16};
+use g2g_core::caps::frame_period_ns_or_assumed;
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::{OwnedCudaBuffer, SystemSlice};
@@ -950,14 +950,8 @@ impl FfmpegVideoDec {
     /// Nominal picture duration from the negotiated input caps, used to turn a
     /// lateness in ns into a count of pictures.
     fn frame_period_ns(&self) -> u64 {
-        let q16 = match &self.input_caps {
-            Some(Caps::CompressedVideo {
-                framerate: Rate::Fixed(q16),
-                ..
-            }) if *q16 > 0 => *q16,
-            _ => ASSUMED_FRAMERATE_Q16,
-        };
-        framerate_q16_period_ns(q16).expect("q16 is nonzero")
+        let framerate = self.input_caps.as_ref().map_or(Rate::Any, Caps::framerate);
+        frame_period_ns_or_assumed(&framerate)
     }
 
     /// Point the codec context's `skip_frame` at the state the budget asks for

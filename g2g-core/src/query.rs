@@ -376,11 +376,7 @@ impl LatencyReport {
     /// back, at `framerate`: the highest rate of a range, and 25 fps when the
     /// rate is unknown, as GStreamer's video decoders assume.
     pub fn held_pictures(min_pictures: u32, max_pictures: u32, framerate: crate::Rate) -> Self {
-        let q16 = match framerate {
-            crate::Rate::Fixed(q16) | crate::Rate::Range { max_q16: q16, .. } if q16 > 0 => q16,
-            _ => crate::caps::ASSUMED_FRAMERATE_Q16,
-        };
-        let period_ns = crate::caps::framerate_q16_period_ns(q16).expect("q16 is nonzero");
+        let period_ns = crate::caps::frame_period_ns_or_assumed(&framerate);
         Self::buffered(
             period_ns.saturating_mul(u64::from(min_pictures)),
             Some(period_ns.saturating_mul(u64::from(max_pictures))),

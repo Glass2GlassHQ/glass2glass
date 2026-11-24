@@ -991,6 +991,7 @@ fn mux_beta<E>(
         pads,
         consumers,
         out_alloc: None,
+        consumer_demand: None,
         rounds: 0,
     }
 }
@@ -2758,7 +2759,14 @@ fn plan_arms<'a>(
                         out_tx: out_txs.pop().expect("muxer output edge"),
                         input_count,
                         current_output: solution[out_e[0]].clone(),
-                        beta: mux_beta(vg, node, &in_e, out_e[0], solution, coord_handle.clone()),
+                        beta: Box::new(mux_beta(
+                            vg,
+                            node,
+                            &in_e,
+                            out_e[0],
+                            solution,
+                            coord_handle.clone(),
+                        )),
                         arm_rx: arm_ctrl_rx[index].take().expect("muxer ctrl rx"),
                         probe: probes[index].clone(),
                         control: controllers[index].take(),
@@ -6445,13 +6453,15 @@ pub(crate) struct MuxBeta {
     consumers: Vec<NodeId>,
     /// The pool last derived for the merged output.
     out_alloc: Option<AllocationParams>,
+    consumer_demand: Option<AllocationParams>,
     /// Output re-derivations since the last new stimulus.
     rounds: u32,
 }
 
 impl MuxBeta {
-    /// Baseline from the startup solve: what the muxer proposes per pad (exactly
-    /// what the reverse-topo cascade stored on each input edge) and for its
+    /// Baseline from the startup solve: what the muxer proposes per pad (what
+    /// the reverse-topo cascade stored on each input edge, less an output
+    /// proposal forwarded to the `output_domain_follows_input` pad) and for its
     /// output, so the first mid-stream round re-cascades only what moved.
     fn seed(&mut self, mux: &(dyn DynMultiInputElement + '_), out_caps: &Caps) {
         for p in &mut self.pads {
@@ -6489,6 +6499,7 @@ impl MuxBeta {
     ) -> Result<(), G2gError> {
         self.rounds = 0;
         mux.configure_allocation_for_output(&params);
+        self.consumer_demand = Some(params);
         self.refresh_pads(mux).await;
         self.settle_output(mux, out_caps).await
     }
@@ -6496,8 +6507,16 @@ impl MuxBeta {
     /// Re-query every pad's demand and re-cascade the ones that moved, so an
     /// input the change does not reach keeps the allocation it already has.
     async fn refresh_pads(&mut self, mux: &(dyn DynMultiInputElement + '_)) {
+        let forwarded_pad = mux.output_domain_follows_input();
         for i in 0..self.pads.len() {
-            let want = mux.propose_allocation_for_input(self.pads[i].pad, &self.pads[i].caps);
+            let pad = self.pads[i].pad;
+            let forwarded = self
+                .consumer_demand
+                .clone()
+                .filter(|_| forwarded_pad == Some(pad));
+            let want = mux
+                .propose_allocation_for_input(pad, &self.pads[i].caps)
+                .or(forwarded);
             if want == self.pads[i].alloc {
                 continue;
             }
@@ -6664,7 +6683,7 @@ pub(crate) struct MuxerArmParts {
     pub(crate) out_tx: LinkSender,
     pub(crate) input_count: usize,
     pub(crate) current_output: Caps,
-    pub(crate) beta: MuxBeta,
+    pub(crate) beta: Box<MuxBeta>,
     pub(crate) arm_rx: Receiver<ArmDirective>,
     pub(crate) probe: Probe,
     pub(crate) control: Option<ArmController>,

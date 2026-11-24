@@ -1245,6 +1245,15 @@ pub fn framerate_q16_period_ns(q16: u32) -> Option<u64> {
     (crate::time::NANOS_PER_SECOND << Q16_FRACTION_BITS).checked_div(u64::from(q16))
 }
 
+pub fn frame_period_ns_or_assumed(framerate: &Rate) -> u64 {
+    // the highest rate of a range, and 25 fps when the rate is unknown
+    let q16 = match framerate {
+        Rate::Fixed(q16) | Rate::Range { max_q16: q16, .. } if *q16 > 0 => *q16,
+        _ => ASSUMED_FRAMERATE_Q16,
+    };
+    framerate_q16_period_ns(q16).expect("q16 is nonzero")
+}
+
 pub fn fps_period_ns(fps: u32) -> u64 {
     crate::time::NANOS_PER_SECOND
         .checked_div(u64::from(fps))

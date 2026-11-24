@@ -830,7 +830,10 @@ appends to whatever `AnalyticsMeta` a detector upstream already wrote rather tha
 replacing it, appends event messages to the frame's `OnvifEventMeta` the same
 way, and drops metadata more than `max-lateness` (default 200 ms) behind
 the video unless a held frame can still take it. An EOS on either pad flushes
-what is held, so a silent metadata pad never stalls the video.
+what is held, so a silent metadata pad never stalls the video. Frames leave only
+when a packet arrives, so with the metadata pad silent a frame waits until the
+first video frame at or past `latency`, and the reported latency is `latency`
+plus one video frame period.
 
 ### relationmeta2onvifmeta and onvifmetadataextractor
 

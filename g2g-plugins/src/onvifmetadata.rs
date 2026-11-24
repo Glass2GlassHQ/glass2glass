@@ -49,6 +49,7 @@ use alloc::collections::VecDeque;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use g2g_core::caps::frame_period_ns_or_assumed;
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::SystemSlice;
@@ -60,7 +61,7 @@ use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError,
     LatencyReport, MemoryDomain, MultiInputElement, MultiOutputElement, MultiOutputSink,
     OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec,
+    PropertySpec, Rate,
 };
 
 use crate::st2038ancdemux::push_to_ports;
@@ -1191,7 +1192,10 @@ impl MultiInputElement for OnvifMetadataCombiner {
     }
 
     fn latency(&self) -> LatencyReport {
-        LatencyReport::buffered(self.latency_ns, None)
+        // with the metadata pad silent, a frame goes out on the first video arrival past its wait
+        let framerate = self.video_caps.as_ref().map_or(Rate::Any, Caps::framerate);
+        let frame_period_ns = frame_period_ns_or_assumed(&framerate);
+        LatencyReport::buffered(self.latency_ns.saturating_add(frame_period_ns), None)
     }
 
     fn output_domain_follows_input(&self) -> Option<usize> {

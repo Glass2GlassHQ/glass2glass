@@ -476,9 +476,13 @@ async fn the_parse_element_drops_a_document_it_cannot_read() {
 async fn the_parse_element_refuses_caps_that_are_not_onvif_metadata() {
     let mut parse = OnvifMetadataParse::new();
     assert!(parse.intercept_caps(&Caps::OnvifMetadata).is_ok());
-    assert!(parse.intercept_caps(&h264_caps()).is_err());
+    assert!(parse
+        .intercept_caps(&h264_caps(g2g_core::Rate::Any))
+        .is_err());
     assert_eq!(
-        parse.configure_pipeline(&h264_caps()).err(),
+        parse
+            .configure_pipeline(&h264_caps(g2g_core::Rate::Any))
+            .err(),
         Some(G2gError::CapsMismatch)
     );
 }
@@ -491,12 +495,12 @@ const FRAME_NS: u64 = 33_333_333;
 /// example frame names.
 const VIDEO_START_NANOS: i64 = FRAME_1_NANOS;
 
-fn h264_caps() -> Caps {
+fn h264_caps(framerate: g2g_core::Rate) -> Caps {
     Caps::CompressedVideo {
         codec: VideoCodec::H264,
         width: g2g_core::Dim::Any,
         height: g2g_core::Dim::Any,
-        framerate: g2g_core::Rate::Any,
+        framerate,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
         pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
@@ -506,7 +510,10 @@ fn h264_caps() -> Caps {
 fn combiner() -> OnvifMetadataCombiner {
     let mut combiner = OnvifMetadataCombiner::new();
     combiner
-        .configure_pipeline(OnvifMetadataCombiner::VIDEO, &h264_caps())
+        .configure_pipeline(
+            OnvifMetadataCombiner::VIDEO,
+            &h264_caps(g2g_core::Rate::Any),
+        )
         .expect("takes the video pad's caps");
     combiner
         .configure_pipeline(OnvifMetadataCombiner::METADATA, &Caps::OnvifMetadata)
@@ -814,13 +821,43 @@ async fn the_wall_clock_takes_over_once_the_video_gets_its_first_sender_report()
     assert_eq!(ids_per_frame(&frames), want);
 }
 
-#[test]
-fn the_combiner_reports_its_hold_as_latency() {
-    let mut combiner = combiner();
+#[tokio::test]
+async fn the_combiner_reports_its_longest_hold_as_latency() {
+    let mut combiner = OnvifMetadataCombiner::new();
+    let framerate_q16 = g2g_core::caps::framerate_q16_from_fraction(30, 1).expect("30 fps");
     combiner
-        .set_property("latency", PropValue::Uint(2 * FRAME_NS))
+        .configure_pipeline(
+            OnvifMetadataCombiner::VIDEO,
+            &h264_caps(g2g_core::Rate::Fixed(framerate_q16)),
+        )
+        .expect("takes the video pad's caps");
+    // a wait that is not a whole number of frames ends on the next video frame after it
+    combiner
+        .set_property("latency", PropValue::Uint(5 * FRAME_NS / 2))
         .expect("latency is a declared property");
-    assert_eq!(combiner.latency().min_ns, 2 * FRAME_NS);
+    let mut sink = CollectSink::default();
+
+    let mut longest_hold_ns = 0;
+    for index in 0..12u64 {
+        let arrival_ns = index * FRAME_NS;
+        combiner
+            .process(
+                OnvifMetadataCombiner::VIDEO,
+                video_frame(arrival_ns, None),
+                &mut sink,
+            )
+            .await
+            .expect("video");
+        for frame in sink.take_frames() {
+            longest_hold_ns = longest_hold_ns.max(arrival_ns - frame.timing.pts_ns);
+        }
+    }
+    assert!(longest_hold_ns > 0, "no frame left the combiner");
+    assert!(
+        longest_hold_ns <= combiner.latency().min_ns,
+        "held {longest_hold_ns} ns, reported {}",
+        combiner.latency().min_ns
+    );
 }
 
 #[tokio::test]
