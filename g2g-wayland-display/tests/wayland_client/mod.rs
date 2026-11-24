@@ -548,7 +548,7 @@ impl DataDeviceHandler for Client {
     fn selection(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
     fn drop_performed(
         &mut self,
-        _: &Connection,
+        connection: &Connection,
         _: &QueueHandle<Self>,
         data_device: &WlDataDevice,
     ) {
@@ -556,13 +556,16 @@ impl DataDeviceHandler for Client {
         let mut pipe = offer
             .receive(String::from(DRAG_MIME_TYPE))
             .expect("the dropped offer has the mime type");
-        offer.finish();
+        let connection = connection.clone();
         let events = self.events.clone();
         // this thread also serves the drag source, which writes the payload
         std::thread::spawn(move || {
             let mut payload = String::new();
             pipe.read_to_string(&mut payload)
                 .expect("reads the payload");
+            // smithay drops an X11 source's transfer when the target finishes before the X11 drop arrives
+            offer.finish();
+            let _ = connection.flush();
             let _ = events.send(ClientEvent::Dropped(payload));
         });
     }

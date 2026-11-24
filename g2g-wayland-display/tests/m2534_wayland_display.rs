@@ -249,19 +249,28 @@ fn send_client_message(
     connection.flush().expect("flushes");
 }
 
-fn run_xdnd_target(display: String, events: mpsc::UnboundedSender<XdndEvent>) {
-    let (connection, screen_number) = x11rb::connect(Some(&display)).expect("connects to Xwayland");
-    let atoms = XdndAtoms {
-        aware: intern(&connection, "XdndAware"),
-        enter: intern(&connection, "XdndEnter"),
-        position: intern(&connection, "XdndPosition"),
-        status: intern(&connection, "XdndStatus"),
-        drop: intern(&connection, "XdndDrop"),
-        finished: intern(&connection, "XdndFinished"),
-        selection: intern(&connection, "XdndSelection"),
-        action_copy: intern(&connection, "XdndActionCopy"),
-        dropped_data: intern(&connection, "G2G_DROPPED_DATA"),
-    };
+impl XdndAtoms {
+    fn intern(connection: &RustConnection) -> Self {
+        Self {
+            aware: intern(connection, "XdndAware"),
+            enter: intern(connection, "XdndEnter"),
+            position: intern(connection, "XdndPosition"),
+            status: intern(connection, "XdndStatus"),
+            drop: intern(connection, "XdndDrop"),
+            finished: intern(connection, "XdndFinished"),
+            selection: intern(connection, "XdndSelection"),
+            action_copy: intern(connection, "XdndActionCopy"),
+            dropped_data: intern(connection, "G2G_DROPPED_DATA"),
+        }
+    }
+}
+
+// an override-redirect window over the right of the screen, as X11 menus are
+fn map_menu_window(
+    connection: &RustConnection,
+    screen_number: usize,
+    event_mask: EventMask,
+) -> Window {
     let screen = &connection.setup().roots[screen_number];
     let [red, green, blue] = X11_TARGET_RGB;
     let window = connection.generate_id().expect("allocates a window id");
@@ -279,9 +288,19 @@ fn run_xdnd_target(display: String, events: mpsc::UnboundedSender<XdndEvent>) {
             screen.root_visual,
             &CreateWindowAux::new()
                 .background_pixel(u32::from_be_bytes([0, red, green, blue]))
-                .override_redirect(1),
+                .override_redirect(1)
+                .event_mask(event_mask),
         )
         .expect("creates a window");
+    connection.map_window(window).expect("maps the window");
+    connection.flush().expect("flushes");
+    window
+}
+
+fn run_xdnd_target(display: String, events: mpsc::UnboundedSender<XdndEvent>) {
+    let (connection, screen_number) = x11rb::connect(Some(&display)).expect("connects to Xwayland");
+    let atoms = XdndAtoms::intern(&connection);
+    let window = map_menu_window(&connection, screen_number, EventMask::NO_EVENT);
     connection
         .change_property32(
             PropMode::REPLACE,
@@ -291,7 +310,6 @@ fn run_xdnd_target(display: String, events: mpsc::UnboundedSender<XdndEvent>) {
             &[XDND_VERSION],
         )
         .expect("marks the window as a drop target");
-    connection.map_window(window).expect("maps the window");
     connection.flush().expect("flushes");
     let mut offered_type = None;
     let mut source = None;
@@ -621,6 +639,188 @@ async fn a_press_on_a_window_leaves_an_x11_menu_above_it() {
                 "the menu stays above the pressed window"
             );
         }
+    };
+    tokio::select! {
+        result = run_graph(graph, &ZeroClock, 2) => panic!("the graph ended first: {result:?}"),
+        () = checks => {}
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum XdndSourceEvent {
+    Pressed,
+    Entered,
+}
+
+// XDND sources send to the top-level window under the pointer, which during a drag is smithay's proxy
+fn window_under(connection: &RustConnection, root: Window, x: i16, y: i16) -> Option<Window> {
+    let child = connection
+        .translate_coordinates(root, root, x, y)
+        .expect("sends the request")
+        .reply()
+        .expect("finds the window under the pointer")
+        .child;
+    (child != x11rb::NONE).then_some(child)
+}
+
+fn run_xdnd_source(display: String, events: mpsc::UnboundedSender<XdndSourceEvent>) {
+    let (connection, screen_number) = x11rb::connect(Some(&display)).expect("connects to Xwayland");
+    let atoms = XdndAtoms::intern(&connection);
+    let utf8_string = intern(&connection, "UTF8_STRING");
+    let root = connection.setup().roots[screen_number].root;
+    let window = map_menu_window(
+        &connection,
+        screen_number,
+        EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION,
+    );
+    let mut proxy = None;
+    let mut dragging = false;
+    while let Ok(event) = connection.wait_for_event() {
+        let event = match event {
+            Event::ButtonPress(press) => {
+                connection
+                    .set_selection_owner(window, atoms.selection, press.time)
+                    .expect("takes the drag selection");
+                connection.flush().expect("flushes");
+                dragging = true;
+                XdndSourceEvent::Pressed
+            }
+            Event::MotionNotify(motion) if dragging => {
+                if proxy.is_none() {
+                    proxy = window_under(&connection, root, motion.root_x, motion.root_y)
+                        .filter(|under| *under != window);
+                    if let Some(proxy) = proxy {
+                        let enter = [window, XDND_VERSION << 24, utf8_string, 0, 0];
+                        send_client_message(&connection, proxy, atoms.enter, enter);
+                        if events.send(XdndSourceEvent::Entered).is_err() {
+                            return;
+                        }
+                    }
+                }
+                if let Some(proxy) = proxy {
+                    let at =
+                        (u32::from(motion.root_x as u16) << 16) | u32::from(motion.root_y as u16);
+                    let position = [window, 0, at, motion.time, atoms.action_copy];
+                    send_client_message(&connection, proxy, atoms.position, position);
+                }
+                continue;
+            }
+            Event::ButtonRelease(release) => {
+                if let Some(proxy) = proxy {
+                    send_client_message(
+                        &connection,
+                        proxy,
+                        atoms.drop,
+                        [window, 0, release.time, 0, 0],
+                    );
+                }
+                continue;
+            }
+            Event::SelectionRequest(request) => {
+                connection
+                    .change_property8(
+                        PropMode::REPLACE,
+                        request.requestor,
+                        request.property,
+                        request.target,
+                        DRAG_PAYLOAD.as_bytes(),
+                    )
+                    .expect("writes the payload");
+                let notify = x11rb::protocol::xproto::SelectionNotifyEvent {
+                    response_type: x11rb::protocol::xproto::SELECTION_NOTIFY_EVENT,
+                    sequence: 0,
+                    time: request.time,
+                    requestor: request.requestor,
+                    selection: request.selection,
+                    target: request.target,
+                    property: request.property,
+                };
+                connection
+                    .send_event(false, request.requestor, EventMask::NO_EVENT, notify)
+                    .expect("answers the request");
+                connection.flush().expect("flushes");
+                continue;
+            }
+            _ => continue,
+        };
+        if events.send(event).is_err() {
+            return;
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_x11_drag_drops_onto_a_wayland_window() {
+    const MOTION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+    let source = WaylandDisplaySrc::new()
+        .with_size(WIDTH, HEIGHT)
+        .with_framerate(FRAMERATE)
+        .with_render_node(SOFTWARE_RENDERING)
+        .with_xwayland();
+    let input = source.input_sender();
+    let mut display_names = source.display_names();
+    let pull = register_appsink_pull("m2562_x11_drag");
+    let mut graph: Graph<GraphNode> = Graph::new();
+    let source_node = graph.add_source(GraphNode::source(source));
+    let sink_node = graph.add_sink(GraphNode::element(
+        AppSink::new().with_channel("m2562_x11_drag"),
+    ));
+    graph.link(source_node, sink_node).expect("links");
+    let send = |event| input.send(event).expect("the display takes input");
+    let checks = async {
+        let mut events = connect_client(&mut display_names).await;
+        client_globals(&mut events).await;
+        let stride = WIDTH as usize * BYTES_PER_PIXEL;
+        assert!(
+            wait_for_picture(&pull, |picture| shows_client(picture, stride)).await,
+            "a frame shows the Wayland client's window"
+        );
+        let x11_display = display_names
+            .borrow()
+            .as_ref()
+            .and_then(|names| names.x11_display.clone())
+            .expect("the source runs Xwayland");
+        let (source_sender, mut source_events) = mpsc::unbounded_channel();
+        std::thread::spawn(move || run_xdnd_source(x11_display, source_sender));
+        let (start_x, start_y) = X11_DROP_POINT;
+        assert!(
+            wait_for_picture(&pull, |picture| {
+                rgb_at(picture, stride, start_x, start_y) == X11_TARGET_RGB
+            })
+            .await,
+            "a frame shows the X11 window"
+        );
+        send(WindowInput::Pointer {
+            x: start_x,
+            y: start_y,
+        });
+        send(WindowInput::Button {
+            button: PointerButton::Left,
+            down: true,
+        });
+        let pressed = tokio::time::timeout(TIMEOUT, source_events.recv()).await;
+        assert_eq!(pressed.ok().flatten(), Some(XdndSourceEvent::Pressed));
+        let (end_x, end_y) = WAYLAND_DRAG_POINT;
+        // smithay maps its drop proxy once it sees the new drag selection, and the app looks for it on each motion
+        let entered = tokio::time::timeout(TIMEOUT, async {
+            for x in (end_x..start_x).rev().cycle() {
+                send(WindowInput::Pointer { x, y: end_y });
+                tokio::time::sleep(MOTION_INTERVAL).await;
+                if let Ok(event) = source_events.try_recv() {
+                    return event;
+                }
+            }
+            unreachable!("the pointer moves forever")
+        })
+        .await;
+        assert_eq!(entered.ok(), Some(XdndSourceEvent::Entered));
+        send(WindowInput::Pointer { x: end_x, y: end_y });
+        wait_for_client_event(&mut events, &ClientEvent::DropAccepted).await;
+        send(WindowInput::Button {
+            button: PointerButton::Left,
+            down: false,
+        });
+        wait_for_client_event(&mut events, &ClientEvent::Dropped(DRAG_PAYLOAD.into())).await;
     };
     tokio::select! {
         result = run_graph(graph, &ZeroClock, 2) => panic!("the graph ended first: {result:?}"),

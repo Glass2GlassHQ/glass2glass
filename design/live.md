@@ -278,7 +278,8 @@ fullscreen at the output size and takes keyboard focus, which the window manager
 passes on as X input focus. Override-redirect windows (menus, tooltips) keep the
 position they set and stay above every managed window. A Wayland drag over an X11 window reaches it as XDND, since
 the pointer focus there is the window's `X11Surface` rather than its Wayland
-surface.
+surface. An X11 drag drops into a Wayland window through the window
+manager's XDND proxy window.
 
 Input arrives as `WindowInput` through `input_sender()`: evdev key codes,
 pointer positions in output pixels, buttons, and wheel steps of 120 per notch,

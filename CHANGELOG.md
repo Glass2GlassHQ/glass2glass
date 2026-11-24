@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2562: Test that an X11 app's drag drops into a Wayland window in `waylanddisplaysrc`.
 - M2561: Keep X11 menus and tooltips above the window a press raises in `waylanddisplaysrc`.
 - M2560: End a QUIC `remotewt` session 5 s after its peer goes silent, with a keep-alive every second.
 - M2559: Keep the `remotewt` QUIC data channel delivering to a peer that closed its own sending side.
