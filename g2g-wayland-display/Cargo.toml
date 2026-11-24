@@ -12,6 +12,7 @@ publish = false
 
 [features]
 ffmpeg = ["display", "g2g-plugins/ffmpeg"]
+cuda = ["ffmpeg", "g2g-plugins/dmabuf-cuda", "g2g-plugins/nvenc"]
 display = [
     "dep:g2g-core",
     "dep:g2g-plugins",

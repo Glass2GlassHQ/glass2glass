@@ -30,7 +30,12 @@ pub(crate) const CUDA_SUCCESS: CuResult = 0;
 
 pub(crate) const CU_MEMORYTYPE_HOST: u32 = 0x01;
 pub(crate) const CU_MEMORYTYPE_DEVICE: u32 = 0x02;
-#[cfg(any(feature = "cuda-wgpu", feature = "cuda-gl", feature = "cuda-kms"))]
+#[cfg(any(
+    feature = "cuda-wgpu",
+    feature = "cuda-gl",
+    feature = "cuda-kms",
+    feature = "dmabuf-cuda"
+))]
 pub(crate) const CU_MEMORYTYPE_ARRAY: u32 = 0x03;
 
 // `CUDA_MEMCPY2D`, field for field from cuda.h (64-bit).
@@ -164,45 +169,94 @@ pub(crate) fn init_driver() -> Result<(), G2gError> {
     check(unsafe { cu_init(0) })
 }
 
-// CUDA-GL interop, the GL entry points live in libcuda itself
-#[cfg(any(feature = "cuda-gl", feature = "cuda-kms"))]
-pub(crate) use gl_interop::*;
+// CUDA-GL and CUDA-EGL interop, the GL and EGL entry points live in libcuda itself
+#[cfg(any(feature = "cuda-gl", feature = "cuda-kms", feature = "dmabuf-cuda"))]
+pub(crate) use graphics_interop::*;
 
-#[cfg(any(feature = "cuda-gl", feature = "cuda-kms"))]
-mod gl_interop {
+#[cfg(any(feature = "cuda-gl", feature = "cuda-kms", feature = "dmabuf-cuda"))]
+mod graphics_interop {
     use super::{c_void, CuResult};
 
     pub(crate) type CuGraphicsResource = *mut c_void;
+    #[cfg(any(feature = "cuda-gl", feature = "cuda-kms"))]
     pub(crate) type CuArray = *mut c_void;
     // null is the default stream
+    #[cfg(any(feature = "cuda-gl", feature = "cuda-kms"))]
     pub(crate) type CuStream = *mut c_void;
+    #[cfg(any(feature = "cuda-gl", feature = "cuda-kms"))]
     pub(crate) type GlUint = u32;
+    #[cfg(any(feature = "cuda-gl", feature = "cuda-kms"))]
     pub(crate) type GlEnum = u32;
 
     // CUDA fully overwrites the texture each frame, so the driver may skip preserving it
+    #[cfg(any(feature = "cuda-gl", feature = "cuda-kms"))]
     pub(crate) const CU_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD: u32 = 0x02;
+    #[cfg(any(feature = "cuda-gl", feature = "cuda-kms"))]
     pub(crate) const GL_TEXTURE_2D: GlEnum = 0x0DE1;
+    #[cfg(feature = "dmabuf-cuda")]
+    pub(crate) const CU_GRAPHICS_REGISTER_FLAGS_READ_ONLY: u32 = 0x01;
+    #[cfg(feature = "dmabuf-cuda")]
+    pub(crate) const CU_EGL_FRAME_TYPE_ARRAY: u32 = 0;
+    #[cfg(feature = "dmabuf-cuda")]
+    const MAX_EGL_FRAME_PLANES: usize = 3;
+
+    // `CUeglFrame` from cudaEGL.h, the plane union read as array handles
+    #[cfg(feature = "dmabuf-cuda")]
+    #[repr(C)]
+    #[derive(Debug, Default)]
+    pub(crate) struct CuEglFrame {
+        pub(crate) planes: [usize; MAX_EGL_FRAME_PLANES],
+        pub(crate) width: u32,
+        pub(crate) height: u32,
+        pub(crate) depth: u32,
+        pub(crate) pitch: u32,
+        pub(crate) plane_count: u32,
+        pub(crate) channel_count: u32,
+        pub(crate) frame_type: u32,
+        pub(crate) egl_color_format: u32,
+        pub(crate) array_format: u32,
+    }
+    // a C probe against CUDA 13.2's cudaEGL.h measured 64 bytes
+    #[cfg(feature = "dmabuf-cuda")]
+    const _: () = assert!(core::mem::size_of::<CuEglFrame>() == 64);
 
     crate::shared_library::shared_library! {
         pub(crate) struct LibCudaGraphics = super::LIBCUDA;
         when missing return super::CUDA_ERROR_SHARED_OBJECT_INIT_FAILED;
+        #[cfg(any(feature = "cuda-gl", feature = "cuda-kms"))]
         pub(crate) fn cu_graphics_gl_register_image = "cuGraphicsGLRegisterImage"(
             resource: *mut CuGraphicsResource,
             image: GlUint,
             target: GlEnum,
             flags: u32,
         ) -> CuResult;
+        #[cfg(feature = "dmabuf-cuda")]
+        pub(crate) fn cu_graphics_egl_register_image = "cuGraphicsEGLRegisterImage"(
+            resource: *mut CuGraphicsResource,
+            image: *mut c_void,
+            flags: u32,
+        ) -> CuResult;
+        #[cfg(feature = "dmabuf-cuda")]
+        pub(crate) fn cu_graphics_resource_get_mapped_egl_frame = "cuGraphicsResourceGetMappedEglFrame"(
+            frame: *mut CuEglFrame,
+            resource: CuGraphicsResource,
+            index: u32,
+            mip_level: u32,
+        ) -> CuResult;
         pub(crate) fn cu_graphics_unregister_resource = "cuGraphicsUnregisterResource"(resource: CuGraphicsResource) -> CuResult;
+        #[cfg(any(feature = "cuda-gl", feature = "cuda-kms"))]
         pub(crate) fn cu_graphics_map_resources = "cuGraphicsMapResources"(
             count: u32,
             resources: *mut CuGraphicsResource,
             stream: CuStream,
         ) -> CuResult;
+        #[cfg(any(feature = "cuda-gl", feature = "cuda-kms"))]
         pub(crate) fn cu_graphics_unmap_resources = "cuGraphicsUnmapResources"(
             count: u32,
             resources: *mut CuGraphicsResource,
             stream: CuStream,
         ) -> CuResult;
+        #[cfg(any(feature = "cuda-gl", feature = "cuda-kms"))]
         pub(crate) fn cu_graphics_sub_resource_get_mapped_array = "cuGraphicsSubResourceGetMappedArray"(
             array: *mut CuArray,
             resource: CuGraphicsResource,

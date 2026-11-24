@@ -399,3 +399,56 @@ async fn vaapi_encodes_nv12_dma_bufs_from_the_display() {
         );
     }
 }
+
+#[cfg(feature = "cuda")]
+#[tokio::test]
+async fn nvenc_encodes_dma_bufs_from_the_display_through_cuda() {
+    use g2g_plugins::dmabuftocuda::DmaBufToCuda;
+    use g2g_plugins::ffmpegdec::FfmpegVideoDec;
+    use g2g_plugins::nvenc::NvEnc;
+    use g2g_wayland_display::waylanddisplaysrc::render_node_driver;
+    const NVIDIA_DRIVER: &str = "nvidia";
+    // waylanddisplaysrc repeats an undamaged picture once a second, so a few frames cover the client's first draw
+    const ENCODED_FRAMES: u64 = 5;
+    for render_node in render_nodes() {
+        if render_node_driver(&render_node).ok().as_deref() != Some(NVIDIA_DRIVER) {
+            continue;
+        }
+        let channel = format!("m2538_{}", render_node.display());
+        let source = gpu_source(&render_node).with_num_buffers(ENCODED_FRAMES);
+        let mut display_names = source.display_names();
+        let pull = register_appsink_pull(&channel);
+        let mut graph: Graph<GraphNode> = Graph::new();
+        let source_node = graph.add_source(GraphNode::source(source));
+        let import_node = graph.add_transform(GraphNode::element(DmaBufToCuda::new()));
+        let encoder_node = graph.add_transform(GraphNode::element(NvEnc::new()));
+        let decoder_node = graph.add_transform(GraphNode::element(FfmpegVideoDec::new()));
+        let sink_node = graph.add_sink(GraphNode::element(AppSink::new().with_channel(&channel)));
+        graph.link(source_node, import_node).expect("links");
+        graph.link(import_node, encoder_node).expect("links");
+        graph.link(encoder_node, decoder_node).expect("links");
+        graph.link(decoder_node, sink_node).expect("links");
+        let checks = async {
+            let mut events = connect_client(&mut display_names).await;
+            client_globals(&mut events).await;
+            let mut client_shown = false;
+            while let Some(frame) = pull.pull().await {
+                client_shown |= decoded_shows_client(&frame);
+            }
+            client_shown
+        };
+        let (stats, client_shown) = tokio::join!(run_graph(graph, &ZeroClock, 2), checks);
+        let stats = stats.expect("the encode runs");
+        assert_eq!(
+            stats.allocation.map(|allocation| allocation.domain),
+            Some(MemoryDomainKind::DmaBuf),
+            "dmabuftocuda takes the display's dma-bufs on {}",
+            render_node.display()
+        );
+        assert!(
+            client_shown,
+            "a decoded frame encoded from {} shows the client's window",
+            render_node.display()
+        );
+    }
+}

@@ -77,9 +77,9 @@ impl Drop for CurrentContext {
 
 #[derive(Debug)]
 pub(crate) struct CudaDevice {
-    ordinal: i32,
+    pub(crate) ordinal: i32,
     device: ffi::CuDevice,
-    context: u64,
+    pub(crate) context: u64,
 }
 
 impl CudaDevice {
@@ -210,7 +210,7 @@ impl CudaStream {
         })
     }
 
-    unsafe fn copy_2d_async(&self, copy: &ffi::CudaMemcpy2D) -> Result<(), G2gError> {
+    pub(crate) unsafe fn copy_2d_async(&self, copy: &ffi::CudaMemcpy2D) -> Result<(), G2gError> {
         let _bound = self.device.bind()?;
         // SAFETY: the caller keeps both ends of the copy alive until the stream passes it.
         check(unsafe { ffi::cu_memcpy_2d_async(copy, self.handle as ffi::CuStream) })
@@ -500,10 +500,10 @@ impl AsyncElement for CudaDownload {
 type FreeAllocations = Arc<Mutex<Vec<PitchedAllocation>>>;
 
 #[derive(Debug)]
-struct PitchedAllocation {
+pub(crate) struct PitchedAllocation {
     device: Arc<CudaDevice>,
-    pointer: u64,
-    pitch: usize,
+    pub(crate) pointer: u64,
+    pub(crate) pitch: usize,
 }
 
 impl Drop for PitchedAllocation {
@@ -517,14 +517,33 @@ impl Drop for PitchedAllocation {
 }
 
 #[derive(Debug)]
-struct FramePool {
-    width: u32,
-    height: u32,
+pub(crate) struct FramePool {
+    row_bytes: usize,
+    rows: usize,
     free: FreeAllocations,
 }
 
 impl FramePool {
-    fn acquire(&self, device: &Arc<CudaDevice>) -> Result<PitchedAllocation, G2gError> {
+    pub(crate) fn new(row_bytes: usize, rows: usize) -> Self {
+        Self {
+            row_bytes,
+            rows,
+            free: Arc::default(),
+        }
+    }
+
+    fn nv12(width: u32, height: u32) -> Self {
+        let rows = height as usize + height.div_ceil(2) as usize;
+        // an odd width makes the interleaved chroma row one byte wider than the luma row
+        let widest_row = 2 * (width as usize).div_ceil(2);
+        Self::new(widest_row, rows)
+    }
+
+    pub(crate) fn has_shape_of(&self, other: &Self) -> bool {
+        (self.row_bytes, self.rows) == (other.row_bytes, other.rows)
+    }
+
+    pub(crate) fn acquire(&self, device: &Arc<CudaDevice>) -> Result<PitchedAllocation, G2gError> {
         let recycled = self
             .free
             .lock()
@@ -533,16 +552,14 @@ impl FramePool {
         if let Some(allocation) = recycled {
             return Ok(allocation);
         }
-        let width = self.width as usize;
-        let rows = self.height as usize + self.height.div_ceil(2) as usize;
-        // an odd width makes the interleaved chroma row one byte wider than the luma row
-        let widest_row = 2 * width.div_ceil(2);
         let _bound = device.bind()?;
         let mut pointer: u64 = 0;
         let mut pitch: usize = 0;
         // nvenc rejects a tight pitch, and an element size of 16 gives the alignment it takes
         // SAFETY: both out pointers are valid and the context is current.
-        check(unsafe { ffi::cu_mem_alloc_pitch(&mut pointer, &mut pitch, widest_row, rows, 16) })?;
+        check(unsafe {
+            ffi::cu_mem_alloc_pitch(&mut pointer, &mut pitch, self.row_bytes, self.rows, 16)
+        })?;
         Ok(PitchedAllocation {
             device: Arc::clone(device),
             pointer,
@@ -552,10 +569,20 @@ impl FramePool {
 }
 
 #[derive(Debug)]
-struct UploadedFrame {
+pub(crate) struct UploadedFrame {
     allocation: Option<PitchedAllocation>,
     recycle_into: FreeAllocations,
     ready: CudaEvent,
+}
+
+impl UploadedFrame {
+    pub(crate) fn new(allocation: PitchedAllocation, pool: &FramePool, ready: CudaEvent) -> Self {
+        Self {
+            allocation: Some(allocation),
+            recycle_into: Arc::clone(&pool.free),
+            ready,
+        }
+    }
 }
 
 impl CudaKeepAlive for UploadedFrame {
@@ -592,16 +619,13 @@ fn upload_pinned(
     width: u32,
     height: u32,
 ) -> Result<OwnedCudaBuffer, G2gError> {
+    let wanted = FramePool::nv12(width, height);
     if gpu
         .pool
         .as_ref()
-        .is_none_or(|pool| (pool.width, pool.height) != (width, height))
+        .is_none_or(|pool| !pool.has_shape_of(&wanted))
     {
-        gpu.pool = Some(FramePool {
-            width,
-            height,
-            free: Arc::default(),
-        });
+        gpu.pool = Some(wanted);
     }
     let pool = gpu.pool.as_ref().ok_or(G2gError::NotConfigured)?;
     let allocation = pool.acquire(&gpu.device)?;
@@ -649,11 +673,7 @@ fn upload_pinned(
         height,
         gpu.device.context,
         gpu.device.ordinal,
-        Arc::new(UploadedFrame {
-            allocation: Some(allocation),
-            recycle_into: Arc::clone(&pool.free),
-            ready,
-        }),
+        Arc::new(UploadedFrame::new(allocation, pool, ready)),
     ))
 }
 

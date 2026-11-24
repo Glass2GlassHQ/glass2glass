@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2538: Add `dmabuftocuda` so `nvenc` encodes `waylanddisplaysrc` output on NVIDIA.
 - M2537: Run X11 apps in `waylanddisplaysrc` through Xwayland.
 - M2539: Encode NV12 and P010 dma-bufs in `ffmpegenc` VA-API without a copy.
 - M2536: Output NV12 from `waylanddisplaysrc` through a GLES conversion pass.

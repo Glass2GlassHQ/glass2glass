@@ -50,7 +50,7 @@ release-binary = [
 ]
 release-binary-linux = [
     "release-binary", "plugin-signing", "shm", "unixfd", "v4l2", "vulkan-video",
-    "kms-sink", "wayland-sink", "wgpu-present", "cuda", "nvenc", "nvdec", "cuda-wgpu",
+    "kms-sink", "wayland-sink", "wgpu-present", "cuda", "nvenc", "nvdec", "cuda-wgpu", "dmabuf-cuda",
     "gl-sink", "alsa-sink", "alsa-src", "openh264", "ffmpeg-long-tail", "vpx",
 ]
 release-binary-macos = ["release-binary", "vtdecode", "vtencode", "metal-sink", "coreaudio", "audiotoolbox-aac", "avfoundation", "screencapture", "vpx", "ffmpeg-long-tail"]
@@ -508,6 +508,9 @@ libcamera-dmabuf = ["libcamera", "dep:wgpu", "dep:wgpu-hal", "dep:ash"]
 # as the libcamera probe but without the libcamera dependency, so a bridge /
 # GStreamer dma-buf feed can be imported to the GPU on its own.
 dmabuf-wgpu = ["std", "dep:wgpu", "dep:wgpu-hal", "dep:ash"]
+# DMABUF -> CUDA import element (`dmabuftocuda`) through an EGLImage on the
+# NVIDIA EGL device, so `nvenc` encodes dma-bufs with a device copy only. Linux only.
+dmabuf-cuda = ["cuda", "dep:khronos-egl"]
 # Vendor-neutral GPU-resident hardware video decode via Vulkan Video
 # (`VK_KHR_video_queue` + `VK_KHR_video_decode_*`), decoding into a wgpu texture
 # on the same Vulkan device wgpu runs, the cross-vendor analog of the CUDA-locked

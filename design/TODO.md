@@ -35,8 +35,6 @@ The plan is [remote.md](remote.md).
 - `ximagesrc` for unattended X11 capture, and window capture.
 - `waylanddisplaysrc`: take the size and rate from a downstream caps filter, and
   support drag and drop.
-- `dmabuftocuda`: import a dma-buf into CUDA so `nvenc` encodes
-  `waylanddisplaysrc` output with no copy.
 - `g2g-desktop host`: capture from `waylanddisplaysrc`, send client input into
   it, and start an app in it with `--run`.
 - Opus audio from the host's default capture device, on a short queue that

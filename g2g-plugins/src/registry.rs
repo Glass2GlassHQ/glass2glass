@@ -3292,6 +3292,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "jpegxsenc" => "jpegxs" on "linux";
         "jpegxsdec" => "jpegxs" on "linux";
         "dmabuftowgpu" => "dmabuf-wgpu" on "linux";
+        "dmabuftocuda" => "dmabuf-cuda" on "linux";
         "wgputodmabuf" => "dmabuf-wgpu" on "linux";
         "waylandsink" => "wayland-sink" on "linux";
         "cudaglsink" => "cuda-gl" on "linux";
@@ -4154,6 +4155,13 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(
         LaunchFactory::of::<crate::dmabufwgpu::DmaBufToWgpu>("dmabuftowgpu", || {
             Box::new(crate::dmabufwgpu::DmaBufToWgpu::new())
+        })
+        .with_experimental(),
+    );
+    #[cfg(all(target_os = "linux", feature = "dmabuf-cuda"))]
+    reg.register_launch(
+        LaunchFactory::of::<crate::dmabuftocuda::DmaBufToCuda>("dmabuftocuda", || {
+            Box::new(crate::dmabuftocuda::DmaBufToCuda::new())
         })
         .with_experimental(),
     );

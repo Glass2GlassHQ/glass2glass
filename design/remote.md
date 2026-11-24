@@ -88,7 +88,7 @@ LAN, and a host off the LAN needs a forwarded UDP port.
 | Windows screen | `d3d11screencapturesrc`, `monitor-index`, `fps`, BGRA in system memory or a D3D11 texture. |
 | Windows GPU colour convert | `d3d11convert`, BGRA D3D11 texture to NV12 on the video processor. |
 | NVIDIA encode | `nvenc`. CUDA NV12, or a D3D11 NV12 texture on Windows, in, Annex-B out, no B-frames, `gop-size=-1` by default, `force_keyframe()` latched and set on the first frame. |
-| Upload into CUDA | `cudaupload`, Linux and Windows. |
+| Upload into CUDA | `cudaupload`, Linux and Windows. `dmabuftocuda` takes RGBA dma-bufs of any modifier on Linux. |
 | VA-API encode | `ffmpegenc` backend `h264_vaapi` / `hevc_vaapi`. |
 | macOS encode | `vtencode`. |
 | Windows encode | `mfencode`, `MF_LOW_LATENCY` so the MFT releases one output per input. `hardware=true` reads D3D11 NV12 textures in place. |

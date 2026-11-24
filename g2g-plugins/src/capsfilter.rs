@@ -317,7 +317,10 @@ pub fn read_memory_feature(caps: &str) -> Option<GstCapsMemory> {
     })
 }
 
-#[cfg(all(target_os = "linux", any(feature = "wayland-sink", feature = "ffmpeg")))]
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "wayland-sink", feature = "ffmpeg", feature = "dmabuf-cuda")
+))]
 pub(crate) fn drm_format(format: g2g_core::RawVideoFormat) -> Option<u32> {
     let (fourcc, _) = DRM_FOURCC_FORMATS
         .iter()

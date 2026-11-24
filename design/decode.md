@@ -463,6 +463,20 @@ render-and-stream path fed by the wgpu-to-CUDA hand-off.
   only, so `unsafe impl Send` rests on the same ownership-transfer argument as
   `FfmpegVideoEnc`.
 
+## DmaBufToCuda
+
+`DmaBufToCuda` (`dmabuftocuda`, feature `dmabuf-cuda`, Linux) copies RGBA or
+BGRA dma-bufs into CUDA device memory on the same NVIDIA GPU, so `nvenc`
+encodes them. Each dma-buf is imported as an EGLImage on the EGL device of the
+`cuda-device-id` GPU, with its DRM format modifier, so NVIDIA's block-linear
+buffers import as they are. `cuGraphicsEGLRegisterImage` maps the image as a
+CUDA array, and one device copy writes it into a pitched buffer from a recycling
+pool. The copy finishes before the frame is pushed, since the producer renders
+into the dma-buf again once its share drops. The image and its registration are
+kept per buffer, keyed by the dma-buf's inode, for up to 16 buffers. A cached
+import of a 160x128 frame takes about 0.1 ms on an RTX 3060, against 0.6 to
+1.1 ms when each frame is registered.
+
 ## NvDec
 
 `NvDec` (`g2g-plugins/src/nvdec.rs`, feature `nvdec` which implies `cuda`,

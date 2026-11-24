@@ -4,7 +4,7 @@
 
 use core::future::Future;
 use core::pin::Pin;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use g2g_core::caps::{fps_period_ns, framerate_q16_from_fraction};
@@ -52,6 +52,19 @@ const DEFAULT_WIDTH: u32 = 1920;
 const DEFAULT_HEIGHT: u32 = 1080;
 const DEFAULT_FRAMERATE: u32 = 60;
 const REPEAT_AFTER: Duration = Duration::from_secs(1);
+const SYS_CLASS_DRM: &str = "/sys/class/drm";
+
+// the kernel driver bound to a render node's device, such as amdgpu or nvidia
+pub fn render_node_driver(render_node: &Path) -> std::io::Result<String> {
+    let not_a_node = || std::io::Error::from(std::io::ErrorKind::InvalidInput);
+    let name = render_node.file_name().ok_or_else(not_a_node)?;
+    let driver = std::fs::read_link(Path::new(SYS_CLASS_DRM).join(name).join("device/driver"))?;
+    driver
+        .file_name()
+        .and_then(|driver| driver.to_str())
+        .map(str::to_owned)
+        .ok_or_else(not_a_node)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DisplayNames {

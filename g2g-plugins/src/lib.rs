@@ -1954,6 +1954,9 @@ pub mod libcamera_dmabuf;
 // Zero-copy DMABUF -> wgpu buffer import element (Linux + GPU).
 #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
 pub mod dmabufwgpu;
+// DMABUF -> CUDA import through an EGLImage on the NVIDIA EGL device.
+#[cfg(all(target_os = "linux", feature = "dmabuf-cuda"))]
+pub mod dmabuftocuda;
 
 // Zero-copy wgpu buffer -> DMABUF export element (M559): the producer half that
 // pairs with dmabufwgpu's importer, so a GPU frame leaves the process via a
@@ -2085,7 +2088,10 @@ pub mod pwdevice;
 pub mod cuda;
 #[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
 mod cuda_driver_ffi;
-#[cfg(all(target_os = "linux", any(feature = "hip", feature = "unixfd")))]
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "hip", feature = "unixfd", feature = "dmabuf-cuda")
+))]
 mod dmabuffence;
 #[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
 pub mod gpurelease;
@@ -2225,11 +2231,19 @@ pub(crate) mod waylanddisplay;
 
 #[cfg(all(
     target_os = "linux",
-    any(feature = "cuda-gl", feature = "cuda-kms", feature = "gl-sink")
+    any(
+        feature = "cuda-gl",
+        feature = "cuda-kms",
+        feature = "gl-sink",
+        feature = "dmabuf-cuda"
+    )
 ))]
 mod egl_library;
 // EGL device queries that put the CUDA-GL sinks' GL context on a CUDA GPU.
-#[cfg(all(target_os = "linux", any(feature = "cuda-gl", feature = "cuda-kms")))]
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "cuda-gl", feature = "cuda-kms", feature = "dmabuf-cuda")
+))]
 pub(crate) mod egldevice;
 
 // EGL + GL ES renderer over that worker for the GL sinks; each sink supplies

@@ -7,6 +7,7 @@ use core::ffi::c_void;
 
 use khronos_egl as egl;
 
+#[cfg(any(feature = "cuda-gl", feature = "cuda-kms"))]
 pub(crate) const EGL_DEVICE_EXT: egl::Int = 0x322C;
 const EGL_CUDA_DEVICE_NV: egl::Int = 0x323A;
 
@@ -34,10 +35,10 @@ fn cuda_ordinal(query_device_attrib: QueryDeviceAttrib, device: *mut c_void) -> 
     i32::try_from(ordinal).ok()
 }
 
-#[cfg(feature = "cuda-gl")]
+#[cfg(any(feature = "cuda-gl", feature = "dmabuf-cuda"))]
 const MAX_EGL_DEVICES: usize = 16;
 
-#[cfg(feature = "cuda-gl")]
+#[cfg(any(feature = "cuda-gl", feature = "dmabuf-cuda"))]
 pub(crate) fn cuda_egl_device(
     egl: &crate::egl_library::Egl,
     cuda_device_id: i32,
