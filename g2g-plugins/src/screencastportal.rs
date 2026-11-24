@@ -98,6 +98,44 @@ impl PortalSourceTypes {
     }
 }
 
+// xdg-desktop-portal ScreenCast cursor_mode values, also the bits of AvailableCursorModes
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PortalCursorMode {
+    // the portal's own default: no pointer in the picture or beside it
+    #[default]
+    Hidden,
+    Embedded,
+    // the pointer image travels as PipeWire cursor metadata instead of in the picture
+    Metadata,
+}
+
+impl PortalCursorMode {
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "hidden" => Some(Self::Hidden),
+            "embedded" => Some(Self::Embedded),
+            "metadata" => Some(Self::Metadata),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Hidden => "hidden",
+            Self::Embedded => "embedded",
+            Self::Metadata => "metadata",
+        }
+    }
+
+    fn bits(self) -> u32 {
+        match self {
+            Self::Hidden => 1,
+            Self::Embedded => 2,
+            Self::Metadata => 4,
+        }
+    }
+}
+
 /// Why a handshake did not produce a stream.
 #[derive(Debug)]
 pub enum PortalError {
@@ -106,7 +144,10 @@ pub enum PortalError {
     /// The bus gave us a unique name an object path cannot be built from.
     SenderName(String),
     /// The portal answered a different `Request` object than the one we asked on.
-    RequestPathMismatch { expected: String, returned: String },
+    RequestPathMismatch {
+        expected: String,
+        returned: String,
+    },
     /// The user declined the share.
     Cancelled,
     /// The portal ended the request some other way (code 2 and up).
@@ -121,6 +162,8 @@ pub enum PortalError {
     WrongType(&'static str),
     /// `Start` succeeded but granted no stream.
     NoStreams,
+    // the portal's AvailableCursorModes lacks the mode asked for
+    CursorModeUnavailable(PortalCursorMode),
 }
 
 impl fmt::Display for PortalError {
@@ -143,6 +186,9 @@ impl fmt::Display for PortalError {
             Self::MissingField(key) => write!(f, "portal response has no {key:?}"),
             Self::WrongType(key) => write!(f, "portal response field {key:?} has the wrong type"),
             Self::NoStreams => write!(f, "the portal granted no stream"),
+            Self::CursorModeUnavailable(mode) => {
+                write!(f, "the portal has no {} cursor mode", mode.as_str())
+            }
         }
     }
 }
@@ -156,6 +202,7 @@ pub struct PortalRequest {
     pub restore_token: Option<String>,
     /// How long to wait for each `Response`, the consent dialog included.
     pub timeout: Duration,
+    pub cursor_mode: PortalCursorMode,
 }
 
 /// A granted screen share: the portal's own PipeWire remote plus the node on it.
@@ -212,6 +259,16 @@ pub fn open_screen_cast(request: &PortalRequest) -> Result<PortalScreenCast, Por
     options.insert("persist_mode", Value::from(PERSIST_MODE_UNTIL_REVOKED));
     if let Some(token) = request.restore_token.as_deref() {
         options.insert("restore_token", Value::from(token));
+    }
+    // hidden is the portal's default, and older portals reject the option altogether
+    if request.cursor_mode != PortalCursorMode::Hidden {
+        let available: u32 = screen_cast
+            .get_property("AvailableCursorModes")
+            .map_err(bus_error)?;
+        if available & request.cursor_mode.bits() == 0 {
+            return Err(PortalError::CursorModeUnavailable(request.cursor_mode));
+        }
+        options.insert("cursor_mode", Value::from(request.cursor_mode.bits()));
     }
     call_request(
         &connection,

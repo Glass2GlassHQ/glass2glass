@@ -149,7 +149,15 @@ capture worker thread over a blocking zbus connection, and connects the stream
 to the granted node id on the private remote fd the portal returns. Every step
 is bounded by `portal-timeout`, so an unattended consent dialog fails the
 capture instead of hanging, and `portal-restore-token` re-opens an earlier
-grant without asking.
+grant without asking. `portal-cursor-mode` asks the portal for the pointer
+`hidden` (the portal's default), `embedded` in the picture, or as `metadata`.
+A mode missing from the portal's `AvailableCursorModes` fails the handshake.
+With `metadata` the stream also asks for `SPA_META_Cursor` (64 to 1024 pixel
+bitmaps, the range OBS asks for) and `cursor_shapes()` publishes the pointer
+image in straight RGBA from RGBA, BGRA, ARGB or ABGR bitmaps. The bitmap arrives
+only when the image changes, and a cursor with id 0 (the pointer is off the
+captured output) or an empty bitmap publishes `None`. The cursor is read before
+the picture chunk, because a pointer-only update carries an empty chunk.
 
 ### MfVideoSrc
 

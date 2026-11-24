@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2565: Send the portal host's pointer to the client from PipeWire cursor metadata (`portal-cursor-mode`).
 - M2564: Sync clipboard text between the `--run` desktop and the Linux `g2g-desktop` client.
 - M2563: Close the `g2g-desktop` client's connection on Ctrl-C, and let the host listen again once a closed connection drains.
 - M2562: Test that an X11 app's drag drops into a Wayland window in `waylanddisplaysrc`.

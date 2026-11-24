@@ -309,6 +309,43 @@ pub(crate) fn dmabuf_buffers_pod_bytes() -> Vec<u8> {
         .into_inner()
 }
 
+// spa's cursor meta size for a square bitmap of side pixels: the cursor and bitmap headers, then 4 byte pixels
+fn cursor_meta_size(side: i32) -> i32 {
+    let headers = core::mem::size_of::<spa_sys::spa_meta_cursor>()
+        + core::mem::size_of::<spa_sys::spa_meta_bitmap>();
+    i32::try_from(headers).expect("the spa headers are a few dozen bytes") + side * side * 4
+}
+
+// obs asks for the same range: 64 pixel cursors usually, up to 1024 on scaled outputs
+const CURSOR_SIDES: (i32, i32, i32) = (64, 1, 1024);
+
+pub(crate) fn cursor_meta_pod_bytes() -> Vec<u8> {
+    let (default, min, max) = CURSOR_SIDES;
+    let obj = object! {
+        SpaTypes::ObjectParamMeta,
+        ParamType::Meta,
+        Property::new(
+            spa_sys::SPA_PARAM_META_type,
+            Value::Id(Id(spa_sys::SPA_META_Cursor)),
+        ),
+        Property::new(
+            spa_sys::SPA_PARAM_META_size,
+            Value::Choice(ChoiceValue::Int(Choice(
+                ChoiceFlags::empty(),
+                ChoiceEnum::Range {
+                    default: cursor_meta_size(default),
+                    min: cursor_meta_size(min),
+                    max: cursor_meta_size(max),
+                },
+            ))),
+        ),
+    };
+    PodSerializer::serialize(std::io::Cursor::new(Vec::new()), &Value::Object(obj))
+        .expect("serialize SPA cursor meta pod")
+        .0
+        .into_inner()
+}
+
 // the output stream's buffers: one shareable block of `size` bytes, rows `stride` apart
 pub(crate) fn mapped_buffers_pod_bytes(size: usize, stride: usize) -> Result<Vec<u8>, G2gError> {
     let (default, min, max) = MAPPED_BUFFERS;

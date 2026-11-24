@@ -33,7 +33,7 @@ use g2g_plugins::perfetto_trace::PerfettoTrace;
 use g2g_plugins::pipewirevideosrc::PipeWireVideoSrc;
 use g2g_plugins::remotewtio::{generate_certificate, SelfSignedCertificate};
 #[cfg(target_os = "linux")]
-use g2g_plugins::screencastportal::PortalSourceTypes;
+use g2g_plugins::screencastportal::{PortalCursorMode, PortalSourceTypes};
 #[cfg(target_os = "linux")]
 use g2g_wayland_display::waylanddisplaysrc::{
     render_node_driver, DisplayNames, WaylandDisplay, WaylandDisplaySettings, WaylandDisplaySrc,
@@ -272,13 +272,14 @@ async fn host_portal(
     };
     let source = PipeWireVideoSrc::new()
         .with_portal(PortalSourceTypes::Monitor)
+        .with_portal_cursor_mode(PortalCursorMode::Metadata)
         .with_portal_restore_token(token)
         .with_fps(capture.fps);
     let saved_tokens = save_portal_restore_tokens(source.portal_restore_tokens(), path);
     let host_capture = HostCapture {
+        cursor_shapes: Some(source.cursor_shapes()),
         nodes: vec![GraphNodeRef::source(source)],
         encoder: HostEncoder::Software,
-        cursor_shapes: None,
         clipboard_texts: None,
     };
     let ((), saved) = tokio::join!(

@@ -76,12 +76,18 @@ use pw::sys as pw_sys;
 use g2g_core::caps_parse::parse_raw_format;
 
 #[cfg(feature = "portal")]
-use crate::screencastportal::{open_screen_cast, PortalRequest, PortalSourceTypes};
+use crate::screencastportal::{
+    open_screen_cast, PortalCursorMode, PortalRequest, PortalSourceTypes,
+};
+
+use crate::cursorshape::{CursorShape, CURSOR_BYTES_PER_PIXEL};
+use pw::spa::buffer::meta::MetaCursor;
+use pw::spa::param::video::VideoFormat;
 
 use crate::pwvideo::{
-    dmabuf_buffers_pod_bytes, dmabuf_frame, format_pod_bytes, rate_q16, single_plane_row_bytes,
-    spa_format, supported_formats, DataBlock, DmaBufFrame, FormatOffer, PlaneLayout, VideoInfo,
-    MAX_DIM,
+    cursor_meta_pod_bytes, dmabuf_buffers_pod_bytes, dmabuf_frame, format_pod_bytes, rate_q16,
+    single_plane_row_bytes, spa_format, supported_formats, DataBlock, DmaBufFrame, FormatOffer,
+    PlaneLayout, VideoInfo, MAX_DIM,
 };
 
 /// Requested capture geometry / rate when the caller does not specify one.
@@ -228,6 +234,9 @@ pub struct PipeWireVideoSrc {
     portal_restore_token: tokio::sync::watch::Sender<String>,
     #[cfg(feature = "portal")]
     portal_timeout_secs: u64,
+    #[cfg(feature = "portal")]
+    portal_cursor_mode: PortalCursorMode,
+    cursor_shapes: tokio::sync::watch::Sender<Option<CursorShape>>,
     /// Whether a consumer asked where the rows are, so a padded mapped
     /// buffer travels as it is instead of being packed tight.
     keep_row_padding: bool,
@@ -260,6 +269,9 @@ impl PipeWireVideoSrc {
             portal_restore_token: tokio::sync::watch::channel(String::new()).0,
             #[cfg(feature = "portal")]
             portal_timeout_secs: DEFAULT_PORTAL_TIMEOUT_SECS,
+            #[cfg(feature = "portal")]
+            portal_cursor_mode: PortalCursorMode::Hidden,
+            cursor_shapes: tokio::sync::watch::channel(None).0,
             keep_row_padding: false,
             configured: false,
         }
@@ -340,6 +352,17 @@ impl PipeWireVideoSrc {
         self
     }
 
+    #[cfg(feature = "portal")]
+    pub fn with_portal_cursor_mode(mut self, mode: PortalCursorMode) -> Self {
+        self.portal_cursor_mode = mode;
+        self
+    }
+
+    // the pointer image from the portal's cursor metadata, None while the pointer is hidden
+    pub fn cursor_shapes(&self) -> tokio::sync::watch::Receiver<Option<CursorShape>> {
+        self.cursor_shapes.subscribe()
+    }
+
     /// The portal grant and a named target node both say where frames come from,
     /// and they name nodes on different PipeWire remotes, so having both is a
     /// contradiction rather than a preference to resolve.
@@ -356,6 +379,7 @@ impl PipeWireVideoSrc {
             source_types: self.portal_source_types,
             restore_token: (!restore_token.is_empty()).then(|| restore_token.clone()),
             timeout: core::time::Duration::from_secs(self.portal_timeout_secs),
+            cursor_mode: self.portal_cursor_mode,
         })
     }
 
@@ -518,6 +542,13 @@ impl SourceLoop for PipeWireVideoSrc {
                 "seconds to wait for each portal step, the consent dialog included",
             )
             .with_default("60"),
+            #[cfg(feature = "portal")]
+            PropertySpec::new(
+                "portal-cursor-mode",
+                PropKind::Str,
+                "the pointer: hidden | embedded in the picture | metadata beside it",
+            )
+            .with_default("hidden"),
         ];
         PROPS
     }
@@ -590,6 +621,13 @@ impl SourceLoop for PipeWireVideoSrc {
                 Ok(())
             }
             #[cfg(feature = "portal")]
+            "portal-cursor-mode" => {
+                let name = value.as_str().ok_or(PropError::Type)?;
+                self.portal_cursor_mode =
+                    PortalCursorMode::from_name(name).ok_or(PropError::Value)?;
+                Ok(())
+            }
+            #[cfg(feature = "portal")]
             "portal-timeout" => {
                 let seconds = value.as_uint().ok_or(PropError::Type)?;
                 if seconds == 0 {
@@ -623,6 +661,8 @@ impl SourceLoop for PipeWireVideoSrc {
             }
             #[cfg(feature = "portal")]
             "portal-timeout" => Some(PropValue::Uint(self.portal_timeout_secs)),
+            #[cfg(feature = "portal")]
+            "portal-cursor-mode" => Some(PropValue::Str(self.portal_cursor_mode.as_str().into())),
             _ => None,
         }
     }
@@ -684,6 +724,12 @@ impl SourceLoop for PipeWireVideoSrc {
             let portal: PortalSetup = self.portal_request();
             #[cfg(not(feature = "portal"))]
             let portal: PortalSetup = ();
+            #[cfg(feature = "portal")]
+            let cursor_shapes = (self.portal
+                && self.portal_cursor_mode == PortalCursorMode::Metadata)
+                .then(|| self.cursor_shapes.clone());
+            #[cfg(not(feature = "portal"))]
+            let cursor_shapes = None;
             let setup_deadline = setup_deadline(&portal);
 
             // Frames and format changes cross from the loop thread to here.
@@ -705,6 +751,7 @@ impl SourceLoop for PipeWireVideoSrc {
                         WorkerToElement {
                             tx,
                             newest_frame: worker_newest_frame,
+                            cursor_shapes,
                         },
                         ctrl_rx,
                         &ready_tx,
@@ -998,6 +1045,7 @@ struct UserData {
     negotiated: Option<Negotiated>,
     tx: tokio::sync::mpsc::UnboundedSender<FromWorker>,
     newest_frame: NewestFrameSlot,
+    cursor_shapes: Option<tokio::sync::watch::Sender<Option<CursorShape>>>,
     policy: BufferPolicy,
     held: HeldBuffers,
 }
@@ -1006,6 +1054,8 @@ struct UserData {
 struct WorkerToElement {
     tx: tokio::sync::mpsc::UnboundedSender<FromWorker>,
     newest_frame: NewestFrameSlot,
+    // set when the portal sends the pointer as cursor metadata
+    cursor_shapes: Option<tokio::sync::watch::Sender<Option<CursorShape>>>,
 }
 
 fn build_and_run(
@@ -1069,11 +1119,16 @@ fn build_and_run(
     let stream = pw::stream::StreamRc::new(core, "g2g-pipewirevideosrc", props).map_err(|_| -1)?;
 
     let held: HeldBuffers = Rc::new(RefCell::new(Vec::new()));
-    let WorkerToElement { tx, newest_frame } = to_element;
+    let WorkerToElement {
+        tx,
+        newest_frame,
+        cursor_shapes,
+    } = to_element;
     let user_data = UserData {
         negotiated: None,
         tx,
         newest_frame,
+        cursor_shapes,
         policy,
         held: Rc::clone(&held),
     };
@@ -1118,12 +1173,20 @@ fn build_and_run(
                     };
                     user_data.negotiated = Some(Negotiated { info, layout });
                     // The buffers are allocated after this callback, so this is
-                    // where the dma-buf demand has to be announced.
+                    // where the dma-buf demand and the cursor metadata have to be announced.
+                    let mut announced = Vec::new();
                     if user_data.policy.io_mode == IoMode::DmaBuf {
-                        let bytes = dmabuf_buffers_pod_bytes();
-                        if let Some(pod) = spa::pod::Pod::from_bytes(&bytes) {
-                            let _ = stream.update_params(&mut [pod]);
-                        }
+                        announced.push(dmabuf_buffers_pod_bytes());
+                    }
+                    if user_data.cursor_shapes.is_some() {
+                        announced.push(cursor_meta_pod_bytes());
+                    }
+                    let mut pods: Vec<&spa::pod::Pod> = announced
+                        .iter()
+                        .filter_map(|bytes| spa::pod::Pod::from_bytes(bytes))
+                        .collect();
+                    if !pods.is_empty() {
+                        let _ = stream.update_params(&mut pods);
                     }
                     if changed {
                         lock_newest(&user_data.newest_frame).take();
@@ -1250,6 +1313,10 @@ fn copy_mapped_frame(stream: &pw::stream::Stream, user_data: &mut UserData) {
     let Some(mut buffer) = stream.dequeue_buffer() else {
         return;
     };
+    // a buffer that only moves the pointer carries an empty picture chunk, so the cursor goes first
+    if let Some(shapes) = &user_data.cursor_shapes {
+        publish_cursor(shapes, buffer.find_meta::<MetaCursor>());
+    }
     let taken = match buffer.datas_mut() {
         [] => return,
         [data] => {
@@ -1327,6 +1394,10 @@ fn share_dmabuf_frame(stream: &pw::stream::Stream, user_data: &mut UserData) {
     if buffer.is_null() {
         return;
     }
+    if let Some(shapes) = &user_data.cursor_shapes {
+        // SAFETY: `buffer` is a live buffer of this stream until it is queued back below.
+        publish_cursor(shapes, unsafe { raw_cursor_meta(buffer) });
+    }
     // SAFETY: `buffer` is a live buffer of this stream, so its `spa_buffer` and the
     // `datas` array it points at are valid for the length it reports.
     let blocks = unsafe { read_blocks(buffer) };
@@ -1363,6 +1434,106 @@ fn share_dmabuf_frame(stream: &pw::stream::Stream, user_data: &mut UserData) {
             let _ = user_data.tx.send(FromWorker::DmaBuf(frame));
         }
     }
+}
+
+/// # Safety
+/// `buffer` must be a buffer this stream handed out and has not taken back, and the
+/// returned reference must not outlive that.
+unsafe fn raw_cursor_meta<'a>(buffer: *mut pw_sys::pw_buffer) -> Option<&'a MetaCursor> {
+    // SAFETY: the caller certifies `buffer` is live, and spa returns either null or a
+    // pointer to a cursor meta at least the size asked for inside that buffer.
+    unsafe {
+        let spa_buffer = (*buffer).buffer;
+        if spa_buffer.is_null() {
+            return None;
+        }
+        let meta = spa::sys::spa_buffer_find_meta_data(
+            spa_buffer,
+            spa::sys::SPA_META_Cursor,
+            core::mem::size_of::<spa::sys::spa_meta_cursor>(),
+        );
+        meta.cast::<MetaCursor>().as_ref()
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum CursorUpdate {
+    Unchanged,
+    Hidden,
+    Shape(CursorShape),
+}
+
+fn rgba_from(format: VideoFormat, pixel: [u8; 4]) -> Option<[u8; 4]> {
+    let [first, second, third, fourth] = pixel;
+    match format {
+        VideoFormat::RGBA => Some(pixel),
+        VideoFormat::BGRA => Some([third, second, first, fourth]),
+        VideoFormat::ARGB => Some([second, third, fourth, first]),
+        VideoFormat::ABGR => Some([fourth, third, second, first]),
+        _ => None,
+    }
+}
+
+// spa sends the bitmap only when the pointer image changes, and an invalid cursor when the pointer is hidden
+fn cursor_update(cursor: Option<&MetaCursor>) -> CursorUpdate {
+    let Some(cursor) = cursor else {
+        return CursorUpdate::Unchanged;
+    };
+    if !cursor.is_valid() {
+        return CursorUpdate::Hidden;
+    }
+    let Some(bitmap) = cursor.bitmap() else {
+        return CursorUpdate::Unchanged;
+    };
+    let size = bitmap.size();
+    if size.width == 0 || size.height == 0 {
+        return CursorUpdate::Hidden;
+    }
+    let row_bytes = size.width as usize * CURSOR_BYTES_PER_PIXEL;
+    let (Ok(stride), Some(pixels)) = (usize::try_from(bitmap.stride()), bitmap.bitmap_data())
+    else {
+        return CursorUpdate::Unchanged;
+    };
+    if stride < row_bytes || pixels.len() < stride * size.height as usize {
+        return CursorUpdate::Unchanged;
+    }
+    let format = bitmap.format();
+    let rgba: Option<Vec<u8>> = pixels
+        .chunks(stride)
+        .take(size.height as usize)
+        .flat_map(|row| row[..row_bytes].as_chunks::<CURSOR_BYTES_PER_PIXEL>().0)
+        .map(|pixel| rgba_from(format, *pixel))
+        .collect::<Option<Vec<[u8; 4]>>>()
+        .map(|pixels| pixels.concat());
+    let Some(rgba) = rgba else {
+        return CursorUpdate::Unchanged;
+    };
+    let hotspot = cursor.hotspot();
+    CursorUpdate::Shape(CursorShape {
+        width: size.width,
+        height: size.height,
+        hotspot_x: hotspot.x,
+        hotspot_y: hotspot.y,
+        rgba,
+    })
+}
+
+fn publish_cursor(
+    shapes: &tokio::sync::watch::Sender<Option<CursorShape>>,
+    cursor: Option<&MetaCursor>,
+) {
+    let shape = match cursor_update(cursor) {
+        CursorUpdate::Unchanged => return,
+        CursorUpdate::Hidden => None,
+        CursorUpdate::Shape(shape) => Some(shape),
+    };
+    shapes.send_if_modified(|current| {
+        if *current == shape {
+            return false;
+        }
+        *current = shape;
+        true
+    });
 }
 
 /// The `spa_data` blocks of a dequeued buffer, as much of each as the dma-buf path
@@ -1442,6 +1613,115 @@ fn parse_format(param: &spa::pod::Pod) -> Result<VideoInfo, G2gError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
+
+    const CURSOR_HEADER_WORDS: usize = 7;
+    const BITMAP_HEADER_WORDS: usize = 5;
+    const WORD_BYTES: u32 = 4;
+    // two pixels per row and one padding pixel, the pitch a producer may pick
+    const CURSOR_WIDTH: u32 = 2;
+    const CURSOR_HEIGHT: u32 = 2;
+    const CURSOR_STRIDE: u32 = 3 * CURSOR_BYTES_PER_PIXEL as u32;
+    const CURSOR_HOTSPOT: (i32, i32) = (1, 0);
+
+    struct BitmapSpec {
+        format: VideoFormat,
+        width: u32,
+        height: u32,
+        pixel_rows: Vec<[u8; 12]>,
+    }
+
+    // a spa_meta_cursor, then a spa_meta_bitmap right after it, then the pixels, in C layout
+    fn cursor_meta(id: u32, bitmap: Option<BitmapSpec>) -> Vec<u32> {
+        let (hotspot_x, hotspot_y) = CURSOR_HOTSPOT;
+        let bitmap_offset = if bitmap.is_some() {
+            CURSOR_HEADER_WORDS as u32 * WORD_BYTES
+        } else {
+            0
+        };
+        let mut words = vec![
+            id,
+            0,
+            0,
+            0,
+            hotspot_x as u32,
+            hotspot_y as u32,
+            bitmap_offset,
+        ];
+        if let Some(bitmap) = bitmap {
+            words.extend([
+                bitmap.format.as_raw(),
+                bitmap.width,
+                bitmap.height,
+                CURSOR_STRIDE,
+                BITMAP_HEADER_WORDS as u32 * WORD_BYTES,
+            ]);
+            for row in bitmap.pixel_rows {
+                words.extend(
+                    row.as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|word| u32::from_ne_bytes(*word)),
+                );
+            }
+        }
+        words
+    }
+
+    fn update_for(words: &[u32]) -> CursorUpdate {
+        // SAFETY: the words hold a spa_meta_cursor in C layout, aligned for its u32 fields, and outlive the borrow.
+        let cursor = unsafe { words.as_ptr().cast::<MetaCursor>().as_ref() };
+        cursor_update(cursor)
+    }
+
+    #[test]
+    fn an_invalid_cursor_hides_the_pointer_and_a_missing_bitmap_keeps_the_last_one() {
+        assert_eq!(update_for(&cursor_meta(0, None)), CursorUpdate::Hidden);
+        assert_eq!(update_for(&cursor_meta(1, None)), CursorUpdate::Unchanged);
+        assert_eq!(cursor_update(None), CursorUpdate::Unchanged);
+    }
+
+    #[test]
+    fn a_bgra_bitmap_becomes_an_rgba_shape_without_its_row_padding() {
+        let rows = vec![
+            [1, 2, 3, 255, 4, 5, 6, 128, 99, 99, 99, 99],
+            [7, 8, 9, 64, 10, 11, 12, 0, 99, 99, 99, 99],
+        ];
+        let words = cursor_meta(
+            1,
+            Some(BitmapSpec {
+                format: VideoFormat::BGRA,
+                width: CURSOR_WIDTH,
+                height: CURSOR_HEIGHT,
+                pixel_rows: rows,
+            }),
+        );
+        let (hotspot_x, hotspot_y) = CURSOR_HOTSPOT;
+        assert_eq!(
+            update_for(&words),
+            CursorUpdate::Shape(CursorShape {
+                width: CURSOR_WIDTH,
+                height: CURSOR_HEIGHT,
+                hotspot_x,
+                hotspot_y,
+                rgba: vec![3, 2, 1, 255, 6, 5, 4, 128, 9, 8, 7, 64, 12, 11, 10, 0],
+            })
+        );
+    }
+
+    #[test]
+    fn an_empty_bitmap_hides_the_pointer() {
+        let words = cursor_meta(
+            1,
+            Some(BitmapSpec {
+                format: VideoFormat::RGBA,
+                width: 0,
+                height: 0,
+                pixel_rows: Vec::new(),
+            }),
+        );
+        assert_eq!(update_for(&words), CursorUpdate::Hidden);
+    }
 
     /// A 4x2 BGRA frame the daemon wrote at a 24-byte pitch: 16 bytes of picture
     /// and 8 of padding per row. Returned padded, then tight.
@@ -1790,6 +2070,7 @@ mod tests {
             ("portal-source-types", PropValue::Str("window".to_string())),
             ("portal-restore-token", PropValue::Str("tok-1".to_string())),
             ("portal-timeout", PropValue::Uint(5)),
+            ("portal-cursor-mode", PropValue::Str("metadata".to_string())),
         ] {
             src.set_property(name, value.clone()).expect("known prop");
             assert_eq!(src.get_property(name), Some(value));
@@ -1798,6 +2079,7 @@ mod tests {
         assert_eq!(request.source_types, PortalSourceTypes::Window);
         assert_eq!(request.restore_token.as_deref(), Some("tok-1"));
         assert_eq!(request.timeout, core::time::Duration::from_secs(5));
+        assert_eq!(request.cursor_mode, PortalCursorMode::Metadata);
         // an empty token means "ask", not "restore an empty grant"
         src.set_property("portal-restore-token", PropValue::Str(String::new()))
             .expect("known prop");

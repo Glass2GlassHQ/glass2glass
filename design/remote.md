@@ -83,7 +83,7 @@ LAN, and a host off the LAN needs a forwarded UDP port.
 
 | Need | Element |
 | :--- | :--- |
-| Wayland screen | `pipewirevideosrc` `portal=true`, `portal-restore-token`, `portal-timeout`. `io-mode=dmabuf` or `mmap`. |
+| Wayland screen | `pipewirevideosrc` `portal=true`, `portal-restore-token`, `portal-timeout`, `portal-cursor-mode=metadata` for `cursor_shapes()`. `io-mode=dmabuf` or `mmap`. |
 | macOS screen | `screencapturesrc`. `cv-output` keeps the IOSurface. It captures the first display until `display-index` exists. |
 | Windows screen | `d3d11screencapturesrc`, `monitor-index`, `fps`, BGRA in system memory or a D3D11 texture. |
 | Windows GPU colour convert | `d3d11convert`, BGRA D3D11 texture to NV12 on the video processor. |
