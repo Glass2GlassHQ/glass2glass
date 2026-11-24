@@ -822,7 +822,8 @@ rather than most of a wrap after it. Before a stream's first report its frames
 carry no wall clock.
 
 `onvifmetadatacombiner` merges the two pads by that clock, falling back to PTS on
-the play timeline when either side lacks it. It holds each video frame for
+the play timeline when either side lacks it. It holds each video frame until
+metadata at or past the end of the frame's window arrives, or for at most
 `latency` (default 200 ms) of stream time, attaches the metadata whose instant
 falls in the frame's window, its own duration else the next frame's start,
 appends to whatever `AnalyticsMeta` a detector upstream already wrote rather than

@@ -938,6 +938,8 @@ pub struct OnvifMetadataCombiner {
     /// The newest instant seen on the video pad, which is what `max-lateness`
     /// measures a metadata frame against.
     newest_video: Option<Instant>,
+    // metadata arrives in timestamp order, so nothing earlier than this is still on its way
+    newest_metadata: Option<Instant>,
     /// Whether a frame on that pad has ever carried a wall clock. The pads are
     /// matched on wall clock once both have: the video's arrives with the first
     /// RTCP sender report, which can be seconds after its first frame.
@@ -956,6 +958,7 @@ impl Default for OnvifMetadataCombiner {
             pending: VecDeque::new(),
             newest: None,
             newest_video: None,
+            newest_metadata: None,
             video_has_wall_clock: false,
             metadata_has_wall_clock: false,
             latency_ns: DEFAULT_LATENCY_NS,
@@ -988,6 +991,7 @@ impl OnvifMetadataCombiner {
         for newest in [
             Some(&mut self.newest),
             video.then_some(&mut self.newest_video),
+            (!video).then_some(&mut self.newest_metadata),
         ]
         .into_iter()
         .flatten()
@@ -1034,8 +1038,9 @@ impl OnvifMetadataCombiner {
         self.held.get(1).map(|next| next.at.on(axis))
     }
 
-    /// Release every held video frame whose wait is up, each carrying the
-    /// metadata that falls in its window. `flush` releases them all, which is
+    /// Release every held video frame whose wait is up or whose window the
+    /// metadata has already passed, each carrying the metadata that falls in
+    /// its window. `flush` releases them all, which is
     /// what an EOS on either pad calls for.
     async fn release(&mut self, out: &mut dyn OutputSink, flush: bool) -> Result<(), G2gError> {
         let axis = self.axis();
@@ -1052,14 +1057,17 @@ impl OnvifMetadataCombiner {
             }
             let start = front.at.on(axis);
             let newest = self.newest.map(|n| n.on(axis)).unwrap_or(start);
-            if !flush && newest.saturating_sub(start) < self.latency_ns as i64 {
+            let window_end = self.front_window_end(axis);
+            let waited = newest.saturating_sub(start) >= self.latency_ns as i64;
+            let metadata_passed_window = window_end
+                .zip(self.newest_metadata.map(|n| n.on(axis)))
+                .is_some_and(|(end, metadata)| metadata >= end);
+            if !flush && !waited && !metadata_passed_window {
                 return Ok(());
             }
             // With no frame after it and no duration of its own, the window
             // closes where the wait does.
-            let end = self
-                .front_window_end(axis)
-                .unwrap_or_else(|| start.saturating_add(self.latency_ns as i64));
+            let end = window_end.unwrap_or_else(|| start.saturating_add(self.latency_ns as i64));
             let mut held = self.held.pop_front().expect("the front frame is present");
             while self
                 .pending

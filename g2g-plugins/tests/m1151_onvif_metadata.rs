@@ -615,6 +615,39 @@ async fn each_video_frame_gets_the_metadata_of_its_own_window() {
     assert_eq!(ids_per_frame(&frames), [[0], [1], [2], [3]]);
 }
 
+#[tokio::test]
+async fn a_picture_goes_out_once_metadata_passes_its_window() {
+    let mut combiner = combiner();
+    let mut sink = CollectSink::default();
+    let packets = [
+        (
+            OnvifMetadataCombiner::VIDEO,
+            video_frame(0, Some(VIDEO_START_NANOS)),
+        ),
+        (
+            OnvifMetadataCombiner::METADATA,
+            parsed_metadata(0, 0, Some(VIDEO_START_NANOS + 10_000_000)),
+        ),
+        // the next window's metadata, one frame on and far short of the latency
+        (
+            OnvifMetadataCombiner::METADATA,
+            parsed_metadata(1, FRAME_NS, Some(VIDEO_START_NANOS + FRAME_NS as i64)),
+        ),
+    ];
+    for (pad, packet) in packets {
+        combiner
+            .process(pad, packet, &mut sink)
+            .await
+            .expect("the combiner takes the packet");
+    }
+
+    assert_eq!(
+        ids_per_frame(&sink.take_frames()),
+        [[0]],
+        "the picture went out with its own metadata before the latency was up"
+    );
+}
+
 // a picture is held for `latency` while the video runs on, and its metadata has to outlast that hold
 #[tokio::test]
 async fn a_steady_stream_keeps_each_pictures_metadata_until_it_goes_out() {
