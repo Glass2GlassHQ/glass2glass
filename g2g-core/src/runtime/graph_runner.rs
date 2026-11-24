@@ -965,13 +965,14 @@ fn consumer_arms<E>(vg: &ValidatedGraph<E>, edge_id: usize, out: &mut Vec<NodeId
 /// Build a muxer arm's β state from the solved graph: one slot per input
 /// edge (in `in_edges` order, so it aligns with the arm's `pad_rxs`) carrying that
 /// pad's negotiated caps and the arm feeding its branch, plus the arms reading the
-/// merged output.
+/// merged output and the demand they sent into it at startup.
 fn mux_beta<E>(
     vg: &ValidatedGraph<E>,
     node: NodeId,
     in_e: &[usize],
     out_e: usize,
     solution: &[Caps],
+    consumer_demand: Option<AllocationParams>,
     coord: GraphCoordHandle,
 ) -> MuxBeta {
     let pads = in_e
@@ -991,7 +992,7 @@ fn mux_beta<E>(
         pads,
         consumers,
         out_alloc: None,
-        consumer_demand: None,
+        consumer_demand,
         rounds: 0,
     }
 }
@@ -1720,7 +1721,7 @@ struct Prepared {
     latency: LatencyReport,
     latency_fold: alloc::sync::Arc<LatencyFold>,
     allocation: Option<AllocationParams>,
-    tee_branch_proposals: Vec<Option<AllocationParams>>,
+    startup_edge_proposals: Vec<Option<AllocationParams>>,
     clock_priority: ClockPriority,
     base_time_ns: u64,
     /// Every clock the elements offered, kept so the health monitor can re-elect
@@ -2050,7 +2051,7 @@ async fn prepare_graph<'a>(
     let mut source_caps = probe_sources(vg, topo).await?;
 
     let mut attempts = 0u32;
-    let (solution, feasibility, allocation, tee_branch_proposals) = loop {
+    let (solution, feasibility, allocation, startup_edge_proposals) = loop {
         attempts += 1;
         if attempts > MAX_FIXATION_ATTEMPTS {
             return Err(G2gError::FixationFailed);
@@ -2084,12 +2085,12 @@ async fn prepare_graph<'a>(
         // sizes its pool from the downstream `min_buffers` when it opens.
         let CascadeOutcome {
             allocation,
-            tee_branch_proposals,
+            startup_edge_proposals,
         } = cascade_allocation(vg, topo, &solution)?;
 
         // Phase 3: configure each element with its negotiated caps.
         let Some((proposer, counter)) = configure_nodes(vg, topo, &solution)? else {
-            break (solution, feasibility, allocation, tee_branch_proposals);
+            break (solution, feasibility, allocation, startup_edge_proposals);
         };
         // A counter-proposal restarts negotiation with it as the upstream source's produce set.
         let source = upstream_source(vg, proposer).ok_or(G2gError::FixationFailed)?;
@@ -2186,7 +2187,7 @@ async fn prepare_graph<'a>(
             latency,
             latency_fold: alloc::sync::Arc::new(latency_fold),
             allocation,
-            tee_branch_proposals,
+            startup_edge_proposals,
             clock_priority,
             base_time_ns,
             clock_candidates,
@@ -2331,7 +2332,7 @@ fn live_topology<'a>(
 fn build_channels<'a>(
     vg: &ValidatedGraph<GraphNodeRef<'a>>,
     topo: &[NodeId],
-    tee_branch_proposals: Vec<Option<AllocationParams>>,
+    startup_edge_proposals: Vec<Option<AllocationParams>>,
     link_capacity: usize,
     instrument: bool,
     mutable: bool,
@@ -2421,7 +2422,7 @@ fn build_channels<'a>(
         arm_ctrl,
         reporter_input_edges,
         edge_producers: (0..ne).map(|edge| edge_producer(vg, edge)).collect(),
-        tee_branch_proposals,
+        tee_branch_proposals: startup_edge_proposals,
     };
 
     GraphChannels {
@@ -2669,6 +2670,7 @@ struct ArmInputs<'r, 'a> {
     coord_handle: &'r GraphCoordHandle,
     solution: &'r [Caps],
     feasibility: &'r [Option<CapsSet>],
+    startup_edge_proposals: &'r [Option<AllocationParams>],
     probes: &'r [Probe],
     visit_recorder: Option<&'r alloc::sync::Arc<dyn VisitRecorder>>,
     names: &'r [alloc::string::String],
@@ -2695,6 +2697,7 @@ fn plan_arms<'a>(
         coord_handle,
         solution,
         feasibility,
+        startup_edge_proposals,
         probes,
         visit_recorder,
         names,
@@ -2765,6 +2768,7 @@ fn plan_arms<'a>(
                             &in_e,
                             out_e[0],
                             solution,
+                            startup_edge_proposals[out_e[0]].clone(),
                             coord_handle.clone(),
                         )),
                         arm_rx: arm_ctrl_rx[index].take().expect("muxer ctrl rx"),
@@ -3016,7 +3020,7 @@ pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
             latency,
             latency_fold,
             allocation,
-            tee_branch_proposals,
+            startup_edge_proposals,
             clock_priority,
             base_time_ns,
             clock_candidates,
@@ -3058,7 +3062,7 @@ pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
     } = build_channels(
         &vg,
         &topo,
-        tee_branch_proposals,
+        startup_edge_proposals.clone(),
         link_capacity,
         observer.is_some() || visit_recorder.is_some(),
         mutation.is_some(),
@@ -3102,6 +3106,7 @@ pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
             coord_handle: &coord_handle,
             solution: &solution,
             feasibility: &feasibility,
+            startup_edge_proposals: &startup_edge_proposals,
             probes: &probes,
             visit_recorder: visit_recorder.as_ref(),
             names: &names,
@@ -3468,7 +3473,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
             latency,
             latency_fold,
             allocation,
-            tee_branch_proposals,
+            startup_edge_proposals,
             clock_priority,
             base_time_ns,
             clock_candidates,
@@ -3505,7 +3510,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
     } = build_channels(
         &vg,
         &topo,
-        tee_branch_proposals,
+        startup_edge_proposals.clone(),
         link_capacity,
         observer.is_some() || visit_recorder.is_some(),
         mutation.is_some(),
@@ -3544,6 +3549,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
             coord_handle: &coord_handle,
             solution: &solution,
             feasibility: &feasibility,
+            startup_edge_proposals: &startup_edge_proposals,
             probes: &probes,
             visit_recorder: visit_recorder.as_ref(),
             names: &names,
@@ -4329,7 +4335,7 @@ pub fn copy_plan(
 
 struct CascadeOutcome {
     allocation: Option<AllocationParams>,
-    tee_branch_proposals: Vec<Option<AllocationParams>>,
+    startup_edge_proposals: Vec<Option<AllocationParams>>,
 }
 
 /// Run the allocation cascade over a solved graph, in reverse topo order: each
@@ -4342,8 +4348,9 @@ struct CascadeOutcome {
 /// linear runner's sink->source fold.
 ///
 /// Returns the source's absorbed proposal (what the runner reports as its
-/// `allocation`) and each tee branch's proposal, which the β coordinator joins
-/// again when one branch re-cascades mid-stream. Shared with
+/// `allocation`) and the proposal each edge's producer received, which the β
+/// coordinator joins again when one tee branch re-cascades mid-stream and a
+/// muxer arm forwards when a pad changes. Shared with
 /// [`negotiate_graph`], which runs it purely to settle each element's domain so a
 /// graph dump reports the negotiated memory domain rather than every producer's
 /// default preference.
@@ -4354,7 +4361,8 @@ fn cascade_allocation(
 ) -> Result<CascadeOutcome, G2gError> {
     let nee = vg.edge_count();
     let mut edge_proposal: Vec<Option<AllocationParams>> = (0..nee).map(|_| None).collect();
-    let mut tee_branch_proposals: Vec<Option<AllocationParams>> = (0..nee).map(|_| None).collect();
+    let mut startup_edge_proposals: Vec<Option<AllocationParams>> =
+        (0..nee).map(|_| None).collect();
     let mut allocation: Option<AllocationParams> = None;
     for &node in topo.iter().rev() {
         match vg.kind(node) {
@@ -4373,6 +4381,7 @@ fn cascade_allocation(
                 // every hop, so a GPU proposal merely passing through a plain
                 // transform is not rejected against its System default (M351).
                 let downstream_proposal = edge_proposal[out_e].take();
+                startup_edge_proposals[out_e] = downstream_proposal.clone();
                 if let Some(p) = &downstream_proposal {
                     element_configure_alloc(vg, node, p);
                 }
@@ -4386,12 +4395,12 @@ fn cascade_allocation(
             NodeKind::Tee(_) => {
                 let in_e = vg.in_edges(node)[0];
                 for &oe in vg.out_edges(node) {
-                    tee_branch_proposals[oe] = edge_proposal[oe].take();
+                    startup_edge_proposals[oe] = edge_proposal[oe].take();
                 }
                 let branches = vg
                     .out_edges(node)
                     .iter()
-                    .map(|&oe| tee_branch_proposals[oe].clone());
+                    .map(|&oe| startup_edge_proposals[oe].clone());
                 // A plain tee carries no element and narrows nothing; a demux
                 // node folds in the domains it declared it can parse, so a
                 // System-only demuxer makes a GPU producer download (M1039).
@@ -4399,6 +4408,7 @@ fn cascade_allocation(
             }
             NodeKind::Source => {
                 let out_e = vg.out_edges(node)[0];
+                startup_edge_proposals[out_e] = edge_proposal[out_e].clone();
                 if let Some(p) = edge_proposal[out_e].take() {
                     // M351: reconcile against the source's emittable domains, the
                     // upstream end of the two-sided negotiation. The reconciled
@@ -4455,6 +4465,9 @@ fn cascade_allocation(
                         .out_edges(node)
                         .first()
                         .and_then(|&out_e| edge_proposal[out_e].clone());
+                    if let Some(&out_e) = vg.out_edges(node).first() {
+                        startup_edge_proposals[out_e] = output_proposal.clone();
+                    }
                     for &in_e in vg.in_edges(node) {
                         let pad = vg.edge(in_e).dst.index as usize;
                         let caps = solution[in_e].clone();
@@ -4472,7 +4485,7 @@ fn cascade_allocation(
     }
     Ok(CascadeOutcome {
         allocation,
-        tee_branch_proposals,
+        startup_edge_proposals,
     })
 }
 
@@ -6459,15 +6472,28 @@ pub(crate) struct MuxBeta {
 }
 
 impl MuxBeta {
-    /// Baseline from the startup solve: what the muxer proposes per pad (what
-    /// the reverse-topo cascade stored on each input edge, less an output
-    /// proposal forwarded to the `output_domain_follows_input` pad) and for its
+    /// Baseline from the startup solve: what the muxer proposes per pad (exactly
+    /// what the reverse-topo cascade stored on each input edge) and for its
     /// output, so the first mid-stream round re-cascades only what moved.
     fn seed(&mut self, mux: &(dyn DynMultiInputElement + '_), out_caps: &Caps) {
-        for p in &mut self.pads {
-            p.alloc = mux.propose_allocation_for_input(p.pad, &p.caps);
+        for i in 0..self.pads.len() {
+            self.pads[i].alloc = self.pad_demand(mux, i);
         }
         self.out_alloc = mux.propose_allocation_for_output(out_caps);
+    }
+
+    fn pad_demand(
+        &self,
+        mux: &(dyn DynMultiInputElement + '_),
+        slot: usize,
+    ) -> Option<AllocationParams> {
+        let pad = self.pads[slot].pad;
+        let forwarded = self
+            .consumer_demand
+            .clone()
+            .filter(|_| mux.output_domain_follows_input() == Some(pad));
+        mux.propose_allocation_for_input(pad, &self.pads[slot].caps)
+            .or(forwarded)
     }
 
     /// A mid-stream `CapsChanged` fixated new caps on one pad.
@@ -6507,16 +6533,8 @@ impl MuxBeta {
     /// Re-query every pad's demand and re-cascade the ones that moved, so an
     /// input the change does not reach keeps the allocation it already has.
     async fn refresh_pads(&mut self, mux: &(dyn DynMultiInputElement + '_)) {
-        let forwarded_pad = mux.output_domain_follows_input();
         for i in 0..self.pads.len() {
-            let pad = self.pads[i].pad;
-            let forwarded = self
-                .consumer_demand
-                .clone()
-                .filter(|_| forwarded_pad == Some(pad));
-            let want = mux
-                .propose_allocation_for_input(pad, &self.pads[i].caps)
-                .or(forwarded);
+            let want = self.pad_demand(mux, i);
             if want == self.pads[i].alloc {
                 continue;
             }

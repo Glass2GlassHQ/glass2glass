@@ -219,6 +219,7 @@ const SWITCHED_FRAMES_PER_SECOND: u32 = 60;
 
 struct FramerateSwitchSource {
     decoder_log: DomainLog,
+    settles_wanted: usize,
 }
 
 impl SourceLoop for FramerateSwitchSource {
@@ -244,7 +245,9 @@ impl SourceLoop for FramerateSwitchSource {
             )))
             .await?;
             let mut sequence = 1;
-            while sequence < MAX_FRAMES && self.decoder_log.lock().unwrap().is_empty() {
+            while sequence < MAX_FRAMES
+                && self.decoder_log.lock().unwrap().len() < self.settles_wanted
+            {
                 out.push(frame(sequence)).await?;
                 sequence += 1;
             }
@@ -337,6 +340,7 @@ fn a_mid_stream_sink_demand_crosses_a_pass_through_mux_to_the_producer() {
     let mut graph: Graph<GraphNode> = Graph::new();
     let source = graph.add_source(GraphNode::source(FramerateSwitchSource {
         decoder_log: Arc::clone(&decoder_log),
+        settles_wanted: 1,
     }));
     let decoder = graph.add_transform(GraphNode::element(LoggingDecoder {
         log: Arc::clone(&decoder_log),
@@ -358,5 +362,88 @@ fn a_mid_stream_sink_demand_crosses_a_pass_through_mux_to_the_producer() {
     assert_eq!(
         decoder_log.lock().unwrap().as_slice(),
         [MemoryDomainKind::DmaBuf]
+    );
+}
+
+const HELD_BUFFERS: usize = 4;
+
+struct FixedOutputPoolMux;
+
+impl MultiInputElement for FixedOutputPoolMux {
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn input_count(&self) -> usize {
+        1
+    }
+
+    fn output_domain_follows_input(&self) -> Option<usize> {
+        Some(0)
+    }
+
+    fn intercept_caps(&self, _input: usize, upstream: &Caps) -> Result<Caps, G2gError> {
+        Ok(upstream.clone())
+    }
+
+    fn caps_constraint_as_input(&self, _input: usize) -> CapsConstraint<'_> {
+        CapsConstraint::AcceptsAny
+    }
+
+    fn propose_allocation_for_input(&self, _input: usize, caps: &Caps) -> Option<AllocationParams> {
+        if caps.framerate() != Rate::Fixed(STARTING_FRAMES_PER_SECOND << 16) {
+            return None;
+        }
+        Some(AllocationParams {
+            min_buffers: HELD_BUFFERS,
+            ..AllocationParams::default()
+        })
+    }
+
+    fn configure_pipeline(
+        &mut self,
+        _input: usize,
+        _absolute_caps: &Caps,
+    ) -> Result<ConfigureOutcome, G2gError> {
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn output_caps(&self) -> Result<Caps, G2gError> {
+        Ok(nv12(STARTING_FRAMES_PER_SECOND))
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        _input: usize,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move { out.push(packet).await.map(|_| ()) })
+    }
+}
+
+#[test]
+fn a_pad_change_hands_the_producer_the_sinks_startup_demand_once_the_mux_drops_its_own() {
+    let decoder_log: DomainLog = Arc::default();
+    let mut graph: Graph<GraphNode> = Graph::new();
+    let source = graph.add_source(GraphNode::source(FramerateSwitchSource {
+        decoder_log: Arc::clone(&decoder_log),
+        settles_wanted: 2,
+    }));
+    let decoder = graph.add_transform(GraphNode::element(LoggingDecoder {
+        log: Arc::clone(&decoder_log),
+    }));
+    let mux = graph.add_muxer(GraphNode::muxer(FixedOutputPoolMux), 1);
+    let sink = graph.add_sink(GraphNode::element(DmaBufSink));
+    graph.link(source, decoder).unwrap();
+    graph.link(decoder, mux.input(0)).unwrap();
+    graph.link(mux.output(), sink).unwrap();
+
+    block_on(run_graph(graph, &NullClock, 4)).expect("the graph runs");
+
+    assert_eq!(
+        decoder_log.lock().unwrap().as_slice(),
+        [MemoryDomainKind::System, MemoryDomainKind::DmaBuf]
     );
 }
