@@ -1452,6 +1452,8 @@ pub mod remotewtsink;
 #[cfg(feature = "webtransport")]
 pub mod remotewtsrc;
 #[cfg(feature = "webtransport")]
+pub mod remotewttrack;
+#[cfg(feature = "webtransport")]
 pub mod remotewttransform;
 #[cfg(feature = "webtransport")]
 pub mod remotewtvideo;

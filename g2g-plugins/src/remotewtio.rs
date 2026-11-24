@@ -24,6 +24,10 @@
 //! A data channel (`open_data_channel` on the sink and source) is a second
 //! bidirectional stream carrying length-framed byte messages, opened by the
 //! source and accepted by the sink.
+//!
+//! Every bidirectional stream the sender opens starts with one kind byte: 0 for
+//! the main packet stream, 1 for the track `open_track` adds, a second
+//! length-framed packet stream that never waits behind the main one.
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
@@ -38,6 +42,7 @@ use core::time::Duration;
 use bytes::Bytes;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinError, JoinSet};
 use tokio::time::Instant;
 use web_transport_quinn::proto::ConnectRequest;
@@ -71,6 +76,7 @@ use crate::abortondrop::AbortOnDrop;
 use crate::datachannel::{DataChannelTransportEnds, MAX_MESSAGE_SIZE};
 use crate::remotewire::{send_frame_bytes, send_framed, FramedRead};
 use crate::remotewtfec::{shard_frame, PathCounts, PathLoss, ShardAssembly};
+use crate::remotewttrack::{deliver_track_packet, SharedTrackOutgoing, MAIN_STREAM, TRACK_STREAM};
 use crate::remotewtvideo::{NextPacket, PacketOrder, PacketReorder, VideoMode, KEYFRAME_REQUEST};
 use crate::remotewtws::{TlsWebSocket, WsLink, WEBSOCKET_SCHEME};
 use crate::textencoding::{hex_decode, hex_encode};
@@ -153,7 +159,7 @@ pub struct QuicStream {
     leading: bool,
     sending: SendOrdering,
     receiving: ReceiveOrdering,
-    _data_channel: Option<AbortOnDrop>,
+    _channel_tasks: Vec<AbortOnDrop>,
 }
 
 #[derive(Debug)]
@@ -276,7 +282,7 @@ impl QuicStream {
         tx: SendStream,
         rx: RecvStream,
         settings: VideoSettings,
-        data_channel: Option<AbortOnDrop>,
+        channel_tasks: Vec<AbortOnDrop>,
     ) -> Self {
         Self {
             session,
@@ -304,7 +310,7 @@ impl QuicStream {
                 datagrams_closed: false,
                 uni_closed: false,
             },
-            _data_channel: data_channel,
+            _channel_tasks: channel_tasks,
         }
     }
 
@@ -563,15 +569,97 @@ pub(crate) async fn open_stream(
     session: Session,
     settings: VideoSettings,
     data_channel: Option<&SharedDataChannel>,
+    track: Option<&SharedTrackOutgoing>,
 ) -> Result<QuicStream, G2gError> {
     // `Session::max_datagram_size` panics on a peer that refused datagram
     // support, so the configured mode is checked once here rather than per frame.
     if settings.mode == VideoMode::Datagrams && Connection::max_datagram_size(&session).is_none() {
         return Err(G2gError::NotConfigured);
     }
-    let pump = data_channel.map(|channel| accept_data_channel(&session, channel.clone()));
-    let (tx, rx) = session.open_bi().await.map_err(wt_err)?;
-    Ok(QuicStream::new(session, tx, rx, settings, pump))
+    let mut channel_tasks: Vec<AbortOnDrop> = data_channel
+        .map(|channel| accept_data_channel(&session, channel.clone()))
+        .into_iter()
+        .collect();
+    let (mut tx, rx) = session.open_bi().await.map_err(wt_err)?;
+    tx.write_all(&[MAIN_STREAM]).await.map_err(wt_err)?;
+    channel_tasks.extend(track.map(|outgoing| send_track(&session, outgoing.clone())));
+    Ok(QuicStream::new(session, tx, rx, settings, channel_tasks))
+}
+
+fn send_track(session: &Session, outgoing: SharedTrackOutgoing) -> AbortOnDrop {
+    let session = session.clone();
+    AbortOnDrop(tokio::spawn(async move {
+        let Ok((mut tx, _rx)) = session.open_bi().await else {
+            return;
+        };
+        if tx.write_all(&[TRACK_STREAM]).await.is_err() {
+            return;
+        }
+        // tokio releases the lock when a replaced connection's task is aborted
+        let mut outgoing = outgoing.lock().await;
+        while let Some(body) = outgoing.recv().await {
+            if send_frame_bytes(&mut tx, &body).await.is_err() {
+                return;
+            }
+        }
+        let _ = tx.finish();
+    }))
+}
+
+// web-transport-quinn returns a WebTransport stream once its header arrives, so streams are accepted in arrival order, not open order
+pub(crate) async fn accept_main_stream(
+    session: &Session,
+    track: Option<mpsc::Sender<PipelinePacket>>,
+) -> Result<(SendStream, RecvStream, AbortOnDrop), G2gError> {
+    let (main_found, main_stream) = oneshot::channel();
+    let session = session.clone();
+    let task = AbortOnDrop(tokio::spawn(async move {
+        let mut main_found = Some(main_found);
+        let mut track_reads = JoinSet::new();
+        loop {
+            let accepted = tokio::select! {
+                accepted = session.accept_bi() => accepted,
+                Some(_) = track_reads.join_next(), if !track_reads.is_empty() => continue,
+            };
+            let Ok((tx, mut rx)) = accepted else {
+                return;
+            };
+            let mut kind = [0u8; 1];
+            if rx.read_exact(&mut kind).await.is_err() {
+                continue;
+            }
+            match (kind[0], &track) {
+                (MAIN_STREAM, _) => match main_found.take() {
+                    Some(found) => {
+                        let _ = found.send((tx, rx));
+                    }
+                    None => g2g_warn!(
+                        Target::category("remotewt"),
+                        "ignoring a second main stream"
+                    ),
+                },
+                (TRACK_STREAM, Some(track)) => {
+                    track_reads.spawn(receive_track(rx, track.clone()));
+                }
+                (TRACK_STREAM, None) => {}
+                (other, _) => g2g_warn!(
+                    Target::category("remotewt"),
+                    "ignoring a stream of unknown kind {other}"
+                ),
+            }
+        }
+    }));
+    let (tx, rx) = main_stream.await.map_err(wt_err)?;
+    Ok((tx, rx, task))
+}
+
+async fn receive_track(mut rx: RecvStream, track: mpsc::Sender<PipelinePacket>) {
+    let mut reader = FramedRead::default();
+    while let Ok(Some(packet)) = reader.recv(&mut rx).await {
+        if deliver_track_packet(&track, packet).await.is_err() {
+            return;
+        }
+    }
 }
 
 pub(crate) type SharedDataChannel = Arc<tokio::sync::Mutex<DataChannelTransportEnds>>;

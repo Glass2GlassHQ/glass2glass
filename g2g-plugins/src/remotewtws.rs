@@ -30,12 +30,14 @@ use crate::abortondrop::AbortOnDrop;
 use crate::datachannel::{DataChannelTransportEnds, MAX_MESSAGE_SIZE};
 use crate::remotewire::map_wire;
 use crate::remotewtio::{wt_err, SharedDataChannel};
+use crate::remotewttrack::{deliver_track_packet, SharedTrackOutgoing};
 
 pub(crate) const WEBSOCKET_SCHEME: &str = "wss";
 
 const VIDEO_TAG: u8 = 0;
 const MESSAGE_TAG: u8 = 1;
 const KEYFRAME_REQUEST_TAG: u8 = 2;
+const TRACK_TAG: u8 = 3;
 
 const HTTP_1_1_ALPN: &[u8] = b"http/1.1";
 const QUEUED_VIDEO_PACKETS: usize = 1;
@@ -123,6 +125,8 @@ impl WsLink {
     pub(crate) async fn new<S>(
         websocket: TlsWebSocket<S>,
         data_channel: Option<&SharedDataChannel>,
+        track_outgoing: Option<&SharedTrackOutgoing>,
+        track_incoming: Option<&mpsc::Sender<PipelinePacket>>,
     ) -> Self
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -141,11 +145,13 @@ impl WsLink {
             video_out,
             requests_out,
             data_channel.cloned(),
+            track_outgoing.cloned(),
         ));
         let reader = tokio::spawn(read_socket(
             socket_stream,
             received_video_in,
             messages_in,
+            track_incoming.cloned(),
             keyframe_requested.clone(),
         ));
         Self {
@@ -219,6 +225,7 @@ async fn write_socket<S>(
     mut video: mpsc::Receiver<Vec<u8>>,
     mut requests: mpsc::UnboundedReceiver<Message>,
     data_channel: Option<SharedDataChannel>,
+    track: Option<SharedTrackOutgoing>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -227,6 +234,11 @@ async fn write_socket<S>(
         None => None,
     };
     let mut messages_open = ends.is_some();
+    let mut track = match &track {
+        Some(track) => Some(track.lock().await),
+        None => None,
+    };
+    let mut track_open = track.is_some();
     loop {
         let message = tokio::select! {
             biased;
@@ -238,6 +250,13 @@ async fn write_socket<S>(
                 Some(message) => tagged(MESSAGE_TAG, &message),
                 None => {
                     messages_open = false;
+                    continue;
+                }
+            },
+            body = async { track.as_mut()?.recv().await }, if track_open => match body {
+                Some(body) => tagged(TRACK_TAG, &body),
+                None => {
+                    track_open = false;
                     continue;
                 }
             },
@@ -259,6 +278,7 @@ async fn read_socket<S>(
     mut socket: futures_util::stream::SplitStream<TlsWebSocket<S>>,
     video: mpsc::Sender<Vec<u8>>,
     messages: Option<mpsc::UnboundedSender<Vec<u8>>>,
+    track: Option<mpsc::Sender<PipelinePacket>>,
     keyframe_requested: Arc<AtomicBool>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -285,6 +305,16 @@ async fn read_socket<S>(
                 }
             }
             KEYFRAME_REQUEST_TAG => keyframe_requested.store(true, Ordering::Relaxed),
+            TRACK_TAG => {
+                let Ok(packet) = decode_packet(payload) else {
+                    break;
+                };
+                if let Some(track) = &track {
+                    if deliver_track_packet(track, packet).await.is_err() {
+                        return;
+                    }
+                }
+            }
             _ => break,
         }
     }

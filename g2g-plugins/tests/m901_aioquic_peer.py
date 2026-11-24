@@ -6,7 +6,8 @@
 that speaks the g2g remote-transform protocol.
 
 It reads the u32-LE length-framed wire stream off the client's bidirectional
-WebTransport stream with its own parser, treats the first message as the leading
+WebTransport stream with its own parser, after the one-byte stream kind (0 for the
+sender's main stream), treats the first message as the leading
 CapsChanged (configuration, no reply), and echoes every later message back
 verbatim. Nothing here shares code with g2g, so a passing round trip means our
 QUIC / HTTP-3 CONNECT handshake and our framing are right by the protocol, not by
@@ -37,6 +38,7 @@ class WirePeer(QuicConnectionProtocol):
         super().__init__(*args, **kwargs)
         self._http = None
         self._buf = bytearray()
+        self._kind = None
         self._seen = 0
         self._echoed = 0
 
@@ -76,6 +78,9 @@ class WirePeer(QuicConnectionProtocol):
             self.transmit()
         elif isinstance(event, WebTransportStreamDataReceived):
             self._buf += event.data
+            if self._kind is None and self._buf:
+                self._kind = self._buf.pop(0)
+                print(f"stream kind {self._kind}", flush=True)
             self._drain(event.stream_id)
             self.transmit()
 

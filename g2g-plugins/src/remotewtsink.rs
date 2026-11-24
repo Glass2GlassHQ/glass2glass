@@ -63,6 +63,7 @@ use crate::remotewtio::{
     self, Connected, Listeners, QuicMode, SelfSignedCertificate, SharedDataChannel, VideoSettings,
     WtStream,
 };
+use crate::remotewttrack::{track_sink, RemoteWtTrackSink, SharedTrackOutgoing};
 use crate::remotewtvideo::{set_video_mode, VideoMode};
 use crate::remotewtws::WsLink;
 
@@ -117,6 +118,12 @@ impl RemoteWtSink {
         application
     }
 
+    pub fn open_track(&mut self) -> RemoteWtTrackSink {
+        let (sink, outgoing) = track_sink();
+        self.transport_mut().track = Some(outgoing);
+        sink
+    }
+
     pub fn with_video_mode(mut self, mode: VideoMode) -> Self {
         AsyncElement::set_property(&mut self, "video-mode", PropValue::Str(mode.name().into()))
             .expect("video-mode names a mode");
@@ -146,6 +153,7 @@ pub struct WtClient {
     /// Opened lazily on the first send (the QUIC / CONNECT handshake is async).
     stream: Option<WtStream>,
     data_channel: Option<SharedDataChannel>,
+    track: Option<SharedTrackOutgoing>,
 }
 
 impl WtClient {
@@ -165,6 +173,7 @@ impl WtClient {
             send_window: QUINN_SEND_WINDOW,
             stream: None,
             data_channel: None,
+            track: None,
         }
     }
 
@@ -335,7 +344,13 @@ impl PacketClient for WtClient {
             let session = match connected {
                 Connected::Quic(session) => *session,
                 Connected::WebSocket(websocket) => {
-                    let link = WsLink::new(*websocket, self.data_channel.as_ref()).await;
+                    let link = WsLink::new(
+                        *websocket,
+                        self.data_channel.as_ref(),
+                        self.track.as_ref(),
+                        None,
+                    )
+                    .await;
                     self.stream = Some(WtStream::WebSocket(link));
                     return Ok(());
                 }
@@ -347,8 +362,13 @@ impl PacketClient for WtClient {
                     .then(|| Duration::from_millis(self.frame_timeout_ms)),
                 missing_frame_timeout: None,
             };
-            let stream =
-                remotewtio::open_stream(session, settings, self.data_channel.as_ref()).await?;
+            let stream = remotewtio::open_stream(
+                session,
+                settings,
+                self.data_channel.as_ref(),
+                self.track.as_ref(),
+            )
+            .await?;
             self.stream = Some(WtStream::Quic(Box::new(stream)));
             Ok(())
         })

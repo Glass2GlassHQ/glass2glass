@@ -327,6 +327,10 @@ async fn invert_server(server: &mut Server) -> Result<u64, Box<dyn std::error::E
     let request = server.accept().await.ok_or("no session offered")?;
     let session = request.ok().await?;
     let (mut tx, mut rx) = session.accept_bi().await?;
+    // the sender's main stream opens with its kind, 0
+    let mut kind = [0u8; 1];
+    rx.read_exact(&mut kind).await?;
+    assert_eq!(kind, [0], "the sender's first stream is its main stream");
     let mut processed = 0u64;
     while let Some(body) = read_framed(&mut rx).await? {
         match decode_packet(&body).map_err(|e| format!("decode: {e:?}"))? {
@@ -601,6 +605,10 @@ async fn webtransport_client_round_trips_through_an_aioquic_peer() {
     // The peer reports what it saw, so a silently-empty echo cannot pass.
     let log = String::from_utf8_lossy(&peer_out.stdout);
     assert!(
+        log.contains("stream kind 0"),
+        "the transform's stream opened as a main stream, log: {log}"
+    );
+    assert!(
         log.contains(&format!("echoed {N}")),
         "aioquic peer echoed {N} messages, log: {log}{}",
         String::from_utf8_lossy(&peer_out.stderr)
@@ -622,8 +630,8 @@ async fn webtransport_source_accepts_an_aioquic_client() {
         RemoteWtSrc::new("127.0.0.1:0".parse().unwrap()).with_certificate(tls.cert(), tls.key());
     let port = src.listen().await.expect("bind quic endpoint").port();
 
-    // Caps, N frames, Eos: each `encode_packet` body behind its u32 LE length.
-    let mut blob: Vec<u8> = Vec::new();
+    // The main stream's kind byte, then caps, N frames, Eos: each `encode_packet` body behind its u32 LE length.
+    let mut blob: Vec<u8> = vec![0];
     let mut push = |packet: &PipelinePacket| {
         let body = encode_packet(packet).expect("encode");
         blob.extend_from_slice(&(body.len() as u32).to_le_bytes());

@@ -843,6 +843,18 @@ frame, since each stream is ordered on its own. Each direction closes on its
 own: a side that drops its outgoing sender finishes its half of the stream and
 still receives the peer's messages.
 
+`open_track()` on `RemoteWtSink` returns a `RemoteWtTrackSink`, and on
+`RemoteWtSrc` a `RemoteWtTrackSrc`. They carry a second packet stream with its
+own caps on the same connection, on its own bidirectional stream, so a track
+packet never waits behind a video frame. Every bidirectional stream the sender
+opens starts with one kind byte, 0 for the main stream and 1 for the track,
+since web-transport-quinn accepts streams in the order their headers arrive. A
+track data frame that finds the track's queue full is dropped, at the sender (4
+packets) and at the receiver (2 packets), and caps and `Eos` wait for room. A
+track is for audio: a stall followed by a burst costs a gap instead of a delay
+that never drains. `RemoteWtTrackSrc` discovers its caps from the track's first
+packet and ends on the track's `Eos` or when the connection closes.
+
 A network that blocks UDP gets a WebSocket fallback. `RemoteWtSink
 mode=listener` also binds TCP on the same port number and accepts a WebSocket
 over TLS 1.3 with the same certificate, taking whichever client arrives first.
@@ -850,7 +862,7 @@ over TLS 1.3 with the same certificate, taking whichever client arrives first.
 QUIC `location` has not connected after one second, and a `wss://` location
 dials the WebSocket alone. The client pins the certificate by SHA-256 as on raw
 QUIC. One socket carries everything: each binary message is a one-byte tag
-(video, data channel message, keyframe request) followed by a wire packet or a
+(video, data channel message, keyframe request, track) followed by a wire packet or a
 message. The socket's reader and writer are separate tasks, so input from the
 client is read while video is being written. Both ends set `TCP_NODELAY`. There
 is no datagram or stream-per-frame mode on the socket, so `video-mode` does not

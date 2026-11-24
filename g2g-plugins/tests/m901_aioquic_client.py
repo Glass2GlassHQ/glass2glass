@@ -7,8 +7,8 @@ that pushes a prepared wire stream at our `RemoteWtSrc`.
 
 It performs its own QUIC handshake, HTTP-3 SETTINGS exchange and CONNECT
 (`:protocol = webtransport`), opens one bidirectional WebTransport stream, and
-writes the file it was given verbatim. The file holds the g2g wire codec, already
-length-framed by the Rust side (the codec is g2g's; the layers under it are what
+writes the file it was given verbatim. The file holds the stream kind byte and the
+g2g wire codec, already length-framed by the Rust side (the codec is g2g's; the layers under it are what
 this validates), so a passing run means our server accepts a foreign client's
 session and reads its stream boundaries correctly.
 

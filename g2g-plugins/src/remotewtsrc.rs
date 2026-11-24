@@ -10,7 +10,7 @@
 //! `RemoteWtSrc` is the server by default (`mode=caller` makes it dial a
 //! listening sink at `location` instead): it binds a QUIC endpoint, accepts
 //! one session (answering its HTTP/3 CONNECT with 200 whatever path it asks for,
-//! since the element is media-agnostic), takes the client's single bidirectional
+//! since the element is media-agnostic), takes the client's main bidirectional
 //! stream, and reconstructs the `PipelinePacket` stream the sender serialized
 //! ([`g2g_core::wire`], `u32` length-framed as on TCP). The stream's first packet
 //! is the sender's negotiated `CapsChanged`, so the source *discovers* the media
@@ -37,12 +37,13 @@
 
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use core::time::Duration;
 
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::sync::Arc;
 
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 
 use web_transport_quinn::quinn::Endpoint;
 
@@ -50,14 +51,15 @@ use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{Caps, PipelinePacket, PropError, PropKind, PropValue, PropertySpec};
 
+use crate::abortondrop::AbortOnDrop;
 use crate::datachannel::{data_channel, DataChannelEnds};
 use crate::remotesource::{leading_caps, PacketTransport, RemoteSource, TransportFuture};
 use crate::remotewtio::{
-    self, load_certificate, set_congestion, wt_err, Connected, QuicMode, QuicStream,
-    SharedDataChannel, VideoSettings, WtStream, CERTIFICATE_PROP, CONGESTION_PROP,
-    PRIVATE_KEY_PROP,
+    self, load_certificate, set_congestion, Connected, QuicMode, QuicStream, SharedDataChannel,
+    VideoSettings, WtStream, CERTIFICATE_PROP, CONGESTION_PROP, PRIVATE_KEY_PROP,
 };
 use crate::remotewtsink::CERT_HASHES_PROP;
+use crate::remotewttrack::{track_source, RemoteWtTrackSrc};
 use crate::remotewtvideo::VideoMode;
 use crate::remotewtws::WsLink;
 
@@ -106,6 +108,17 @@ impl RemoteWtSrc {
         application
     }
 
+    pub fn open_track(&mut self) -> RemoteWtTrackSrc {
+        let transport = self.transport_mut();
+        assert!(
+            !transport.listened,
+            "the track opens before the source listens"
+        );
+        let (source, incoming) = track_source();
+        transport.track = Some(incoming);
+        source
+    }
+
     pub fn with_certificate(mut self, cert: impl Into<String>, key: impl Into<String>) -> Self {
         SourceLoop::set_property(&mut self, "certificate", PropValue::Str(cert.into()))
             .expect("certificate is a string");
@@ -128,6 +141,7 @@ pub struct WtTransport {
     congestion: String,
     frame_timeout_ms: u64,
     data_channel: Option<SharedDataChannel>,
+    track: Option<mpsc::Sender<PipelinePacket>>,
     listened: bool,
 }
 
@@ -143,6 +157,7 @@ impl Default for WtTransport {
             congestion: "default".to_string(),
             frame_timeout_ms: 0,
             data_channel: None,
+            track: None,
             listened: false,
         }
     }
@@ -153,6 +168,7 @@ pub struct WtListener {
     kind: ListenerKind,
     frame_timeout_ms: u64,
     data_channel: Option<SharedDataChannel>,
+    track: Option<mpsc::Sender<PipelinePacket>>,
 }
 
 #[derive(Debug)]
@@ -246,6 +262,7 @@ impl PacketTransport for WtTransport {
                 kind,
                 frame_timeout_ms: self.frame_timeout_ms,
                 data_channel: self.data_channel.clone(),
+                track: self.track.clone(),
             })
         })
     }
@@ -281,19 +298,27 @@ impl PacketTransport for WtTransport {
             let session = match connected {
                 Connected::Quic(session) => *session,
                 Connected::WebSocket(websocket) => {
-                    let link = WsLink::new(*websocket, listener.data_channel.as_ref()).await;
+                    let link = WsLink::new(
+                        *websocket,
+                        listener.data_channel.as_ref(),
+                        None,
+                        listener.track.as_ref(),
+                    )
+                    .await;
                     let mut conn = WtStream::WebSocket(link);
                     let caps = leading_caps(conn.recv().await?)?;
                     return Ok((conn, caps));
                 }
             };
-            let pump = listener
+            let mut channel_tasks: Vec<AbortOnDrop> = listener
                 .data_channel
                 .as_ref()
-                .map(|channel| remotewtio::open_data_channel(&session, channel.clone()));
-            // The sender opens exactly one bidirectional stream and writes the
-            // wire codec into it.
-            let (tx, rx) = session.accept_bi().await.map_err(wt_err)?;
+                .map(|channel| remotewtio::open_data_channel(&session, channel.clone()))
+                .into_iter()
+                .collect();
+            let (tx, rx, streams) =
+                remotewtio::accept_main_stream(&session, listener.track.clone()).await?;
+            channel_tasks.push(streams);
             // Receiving is mode-free: `WtStream::recv` takes packets off the
             // stream or the datagram flow, whichever the sender used.
             let settings = VideoSettings {
@@ -302,8 +327,13 @@ impl PacketTransport for WtTransport {
                 missing_frame_timeout: (listener.frame_timeout_ms != 0)
                     .then(|| Duration::from_millis(listener.frame_timeout_ms)),
             };
-            let mut conn =
-                WtStream::Quic(Box::new(QuicStream::new(session, tx, rx, settings, pump)));
+            let mut conn = WtStream::Quic(Box::new(QuicStream::new(
+                session,
+                tx,
+                rx,
+                settings,
+                channel_tasks,
+            )));
             let caps = leading_caps(conn.recv().await?)?;
             Ok((conn, caps))
         })
