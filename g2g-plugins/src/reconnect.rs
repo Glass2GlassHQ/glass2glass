@@ -106,11 +106,6 @@ impl ReconnectState {
     }
 }
 
-/// Gap inserted in the emitted timeline at a reconnect boundary, so downstream
-/// sees the discontinuity as a jump rather than as overlapping timestamps.
-#[cfg(feature = "rtsp")]
-pub(crate) const RECONNECT_PTS_GAP_NS: u64 = 1_000_000_000;
-
 // the `reconnect` of a source, whose budget starts again once a new session carries media
 #[cfg(any(feature = "rtsp", feature = "webrtc"))]
 pub(crate) const SOURCE_RECONNECT_PROP: PropertySpec = PropertySpec::new(

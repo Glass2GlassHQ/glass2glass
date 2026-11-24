@@ -23,8 +23,10 @@
 //! [`Timestamp::elapsed`](retina::Timestamp::elapsed), which is normal play
 //! time in that stream's own clock units against the `RTP-Info` origin the
 //! server declares for both. Converting per stream and rebasing both on the
-//! first frame of the session puts video and audio on one timeline that starts
-//! at zero with the stream's own A/V offset preserved. A server that omits
+//! first frame of the session puts video and audio on one timeline with the
+//! stream's own A/V offset preserved, and that timeline starts at the running
+//! time the session's first frame arrives at, as a live source stamps it, so a
+//! sink anchored on the base time presents it on time. A server that omits
 //! `rtptime` falls back to each stream's first packet at NPT 0
 //! ([`InitialTimestampPolicy::Permissive`]), which starts the tracks together
 //! but cannot preserve the offset.
@@ -53,6 +55,7 @@ use retina::client::{
 use retina::codec::{AudioParameters, CodecItem, FrameFormat, ParametersRef};
 
 use g2g_core::caps::framerate_q16_from_fraction;
+use g2g_core::clock::ClockSync;
 use g2g_core::frame::Frame;
 use g2g_core::log::Target;
 use g2g_core::memory::SystemSlice;
@@ -62,11 +65,12 @@ use g2g_core::{
     PropertySpec, Rate, VideoCodec,
 };
 
+use crate::arrivalstamp::SenderTimelineShift;
 use crate::clock::attach_wall_clock;
 use crate::g711::{G711_CLOCK_RATE_HZ, G711_DEFAULT_CHANNELS};
 use crate::reconnect::{
     ReconnectPolicy, ReconnectState, RECONNECT_BACKOFF_MAX_PROP, RECONNECT_BACKOFF_PROP,
-    RECONNECT_PTS_GAP_NS, SOURCE_RECONNECT_PROP,
+    SOURCE_RECONNECT_PROP,
 };
 use crate::rtcp::SenderClock;
 use crate::rtspclient::{transports_from_flags, transports_to_flags, LowerTransport};
@@ -165,6 +169,7 @@ pub struct RtspSrcN {
     /// `onvif-metadata` after construction can trade the audio pad for the
     /// metadata one instead of growing the element past the linked count.
     requested_outputs: Option<usize>,
+    clock_sync: Option<ClockSync>,
 }
 
 impl RtspSrcN {
@@ -183,6 +188,7 @@ impl RtspSrcN {
             audio: None,
             onvif_metadata: false,
             requested_outputs: None,
+            clock_sync: None,
         }
     }
 
@@ -887,6 +893,10 @@ impl MultiOutputSource for RtspSrcN {
         g2g_core::query::LatencyReport::live(0, None)
     }
 
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.clock_sync = Some(sync);
+    }
+
     async fn resolve_output_caps(&mut self) -> Result<(), G2gError> {
         if self.complete_expected_dims().is_some() || self.probed_video.is_some() {
             return Ok(());
@@ -1053,23 +1063,20 @@ impl PortState {
 async fn run_rtsp_n(src: &mut RtspSrcN, out: &mut dyn MultiOutputSink) -> Result<u64, G2gError> {
     let ports = src.output_count();
     let mut state: Vec<PortState> = (0..ports).map(|_| PortState::new()).collect();
-    let mut pts_base_ns: u64 = 0;
     let mut retry = ReconnectState::new(&src.reconnect);
+    let mut timeline = SenderTimelineShift::new(src.clock_sync.clone());
 
     loop {
         let emitted_before: u64 = state.iter().map(|port| port.emitted).sum();
-        let mut session_max_pts = pts_base_ns;
-        let outcome = run_session(src, out, &mut state, pts_base_ns, &mut session_max_pts).await;
+        timeline.start_new_sender_timeline();
+        let outcome = run_session(src, out, &mut state, &mut timeline).await;
         match outcome {
             SessionOutcome::LimitReached | SessionOutcome::GracefulEnd => break,
             SessionOutcome::DownstreamError(e) => return Err(e),
             SessionOutcome::NetworkError(e) => {
                 let emitted_after: u64 = state.iter().map(|port| port.emitted).sum();
-                // A session that emitted nothing leaves the base alone, so a
-                // flapping reconnect does not push PTS a second forward each attempt.
                 if emitted_after > emitted_before {
                     retry.recovered(&src.reconnect);
-                    pts_base_ns = session_max_pts.saturating_add(RECONNECT_PTS_GAP_NS);
                 }
                 let Some(backoff_ms) = retry.next_delay_ms(&src.reconnect) else {
                     return Err(e);
@@ -1136,8 +1143,7 @@ async fn run_session(
     src: &mut RtspSrcN,
     out: &mut dyn MultiOutputSink,
     state: &mut [PortState],
-    pts_base_ns: u64,
-    session_max_pts: &mut u64,
+    timeline: &mut SenderTimelineShift,
 ) -> SessionOutcome {
     let metadata_port = src.metadata_port();
     let prepared = match src.prepared.take() {
@@ -1399,13 +1405,11 @@ async fn run_session(
             _ if Some(port) == metadata_port => metadata_idx.unwrap_or(video_idx),
             _ => audio_idx.unwrap_or(video_idx),
         };
-        let pts_ns = session_pts_ns(
+        let pts_ns = timeline.shift_ns(session_pts_ns(
             timestamp.elapsed(),
             demuxed.streams()[stream_idx].clock_rate_hz(),
             &mut origin_ns,
-            pts_base_ns,
-        );
-        *session_max_pts = (*session_max_pts).max(pts_ns);
+        ));
 
         let mut frame = Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(bytes)),
@@ -1498,15 +1502,10 @@ async fn push_while_polling(
 }
 
 // `elapsed` is signed because a server's RTP-Info rtptime can be ahead of its first packets
-fn session_pts_ns(
-    elapsed: i64,
-    clock_rate_hz: u32,
-    origin_ns: &mut Option<i128>,
-    pts_base_ns: u64,
-) -> u64 {
+fn session_pts_ns(elapsed: i64, clock_rate_hz: u32, origin_ns: &mut Option<i128>) -> u64 {
     let raw_ns = i128::from(elapsed) * 1_000_000_000 / i128::from(clock_rate_hz.max(1));
     let origin = *origin_ns.get_or_insert(raw_ns);
-    pts_base_ns.saturating_add(u64::try_from(raw_ns - origin).unwrap_or(0))
+    u64::try_from(raw_ns - origin).unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -1518,7 +1517,7 @@ mod tests {
         let mut origin = None;
         let ticks_per_frame = 9_000;
         let pts: Vec<u64> = (0..3)
-            .map(|frame| session_pts_ns(-900_000 + frame * ticks_per_frame, 90_000, &mut origin, 0))
+            .map(|frame| session_pts_ns(-900_000 + frame * ticks_per_frame, 90_000, &mut origin))
             .collect();
         assert_eq!(pts, [0, 100_000_000, 200_000_000]);
     }

@@ -682,9 +682,8 @@ placeholder range.
 
 The source reports live latency with a zero minimum. On a network failure with
 `reconnect` set it pushes a `Flush` to every open pad, waits the backoff, and
-connects afresh. The emitted timeline jumps a second past the last session's
-highest PTS, but only after a session that emitted media, so a run of failed
-attempts does not move it.
+connects afresh. The new session's timeline starts at the running time its
+first frame arrives at.
 
 A server that closes the connection mid-stream ends a recording, an SDP whose
 `a=range` has an end such as `npt=0-30`, with `Eos`. On a live feed the close
@@ -712,8 +711,11 @@ same variant.
 The pads run on different RTP clocks, so each frame's PTS is
 `Timestamp::elapsed`, normal play time against the server's `RTP-Info` origin
 which spans both streams, converted at that stream's clock rate and rebased on
-the session's first frame: one timeline starting at zero with the stream's A/V
-offset intact. `InitialTimestampPolicy::Permissive` keeps a server that omits
+the session's first frame: one timeline with the stream's A/V offset intact.
+`SenderTimelineShift` moves it onto the pipeline's running time at the arrival
+of that first frame, as a live source stamps, so a sink anchored on the base
+time presents it on time instead of the RTSP handshake's length late. Without a
+pipeline clock the first session starts at zero. `InitialTimestampPolicy::Permissive` keeps a server that omits
 `rtptime` playable, each stream starting at its own first packet. With one
 stream set up retina starts it at its first packet whatever the policy, so the
 video-only form stamps from its first emitted frame.

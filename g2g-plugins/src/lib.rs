@@ -1155,6 +1155,7 @@ pub mod udpsink;
         any(feature = "local-ipc", feature = "local-dmabuf")
     ),
     feature = "st2110",
+    feature = "rtsp",
     all(target_arch = "wasm32", feature = "web"),
     all(target_os = "linux", feature = "shm")
 ))]

@@ -91,6 +91,7 @@ impl ArrivalStamp {
         any(feature = "local-ipc", feature = "local-dmabuf")
     ),
     feature = "st2110",
+    feature = "rtsp",
     all(target_arch = "wasm32", feature = "web")
 ))]
 #[derive(Debug)]
@@ -108,6 +109,7 @@ pub(crate) struct SenderTimelineShift {
         any(feature = "local-ipc", feature = "local-dmabuf")
     ),
     feature = "st2110",
+    feature = "rtsp",
     all(target_arch = "wasm32", feature = "web")
 ))]
 impl SenderTimelineShift {
@@ -116,6 +118,11 @@ impl SenderTimelineShift {
             arrival: ArrivalStamp::new(clock_sync),
             offset_ns: None,
         }
+    }
+
+    #[cfg(feature = "rtsp")]
+    pub(crate) fn start_new_sender_timeline(&mut self) {
+        self.offset_ns = None;
     }
 
     pub(crate) fn shift_ns(&mut self, sender_ns: u64) -> u64 {
