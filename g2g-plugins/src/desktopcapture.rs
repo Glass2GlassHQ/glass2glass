@@ -12,7 +12,7 @@ use tokio::sync::watch;
 
 use g2g_core::frame::Frame;
 use g2g_core::{
-    CaptureAnchor, ClockSync, FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink,
+    Caps, CaptureAnchor, ClockSync, FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink,
     PipelineClock, PipelinePacket,
 };
 
@@ -24,12 +24,19 @@ const POLL_INTERVAL: Duration = Duration::from_millis(1);
 pub(crate) trait DesktopGrabber {
     // returns without waiting, None when the desktop has not changed since the last call
     fn next_image(&mut self) -> Result<Option<MemoryDomain>, G2gError>;
+
+    // the caps of the images next_image returns once they differ from the negotiated ones, read after each call
+    fn resized_caps(&mut self) -> Option<Caps> {
+        None
+    }
 }
 
 #[derive(Debug)]
 struct CapturedFrame {
     image: MemoryDomain,
     capture_ns: u64,
+    // None while the images keep the negotiated caps
+    caps: Option<Caps>,
 }
 
 #[derive(Debug)]
@@ -85,11 +92,15 @@ impl CaptureWorker {
     pub(crate) fn pace(self, grabber: &mut impl DesktopGrabber) -> Result<(), G2gError> {
         let _ = self.ready.try_send(Ok(()));
         let mut pacer = DesktopPacer::new(self.period, Instant::now());
+        let mut caps = None;
         loop {
             if let Some(allowed) = pacer.next_change_allowed() {
                 thread::sleep(allowed.saturating_duration_since(Instant::now()));
             }
             let changed = grabber.next_image()?;
+            if let Some(resized) = grabber.resized_caps() {
+                caps = Some(resized);
+            }
             let Some(image) = pacer.image_to_send(changed, Instant::now()) else {
                 thread::sleep(POLL_INTERVAL);
                 continue;
@@ -97,6 +108,7 @@ impl CaptureWorker {
             let captured = CapturedFrame {
                 image,
                 capture_ns: g2g_core::metrics::monotonic_ns(),
+                caps: caps.clone(),
             };
             if self.frames.send(Some(captured)).is_err() {
                 return Ok(());
@@ -156,6 +168,7 @@ pub(crate) async fn run_desktop_capture(
     let mut first_capture_ns = None;
     let mut sequence = 0u64;
     let mut downstream_open = true;
+    let mut pushed_caps = None;
     while sequence < frame_limit {
         if frame_receiver.changed().await.is_err() {
             break;
@@ -164,9 +177,23 @@ pub(crate) async fn run_desktop_capture(
             Some(captured) => CapturedFrame {
                 image: captured.image.share(),
                 capture_ns: captured.capture_ns,
+                caps: captured.caps.clone(),
             },
             None => continue,
         };
+        if captured.caps != pushed_caps {
+            if let Some(caps) = &captured.caps {
+                if out
+                    .push(PipelinePacket::CapsChanged(caps.clone()))
+                    .await
+                    .is_err()
+                {
+                    downstream_open = false;
+                    break;
+                }
+            }
+            pushed_caps = captured.caps.clone();
+        }
         let elapsed = captured.capture_ns - *first_capture_ns.get_or_insert(captured.capture_ns);
         let pts = match &clock_sync {
             Some(sync) => anchor.stamp(sync, elapsed, period_ns),

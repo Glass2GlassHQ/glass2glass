@@ -34,8 +34,6 @@ The plan is [remote.md](remote.md).
 
 - `g2g-desktop host` on an X11 display: capture with `ximagesrc` and inject
   input through XTest.
-- `ximagesrc`: follow a window or screen resize with `CapsChanged` instead of
-  failing.
 - Opus audio from the host's default capture device, on a short queue that
   does not hold the picture.
 - Encode with `d3d11convert ! nvenc` on a Windows host with an NVIDIA GPU,

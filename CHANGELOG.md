@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2567: Follow a resized window or screen in `ximagesrc` with `CapsChanged`.
 - M2566: Grab the desktop's shortcuts in the Linux `g2g-desktop` client window, released by Escape (`--keyboard-grab`).
 - M2565: Send the portal host's pointer to the client from PipeWire cursor metadata (`portal-cursor-mode`).
 - M2564: Sync clipboard text between the `--run` desktop and the Linux `g2g-desktop` client.

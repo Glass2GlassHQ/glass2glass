@@ -16,7 +16,10 @@ use x11rb::connection::Connection;
 use x11rb::protocol::damage::{ConnectionExt as _, ReportLevel};
 use x11rb::protocol::shm::ConnectionExt as _;
 use x11rb::protocol::xfixes::{ConnectionExt as _, CursorNotifyMask};
-use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _, ImageFormat, ImageOrder, Window};
+use x11rb::protocol::xproto::{
+    AtomEnum, ChangeWindowAttributesAux, ConnectionExt as _, EventMask, ImageFormat, ImageOrder,
+    Window,
+};
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 
@@ -336,12 +339,39 @@ struct PointerOverlay {
 
 struct XGrabber {
     connection: RustConnection,
+    target: CaptureTarget,
+    framerate_q16: u32,
     area: CaptureArea,
     segment: u32,
     image: SharedImage,
     damage: Option<u32>,
     pointer: Option<PointerOverlay>,
     captured_once: bool,
+    resized: Option<Caps>,
+}
+
+#[derive(Debug, Default)]
+struct XEvents {
+    damaged: bool,
+    cursor_changed: bool,
+    reconfigured: bool,
+}
+
+fn attach_image(connection: &RustConnection, bytes: usize) -> Result<(u32, SharedImage), G2gError> {
+    let image = SharedImage::new(bytes)?;
+    let segment = connection
+        .generate_id()
+        .map_err(|error| x11_failure("allocating the shm segment id", error))?;
+    let shared_fd = image
+        .fd
+        .try_clone()
+        .map_err(|error| x11_failure("duplicating the shared image", error))?;
+    connection
+        .shm_attach_fd(segment, shared_fd, false)
+        .map_err(|error| x11_failure("attaching the shared image", error))?
+        .check()
+        .map_err(|error| x11_failure("attaching the shared image", error))?;
+    Ok((segment, image))
 }
 
 impl Debug for XGrabber {
@@ -355,7 +385,8 @@ impl Debug for XGrabber {
 
 #[derive(Debug, Clone)]
 struct GrabSettings {
-    display_name: Option<String>,
+    target: CaptureTarget,
+    framerate_q16: u32,
     area: CaptureArea,
     show_pointer: bool,
     use_damage: bool,
@@ -363,7 +394,7 @@ struct GrabSettings {
 
 impl XGrabber {
     fn open(settings: GrabSettings) -> Result<Self, G2gError> {
-        let (connection, _) = connect(settings.display_name.as_deref())?;
+        let (connection, _) = connect(settings.target.display_name.as_deref())?;
         let area = settings.area;
         let version = connection
             .shm_query_version()
@@ -373,19 +404,16 @@ impl XGrabber {
         if (version.major_version, version.minor_version) < MIN_SHM_VERSION {
             return Err(x11_failure("MIT-SHM is older than 1.2", version));
         }
-        let image = SharedImage::new(area.bytes())?;
-        let segment = connection
-            .generate_id()
-            .map_err(|error| x11_failure("allocating the shm segment id", error))?;
-        let shared_fd = image
-            .fd
-            .try_clone()
-            .map_err(|error| x11_failure("duplicating the shared image", error))?;
+        let (segment, image) = attach_image(&connection, area.bytes())?;
+        // a resized window or screen sends ConfigureNotify to clients that select structure events on it
         connection
-            .shm_attach_fd(segment, shared_fd, false)
-            .map_err(|error| x11_failure("attaching the shared image", error))?
+            .change_window_attributes(
+                area.window,
+                &ChangeWindowAttributesAux::new().event_mask(EventMask::STRUCTURE_NOTIFY),
+            )
+            .map_err(|error| x11_failure("watching the window size", error))?
             .check()
-            .map_err(|error| x11_failure("attaching the shared image", error))?;
+            .map_err(|error| x11_failure("watching the window size", error))?;
         let extensions_needed = settings.use_damage || settings.show_pointer;
         if extensions_needed {
             let (major, minor) = XFIXES_VERSION;
@@ -415,13 +443,35 @@ impl XGrabber {
         };
         Ok(Self {
             connection,
+            target: settings.target,
+            framerate_q16: settings.framerate_q16,
             area,
             segment,
             image,
             damage,
             pointer,
             captured_once: false,
+            resized: None,
         })
+    }
+
+    fn follow_resize(&mut self) -> Result<(), G2gError> {
+        let area = capture_area(&self.target)?;
+        if (area.width, area.height) != (self.area.width, self.area.height) {
+            let (segment, image) = attach_image(&self.connection, area.bytes())?;
+            // the X server also detaches the segment when the connection closes
+            let _ = self.connection.shm_detach(self.segment);
+            self.segment = segment;
+            self.image = image;
+            self.resized = caps_for(
+                FORMAT,
+                Dim::Fixed(u32::from(area.width)),
+                Dim::Fixed(u32::from(area.height)),
+                Rate::Fixed(self.framerate_q16),
+            );
+        }
+        self.area = area;
+        Ok(())
     }
 
     fn cursor_image(&self) -> Result<CursorImage, G2gError> {
@@ -458,24 +508,26 @@ impl XGrabber {
             .then(|| (i32::from(reply.win_x), i32::from(reply.win_y))))
     }
 
-    fn take_events(&mut self) -> Result<(bool, bool), G2gError> {
-        let mut damaged = false;
-        let mut cursor_changed = false;
+    fn take_events(&mut self) -> Result<XEvents, G2gError> {
+        let mut events = XEvents::default();
         while let Some(event) = self
             .connection
             .poll_for_event()
             .map_err(|error| x11_failure("reading X events", error))?
         {
             match event {
-                Event::DamageNotify(_) => damaged = true,
-                Event::XfixesCursorNotify(_) => cursor_changed = true,
+                Event::DamageNotify(_) => events.damaged = true,
+                Event::XfixesCursorNotify(_) => events.cursor_changed = true,
+                Event::ConfigureNotify(notify) if notify.window == self.area.window => {
+                    events.reconfigured = true;
+                }
                 Event::Error(error) => {
                     return Err(x11_failure("the X server failed a request", error))
                 }
                 _ => {}
             }
         }
-        Ok((damaged, cursor_changed))
+        Ok(events)
     }
 }
 
@@ -499,8 +551,16 @@ fn watch_damage(connection: &RustConnection, window: Window) -> Result<u32, G2gE
 
 impl DesktopGrabber for XGrabber {
     fn next_image(&mut self) -> Result<Option<MemoryDomain>, G2gError> {
-        let (damaged, cursor_changed) = self.take_events()?;
-        let mut changed = !self.captured_once || self.damage.is_none() || damaged;
+        let XEvents {
+            damaged,
+            cursor_changed,
+            reconfigured,
+        } = self.take_events()?;
+        if reconfigured {
+            self.follow_resize()?;
+        }
+        let mut changed =
+            !self.captured_once || self.damage.is_none() || damaged || self.resized.is_some();
         if let (Some(damage), true) = (self.damage, damaged) {
             // damage reports once until the damaged region is cleared
             self.connection
@@ -551,6 +611,10 @@ impl DesktopGrabber for XGrabber {
         }
         self.captured_once = true;
         Ok(Some(MemoryDomain::System(SystemSlice::from_boxed(picture))))
+    }
+
+    fn resized_caps(&mut self) -> Option<Caps> {
+        self.resized.take()
     }
 }
 
@@ -839,7 +903,8 @@ impl SourceLoop for XImageSrc {
                 return Ok(0);
             }
             let grab = GrabSettings {
-                display_name: self.target.display_name.clone(),
+                target: self.target.clone(),
+                framerate_q16: self.framerate_q16,
                 area,
                 show_pointer: self.show_pointer,
                 use_damage: self.use_damage,

@@ -15,8 +15,8 @@ use g2g_plugins::appsink::{register_appsink_pull, AppSinkPull};
 use g2g_plugins::registry::default_registry;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
-    AtomEnum, ChangeWindowAttributesAux, ConnectionExt as _, CreateWindowAux, PropMode, Window,
-    WindowClass,
+    AtomEnum, ChangeWindowAttributesAux, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux,
+    PropMode, Window, WindowClass,
 };
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
@@ -141,6 +141,18 @@ impl TestWindow {
         self.connection
             .clear_area(false, self.window, 0, 0, 0, 0)
             .expect("repaints the window");
+        self.sync();
+    }
+
+    fn resize(&self, width: u16, height: u16) {
+        self.connection
+            .configure_window(
+                self.window,
+                &ConfigureWindowAux::new()
+                    .width(u32::from(width))
+                    .height(u32::from(height)),
+            )
+            .expect("resizes the window");
         self.sync();
     }
 
@@ -303,4 +315,50 @@ async fn a_window_is_found_by_name_and_shown_with_the_pointer() {
         ) != bgr(FIRST_COLOR)),
         "the pointer is drawn into the frame"
     );
+}
+
+#[tokio::test]
+async fn a_resized_window_is_captured_at_its_new_size() {
+    const NEW_WIDTH: u16 = 96;
+    const NEW_HEIGHT: u16 = 40;
+    let server = Xvfb::start();
+    let window = TestWindow::map(&server.display);
+    let (pull, graph) = launch(
+        "m2567_resize",
+        &format!(
+            "ximagesrc display-name={} xid={} show-pointer=false",
+            server.display, window.window
+        ),
+    );
+    let picture_bytes =
+        |width: u16, height: u16| usize::from(width) * usize::from(height) * BYTES_PER_PIXEL;
+    let checks = async {
+        let first = pull.pull().await.expect("the first frame");
+        assert_eq!(
+            picture(&first).len(),
+            picture_bytes(WINDOW_WIDTH, WINDOW_HEIGHT)
+        );
+        window.resize(NEW_WIDTH, NEW_HEIGHT);
+        loop {
+            let frame = pull.pull().await.expect("the source keeps producing");
+            let picture = picture(&frame);
+            if picture.len() == picture_bytes(NEW_WIDTH, NEW_HEIGHT) {
+                assert!(picture
+                    .as_chunks::<BYTES_PER_PIXEL>()
+                    .0
+                    .iter()
+                    .all(|pixel| pixel[..3] == bgr(FIRST_COLOR)));
+                return;
+            }
+            assert_eq!(
+                picture.len(),
+                picture_bytes(WINDOW_WIDTH, WINDOW_HEIGHT),
+                "frames keep the old size until the new one"
+            );
+        }
+    };
+    tokio::select! {
+        result = run_graph(graph, &ZeroClock, 2) => panic!("the graph ended first: {result:?}"),
+        resized = tokio::time::timeout(TIMEOUT, checks) => resized.expect("a frame has the new size"),
+    }
 }

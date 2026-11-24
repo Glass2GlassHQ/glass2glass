@@ -211,10 +211,14 @@ The worker runs on the same desktop capture loop as `D3D11ScreenCaptureSrc`.
 With `use-damage` an XDamage object on the window marks a change, and the image
 is read only then. Without it every period reads the image. With `show-pointer`
 the XFixes cursor image is blended in at the pointer, refetched when XFixes
-reports a new cursor, and a pointer move counts as a change. The X server
-refuses a read whose area is not on screen and inside the window, so a window
-that shrinks below the region, moves partly off screen or unmaps fails the
-source. A window that grows keeps the captured area.
+reports a new cursor, and a pointer move counts as a change. The worker
+selects structure events on the window, and a `ConfigureNotify` makes it cut
+the region out of the new geometry. A new size reallocates the shared image and
+the next frame goes out behind a `CapsChanged` with that size, which the
+capture loop pushes whenever a frame's caps differ from the last pushed ones.
+The X server refuses a read whose area is not on screen and inside the window,
+so a window that shrinks below a fixed region, moves partly off screen or
+unmaps fails the source.
 
 ### WaylandDisplaySrc
 
