@@ -28,7 +28,14 @@ git = "https://github.com/Smithay/smithay"
 rev = "a38bb709a0400759b6a4fab6129e0f1dd72808c3"
 optional = true
 default-features = false
-features = ["desktop", "renderer_pixman", "wayland_frontend"]
+features = [
+    "backend_egl",
+    "backend_gbm",
+    "desktop",
+    "renderer_gl",
+    "renderer_pixman",
+    "wayland_frontend",
+]
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 g2g-plugins = { workspace = true, features = ["std"] }

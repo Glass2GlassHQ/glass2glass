@@ -18,7 +18,6 @@ const APPSINK_CHANNEL: &str = "g2g-gtk4-video";
 const LINK_CAPACITY: usize = 2;
 const DEFAULT_PIPELINE: &str = "videotestsrc pattern=ball \
     ! video/x-raw,format=RGBA,width=1280,height=720,framerate=30/1 ! clocksync";
-const DRM_FORMAT_MOD_LINEAR: u64 = 0;
 
 fn main() -> glib::ExitCode {
     let description = std::env::args()
@@ -143,7 +142,7 @@ fn dmabuf_texture(
         .set_width(width)
         .set_height(height)
         .set_fourcc(fourcc)
-        .set_modifier(DRM_FORMAT_MOD_LINEAR)
+        .set_modifier(buffer.modifier())
         .set_n_planes(planes);
     for plane in 0..planes {
         // SAFETY: the frame holds `fd` open until GTK calls the release function below

@@ -470,6 +470,7 @@ impl EncodeSession {
                 (v4l2_memory_V4L2_MEMORY_MMAP, 0)
             }
             MemoryDomain::DmaBuf(dmabuf) => {
+                dmabuf.require_linear(self.log_category)?;
                 let (layout, _) =
                     dmabuf_plane_layout(dmabuf, picture.format, picture.width, picture.height)
                         .ok_or(G2gError::CapsMismatch)?;

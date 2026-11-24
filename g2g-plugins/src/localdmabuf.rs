@@ -474,6 +474,7 @@ impl AsyncElement for DmaBufSink {
                         // the wire codec instead.
                         return Err(G2gError::UnsupportedDomain);
                     };
+                    dmabuf.require_linear(g2g_core::log::short_type_name::<Self>())?;
                     let (format, w, h) = self
                         .configured_caps
                         .as_ref()

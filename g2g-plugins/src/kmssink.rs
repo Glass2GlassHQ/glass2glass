@@ -23,7 +23,9 @@ use drm::{ClientCapability, Device as _};
 use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, Target};
-use g2g_core::memory::{DomainSet, MemoryDomain, MemoryDomainKind, OwnedDmaBuf};
+use g2g_core::memory::{
+    DomainSet, MemoryDomain, MemoryDomainKind, OwnedDmaBuf, DRM_FORMAT_MOD_LINEAR,
+};
 use g2g_core::meta::{Orientation, OrientationSet, PlaneLayout};
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
@@ -74,6 +76,7 @@ struct Nv12Framebuffer {
     handles: [Option<BufferHandle>; 4],
     pitches: [u32; 4],
     offsets: [u32; 4],
+    modifier: Option<DrmModifier>,
 }
 
 impl PlanarBuffer for Nv12Framebuffer {
@@ -84,7 +87,7 @@ impl PlanarBuffer for Nv12Framebuffer {
         PICTURE_FORMAT
     }
     fn modifier(&self) -> Option<DrmModifier> {
-        None
+        self.modifier
     }
     fn pitches(&self) -> [u32; 4] {
         self.pitches
@@ -113,6 +116,7 @@ fn nv12_slots(card: &Card, (width, height): (u32, u32)) -> Result<Vec<Slot>, G2g
                 handles: [Some(db.handle()), Some(db.handle()), None, None],
                 pitches: [pitch, pitch, 0, 0],
                 offsets: [0, pitch * height, 0, 0],
+                modifier: None,
             };
             let fb = card
                 .add_planar_framebuffer(&planar, FbCmd2Flags::empty())
@@ -701,12 +705,15 @@ impl Scanout {
                 // SAFETY: the fd is a live dma-buf owned by `dmabuf` for this call.
                 let fd = unsafe { BorrowedFd::borrow_raw(dmabuf.as_raw()) };
                 let handle = card.prime_fd_to_buffer(fd).map_err(hardware)?;
+                let modifier = (dmabuf.modifier() != DRM_FORMAT_MOD_LINEAR)
+                    .then(|| DrmModifier::from(dmabuf.modifier()));
                 let mut framebuffer = Nv12Framebuffer {
                     width,
                     height,
                     handles: [None; 4],
                     pitches: [0; 4],
                     offsets: [0; 4],
+                    modifier,
                 };
                 for index in 0..layout.count() {
                     let plane = layout.plane(index).ok_or(G2gError::CapsMismatch)?;
@@ -719,7 +726,11 @@ impl Scanout {
                     framebuffer.pitches[index] = to_u32(plane.stride)?;
                     framebuffer.offsets[index] = to_u32(plane.offset)?;
                 }
-                let added = card.add_planar_framebuffer(&framebuffer, FbCmd2Flags::empty());
+                let flags = match modifier {
+                    Some(_) => FbCmd2Flags::MODIFIERS,
+                    None => FbCmd2Flags::empty(),
+                };
+                let added = card.add_planar_framebuffer(&framebuffer, flags);
                 // drm keeps the buffer alive while a framebuffer uses it
                 card.close_buffer(handle).map_err(hardware)?;
                 added.map_err(hardware)

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2535: Render `waylanddisplaysrc` on a GPU render node and carry a DRM format modifier on `OwnedDmaBuf`.
 - M2534: Add `waylanddisplaysrc`, a headless Wayland compositor source in `g2g-wayland-display`.
 - M2533: Resize the `waylandsink` window in place when the caps change size.
 - M2532: Pace and report `waylandsink` QoS by when frames reach the screen.

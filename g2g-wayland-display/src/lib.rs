@@ -5,6 +5,8 @@
 #[cfg(all(target_os = "linux", feature = "display"))]
 mod display;
 #[cfg(all(target_os = "linux", feature = "display"))]
+mod gpu;
+#[cfg(all(target_os = "linux", feature = "display"))]
 pub mod waylanddisplaysrc;
 
 #[cfg(all(target_os = "linux", feature = "display"))]

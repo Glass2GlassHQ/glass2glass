@@ -4,18 +4,19 @@
 
 use core::future::Future;
 use core::pin::Pin;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use g2g_core::caps::{fps_period_ns, framerate_q16_from_fraction};
 use g2g_core::frame::Frame;
 use g2g_core::log::Target;
-use g2g_core::memory::SystemSlice;
+use g2g_core::memory::{DomainSet, MemoryDomainKind, SystemSlice};
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, CaptureAnchor, ClockSync, Colorimetry, ConfigureOutcome, Dim,
-    ElementMetadata, FrameTiming, G2gError, HardwareError, Interlace, LatencyReport, MemoryDomain,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PixelAspect, PropError, PropKind,
-    PropValue, PropertySpec, Rate, RawVideoFormat,
+    AllocationParams, Caps, CapsConstraint, CapsSet, CaptureAnchor, ClockSync, Colorimetry,
+    ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError, HardwareError, Interlace,
+    LatencyReport, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PixelAspect, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 use g2g_plugins::numbuffers::{
     finished_at_zero_limit, get_num_buffers, num_buffers_property, set_num_buffers,
@@ -24,10 +25,15 @@ use g2g_plugins::windowinput::WindowInput;
 use smithay::reexports::calloop::channel::{channel, Channel, Sender};
 use tokio::sync::{oneshot, watch};
 
-use crate::display::{run_display, DisplayChannels, DisplaySize, FrameReply, Pacing};
+use crate::display::{
+    run_display, DisplayChannels, DisplaySize, FrameReply, Pacing, Picture, Rendering,
+};
+use crate::gpu::GpuOutput;
 
-// pixman's x8r8g8b8 is B, G, R, X in memory on little-endian hosts
-const OUTPUT_FORMAT: RawVideoFormat = RawVideoFormat::Bgrx8;
+// drm's abgr8888 is R, G, B, A in memory
+const OUTPUT_FORMAT: RawVideoFormat = RawVideoFormat::Rgba8;
+const SOFTWARE_RENDERING: &str = "software";
+const DEFAULT_RENDER_NODE: &str = "/dev/dri/renderD128";
 const DEFAULT_WIDTH: u32 = 1920;
 const DEFAULT_HEIGHT: u32 = 1080;
 const DEFAULT_FRAMERATE: u32 = 60;
@@ -38,6 +44,8 @@ pub struct WaylandDisplaySrc {
     height: u32,
     framerate: u32,
     frame_limit: u64,
+    render_node: String,
+    output_memory: MemoryDomainKind,
     configured: bool,
     clock_sync: Option<ClockSync>,
     input_sender: Sender<WindowInput>,
@@ -52,6 +60,8 @@ impl core::fmt::Debug for WaylandDisplaySrc {
             .field("height", &self.height)
             .field("framerate", &self.framerate)
             .field("frame_limit", &self.frame_limit)
+            .field("render_node", &self.render_node)
+            .field("output_memory", &self.output_memory)
             .field("socket_name", &*self.socket_name.borrow())
             .finish_non_exhaustive()
     }
@@ -65,6 +75,8 @@ impl Default for WaylandDisplaySrc {
             height: DEFAULT_HEIGHT,
             framerate: DEFAULT_FRAMERATE,
             frame_limit: u64::MAX,
+            render_node: String::from(DEFAULT_RENDER_NODE),
+            output_memory: MemoryDomainKind::System,
             configured: false,
             clock_sync: None,
             input_sender,
@@ -95,6 +107,11 @@ impl WaylandDisplaySrc {
         self
     }
 
+    pub fn with_render_node(mut self, render_node: impl Into<String>) -> Self {
+        self.render_node = render_node.into();
+        self
+    }
+
     pub fn input_sender(&self) -> Sender<WindowInput> {
         self.input_sender.clone()
     }
@@ -102,6 +119,21 @@ impl WaylandDisplaySrc {
     pub fn socket_names(&self) -> watch::Receiver<String> {
         // clients set WAYLAND_DISPLAY to this name, which stays empty until the run opens the socket
         self.socket_name.subscribe()
+    }
+
+    fn rendering(&self) -> Result<Rendering, G2gError> {
+        if self.render_node == SOFTWARE_RENDERING {
+            return Ok(Rendering::Software);
+        }
+        let output = match self.output_memory {
+            MemoryDomainKind::DmaBuf => GpuOutput::DmaBuf,
+            MemoryDomainKind::System => GpuOutput::System,
+            _ => return Err(G2gError::AllocationConflict),
+        };
+        Ok(Rendering::Gpu {
+            render_node: PathBuf::from(&self.render_node),
+            output,
+        })
     }
 
     pub(crate) fn caps(&self) -> Result<Caps, G2gError> {
@@ -178,6 +210,12 @@ impl SourceLoop for WaylandDisplaySrc {
                 "highest output rate in frames per second, also the refresh clients see",
             )
             .with_default("60"),
+            PropertySpec::new(
+                "render-node",
+                PropKind::Str,
+                "DRM render node the compositor renders with, or software for the CPU renderer",
+            )
+            .with_default(DEFAULT_RENDER_NODE),
             num_buffers_property("frames to render then EOS (-1 = forever)"),
         ];
         PROPERTIES
@@ -194,6 +232,9 @@ impl SourceLoop for WaylandDisplaySrc {
             "width" => self.width = as_u32(&value)?,
             "height" => self.height = as_u32(&value)?,
             "framerate" => self.framerate = as_u32(&value)?,
+            "render-node" => {
+                self.render_node = value.as_str().ok_or(PropError::Type)?.to_owned();
+            }
             "num-buffers" => set_num_buffers(&mut self.frame_limit, &value)?,
             _ => return Err(PropError::Unknown),
         }
@@ -205,8 +246,26 @@ impl SourceLoop for WaylandDisplaySrc {
             "width" => Some(PropValue::Uint(self.width.into())),
             "height" => Some(PropValue::Uint(self.height.into())),
             "framerate" => Some(PropValue::Uint(self.framerate.into())),
+            "render-node" => Some(PropValue::Str(self.render_node.clone())),
             "num-buffers" => Some(get_num_buffers(self.frame_limit)),
             _ => None,
+        }
+    }
+
+    fn output_memory(&self) -> MemoryDomainKind {
+        self.output_memory
+    }
+
+    fn output_domains(&self) -> DomainSet {
+        if self.render_node == SOFTWARE_RENDERING {
+            return DomainSet::only(MemoryDomainKind::System);
+        }
+        DomainSet::only(MemoryDomainKind::System).with(MemoryDomainKind::DmaBuf)
+    }
+
+    fn configure_allocation(&mut self, params: &AllocationParams) {
+        if let Ok(resolved) = params.clone().resolve_for_producer(self.output_domains()) {
+            self.output_memory = resolved.domain;
         }
     }
 
@@ -226,6 +285,7 @@ impl SourceLoop for WaylandDisplaySrc {
             if finished_at_zero_limit(self.frame_limit, out).await? {
                 return Ok(0);
             }
+            let rendering = self.rendering()?;
             let input = self.input.take().ok_or(G2gError::NotConfigured)?;
             let period_ns = fps_period_ns(self.framerate);
             let size = DisplaySize {
@@ -244,6 +304,7 @@ impl SourceLoop for WaylandDisplaySrc {
                     run_display(
                         size,
                         pacing,
+                        rendering,
                         DisplayChannels {
                             frame_requests,
                             input,
@@ -291,10 +352,14 @@ impl SourceLoop for WaylandDisplaySrc {
                     Some(sync) => anchor.stamp(sync, elapsed, period_ns),
                     None => elapsed,
                 };
+                let domain = match picture {
+                    Picture::System(bytes) => {
+                        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice()))
+                    }
+                    Picture::DmaBuf(dmabuf) => MemoryDomain::DmaBuf(dmabuf),
+                };
                 let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(
-                        picture.into_boxed_slice(),
-                    )),
+                    domain,
                     timing: FrameTiming {
                         pts_ns: pts,
                         dts_ns: pts,

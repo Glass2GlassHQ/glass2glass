@@ -158,6 +158,7 @@ impl DmaBufImporter {
         dmabuf: &OwnedDmaBuf,
         size: u64,
     ) -> Result<wgpu::Buffer, G2gError> {
+        dmabuf.require_linear("DmaBufImporter")?;
         self.await_producer(device, dmabuf).await?;
         self.imports.get_or_import(
             dmabuf,

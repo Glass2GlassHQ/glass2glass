@@ -2,19 +2,22 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use g2g_core::log::Target;
+use g2g_core::memory::OwnedDmaBuf;
 use g2g_core::{G2gError, HardwareError};
 use g2g_plugins::windowinput::{WindowInput, WHEEL_PIXELS_PER_NOTCH, WHEEL_UNITS_PER_NOTCH};
+use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::input::{Axis, AxisSource, ButtonState, InputTime, KeyState};
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::pixman::PixmanRenderer;
 use smithay::backend::renderer::utils::on_commit_buffer_handler;
-use smithay::backend::renderer::{Bind, Offscreen};
+use smithay::backend::renderer::{Bind, ImportDma, Offscreen};
 use smithay::desktop::space::render_output;
 use smithay::desktop::{PopupKind, PopupManager, Space, Window, WindowSurfaceType};
 use smithay::input::dnd::DndGrabHandler;
@@ -37,6 +40,7 @@ use smithay::wayland::compositor::{
     get_parent, is_sync_subsurface, with_states, CompositorClientState, CompositorHandler,
     CompositorState,
 };
+use smithay::wayland::dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier};
 use smithay::wayland::output::{OutputHandler, OutputManagerState};
 use smithay::wayland::pointer_constraints::PointerConstraintsHandler;
 use smithay::wayland::selection::data_device::{
@@ -51,13 +55,16 @@ use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::wayland::socket::ListeningSocketSource;
 use tokio::sync::oneshot;
 
+use crate::gpu::{GpuOutput, GpuRenderer};
+
 const LOG_CATEGORY: &str = "WaylandDisplaySrc";
 // xkb keycodes are evdev codes offset by 8
 const XKB_KEYCODE_OFFSET: u32 = 8;
 const KEY_REPEAT_DELAY_MS: i32 = 200;
 const KEY_REPEAT_RATE_HZ: i32 = 25;
-const BACKGROUND: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
-const BYTES_PER_PIXEL: usize = 4;
+pub(crate) const BACKGROUND: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+pub(crate) const BYTES_PER_PIXEL: usize = 4;
+pub(crate) const OUTPUT_FOURCC: Fourcc = Fourcc::Abgr8888;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct DisplaySize {
@@ -71,7 +78,22 @@ pub(crate) struct Pacing {
     pub(crate) repeat_after: Duration,
 }
 
-pub(crate) type FrameReply = oneshot::Sender<Vec<u8>>;
+#[derive(Debug, Clone)]
+pub(crate) enum Picture {
+    System(Vec<u8>),
+    DmaBuf(OwnedDmaBuf),
+}
+
+pub(crate) type FrameReply = oneshot::Sender<Picture>;
+
+#[derive(Debug, Clone)]
+pub(crate) enum Rendering {
+    Software,
+    Gpu {
+        render_node: PathBuf,
+        output: GpuOutput,
+    },
+}
 
 pub(crate) struct DisplayChannels {
     pub(crate) frame_requests: Channel<FrameReply>,
@@ -79,7 +101,7 @@ pub(crate) struct DisplayChannels {
     pub(crate) socket_name: oneshot::Sender<Result<String, G2gError>>,
 }
 
-fn hardware_error(what: &str, error: impl core::fmt::Debug) -> G2gError {
+pub(crate) fn hardware_error(what: &str, error: impl core::fmt::Debug) -> G2gError {
     g2g_core::g2g_error!(Target::category(LOG_CATEGORY), "{what}: {error:?}");
     G2gError::Hardware(HardwareError::Other)
 }
@@ -87,6 +109,7 @@ fn hardware_error(what: &str, error: impl core::fmt::Debug) -> G2gError {
 pub(crate) fn run_display(
     size: DisplaySize,
     pacing: Pacing,
+    rendering: Rendering,
     channels: DisplayChannels,
 ) -> Result<(), G2gError> {
     let DisplayChannels {
@@ -94,7 +117,7 @@ pub(crate) fn run_display(
         input,
         socket_name,
     } = channels;
-    let started = start_display(size, pacing, frame_requests, input);
+    let started = start_display(size, pacing, rendering, frame_requests, input);
     let (mut event_loop, mut state) = match started {
         Ok(started) => started,
         Err(error) => {
@@ -120,6 +143,7 @@ pub(crate) fn run_display(
 fn start_display(
     size: DisplaySize,
     pacing: Pacing,
+    rendering: Rendering,
     frame_requests: Channel<FrameReply>,
     input: Channel<WindowInput>,
 ) -> Result<(EventLoop<'static, DisplayState>, DisplayState), G2gError> {
@@ -174,7 +198,7 @@ fn start_display(
         })
         .map_err(|error| hardware_error("receiving input", error))?;
 
-    let state = DisplayState::new(display_handle, socket_name, size, pacing)?;
+    let state = DisplayState::new(display_handle, socket_name, size, pacing, rendering)?;
     Ok((event_loop, state))
 }
 
@@ -185,11 +209,15 @@ struct ClientState {
 
 impl ClientData for ClientState {}
 
-struct Renderer {
+struct SoftwareRenderer {
     pixman: PixmanRenderer,
     image: Image<'static, 'static>,
-    damage_tracker: OutputDamageTracker,
     rendered_once: bool,
+}
+
+enum Renderer {
+    Software(SoftwareRenderer),
+    Gpu(Box<GpuRenderer>),
 }
 
 struct DisplayState {
@@ -201,6 +229,8 @@ struct DisplayState {
     compositor_state: CompositorState,
     xdg_shell_state: XdgShellState,
     shm_state: ShmState,
+    dmabuf_state: DmabufState,
+    _dmabuf_global: Option<DmabufGlobal>,
     data_device_state: DataDeviceState,
     _output_manager_state: OutputManagerState,
     seat_state: SeatState<DisplayState>,
@@ -209,11 +239,58 @@ struct DisplayState {
     popups: PopupManager,
     output: Output,
     renderer: Renderer,
+    damage_tracker: OutputDamageTracker,
     pending_reply: Option<FrameReply>,
     damaged: bool,
-    last_frame: Option<(Instant, Vec<u8>)>,
+    last_frame: Option<(Instant, Picture)>,
     held_buttons: Vec<u32>,
     stopped: bool,
+}
+
+fn render_software(
+    software: &mut SoftwareRenderer,
+    output: &Output,
+    space: &Space<Window>,
+    damage_tracker: &mut OutputDamageTracker,
+) -> Result<(), G2gError> {
+    let age = usize::from(software.rendered_once);
+    let mut framebuffer = software
+        .pixman
+        .bind(&mut software.image)
+        .map_err(|error| hardware_error("binding the output picture", error))?;
+    let result = render_output::<_, WaylandSurfaceRenderElement<PixmanRenderer>, _, _>(
+        output,
+        &mut software.pixman,
+        &mut framebuffer,
+        1.0,
+        age,
+        [space],
+        &[],
+        damage_tracker,
+        BACKGROUND,
+    )
+    .map_err(|error| hardware_error("rendering the output", error))?;
+    result
+        .sync
+        .wait()
+        .map_err(|error| hardware_error("waiting for the render", error))?;
+    software.rendered_once = true;
+    Ok(())
+}
+
+fn copy_picture(image: &Image<'static, 'static>, size: DisplaySize) -> Vec<u8> {
+    let row_bytes = size.width as usize * BYTES_PER_PIXEL;
+    let stride = image.stride();
+    let height = size.height as usize;
+    // SAFETY: pixman owns stride * height bytes at data() for as long as the image lives, and nothing writes them during this borrow.
+    let bits = unsafe {
+        std::slice::from_raw_parts(image.data().cast::<u8>().cast_const(), stride * height)
+    };
+    let mut picture = Vec::with_capacity(row_bytes * height);
+    for row in bits.chunks_exact(stride) {
+        picture.extend_from_slice(&row[..row_bytes]);
+    }
+    picture
 }
 
 impl DisplayState {
@@ -222,6 +299,7 @@ impl DisplayState {
         socket_name: String,
         size: DisplaySize,
         pacing: Pacing,
+        rendering: Rendering,
     ) -> Result<Self, G2gError> {
         let compositor_state = CompositorState::new::<Self>(&display_handle);
         let xdg_shell_state = XdgShellState::new::<Self>(&display_handle);
@@ -269,11 +347,32 @@ impl DisplayState {
         let mut space = Space::default();
         space.map_output(&output, (0, 0));
 
-        let mut pixman = PixmanRenderer::new()
-            .map_err(|error| hardware_error("creating the renderer", error))?;
-        let image = pixman
-            .create_buffer(Fourcc::Xrgb8888, pixel_size.into())
-            .map_err(|error| hardware_error("allocating the output picture", error))?;
+        let renderer = match rendering {
+            Rendering::Software => {
+                let mut pixman = PixmanRenderer::new()
+                    .map_err(|error| hardware_error("creating the renderer", error))?;
+                let image = pixman
+                    .create_buffer(OUTPUT_FOURCC, pixel_size.into())
+                    .map_err(|error| hardware_error("allocating the output picture", error))?;
+                Renderer::Software(SoftwareRenderer {
+                    pixman,
+                    image,
+                    rendered_once: false,
+                })
+            }
+            Rendering::Gpu {
+                render_node,
+                output,
+            } => Renderer::Gpu(Box::new(GpuRenderer::open(&render_node, size, output)?)),
+        };
+        let mut dmabuf_state = DmabufState::new();
+        let dmabuf_global = match &renderer {
+            Renderer::Software(_) => None,
+            Renderer::Gpu(gpu) => Some(dmabuf_state.create_global_with_default_feedback::<Self>(
+                &display_handle,
+                &gpu.dmabuf_feedback()?,
+            )),
+        };
         let damage_tracker = OutputDamageTracker::from_output(&output);
 
         Ok(Self {
@@ -285,6 +384,8 @@ impl DisplayState {
             compositor_state,
             xdg_shell_state,
             shm_state,
+            dmabuf_state,
+            _dmabuf_global: dmabuf_global,
             data_device_state,
             _output_manager_state: output_manager_state,
             seat_state,
@@ -292,12 +393,8 @@ impl DisplayState {
             space,
             popups: PopupManager::default(),
             output,
-            renderer: Renderer {
-                pixman,
-                image,
-                damage_tracker,
-                rendered_once: false,
-            },
+            renderer,
+            damage_tracker,
             pending_reply: None,
             damaged: true,
             last_frame: None,
@@ -343,34 +440,22 @@ impl DisplayState {
         Ok(())
     }
 
-    fn render(&mut self) -> Result<Vec<u8>, G2gError> {
-        let renderer = &mut self.renderer;
-        let age = usize::from(renderer.rendered_once);
-        {
-            let mut framebuffer = renderer
-                .pixman
-                .bind(&mut renderer.image)
-                .map_err(|error| hardware_error("binding the output picture", error))?;
-            let result = render_output::<_, WaylandSurfaceRenderElement<PixmanRenderer>, _, _>(
-                &self.output,
-                &mut renderer.pixman,
-                &mut framebuffer,
-                1.0,
-                age,
-                [&self.space],
-                &[],
-                &mut renderer.damage_tracker,
-                BACKGROUND,
-            )
-            .map_err(|error| hardware_error("rendering the output", error))?;
-            result
-                .sync
-                .wait()
-                .map_err(|error| hardware_error("waiting for the render", error))?;
-        }
-        renderer.rendered_once = true;
+    fn render(&mut self) -> Result<Picture, G2gError> {
+        let picture = match &mut self.renderer {
+            Renderer::Software(software) => {
+                render_software(
+                    software,
+                    &self.output,
+                    &self.space,
+                    &mut self.damage_tracker,
+                )?;
+                Picture::System(copy_picture(&software.image, self.size))
+            }
+            Renderer::Gpu(gpu) => {
+                gpu.render(&self.output, &self.space, &mut self.damage_tracker)?
+            }
+        };
         self.damaged = false;
-        let picture = self.copy_picture();
 
         let elapsed = self.started.elapsed();
         for window in self.space.elements() {
@@ -381,22 +466,6 @@ impl DisplayState {
         self.space.refresh();
         self.popups.cleanup();
         Ok(picture)
-    }
-
-    fn copy_picture(&self) -> Vec<u8> {
-        let image = &self.renderer.image;
-        let row_bytes = self.size.width as usize * BYTES_PER_PIXEL;
-        let stride = image.stride();
-        let height = self.size.height as usize;
-        // SAFETY: pixman owns stride * height bytes at data() for as long as the image lives, and nothing writes them during this borrow.
-        let bits = unsafe {
-            std::slice::from_raw_parts(image.data().cast::<u8>().cast_const(), stride * height)
-        };
-        let mut picture = Vec::with_capacity(row_bytes * height);
-        for row in bits.chunks_exact(stride) {
-            picture.extend_from_slice(&row[..row_bytes]);
-        }
-        picture
     }
 
     fn surface_under(
@@ -611,6 +680,30 @@ impl DisplayState {
 
 impl BufferHandler for DisplayState {
     fn buffer_destroyed(&mut self, _buffer: &wl_buffer::WlBuffer) {}
+}
+
+impl DmabufHandler for DisplayState {
+    fn dmabuf_state(&mut self) -> &mut DmabufState {
+        &mut self.dmabuf_state
+    }
+
+    fn dmabuf_imported(
+        &mut self,
+        _global: &DmabufGlobal,
+        dmabuf: Dmabuf,
+        notifier: ImportNotifier,
+    ) {
+        let imported = match &mut self.renderer {
+            Renderer::Software(software) => software.pixman.import_dmabuf(&dmabuf, None).is_ok(),
+            Renderer::Gpu(gpu) => gpu.gles.import_dmabuf(&dmabuf, None).is_ok(),
+        };
+        if imported {
+            // the client may disconnect before the reply
+            let _ = notifier.successful::<Self>();
+        } else {
+            notifier.failed();
+        }
+    }
 }
 
 impl ShmHandler for DisplayState {

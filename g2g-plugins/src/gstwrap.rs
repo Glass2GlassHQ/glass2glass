@@ -699,6 +699,7 @@ impl AsyncElement for GstWrap {
                 PipelinePacket::DataFrame(frame) => {
                     let pts_ns = frame.timing.pts_ns;
                     if let MemoryDomain::DmaBuf(dmabuf) = &frame.domain {
+                        dmabuf.require_linear(g2g_core::log::short_type_name::<Self>())?;
                         self.push_dmabuf(p, dmabuf, pts_ns)?;
                     } else {
                         let bytes = frame

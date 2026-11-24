@@ -49,6 +49,7 @@ struct Mapping {
 impl Mapping {
     // the kernel maps a dma-buf only whole, `dma_buf_mmap` refuses a non-zero page offset
     fn new(dmabuf: &OwnedDmaBuf, protection: libc::c_int, access: u64) -> Result<Self, G2gError> {
+        dmabuf.require_linear("DmaBufMap")?;
         let fd = dmabuf.as_raw();
         let length = dmabuf_len(dmabuf)?;
         // SAFETY: a null hint lets the kernel place the mapping; `fd` is an open

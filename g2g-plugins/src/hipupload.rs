@@ -350,6 +350,7 @@ impl AsyncElement for HipUpload {
                             self.onto_chosen_device(wrapped).await?
                         }
                         MemoryDomain::DmaBuf(dmabuf) => {
+                            dmabuf.require_linear(short_type_name::<Self>())?;
                             wait_for_producer(&dmabuf).await.inspect_err(|_| {
                                 g2g_error!(
                                     Target::category(short_type_name::<Self>()),

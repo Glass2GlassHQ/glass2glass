@@ -709,6 +709,10 @@ impl SystemView {
     }
 }
 
+// drm_fourcc.h
+#[cfg(feature = "alloc")]
+pub const DRM_FORMAT_MOD_LINEAR: u64 = 0;
+
 /// `Clone` is a refcount bump on the shared fd: a tee branch references
 /// the same DMABUF, and the fd is closed once when the last share drops.
 #[cfg(feature = "alloc")]
@@ -719,6 +723,7 @@ pub struct OwnedDmaBuf {
     fd: Arc<DmaBufFd>,
     pub stride: u32,
     pub offset: u32,
+    modifier: u64,
     /// Optional cross-process GPU-completion sync: a shared
     /// [`SyncFd`] (an exported timeline-semaphore fd, one per stream) plus the
     /// timeline value this frame's producer GPU work signals on completion. When
@@ -842,6 +847,7 @@ impl OwnedDmaBuf {
             fd: Arc::new(DmaBufFd(fd)),
             stride,
             offset,
+            modifier: DRM_FORMAT_MOD_LINEAR,
             sync: None,
             sync_file: None,
             plane_layout: None,
@@ -851,6 +857,27 @@ impl OwnedDmaBuf {
 
     pub fn as_raw(&self) -> i32 {
         self.fd.0
+    }
+
+    pub fn with_modifier(mut self, modifier: u64) -> Self {
+        self.modifier = modifier;
+        self
+    }
+
+    pub fn modifier(&self) -> u64 {
+        self.modifier
+    }
+
+    pub fn require_linear(&self, category: &'static str) -> Result<(), crate::G2gError> {
+        if self.modifier == DRM_FORMAT_MOD_LINEAR {
+            return Ok(());
+        }
+        crate::g2g_error!(
+            crate::log::Target::category(category),
+            "reads dma-bufs in linear layout but the producer sent DRM format modifier {:#x}",
+            self.modifier
+        );
+        Err(crate::G2gError::UnsupportedDomain)
     }
 
     pub fn with_plane_layout(mut self, layout: PlaneLayout) -> Self {
@@ -1896,6 +1923,27 @@ mod tests {
                 .read(&mut byte)
                 .expect("the closed end reads as end of file"),
             0
+        );
+    }
+
+    #[cfg(all(feature = "std", target_os = "linux"))]
+    #[test]
+    fn only_a_linear_dma_buf_passes_require_linear() {
+        extern crate std;
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+        // drm_fourcc.h DRM_FORMAT_MOD_NVIDIA_BLOCK_LINEAR_2D for one 3060 render target
+        const NVIDIA_BLOCK_LINEAR: u64 = 0x0300_0000_00e0_8013;
+        let (buffer_end, _buffer_peer) = UnixStream::pair().expect("socket pair");
+        // SAFETY: `into_raw_fd` just released this fd, so nothing else owns it.
+        let linear = unsafe { OwnedDmaBuf::from_raw(buffer_end.into_raw_fd(), 0, 0) };
+        assert_eq!(linear.modifier(), DRM_FORMAT_MOD_LINEAR);
+        assert_eq!(linear.require_linear("test"), Ok(()));
+        let tiled = linear.with_modifier(NVIDIA_BLOCK_LINEAR);
+        assert_eq!(tiled.modifier(), NVIDIA_BLOCK_LINEAR);
+        assert_eq!(
+            tiled.require_linear("test"),
+            Err(crate::G2gError::UnsupportedDomain)
         );
     }
 

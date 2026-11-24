@@ -92,7 +92,9 @@ use g2g_core::caps_parse::parse_raw_format;
 use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, Target};
-use g2g_core::memory::{DomainSet, MemoryDomain, MemoryDomainKind, OwnedDmaBuf, SystemSlice};
+use g2g_core::memory::{
+    DomainSet, MemoryDomain, MemoryDomainKind, OwnedDmaBuf, SystemSlice, DRM_FORMAT_MOD_LINEAR,
+};
 use g2g_core::meta::{Orientation, OrientationSet};
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
@@ -445,13 +447,24 @@ impl Picture {
 #[derive(Debug, Default)]
 struct CompositorFormats {
     shm: Vec<RawVideoFormat>,
-    dmabuf: Vec<RawVideoFormat>,
+    dmabuf: Vec<(RawVideoFormat, u64)>,
 }
 
 impl CompositorFormats {
+    fn takes_dmabuf(&self, format: RawVideoFormat, modifier: u64) -> bool {
+        self.dmabuf.contains(&(format, modifier))
+    }
+
+    fn linear_dmabuf_formats(&self) -> impl Iterator<Item = &RawVideoFormat> {
+        self.dmabuf
+            .iter()
+            .filter(|(_, modifier)| *modifier == DRM_FORMAT_MOD_LINEAR)
+            .map(|(format, _)| format)
+    }
+
     fn accepted_caps(&self) -> CapsSet {
         let mut formats: Vec<RawVideoFormat> = Vec::new();
-        for format in self.shm.iter().chain(&self.dmabuf) {
+        for format in self.shm.iter().chain(self.linear_dmabuf_formats()) {
             if !formats.contains(format) {
                 formats.push(*format);
             }
@@ -463,7 +476,6 @@ impl CompositorFormats {
 }
 
 // drm_fourcc.h
-const DRM_FORMAT_MOD_LINEAR: u64 = 0;
 const DRM_FORMAT_ARGB8888: u32 = u32::from_le_bytes(*b"AR24");
 const DRM_FORMAT_XRGB8888: u32 = u32::from_le_bytes(*b"XR24");
 
@@ -503,7 +515,7 @@ fn drm_format_of_shm(format: WEnum<wl_shm::Format>) -> u32 {
 #[derive(Default)]
 struct FormatProbe {
     shm: Vec<u32>,
-    dmabuf: Vec<u32>,
+    dmabuf: Vec<(u32, u64)>,
 }
 
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for FormatProbe {
@@ -548,9 +560,10 @@ impl Dispatch<ZwpLinuxDmabufV1, ()> for FormatProbe {
             modifier_lo,
         } = event
         {
-            if (u64::from(modifier_hi) << 32 | u64::from(modifier_lo)) == DRM_FORMAT_MOD_LINEAR {
-                probe.dmabuf.push(format);
-            }
+            probe.dmabuf.push((
+                format,
+                u64::from(modifier_hi) << 32 | u64::from(modifier_lo),
+            ));
         }
     }
 }
@@ -570,7 +583,11 @@ fn probe_compositor_formats() -> Result<CompositorFormats, Box<dyn std::error::E
     let known = |codes: &[u32]| codes.iter().copied().filter_map(raw_video_format).collect();
     Ok(CompositorFormats {
         shm: known(&probe.shm),
-        dmabuf: known(&probe.dmabuf),
+        dmabuf: probe
+            .dmabuf
+            .iter()
+            .filter_map(|&(code, modifier)| Some((raw_video_format(code)?, modifier)))
+            .collect(),
     })
 }
 
@@ -650,7 +667,11 @@ impl AsyncElement for WaylandSink {
             self.colorimetry = *colorimetry;
         }
         let formats = self.compositor_formats();
-        if !formats.shm.contains(&picture.format) && !formats.dmabuf.contains(&picture.format) {
+        if !formats.shm.contains(&picture.format)
+            && !formats
+                .linear_dmabuf_formats()
+                .any(|format| *format == picture.format)
+        {
             g2g_core::g2g_error!(
                 self,
                 "the compositor takes no {} buffers",
@@ -874,11 +895,12 @@ impl AsyncElement for WaylandSink {
                     let formats = self.compositor_formats();
                     let pixels = match domain {
                         MemoryDomain::DmaBuf(dmabuf) => {
-                            if !formats.dmabuf.contains(&picture.format) {
+                            if !formats.takes_dmabuf(picture.format, dmabuf.modifier()) {
                                 g2g_core::g2g_error!(
                                     self,
-                                    "the compositor takes no linear {} dma-bufs",
-                                    picture.format.gst_name()
+                                    "the compositor takes no {} dma-bufs with DRM format modifier {:#x}",
+                                    picture.format.gst_name(),
+                                    dmabuf.modifier()
                                 );
                                 return Err(G2gError::CapsMismatch);
                             }
@@ -1418,7 +1440,7 @@ impl WorkerState {
                         index as u32,
                         to_u32(plane.offset)?,
                         to_u32(plane.stride)?,
-                        DRM_FORMAT_MOD_LINEAR,
+                        dmabuf.modifier(),
                     );
                 }
                 let (wl_buffer, _) = params.create_immed(
@@ -2226,7 +2248,10 @@ mod tests {
                 RawVideoFormat::Nv12,
                 RawVideoFormat::Yuyv
             ],
-            dmabuf: alloc::vec![RawVideoFormat::Nv12, RawVideoFormat::Uyvy],
+            dmabuf: alloc::vec![
+                (RawVideoFormat::Nv12, DRM_FORMAT_MOD_LINEAR),
+                (RawVideoFormat::Uyvy, DRM_FORMAT_MOD_LINEAR),
+            ],
         };
         let expected: Vec<Caps> = [
             RawVideoFormat::Nv12,

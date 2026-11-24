@@ -35,8 +35,6 @@ The plan is [remote.md](remote.md).
 - `ximagesrc` for unattended X11 capture, and window capture.
 - VA-API encode on the Linux host through `ffmpegenc`, taking dma-buf frames
   and converting RGBA to NV12 with `scale_vaapi`.
-- `waylanddisplaysrc`: render with smithay's GLES renderer on a render node and
-  output a linear RGBA dma-buf.
 - `waylanddisplaysrc`: output a linear NV12 dma-buf from a GLES pass when
   downstream caps ask for NV12.
 - `waylanddisplaysrc`: run X11 apps through Xwayland with smithay's X11 window
@@ -333,10 +331,10 @@ libraries installed.
   surface on the first frame, which takes about 1.3 s on a Windows laptop, so a
   live camera shows an empty window and late-drops about 40 frames. Measure the
   split, then open the device at `configure_pipeline`.
-- **Dma-buf modifiers:** carry a format modifier on `OwnedDmaBuf`, pass each
-  consumer's accepted format and modifier pairs to the producer through
-  `AllocationParams`, import with the frame's modifier in `waylandsink`,
-  `kmssink`, `dmabuftowgpu` and `hipupload`, and read the modifier suffix of
+- **Dma-buf modifiers:** pass each consumer's accepted format and modifier pairs
+  to the producer through `AllocationParams`, import tiled buffers in
+  `dmabuftowgpu` and `hipupload`, carry the modifier across `unixfd`,
+  `localdmabufsink` and the bridge's C output, and read the modifier suffix of
   GStreamer's `drm-format` in `capsfilter`. First find which producers hand out
   tiled buffers (Vulkan decode on RADV, PipeWire screen capture).
 

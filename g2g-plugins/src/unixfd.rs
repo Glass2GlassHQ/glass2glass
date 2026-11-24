@@ -638,6 +638,7 @@ impl UnixFdSink {
         let geometry = raw_video_geometry(caps);
         let (memory, fd) = match &frame.domain {
             MemoryDomain::DmaBuf(dmabuf) => {
+                dmabuf.require_linear(g2g_core::log::short_type_name::<Self>())?;
                 let fd = dmabuf.as_raw();
                 buffer.memory_type = MEMORY_TYPE_DMABUF;
                 // dmabuf_plane_layout counts plane offsets from the start of the fd

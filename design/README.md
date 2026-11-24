@@ -211,8 +211,16 @@ pub struct OwnedDmaBuf {
     fd: i32,
     pub stride: u32,
     pub offset: u32,
+    modifier: u64,
 }
 ```
+
+`modifier` is the buffer's DRM format modifier, `DRM_FORMAT_MOD_LINEAR` unless
+the producer sets another with `with_modifier`. `waylandsink` and `kmssink`
+import a buffer with its modifier. Every consumer that reads linear rows calls
+`require_linear` and fails on any other modifier: the CPU mappings in
+`dmabufmap`, `dmabuftowgpu`, `wgpupreprocess`, `hipupload`, the V4L2 stateless encoders,
+`gstwrap`, `unixfd`, `localdmabufsink` and the bridge's C output.
 
 Every hardware handle is reference-counted, an `Arc`-held keep-alive owner or an
 `Arc`-shared fd for DMABUF, so the underlying file descriptor or GPU allocation
@@ -381,8 +389,9 @@ negotiation it opens a short Wayland connection and reads the compositor's
 `wl_shm` formats and the linux-dmabuf format table, bound at version 3, the last
 version that sends the table as modifier events. It accepts each of those formats
 that `DRM_FOURCC_FORMATS` names, NV12 first, and a dma-buf format only when the
-table lists it with the linear modifier, since `OwnedDmaBuf` carries no modifier.
-With no compositor it accepts nothing. A system-memory frame is copied into a
+table lists it with the linear modifier. A dma-buf frame is imported with its own
+modifier and fails with an error when the table does not list that format and
+modifier pair. With no compositor it accepts nothing. A system-memory frame is copied into a
 `wl_shm` buffer and a dma-buf frame is imported, so a system-memory frame in a
 format the compositor takes only as a dma-buf (UYVY and ARGB on Weston 13 and
 mutter 51) fails with an error that suggests `videoconvert`. The compositor

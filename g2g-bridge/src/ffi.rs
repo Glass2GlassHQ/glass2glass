@@ -398,6 +398,9 @@ pub unsafe extern "C" fn g2g_bridge_pull_buf(bridge: *mut G2gBridge, out: *mut G
             pts_ns,
             owner: ptr::null_mut(),
         },
+        g2g_core::MemoryDomain::DmaBuf(dmabuf) if dmabuf.require_linear("g2g-bridge").is_err() => {
+            return PULL_UNSUPPORTED_DOMAIN;
+        }
         g2g_core::MemoryDomain::DmaBuf(dmabuf) => G2gOut {
             kind: 1,
             data: ptr::null(),

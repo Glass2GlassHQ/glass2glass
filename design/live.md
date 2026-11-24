@@ -201,8 +201,22 @@ publishes the name on `socket_names()`. The compositor offers `wl_compositor`,
 pointer, `wl_output` with `xdg_output`, and `wl_data_device_manager`. GTK 4
 refuses a display without the last one. Drag and drop is refused, the
 clipboard works. Every toplevel is configured fullscreen at the output size and
-takes keyboard focus. smithay's pixman renderer composites into BGRx system
-memory at the `width`, `height` and `framerate` properties.
+takes keyboard focus. The output is RGBA at the `width`, `height` and
+`framerate` properties.
+
+`render-node` picks the renderer. With a DRM render node path (the default is
+`/dev/dri/renderD128`) smithay's GLES renderer composites on that GPU and the
+compositor also offers `zwp_linux_dmabuf_v1` with feedback for the node, so GPU
+clients hand it dma-bufs (GTK 4 picks its Vulkan renderer). With `software`
+smithay's pixman renderer composites into system memory and clients draw into
+`wl_shm`. The GLES path renders into a pool of up to eight GBM buffers and reuses
+one once downstream drops every share of it. Each buffer is linear when the node
+can render linear RGBA (AMD) and otherwise uses one of the node's renderable
+modifiers, which the frame carries (NVIDIA renders only block-linear). When the
+allocation query settles on `DmaBuf`, which a sink that declares
+`DmaBuf` in its `input_domains` (`waylandsink`) brings about, the frames are
+those buffers with no copy. Otherwise the picture is read back through GLES into
+system memory.
 
 The `run` loop asks the compositor thread for one frame at a time. The thread
 renders once a client has committed since the last frame and a frame period has
