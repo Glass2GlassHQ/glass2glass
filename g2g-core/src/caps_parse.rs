@@ -19,13 +19,13 @@ use crate::caps::{
     MOV_UNKNOWN_SUBTYPE_PREFIX, PCM_FORMATS, RIFF_AUDIO_TAG_FIELD, RIFF_UNKNOWN_SUBTYPE,
     RIFF_VIDEO_TAG_FIELD,
 };
-use crate::caps::{ALL_BAYER_FORMATS, GDP_MEDIA_TYPE};
+use crate::caps::{ALL_BAYER_FORMATS, GDP_MEDIA_TYPE, NON_BAYER_RAW_VIDEO_FORMATS};
 use crate::channels::ChannelLayout;
 
-/// The raw pixel formats a format-less `video/x-raw` expands to. Order is
-/// the preference the solver fixates by when several survive; in practice the
-/// upstream format narrows it to one.
-const RAW_VIDEO_FORMATS: [RawVideoFormat; 5] = [
+/// The raw pixel formats a format-less `video/x-raw` lists first, ahead of the
+/// other non-Bayer formats. Order is the preference the solver fixates by when
+/// several survive; in practice the upstream format narrows it to one.
+const PREFERRED_RAW_VIDEO_FORMATS: [RawVideoFormat; 5] = [
     RawVideoFormat::Nv12,
     RawVideoFormat::I420,
     RawVideoFormat::Rgba8,
@@ -174,9 +174,21 @@ fn expand_st2038_alignment(fv: Option<&FieldVal>) -> Option<Vec<St2038Alignment>
     })
 }
 
+fn format_less_raw_video_formats() -> Vec<RawVideoFormat> {
+    PREFERRED_RAW_VIDEO_FORMATS
+        .iter()
+        .chain(
+            NON_BAYER_RAW_VIDEO_FORMATS
+                .iter()
+                .filter(|format| !PREFERRED_RAW_VIDEO_FORMATS.contains(format)),
+        )
+        .copied()
+        .collect()
+}
+
 fn expand_raw_format(fv: Option<&FieldVal>) -> Option<Vec<RawVideoFormat>> {
     Some(match fv {
-        None => RAW_VIDEO_FORMATS.to_vec(),
+        None => format_less_raw_video_formats(),
         Some(FieldVal::One(s)) => alloc::vec![parse_raw_format(s)?],
         Some(FieldVal::List(xs)) => xs
             .iter()
@@ -1035,7 +1047,7 @@ mod tests {
     fn parse_caps_set_expands_format_less_raw_video() {
         // No `format` -> all supported pixel formats at the fixed geometry (M184).
         let set = CapsSet::from_gst_string("video/x-raw,width=160,height=120").expect("parses");
-        assert_eq!(set.alternatives().len(), RAW_VIDEO_FORMATS.len());
+        assert_eq!(set.alternatives().len(), NON_BAYER_RAW_VIDEO_FORMATS.len());
         assert!(set.alternatives().iter().all(|c| matches!(
             c,
             Caps::RawVideo {
@@ -1044,8 +1056,17 @@ mod tests {
                 ..
             }
         )));
+        let leading_formats: Vec<RawVideoFormat> = set.alternatives()
+            [..PREFERRED_RAW_VIDEO_FORMATS.len()]
+            .iter()
+            .map(|c| match c {
+                Caps::RawVideo { format, .. } => *format,
+                other => panic!("expected raw video, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(leading_formats, PREFERRED_RAW_VIDEO_FORMATS);
         // Every supported format is represented at that geometry.
-        for fmt in RAW_VIDEO_FORMATS {
+        for fmt in NON_BAYER_RAW_VIDEO_FORMATS {
             assert!(set.alternatives().iter().any(|c| matches!(
                 c,
                 Caps::RawVideo { format, .. } if *format == fmt

@@ -243,7 +243,7 @@ async fn a_region_is_captured_at_the_rate_a_caps_filter_asks_for() {
         "m2543_region",
         &format!(
             "ximagesrc display-name={} startx={START_X} starty={START_Y} endx={END_X} \
-             endy={END_Y} show-pointer=false num-buffers=1 ! video/x-raw,format=BGRx,framerate={FPS}/1",
+             endy={END_Y} show-pointer=false num-buffers=1 ! video/x-raw,framerate={FPS}/1",
             server.display
         ),
     )

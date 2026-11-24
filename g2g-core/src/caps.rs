@@ -3420,7 +3420,7 @@ pub enum TensorLayout {
     Nhwc,
 }
 
-const NON_BAYER_RAW_VIDEO_FORMATS: [RawVideoFormat; 34] = [
+pub(crate) const NON_BAYER_RAW_VIDEO_FORMATS: [RawVideoFormat; 34] = [
     RawVideoFormat::Nv12,
     RawVideoFormat::I420,
     RawVideoFormat::Rgba8,
