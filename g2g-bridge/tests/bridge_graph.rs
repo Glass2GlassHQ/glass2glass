@@ -231,14 +231,13 @@ fn failed_negotiation_ends_the_drain() {
     assert!(bridge.finish().is_err(), "the run reports the failure");
 }
 
-// GStreamer exported this from a GL texture here, a tiled AMD layout
-const TILED_MODIFIER: u64 = 0x0200_0000_1056_bb03;
-
 #[cfg(unix)]
 #[test]
 fn a_pushed_dmabuf_takes_the_modifier_of_tiled_caps() {
     use g2g_core::memory::{MemoryDomain, OwnedDmaBuf};
     use std::os::fd::IntoRawFd;
+    // GStreamer exported this from a GL texture here, a tiled AMD layout
+    const TILED_MODIFIER: u64 = 0x0200_0000_1056_bb03;
 
     let caps = format!(
         "video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format=AB24:0x{TILED_MODIFIER:016x},width=2,height=2,framerate=30/1"

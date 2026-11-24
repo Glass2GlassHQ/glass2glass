@@ -2496,7 +2496,7 @@ pub(crate) mod tests {
                 framerate: Rate::Fixed(30 << 16),
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 pixel_aspect: g2g_core::PixelAspect::Any,
-                alignment: g2g_core::BitstreamAlignment::Unspecified,
+                alignment: g2g_core::BitstreamAlignment::AccessUnit,
             }],
             "output caps announced once"
         );

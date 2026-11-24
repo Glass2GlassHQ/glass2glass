@@ -33,6 +33,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           env-vars: ImageOS
+      # g2g-wayland-display's tests open a wgpu-present window, which builds sctk against xkbcommon
+      - name: install xkbcommon
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libxkbcommon-dev
       - name: check (no_std default build)
         run: cargo check --workspace --locked
       - name: test (default features)
@@ -125,6 +129,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           env-vars: ImageOS
+      # g2g-wayland-display's tests open a wgpu-present window, which builds sctk against xkbcommon
+      - name: install xkbcommon
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libxkbcommon-dev
       - run: cargo clippy --workspace --all-targets --locked
       # the workspace build turns on `std` for g2g-plugins, which hides test files missing their feature gate
       - run: cargo clippy -p g2g-plugins --all-targets --locked
