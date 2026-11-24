@@ -955,7 +955,12 @@ index) and sequence numbering per player. The responder routes each SETUP to a
 track by `a=control` as it does for a publisher's ANNOUNCE, and PLAY starts every
 track the player SETUP. A metadata document is split across packets with the
 marker on the last, as RFC 6597 does KLV. Only H.264 waits for a player's first
-keyframe. Sender reports of every track map PTS to wall clock through one
+keyframe. The PLAY reply's `RTP-Info` names each SETUP track by its URL with
+`seq=0` and one `rtptime`, the RTP timestamp of the newest frame sent on any
+track, which every track's timestamps share, so a player that starts the
+metadata before the delayed video still puts both on one timeline. The
+`Content-Base` is the request path with a trailing slash, as gst-rtsp-server
+sends, since RTP-Info separates its fields with `;`. Sender reports of every track map PTS to wall clock through one
 `PtsWallClock`, fixed by the first frame's `WallClockMeta`, else the time of day,
 and each report names the instant of the 90 kHz tick its RTP timestamp rounds
 to, so a receiver rebuilds the same wall clock for a picture and for the

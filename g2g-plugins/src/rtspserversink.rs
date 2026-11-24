@@ -217,7 +217,7 @@ impl Client {
     /// Drain whatever control bytes are readable now (non-blocking) and answer
     /// the requests they complete, advancing toward PLAY. Returns `false` if the
     /// player disconnected or tore down (the caller reaps it).
-    async fn advance(&mut self) -> bool {
+    async fn advance(&mut self, stream_rtptime: Option<u32>) -> bool {
         let mut buf = [0u8; CTRL_BUF];
         loop {
             match self.control.try_read(&mut buf) {
@@ -246,6 +246,9 @@ impl Client {
             };
             self.pending.drain(..consumed);
             self.last_activity_ns = g2g_core::metrics::monotonic_ns();
+            if let Some(rtptime) = stream_rtptime {
+                self.responder.set_stream_rtptime(rtptime);
+            }
             let (response, event) = self.responder.handle_request(&req);
             if self.control.write_all(&response).await.is_err() {
                 return false;
@@ -382,6 +385,7 @@ pub struct RtspServerSink {
     packets_sent: u64,
     sender_reports_sent: u64,
     keyframe_request_pending: bool,
+    newest_pts_ns: Option<u64>,
     /// Last SPS and PPS seen in the stream, offered in the SDP as
     /// `sprop-parameter-sets`. Refreshed as they flow, so a mid-stream
     /// resolution change reaches players that DESCRIBE after it.
@@ -411,6 +415,7 @@ impl RtspServerSink {
             packets_sent: 0,
             sender_reports_sent: 0,
             keyframe_request_pending: false,
+            newest_pts_ns: None,
             sps: None,
             pps: None,
             wall_clock: None,
@@ -567,9 +572,12 @@ impl RtspServerSink {
     /// control-channel close is detected and keepalive requests are answered.
     async fn advance_handshakes(&mut self) {
         let now = g2g_core::metrics::monotonic_ns();
+        let stream_rtptime = self
+            .newest_pts_ns
+            .map(crate::rtpklv::rtp_timestamp_from_pts);
         let mut i = 0;
         while i < self.clients.len() {
-            let keep = self.clients[i].advance().await
+            let keep = self.clients[i].advance(stream_rtptime).await
                 && now.saturating_sub(self.clients[i].last_activity_ns) <= self.session_timeout_ns;
             if keep {
                 i += 1;
@@ -662,6 +670,10 @@ impl RtspServerSink {
         pts_ns: u64,
     ) -> Result<(), G2gError> {
         let timestamp = crate::rtpklv::rtp_timestamp_from_pts(pts_ns);
+        self.newest_pts_ns = Some(
+            self.newest_pts_ns
+                .map_or(pts_ns, |newest| newest.max(pts_ns)),
+        );
         let ssrc = self.track_ssrc(track_index);
         let socket = self.tracks[track_index]
             .rtp_socket
@@ -1082,7 +1094,7 @@ mod tests {
         });
         let mut reaped = false;
         for _ in 0..10_000 {
-            if !client.advance().await {
+            if !client.advance(None).await {
                 reaped = true;
                 break;
             }
@@ -1101,7 +1113,7 @@ mod tests {
         drop(peer); // peer closes the control channel mid-stream
         let mut reaped = false;
         for _ in 0..10_000 {
-            if !client.advance().await {
+            if !client.advance(None).await {
                 reaped = true;
                 break;
             }

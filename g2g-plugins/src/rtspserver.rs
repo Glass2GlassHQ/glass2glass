@@ -224,6 +224,10 @@ pub struct RtspResponder {
     // indexed like `tracks`, empty when every track sends as `ssrc`
     track_ssrcs: Vec<u32>,
     track_transports: Vec<Option<TrackTransport>>,
+    // indexed like `tracks`, the URL each track was SETUP under, which RTP-Info names it by
+    track_setup_uris: Vec<Option<String>>,
+    // the RTP timestamp of the newest access unit sent on any track, which every track's timestamps share
+    stream_rtptime: Option<u32>,
     // the video codec an ingest server records, a publisher announcing another is refused
     ingest_codec: Option<VideoCodec>,
 }
@@ -249,6 +253,8 @@ impl RtspResponder {
             track_server_ports: Vec::new(),
             track_ssrcs: Vec::new(),
             track_transports: Vec::new(),
+            track_setup_uris: Vec::new(),
+            stream_rtptime: None,
             ingest_codec: None,
         }
     }
@@ -281,6 +287,7 @@ impl RtspResponder {
     pub fn serving_tracks(mut self, server_rtp_ports: Vec<u16>, ssrcs: Vec<u32>) -> Self {
         self.tracks = tracks_of(&self.sdp);
         self.track_transports = alloc::vec![None; self.tracks.len()];
+        self.track_setup_uris = alloc::vec![None; self.tracks.len()];
         self.track_server_ports = server_rtp_ports;
         self.track_ssrcs = ssrcs;
         self
@@ -302,6 +309,12 @@ impl RtspResponder {
     /// the publisher has not SETUP.
     pub fn track_transports(&self) -> &[Option<TrackTransport>] {
         &self.track_transports
+    }
+
+    /// The RTP timestamp of the newest access unit the I/O layer has sent on any
+    /// track, which the next PLAY reports as every track's `rtptime`.
+    pub fn set_stream_rtptime(&mut self, rtptime: u32) {
+        self.stream_rtptime = Some(rtptime);
     }
 
     fn track_for(&self, uri: &str) -> Option<usize> {
@@ -352,7 +365,13 @@ impl RtspResponder {
                 RtspEvent::None,
             ),
             "DESCRIBE" => {
-                let base = format!("{};", req.uri);
+                // gst-rtsp-server's base is the request path with a trailing slash and no query
+                let path = req.uri.split_once('?').map_or(req.uri.as_str(), |(path, _)| path);
+                let base = if path.ends_with('/') {
+                    path.to_string()
+                } else {
+                    format!("{path}/")
+                };
                 let sdp = self.sdp.clone();
                 (
                     self.respond(
@@ -383,6 +402,7 @@ impl RtspResponder {
                 }
                 self.sdp = sdp.to_string();
                 self.track_transports = alloc::vec![None; announced.len()];
+                self.track_setup_uris = alloc::vec![None; announced.len()];
                 self.track_server_ports.clear();
                 self.tracks = announced;
                 (
@@ -415,6 +435,7 @@ impl RtspResponder {
                             rtp_channel: rtp_ch,
                             rtcp_channel: rtcp_ch,
                         });
+                        self.track_setup_uris[index] = Some(req.uri.clone());
                     }
                     let transport = format!(
                         "RTP/AVP/TCP;unicast;interleaved={rtp_ch}-{rtcp_ch};ssrc={:08X}",
@@ -446,6 +467,7 @@ impl RtspResponder {
                     self.track_transports[index] = Some(TrackTransport::Udp {
                         client_rtp_port: port,
                     });
+                    self.track_setup_uris[index] = Some(req.uri.clone());
                 }
                 let server_port = self.server_rtp_port_for(track);
                 let transport = format!(
@@ -467,8 +489,22 @@ impl RtspResponder {
             "PLAY" => {
                 self.state = State::Playing;
                 let session = self.session_id.clone();
-                // the first packet's rtptime is the next access unit's, unknown until it arrives
-                let rtp_info = format!("url={};seq=0", req.uri);
+                // players start each track's timeline at its rtptime, or at its own first packet without one
+                let rtptime = self
+                    .stream_rtptime
+                    .map(|rtptime| format!(";rtptime={rtptime}"))
+                    .unwrap_or_default();
+                let track_entries: Vec<String> = self
+                    .track_setup_uris
+                    .iter()
+                    .flatten()
+                    .map(|uri| format!("url={uri};seq=0{rtptime}"))
+                    .collect();
+                let rtp_info = if track_entries.is_empty() {
+                    format!("url={};seq=0{rtptime}", req.uri)
+                } else {
+                    track_entries.join(",")
+                };
                 (
                     self.respond(
                         req.cseq,

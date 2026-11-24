@@ -193,14 +193,22 @@ fn described_frame(index: u64, access_unit: &[u8]) -> Frame {
     frame
 }
 
-async fn serve(server: &mut RtspServerSink, client_done: &AtomicBool) -> Vec<i64> {
+// `delta_lead_in` of the fixture's second access unit goes out before the fixture plays from its keyframe
+async fn serve(
+    server: &mut RtspServerSink,
+    client_done: &AtomicBool,
+    delta_lead_in: Duration,
+) -> Vec<i64> {
     let mut writer = RelationMeta2OnvifMeta::new();
     let mut extractor = OnvifMetadataExtractor::new(2);
     let mut written = CollectSink::default();
     let mut extracted = RecordingFanout::with_ports(2);
     let mut served = CollectSink::default();
     let mut written_times = Vec::new();
-    for (index, access_unit) in access_units(FIXTURE).iter().cycle().enumerate() {
+    let access_units = access_units(FIXTURE);
+    let lead_in_frames = (delta_lead_in.as_nanos() / FRAME_PERIOD.as_nanos()) as usize;
+    let lead_in = core::iter::repeat_n(&access_units[1], lead_in_frames);
+    for (index, access_unit) in lead_in.chain(access_units.iter().cycle()).enumerate() {
         if client_done.load(Ordering::Relaxed) {
             break;
         }
@@ -307,8 +315,13 @@ async fn parse(documents: Vec<Frame>) -> Vec<Frame> {
         .collect()
 }
 
-#[tokio::test]
-async fn each_received_picture_carries_its_own_frames_detection() {
+struct Received {
+    video: Vec<Frame>,
+    documents: Vec<Frame>,
+    written_times: Vec<i64>,
+}
+
+async fn serve_and_receive(delta_lead_in: Duration) -> Received {
     let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind rtsp control");
     let port = listener.local_addr().unwrap().port();
     let mut server = RtspServerSink::from_listener(listener)
@@ -333,35 +346,47 @@ async fn each_received_picture_carries_its_own_frames_detection() {
         client_done.store(true, Ordering::Relaxed);
         result
     };
-    let (played, written_times) = tokio::join!(play, serve(&mut server, &client_done));
+    let (played, written_times) =
+        tokio::join!(play, serve(&mut server, &client_done, delta_lead_in));
     played
         .expect("the session ends within the run limit")
         .expect("the session plays");
-
-    let video = received.frames(VIDEO_TRACK);
     let documents = received.frames(METADATA_TRACK);
     assert!(!documents.is_empty(), "the metadata track arrived");
-    let parsed = parse(documents).await;
-    let described: Vec<u64> = parsed
+    Received {
+        video: received.frames(VIDEO_TRACK),
+        documents: parse(documents).await,
+        written_times,
+    }
+}
+
+// the served frame whose document time is nearest the wall clock the player rebuilt
+fn served_index(picture: &Frame, written_times: &[i64]) -> Option<u64> {
+    let half_period_ns = FRAME_PERIOD.as_nanos() as i64 / 2;
+    let rebuilt = picture.meta.get::<WallClockMeta>()?.unix_nanos;
+    let index = written_times
+        .iter()
+        .position(|written| (written - rebuilt).abs() < half_period_ns)?;
+    Some(index as u64)
+}
+
+#[tokio::test]
+async fn each_received_picture_carries_its_own_frames_detection() {
+    let received = serve_and_receive(Duration::ZERO).await;
+    let described: Vec<u64> = received
+        .documents
         .iter()
         .filter_map(|frame| frame.meta.get::<AnalyticsMeta>())
         .flat_map(tracked_ids)
         .collect();
-    let pictures = combine(video, parsed).await;
+    let pictures = combine(received.video, received.documents).await;
 
-    // the served frame whose document time is nearest the wall clock the player rebuilt
-    let half_period_ns = FRAME_PERIOD.as_nanos() as i64 / 2;
-    let served_index = |picture: &Frame| -> Option<u64> {
-        let rebuilt = picture.meta.get::<WallClockMeta>()?.unix_nanos;
-        let index = written_times
-            .iter()
-            .position(|written| (written - rebuilt).abs() < half_period_ns)?;
-        Some(index as u64)
-    };
     let mut checked = 0;
     for picture in &pictures {
         // the frame limit ends the two tracks at different pictures
-        let Some(index) = served_index(picture).filter(|index| described.contains(index)) else {
+        let Some(index) = served_index(picture, &received.written_times)
+            .filter(|index| described.contains(index))
+        else {
             continue;
         };
         let ids = picture
@@ -376,6 +401,43 @@ async fn each_received_picture_carries_its_own_frames_detection() {
         checked >= FRAMES as usize / 2,
         "only {checked} of {} pictures had a sender wall clock and a document",
         pictures.len()
+    );
+}
+
+// long past the loopback handshake, so the player is PLAYing before the first keyframe goes out
+const DELTA_LEAD_IN: Duration = Duration::from_millis(500);
+
+#[tokio::test]
+async fn a_player_joining_before_a_keyframe_gets_both_tracks_on_one_timeline() {
+    let received = serve_and_receive(DELTA_LEAD_IN).await;
+    let document_pts: std::collections::HashMap<u64, u64> = received
+        .documents
+        .iter()
+        .filter_map(|document| {
+            let index = *tracked_ids(document.meta.get::<AnalyticsMeta>()?).first()?;
+            Some((index, document.timing.pts_ns))
+        })
+        .collect();
+
+    let mut checked = 0;
+    for picture in &received.video {
+        let Some(index) = served_index(picture, &received.written_times) else {
+            continue;
+        };
+        // the frame limit ends the two tracks at different pictures
+        let Some(&pts_ns) = document_pts.get(&index) else {
+            continue;
+        };
+        assert_eq!(
+            picture.timing.pts_ns, pts_ns,
+            "picture {index} and its document share a timestamp"
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= FRAMES as usize / 2,
+        "only {checked} of {} pictures had a sender wall clock and a document",
+        received.video.len()
     );
 }
 

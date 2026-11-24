@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2547: Name every track with a shared `rtptime` in `rtspserversink`'s RTP-Info so a player keeps video and metadata on one timeline.
 - M2546: Stamp `rtspsrcn` frames in pipeline running time, including after a reconnect.
 - M2545: Serve analytics as an ONVIF metadata track beside H.264 with `relationmeta2onvifmeta`, `onvifmetadataextractor` and a two-track `rtspserversink`.
 - M2544: Let a format-less `video/x-raw` filter match every non-Bayer raw format.
