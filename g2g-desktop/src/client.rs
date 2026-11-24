@@ -53,6 +53,8 @@ pub struct ClientSettings {
     pub cert_hash: String,
     pub inputs: bool,
     pub transport: ClientTransport,
+    #[cfg(target_os = "linux")]
+    pub keyboard_grab: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,6 +226,19 @@ struct ClipboardSync {
 }
 
 #[cfg(target_os = "linux")]
+fn grab_keyboard(sink: WgpuPresentSink, settings: &ClientSettings) -> WgpuPresentSink {
+    if settings.inputs && settings.keyboard_grab {
+        return sink.with_keyboard_grab();
+    }
+    sink
+}
+
+#[cfg(not(target_os = "linux"))]
+fn grab_keyboard(sink: WgpuPresentSink, _settings: &ClientSettings) -> WgpuPresentSink {
+    sink
+}
+
+#[cfg(target_os = "linux")]
 fn sync_clipboard(sink: &mut WgpuPresentSink, inputs: bool) -> Option<ClipboardSync> {
     if !inputs {
         return None;
@@ -286,13 +301,12 @@ pub async fn run_client(
         .outgoing
         .send(settings.token.as_bytes().to_vec())
         .expect("the source holds the data channel until it runs");
-    let (cursor_shapes, mut sink) = show_host_cursor(
-        WgpuPresentSink::new()
-            .with_title(WINDOW_TITLE)
-            .with_sync(false)
-            .with_present_mode(wgpu::PresentMode::Mailbox),
-        settings.inputs,
-    );
+    let window = WgpuPresentSink::new()
+        .with_title(WINDOW_TITLE)
+        .with_sync(false)
+        .with_present_mode(wgpu::PresentMode::Mailbox);
+    let (cursor_shapes, mut sink) =
+        show_host_cursor(grab_keyboard(window, settings), settings.inputs);
     let window_input = settings.inputs.then(|| sink.input_events());
     let (host_clipboard, local_copies) = sync_clipboard(&mut sink, settings.inputs)
         .map(|sync| (sync.host_texts, sync.local_copies))

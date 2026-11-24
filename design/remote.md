@@ -232,7 +232,7 @@ stay shared and are tested without a desktop.
 
 | Edge | Capture | Inject |
 | :--- | :--- | :--- |
-| Linux | the client window's keyboard and pointer, plus `/dev/input` for grab | `/dev/uinput`, which Fedora creates as root-only `0600`, so the host needs a udev rule that gives the `input` group write access. |
+| Linux | the client window's keyboard and pointer, with the desktop's shortcuts inhibited while grabbed | `/dev/uinput`, which Fedora creates as root-only `0600`, so the host needs a udev rule that gives the `input` group write access. |
 | Windows | the client window's key and mouse messages, plus Raw Input for grab | `SendInput` in the interactive session. The service injects when the interactive process cannot, which is the secure desktop. |
 | macOS | the client window | `CGEvent`, which needs the accessibility permission. Screen recording stays the permission `screencapturesrc` already needs. |
 
@@ -254,7 +254,10 @@ of monochrome and masked-color pointers, and those pixels arrive black. The
 Wayland client sets the bitmap as its window's pointer cursor through
 `WgpuPresentSink::with_cursor_shapes`, so the pointer moves at the
 compositor's rate with no video delay. Grab is pointer lock on the web client
-and a window grab on the native client. Escape releases the grab locally and is not
+and a window grab on the native client. On Linux the window holds a
+`zwp_keyboard_shortcuts_inhibitor_v1` while it has keyboard focus, so Super and
+Alt+Tab reach the host, and a click takes the grab again after Escape. A
+compositor without the protocol still gets the Escape and click handling. Escape releases the grab locally and is not
 forwarded.
 
 Clipboard: each side watches its clipboard and sends type 9 when the text

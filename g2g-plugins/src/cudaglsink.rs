@@ -397,6 +397,8 @@ impl AsyncElement for CudaGlSink {
             app_id: self.app_id.clone(),
             fullscreen: false,
             log_tag: WORKER_NAME,
+            #[cfg(target_os = "linux")]
+            keyboard_grab: false,
         };
 
         let ready = Arc::new(Handshake::new());

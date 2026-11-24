@@ -68,6 +68,9 @@ pub(crate) struct WindowParams {
     pub(crate) app_id: String,
     /// Map the window fullscreen rather than as a normal toplevel.
     pub(crate) fullscreen: bool,
+    // keep the desktop's shortcuts away while focused, so they reach the window's input
+    #[cfg(target_os = "linux")]
+    pub(crate) keyboard_grab: bool,
     /// Log category the worker's error lines go under (the sink's element name).
     pub(crate) log_tag: &'static str,
 }

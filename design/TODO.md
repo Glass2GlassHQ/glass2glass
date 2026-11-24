@@ -42,8 +42,7 @@ The plan is [remote.md](remote.md).
   falling back to `mfh264enc`, and rebuild the host graph after `AccessLost`.
 - The macOS client, then `display-index` on `screencapturesrc` and a macOS
   host through `vtencode`.
-- Cursor from the Wayland portal host and on the Windows client, clipboard,
-  and grab.
+- Cursor, clipboard and grab on the Windows client.
 - Gamepad injection on Linux and Windows, and a Windows service that injects
   on the secure desktop.
 - A Chrome client on the same signaling and the same data channel.

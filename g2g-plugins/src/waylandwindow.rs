@@ -24,6 +24,11 @@ use std::time::Duration;
 use alloc::boxed::Box;
 use alloc::string::String;
 
+use smithay_client_toolkit::dispatch2::Dispatch2;
+use smithay_client_toolkit::reexports::protocols::wp::keyboard_shortcuts_inhibit::zv1::client::{
+    zwp_keyboard_shortcuts_inhibit_manager_v1::ZwpKeyboardShortcutsInhibitManagerV1,
+    zwp_keyboard_shortcuts_inhibitor_v1::{self, ZwpKeyboardShortcutsInhibitorV1},
+};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, FrameCallbackData},
     data_device_manager::{
@@ -41,6 +46,7 @@ use smithay_client_toolkit::{
     reexports::calloop_wayland_source::WaylandSource,
     reexports::client::{
         globals::registry_queue_init,
+        globals::GlobalList,
         protocol::{
             wl_data_device::WlDataDevice, wl_data_device_manager::DndAction,
             wl_data_source::WlDataSource, wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm,
@@ -103,6 +109,7 @@ pub(crate) fn run_window<R: WindowRenderer>(
         title,
         app_id,
         fullscreen,
+        keyboard_grab,
         log_tag,
     } = params;
     let conn = Connection::connect_to_env()?;
@@ -129,6 +136,7 @@ pub(crate) fn run_window<R: WindowRenderer>(
     window.commit();
 
     let renderer = build_renderer(&conn, window.wl_surface(), width, height)?;
+    let grab = keyboard_grab.then(|| KeyboardGrab::new(&globals, &qh, log_tag));
     let clipboard =
         channels
             .clipboard
@@ -181,6 +189,7 @@ pub(crate) fn run_window<R: WindowRenderer>(
             enter_serial: None,
         },
         clipboard,
+        grab,
     };
 
     loop_handle.insert_source(
@@ -243,6 +252,94 @@ struct WindowWorker<R: WindowRenderer> {
     shm: Shm,
     cursor: PointerCursor,
     clipboard: Option<WindowClipboard>,
+    grab: Option<KeyboardGrab>,
+}
+
+struct KeyboardGrab {
+    // None when the compositor has no shortcuts inhibitor, the Escape and click handling still apply
+    manager: Option<ZwpKeyboardShortcutsInhibitManagerV1>,
+    inhibitor: Option<ZwpKeyboardShortcutsInhibitorV1>,
+    seat: Option<wl_seat::WlSeat>,
+    grabbed: bool,
+    // the Escape that released the grab, whose release must not reach the input either
+    escape_held: bool,
+}
+
+impl KeyboardGrab {
+    fn new<D>(globals: &GlobalList, qh: &QueueHandle<D>, log_tag: &'static str) -> Self
+    where
+        D: smithay_client_toolkit::reexports::client::Dispatch<
+                ZwpKeyboardShortcutsInhibitManagerV1,
+                GrabEvents,
+            > + 'static,
+    {
+        let manager = globals.bind(qh, 1..=1, GrabEvents).ok();
+        if manager.is_none() {
+            g2g_core::g2g_warn!(
+                Target::category(log_tag),
+                "the compositor cannot hand its shortcuts to the window"
+            );
+        }
+        Self {
+            manager,
+            inhibitor: None,
+            seat: None,
+            grabbed: false,
+            escape_held: false,
+        }
+    }
+
+    fn take<D>(&mut self, surface: &wl_surface::WlSurface, qh: &QueueHandle<D>)
+    where
+        D: smithay_client_toolkit::reexports::client::Dispatch<
+                ZwpKeyboardShortcutsInhibitorV1,
+                GrabEvents,
+            > + 'static,
+    {
+        self.grabbed = true;
+        if self.inhibitor.is_some() {
+            return;
+        }
+        if let (Some(manager), Some(seat)) = (&self.manager, &self.seat) {
+            self.inhibitor = Some(manager.inhibit_shortcuts(surface, seat, qh, GrabEvents));
+        }
+    }
+
+    fn release(&mut self) {
+        self.grabbed = false;
+        if let Some(inhibitor) = self.inhibitor.take() {
+            inhibitor.destroy();
+        }
+    }
+}
+
+#[derive(Debug)]
+struct GrabEvents;
+
+impl<R: WindowRenderer> Dispatch2<ZwpKeyboardShortcutsInhibitManagerV1, WindowWorker<R>>
+    for GrabEvents
+{
+    fn event(
+        &self,
+        _: &mut WindowWorker<R>,
+        _: &ZwpKeyboardShortcutsInhibitManagerV1,
+        _: <ZwpKeyboardShortcutsInhibitManagerV1 as smithay_client_toolkit::reexports::client::Proxy>::Event,
+        _: &Connection,
+        _: &QueueHandle<WindowWorker<R>>,
+    ) {
+    }
+}
+
+impl<R: WindowRenderer> Dispatch2<ZwpKeyboardShortcutsInhibitorV1, WindowWorker<R>> for GrabEvents {
+    fn event(
+        &self,
+        _: &mut WindowWorker<R>,
+        _: &ZwpKeyboardShortcutsInhibitorV1,
+        _: zwp_keyboard_shortcuts_inhibitor_v1::Event,
+        _: &Connection,
+        _: &QueueHandle<WindowWorker<R>>,
+    ) {
+    }
 }
 
 struct WindowClipboard {
@@ -552,6 +649,9 @@ impl<R: WindowRenderer> SeatHandler for WindowWorker<R> {
                 if let Some(clipboard) = &mut self.clipboard {
                     clipboard.device = Some(clipboard.manager.get_data_device(qh, &seat));
                 }
+                if let Some(grab) = &mut self.grab {
+                    grab.seat = Some(seat.clone());
+                }
             }
             Capability::Pointer if self.pointer.is_none() => {
                 match self.seat_state.get_pointer(qh, &seat) {
@@ -600,6 +700,9 @@ impl<R: WindowRenderer> KeyboardHandler for WindowWorker<R> {
         _: &[Keysym],
     ) {
         self.note_input_serial(serial);
+        if let Some(grab) = &mut self.grab {
+            grab.take(self.window.wl_surface(), &self.qh);
+        }
         self.send_input(WindowInput::Focus(true));
     }
 
@@ -611,6 +714,9 @@ impl<R: WindowRenderer> KeyboardHandler for WindowWorker<R> {
         _: &wl_surface::WlSurface,
         _: u32,
     ) {
+        if let Some(grab) = &mut self.grab {
+            grab.release();
+        }
         self.send_input(WindowInput::Focus(false));
     }
 
@@ -623,6 +729,13 @@ impl<R: WindowRenderer> KeyboardHandler for WindowWorker<R> {
         event: KeyEvent,
     ) {
         self.note_input_serial(serial);
+        if let Some(grab) = self.grab.as_mut().filter(|grab| grab.grabbed) {
+            if event.keysym == Keysym::Escape {
+                grab.release();
+                grab.escape_held = true;
+                return;
+            }
+        }
         self.send_input(WindowInput::Key {
             scancode: event.raw_code,
             down: true,
@@ -647,6 +760,12 @@ impl<R: WindowRenderer> KeyboardHandler for WindowWorker<R> {
         _: u32,
         event: KeyEvent,
     ) {
+        if let Some(grab) = self.grab.as_mut().filter(|grab| grab.escape_held) {
+            if event.keysym == Keysym::Escape {
+                grab.escape_held = false;
+                return;
+            }
+        }
         self.send_input(WindowInput::Key {
             scancode: event.raw_code,
             down: false,
@@ -707,6 +826,9 @@ impl<R: WindowRenderer> PointerHandler for WindowWorker<R> {
                 PointerEventKind::Press { button, .. }
                 | PointerEventKind::Release { button, .. } => {
                     let down = matches!(event.kind, PointerEventKind::Press { .. });
+                    if let Some(grab) = self.grab.as_mut().filter(|_| down) {
+                        grab.take(self.window.wl_surface(), &self.qh);
+                    }
                     if let Some(button) = PointerButton::from_evdev_code(button) {
                         self.send_input(WindowInput::Button { button, down });
                     }

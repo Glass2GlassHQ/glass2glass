@@ -49,6 +49,10 @@ const CLIENT_USAGE: &str =
     "  g2g-desktop client --host HOST --cert-hash SHA256 --token TOKEN [--port 8080] [--inputs true]
                      [--transport auto|quic|websocket] [--trace FILE]";
 #[cfg(target_os = "linux")]
+const PLATFORM_CLIENT_USAGE: &str = " [--keyboard-grab true]";
+#[cfg(target_os = "windows")]
+const PLATFORM_CLIENT_USAGE: &str = "";
+#[cfg(target_os = "linux")]
 const PLATFORM_HOST_USAGE: &str =
     "\n                   [--run COMMAND [--size 1920x1080] [--render-node /dev/dri/renderD128]]";
 #[cfg(target_os = "windows")]
@@ -73,6 +77,10 @@ const PLATFORM_HOST_FLAGS: [&str; 3] = ["run", "size", "render-node"];
 const PLATFORM_HOST_FLAGS: [&str; 2] = ["monitor-index", "quality-vs-speed"];
 #[cfg(target_os = "windows")]
 const PRIMARY_MONITOR: i32 = -1;
+#[cfg(target_os = "linux")]
+const PLATFORM_CLIENT_FLAGS: [&str; 1] = ["keyboard-grab"];
+#[cfg(target_os = "windows")]
+const PLATFORM_CLIENT_FLAGS: [&str; 0] = [];
 const CLIENT_FLAGS: [&str; 7] = [
     "host",
     "port",
@@ -508,6 +516,8 @@ async fn client(flags: Flags) -> Result<(), Box<dyn Error>> {
             Some("websocket") => ClientTransport::WebSocket,
             Some(other) => return Err(format!("unknown --transport {other}").into()),
         },
+        #[cfg(target_os = "linux")]
+        keyboard_grab: parsed(&flags, "keyboard-grab", true)?,
     };
     let trace = open_trace(flags.get("trace").map(Path::new))?;
     let observer = Observer::new();
@@ -563,9 +573,12 @@ fn main() -> ExitCode {
     let result = match command.as_deref() {
         Some("host") => parse_flags(args, &[&HOST_FLAGS[..], &PLATFORM_HOST_FLAGS].concat())
             .and_then(|flags| runtime.block_on(local.run_until(host(flags)))),
-        Some("client") => parse_flags(args, &CLIENT_FLAGS)
+        Some("client") => parse_flags(args, &[&CLIENT_FLAGS[..], &PLATFORM_CLIENT_FLAGS].concat())
             .and_then(|flags| runtime.block_on(local.run_until(client(flags)))),
-        _ => Err(format!("usage:\n{HOST_USAGE}{PLATFORM_HOST_USAGE}\n{CLIENT_USAGE}").into()),
+        _ => Err(format!(
+            "usage:\n{HOST_USAGE}{PLATFORM_HOST_USAGE}\n{CLIENT_USAGE}{PLATFORM_CLIENT_USAGE}"
+        )
+        .into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

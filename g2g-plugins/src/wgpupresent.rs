@@ -141,6 +141,8 @@ pub struct WgpuPresentSink {
     cursor_shapes: Option<CursorShapes>,
     #[cfg(target_os = "linux")]
     clipboard: Option<ClipboardLink>,
+    #[cfg(target_os = "linux")]
+    keyboard_grab: bool,
     latency: Arc<LatencyHistogram>,
     /// Why the worker could not bring its window up, sent once by the worker and
     /// read while waiting for the readiness handshake, so a setup failure is
@@ -201,6 +203,8 @@ impl WgpuPresentSink {
             cursor_shapes: None,
             #[cfg(target_os = "linux")]
             clipboard: None,
+            #[cfg(target_os = "linux")]
+            keyboard_grab: false,
             latency: Arc::new(LatencyHistogram::new()),
             startup_error: None,
             log_name: LogName::new(),
@@ -236,6 +240,13 @@ impl WgpuPresentSink {
             local_texts,
         });
         receiver
+    }
+
+    // the desktop's shortcuts reach input_events while the window is focused, Escape releases them and a click takes them again
+    #[cfg(target_os = "linux")]
+    pub fn with_keyboard_grab(mut self) -> Self {
+        self.keyboard_grab = true;
+        self
     }
 
     pub fn with_title<S: Into<String>>(mut self, title: S) -> Self {
@@ -376,6 +387,8 @@ impl WgpuPresentSink {
             #[cfg(target_os = "linux")]
             app_id: self.app_id.clone(),
             fullscreen: self.fullscreen,
+            #[cfg(target_os = "linux")]
+            keyboard_grab: self.keyboard_grab,
             log_tag: short_type_name::<Self>(),
         };
 
