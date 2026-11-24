@@ -815,7 +815,10 @@ the stream, datagram and framing code is the same for both. A listening side
 offers both ALPNs (`h3` and `g2g-remote`) on one UDP port and branches per
 connection on the one the handshake negotiated. The raw client checks a pinned
 certificate by SHA-256, or the system roots when no digest is given, and gets
-the same `congestion-control` choice as WebTransport.
+the same `congestion-control` choice as WebTransport. Both QUIC flavours send a
+keep-alive every second and close a connection that has heard nothing from its
+peer for 5 s, so a peer killed without a close, or cut off, ends the session
+then instead of after quinn's 30 s default.
 
 `mode` swaps which side listens. `RemoteWtSink mode=listener` binds its
 `location` (an IP literal and port) with `certificate` / `private-key` and waits
@@ -832,7 +835,9 @@ the sink accepts it. QUIC shows a stream to the peer only once the opener writes
 to it, so the sink sees the channel after the source's first message. Each
 message is `u32` length-framed like the packets, and a message over 64 KiB
 (`MAX_MESSAGE_SIZE`) closes the channel. A message never waits behind a video
-frame, since each stream is ordered on its own.
+frame, since each stream is ordered on its own. Each direction closes on its
+own: a side that drops its outgoing sender finishes its half of the stream and
+still receives the peer's messages.
 
 A network that blocks UDP gets a WebSocket fallback. `RemoteWtSink
 mode=listener` also binds TCP on the same port number and accepts a WebSocket

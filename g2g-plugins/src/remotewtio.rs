@@ -600,7 +600,9 @@ async fn carry_messages(mut tx: SendStream, mut rx: RecvStream, channel: SharedD
     let DataChannelTransportEnds { outgoing, incoming } = &mut *ends;
     let mut reader = FramedRead::default();
     let mut sending = true;
-    loop {
+    let mut receiving = true;
+    // a peer can finish its send side and keep receiving
+    while sending || receiving {
         tokio::select! {
             message = outgoing.recv(), if sending => match message {
                 Some(message) => {
@@ -613,13 +615,13 @@ async fn carry_messages(mut tx: SendStream, mut rx: RecvStream, channel: SharedD
                     sending = false;
                 }
             },
-            received = reader.recv_bytes(&mut rx, MAX_MESSAGE_SIZE) => match received {
+            received = reader.recv_bytes(&mut rx, MAX_MESSAGE_SIZE), if receiving => match received {
                 Ok(Some(message)) => {
                     if incoming.send(message.to_vec()).is_err() {
                         return;
                     }
                 }
-                Ok(None) => return,
+                Ok(None) => receiving = false,
                 Err(error) => {
                     g2g_warn!(
                         Target::category("remotewt"),
@@ -679,8 +681,18 @@ pub(crate) fn bind_address(location: &str) -> Result<SocketAddr, G2gError> {
 }
 const RAW_QUIC_SCHEME: &str = "quic";
 
+// a peer that vanishes without a close ends its session after this long
+const IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+// quinn's idle timer restarts on any packet from the peer, and keep-alives make an idle peer send one
+const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(1);
+
 fn transport_config(congestion: &str) -> Arc<quinn::TransportConfig> {
     let mut transport = quinn::TransportConfig::default();
+    transport
+        .keep_alive_interval(Some(KEEP_ALIVE_INTERVAL))
+        .max_idle_timeout(Some(
+            quinn::IdleTimeout::try_from(IDLE_TIMEOUT).expect("5 s fits a QUIC varint"),
+        ));
     // web-transport-quinn keeps its factory mapping private, so raw QUIC repeats it
     match congestion_control(congestion) {
         CongestionControl::LowLatency => {

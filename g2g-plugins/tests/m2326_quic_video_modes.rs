@@ -7,7 +7,7 @@
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use g2g_core::caps::framerate_q16_period_ns;
 use g2g_core::query::LatencyReport;
@@ -618,5 +618,64 @@ async fn a_stalled_link_resets_old_frames_behind_a_new_keyframe() {
     assert!(
         forwarded < (sent_bytes - FRAMES_RESET_AT_LEAST * STALL_FRAME_LEN) as u64,
         "reset frames are not retransmitted: {forwarded} of {sent_bytes} bytes crossed the link"
+    );
+}
+
+#[tokio::test]
+async fn a_client_that_goes_silent_ends_the_host_session_within_the_idle_timeout() {
+    // quinn's default idle timeout is 30 s
+    const DETECTED_WITHIN: Duration = Duration::from_secs(15);
+    const SEND_INTERVAL: Duration = Duration::from_millis(50);
+    let Host {
+        mut sink,
+        port,
+        hash,
+    } = host(VideoMode::Stream);
+    let relay = UdpRelay::start(([127, 0, 0, 1], port).into(), 0).await;
+    let mut source = client(format!("quic://{}", relay.address), hash);
+    let mut out = RecordingOut::default();
+    let (client_connected, connected) = tokio::sync::oneshot::channel();
+    let client_run = async {
+        let caps = source
+            .intercept_caps()
+            .await
+            .expect("connect and read caps");
+        source
+            .configure_pipeline(&caps)
+            .expect("configure the source");
+        client_connected
+            .send(())
+            .expect("the host waits for the client");
+        // the client loses the host as well once the relay drops everything
+        let _ = source.run(&mut out).await;
+    };
+    let host_run = async {
+        sink.connect().await.expect("accept the client");
+        sink.configure_pipeline(&test_caps()).expect("configure");
+        FakeEncoder::new().send_next(&mut sink).await;
+        connected.await.expect("the client connects");
+        relay.blackhole.store(true, Ordering::Relaxed);
+        let silent_since = Instant::now();
+        loop {
+            let frame = test_frame(0, FRAME_LEN);
+            if sink
+                .process(PipelinePacket::DataFrame(frame), &mut NullOut)
+                .await
+                .is_err()
+            {
+                break;
+            }
+            tokio::time::sleep(SEND_INTERVAL).await;
+        }
+        silent_since.elapsed()
+    };
+    let (silent_for, ()) = tokio::time::timeout(SESSION_TIMEOUT, async {
+        tokio::join!(host_run, client_run)
+    })
+    .await
+    .expect("the host notices the silent client before the session timeout");
+    assert!(
+        silent_for < DETECTED_WITHIN,
+        "the host noticed the silent client after {silent_for:?}"
     );
 }

@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2560: End a QUIC `remotewt` session 5 s after its peer goes silent, with a keep-alive every second.
+- M2559: Keep the `remotewt` QUIC data channel delivering to a peer that closed its own sending side.
 - M2558: Keep the `g2g-desktop host --run` display and app across reconnects, and send its cursor to the client.
 - M2557: Drop Wayland drags onto X11 windows in `waylanddisplaysrc`.
 - M2556: Keep forwarding the startup consumer demand through a muxer's pass-through pad when a pad caps change drops the muxer's own proposal.

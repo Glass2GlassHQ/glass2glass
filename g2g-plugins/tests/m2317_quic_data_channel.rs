@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use g2g_core::runtime::{run_simple_pipeline, LatencyProfile};
 use g2g_core::{AsyncElement, PipelinePacket};
+use g2g_plugins::datachannel::DataChannelEnds;
 use g2g_plugins::remotewtsink::RemoteWtSink;
 use g2g_plugins::remotewtsrc::RemoteWtSrc;
 
@@ -32,15 +33,19 @@ async fn data_channel_runs_both_ways_beside_the_video(scheme: &str) {
     let mut source = RemoteWtSrc::new("127.0.0.1:0".parse().unwrap())
         .with_caller(format!("{scheme}://127.0.0.1:{port}"), tls.hash_hex.clone())
         .with_frame_limit(u64::from(FRAMES));
-    let mut client_channel = source.open_data_channel();
-    client_channel
-        .outgoing
+    let DataChannelEnds {
+        outgoing: client_outgoing,
+        incoming: mut client_incoming,
+    } = source.open_data_channel();
+    client_outgoing
         .send(CLIENT_MESSAGE.to_vec())
         .expect("queue the client message");
+    // a client with no input finishes its side after its first message, and still hears the host
+    drop(client_outgoing);
 
     let (client_received_sender, client_received) = tokio::sync::oneshot::channel();
     let client = async move {
-        let message = client_channel.incoming.recv().await;
+        let message = client_incoming.recv().await;
         client_received_sender
             .send(())
             .expect("the host waits for the client");
