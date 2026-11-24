@@ -55,9 +55,13 @@ pub(crate) const TIMEOUT: Duration = Duration::from_secs(10);
 const DRAG_BUTTON: PointerButton = PointerButton::Middle;
 const DRAG_ICON_SIZE: u32 = 16;
 const DRAG_ICON_COLOR_ARGB: u32 = 0xFF30_C050;
-const DRAG_PAYLOAD: &str = "dragged text";
+pub(crate) const DRAG_PAYLOAD: &str = "dragged text";
 const DRAG_MIME_TYPE: &str = "text/plain;charset=utf-8";
 const DRAG_START: (u32, u32) = (20, 20);
+// the client sets this cursor whenever the pointer enters its window
+pub(crate) const CURSOR_SIZE: u32 = 8;
+pub(crate) const CURSOR_COLOR_ARGB: u32 = 0xFF10_A0E0;
+pub(crate) const CURSOR_HOTSPOT: (i32, i32) = (2, 3);
 const DRAG_END: (u32, u32) = (60, 30);
 
 pub(crate) struct ZeroClock;
@@ -87,6 +91,7 @@ struct Client {
     data_device_manager: DataDeviceManagerState,
     data_device: Option<DataDevice>,
     drag: Option<(DragSource, wl_surface::WlSurface)>,
+    cursor: Option<wl_surface::WlSurface>,
     shm: Shm,
     pool: SlotPool,
     window: Window,
@@ -120,6 +125,30 @@ impl Client {
         buffer.attach_to(surface).expect("attaches");
         self.window.commit();
         self.drawn = true;
+    }
+
+    fn set_cursor(&mut self, qh: &QueueHandle<Self>, serial: u32) {
+        let surface = self
+            .cursor
+            .get_or_insert_with(|| self.compositor.create_surface(qh))
+            .clone();
+        let (hotspot_x, hotspot_y) = CURSOR_HOTSPOT;
+        self.pointer
+            .as_ref()
+            .expect("the pointer entered")
+            .set_cursor(serial, Some(&surface), hotspot_x, hotspot_y);
+        let side = CURSOR_SIZE as i32;
+        let stride = side * BYTES_PER_PIXEL as i32;
+        let (buffer, canvas) = self
+            .pool
+            .create_buffer(side, side, stride, wl_shm::Format::Argb8888)
+            .expect("the pool grows for the cursor");
+        for pixel in canvas.as_chunks_mut::<BYTES_PER_PIXEL>().0 {
+            *pixel = CURSOR_COLOR_ARGB.to_le_bytes();
+        }
+        surface.damage_buffer(0, 0, side, side);
+        buffer.attach_to(&surface).expect("attaches");
+        surface.commit();
     }
 
     fn start_drag(&mut self, qh: &QueueHandle<Self>, serial: u32) {
@@ -183,12 +212,12 @@ pub(crate) async fn client_globals(
     interfaces
 }
 
-fn rgb(argb: u32) -> [u8; 3] {
+pub(crate) fn rgb(argb: u32) -> [u8; 3] {
     let [blue, green, red, _] = argb.to_le_bytes();
     [red, green, blue]
 }
 
-fn rgb_at(picture: &[u8], stride: usize, x: u32, y: u32) -> [u8; 3] {
+pub(crate) fn rgb_at(picture: &[u8], stride: usize, x: u32, y: u32) -> [u8; 3] {
     let offset = y as usize * stride + x as usize * BYTES_PER_PIXEL;
     let mut pixel = [0; 3];
     pixel.copy_from_slice(&picture[offset..offset + 3]);
@@ -201,7 +230,7 @@ fn rgb_under_drag_icon(picture: &[u8], (pointer_x, pointer_y): (u32, u32)) -> [u
     rgb_at(picture, stride, pointer_x + middle, pointer_y + middle)
 }
 
-async fn wait_for_picture(pull: &AppSinkPull, shows: impl Fn(&[u8]) -> bool) -> bool {
+pub(crate) async fn wait_for_picture(pull: &AppSinkPull, shows: impl Fn(&[u8]) -> bool) -> bool {
     tokio::time::timeout(TIMEOUT, async {
         loop {
             let frame = pull.pull().await.expect("the source keeps producing");
@@ -226,6 +255,45 @@ fn send(input: &InputSender, event: WindowInput) {
     input.send(event).expect("the display takes input");
 }
 
+pub(crate) async fn drag_icon_to(pull: &AppSinkPull, input: &InputSender, end: (u32, u32)) {
+    let (start_x, start_y) = DRAG_START;
+    let (end_x, end_y) = end;
+    send(
+        input,
+        WindowInput::Pointer {
+            x: start_x,
+            y: start_y,
+        },
+    );
+    send(
+        input,
+        WindowInput::Button {
+            button: DRAG_BUTTON,
+            down: true,
+        },
+    );
+    // the drag starts once the client answers the press, and only motion after that reaches a drop target
+    assert!(
+        wait_for_drag_icon(pull, DRAG_START, DRAG_ICON_COLOR_ARGB).await,
+        "a frame shows the drag icon where the drag starts"
+    );
+    send(input, WindowInput::Pointer { x: end_x, y: end_y });
+    assert!(
+        wait_for_drag_icon(pull, end, DRAG_ICON_COLOR_ARGB).await,
+        "the drag icon follows the pointer"
+    );
+}
+
+pub(crate) fn release_drag(input: &InputSender) {
+    send(
+        input,
+        WindowInput::Button {
+            button: DRAG_BUTTON,
+            down: false,
+        },
+    );
+}
+
 // the source must output system memory at WIDTH x HEIGHT
 pub(crate) async fn drag_reaches_the_drop_target(source: WaylandDisplaySrc, channel: &str) {
     let input = source.input_sender();
@@ -243,41 +311,10 @@ pub(crate) async fn drag_reaches_the_drop_target(source: WaylandDisplaySrc, chan
             wait_for_picture(&pull, |picture| shows_client(picture, stride)).await,
             "a frame shows the client's window"
         );
-        let (start_x, start_y) = DRAG_START;
-        let (end_x, end_y) = DRAG_END;
-        send(
-            &input,
-            WindowInput::Pointer {
-                x: start_x,
-                y: start_y,
-            },
-        );
-        send(
-            &input,
-            WindowInput::Button {
-                button: DRAG_BUTTON,
-                down: true,
-            },
-        );
-        // the drag starts once the client answers the press, and only motion after that reaches a drop target
-        assert!(
-            wait_for_drag_icon(&pull, DRAG_START, DRAG_ICON_COLOR_ARGB).await,
-            "a frame shows the drag icon where the drag starts"
-        );
-        send(&input, WindowInput::Pointer { x: end_x, y: end_y });
-        assert!(
-            wait_for_drag_icon(&pull, DRAG_END, DRAG_ICON_COLOR_ARGB).await,
-            "the drag icon follows the pointer"
-        );
+        drag_icon_to(&pull, &input, DRAG_END).await;
         // smithay cancels a drop the target has not accepted yet
         wait_for_client_event(&mut events, &ClientEvent::DropAccepted).await;
-        send(
-            &input,
-            WindowInput::Button {
-                button: DRAG_BUTTON,
-                down: false,
-            },
-        );
+        release_drag(&input);
         wait_for_client_event(&mut events, &ClientEvent::Dropped(DRAG_PAYLOAD.into())).await;
         assert!(
             wait_for_drag_icon(&pull, DRAG_END, UPPER_COLOR_ARGB).await,
@@ -322,6 +359,7 @@ fn run_client(socket: PathBuf, events: mpsc::UnboundedSender<ClientEvent>) {
         data_device_manager,
         data_device: None,
         drag: None,
+        cursor: None,
         pool: SlotPool::new(pool_bytes, &shm).expect("shm pool"),
         shm,
         window,
@@ -461,6 +499,9 @@ impl PointerHandler for Client {
         events: &[PointerEvent],
     ) {
         for event in events {
+            if let PointerEventKind::Enter { serial } = event.kind {
+                self.set_cursor(qh, serial);
+            }
             let client_event = match event.kind {
                 PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
                     ClientEvent::PointerMotion {

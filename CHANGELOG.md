@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2558: Keep the `g2g-desktop host --run` display and app across reconnects, and send its cursor to the client.
+- M2557: Drop Wayland drags onto X11 windows in `waylanddisplaysrc`.
 - M2556: Keep forwarding the startup consumer demand through a muxer's pass-through pad when a pad caps change drops the muxer's own proposal.
 - M2555: Skip the SSD decoder's argmax index pass for anchors whose best score is under the confidence threshold.
 - M2554: Report `onvifmetadatacombiner` latency as `latency` plus one video frame, and forward a mid-stream consumer demand through it to the video producer.

@@ -4785,6 +4785,7 @@ dependencies = [
  "smithay-client-toolkit 0.21.1",
  "tokio",
  "x11rb 0.14.0",
+ "xcursor",
 ]
 
 [[package]]

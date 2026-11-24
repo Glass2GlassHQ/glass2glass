@@ -18,12 +18,14 @@ display = [
     "dep:g2g-plugins",
     "dep:smithay",
     "dep:tokio",
+    "dep:xcursor",
 ]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 g2g-core = { workspace = true, features = ["std", "runtime"], optional = true }
 g2g-plugins = { workspace = true, features = ["std"], optional = true }
 tokio = { version = "1", features = ["sync"], optional = true }
+xcursor = { version = "0.3", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies.smithay]
 git = "https://github.com/Smithay/smithay"

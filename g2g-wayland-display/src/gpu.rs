@@ -27,8 +27,8 @@ use smithay::utils::{DeviceFd, Physical, Point, Rectangle, Transform};
 use smithay::wayland::dmabuf::{DmabufFeedback, DmabufFeedbackBuilder};
 
 use crate::display::{
-    drag_icon_elements, hardware_error, DisplaySize, Picture, BACKGROUND, BYTES_PER_PIXEL,
-    OUTPUT_FOURCC,
+    drag_icon_elements, hardware_error, DisplaySize, Picture, SessionOutput, BACKGROUND,
+    BYTES_PER_PIXEL, OUTPUT_FOURCC,
 };
 
 const MAX_OUTPUT_BUFFERS: usize = 8;
@@ -75,22 +75,21 @@ enum OutputPass {
     },
 }
 
+struct OutputTarget {
+    output: GpuOutput,
+    pass: OutputPass,
+}
+
 pub(crate) struct GpuRenderer {
     pub(crate) gles: GlesRenderer,
     allocator: GbmAllocator<DrmDeviceFd>,
     node: DrmNode,
     size: DisplaySize,
-    output: GpuOutput,
-    pass: OutputPass,
+    target: Option<OutputTarget>,
 }
 
 impl GpuRenderer {
-    pub(crate) fn open(
-        render_node: &Path,
-        size: DisplaySize,
-        output: GpuOutput,
-        format: GpuFormat,
-    ) -> Result<Self, G2gError> {
+    pub(crate) fn open(render_node: &Path, size: DisplaySize) -> Result<Self, G2gError> {
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -107,26 +106,33 @@ impl GpuRenderer {
         let context = EGLContext::new(&display)
             .map_err(|error| hardware_error("creating the EGL context", error))?;
         // SAFETY: the context was created on this thread above and is current on no other thread.
-        let mut gles = unsafe { GlesRenderer::new(context) }
+        let gles = unsafe { GlesRenderer::new(context) }
             .map_err(|error| hardware_error("creating the GLES renderer", error))?;
-        let pass = match format {
-            GpuFormat::Rgba => OutputPass::Rgba {
-                modifiers: rgba_modifiers(&gles)?,
-                buffers: Vec::new(),
-            },
-            GpuFormat::Nv12 => OutputPass::Nv12 {
-                pass: nv12_pass(&mut gles, size)?,
-                buffers: Vec::new(),
-            },
-        };
         Ok(Self {
             gles,
             allocator: GbmAllocator::new(gbm, GbmBufferFlags::RENDERING),
             node,
             size,
-            output,
-            pass,
+            target: None,
         })
+    }
+
+    pub(crate) fn select_output(&mut self, session: SessionOutput) -> Result<(), G2gError> {
+        let pass = match session.format {
+            GpuFormat::Rgba => OutputPass::Rgba {
+                modifiers: rgba_modifiers(&self.gles)?,
+                buffers: Vec::new(),
+            },
+            GpuFormat::Nv12 => OutputPass::Nv12 {
+                pass: nv12_pass(&mut self.gles, self.size)?,
+                buffers: Vec::new(),
+            },
+        };
+        self.target = Some(OutputTarget {
+            output: session.output,
+            pass,
+        });
+        Ok(())
     }
 
     pub(crate) fn dmabuf_feedback(&self) -> Result<DmabufFeedback, G2gError> {
@@ -143,7 +149,8 @@ impl GpuRenderer {
         damage_tracker: &mut OutputDamageTracker,
     ) -> Result<Picture, G2gError> {
         let size = self.size;
-        match &mut self.pass {
+        let target = self.target.as_mut().ok_or(G2gError::NotConfigured)?;
+        match &mut target.pass {
             OutputPass::Rgba { modifiers, buffers } => {
                 let index = match reusable(buffers)? {
                     Some(index) => index,
@@ -173,7 +180,7 @@ impl GpuRenderer {
                     drag_icon,
                     damage_tracker,
                 )?;
-                match self.output {
+                match target.output {
                     GpuOutput::DmaBuf => Ok(Picture::DmaBuf(buffer.shared.clone())),
                     GpuOutput::System => {
                         read_framebuffer(&mut self.gles, &framebuffer, size).map(Picture::System)
@@ -220,7 +227,7 @@ impl GpuRenderer {
                     &pass.chroma_program,
                     half,
                 )?;
-                match self.output {
+                match target.output {
                     GpuOutput::DmaBuf => Ok(Picture::DmaBuf(buffer.shared.clone())),
                     GpuOutput::System => read_nv12(&buffer.shared, size).map(Picture::System),
                 }

@@ -144,10 +144,15 @@ writes each token `PipeWireVideoSrc::portal_restore_tokens` publishes back to
 that file. Portal tokens are single-use, so the file always holds the newest one.
 
 With `--run COMMAND` the Linux host captures a headless desktop instead of the
-screen. Each connection starts `waylanddisplaysrc` with Xwayland at `--size`
-(default 1920x1080) on `--render-node`, then runs `sh -c COMMAND` with
-`WAYLAND_DISPLAY` and `DISPLAY` naming the new display, and kills it when the
-connection ends. The encoder follows the render node's kernel driver:
+screen. At launch the host starts a `WaylandDisplay` with Xwayland at `--size`
+(default 1920x1080) on `--render-node`, runs `sh -c COMMAND` with
+`WAYLAND_DISPLAY` and `DISPLAY` naming it, and exits when the command exits.
+Each connection attaches a `WaylandDisplaySrc::on_display` source to that
+display, so the app and its windows stay across reconnects. A source that
+detaches releases every key and button its session left held. The cursor the
+focused client sets goes to the client as type 8, a named cursor comes from the
+`XCURSOR_THEME` theme at `XCURSOR_SIZE`. The encoder follows the render node's
+kernel driver:
 
 ```
 waylanddisplaysrc ! dmabuftocuda ! nvenc      # nvidia

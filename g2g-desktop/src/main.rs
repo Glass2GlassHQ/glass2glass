@@ -3,6 +3,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use std::collections::BTreeMap;
+#[cfg(target_os = "linux")]
+use std::convert::Infallible;
 use std::error::Error;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -29,12 +31,13 @@ use g2g_plugins::d3d11screencapturesrc::{monitor_bounds, D3D11ScreenCaptureSrc};
 use g2g_plugins::perfetto_trace::PerfettoTrace;
 #[cfg(target_os = "linux")]
 use g2g_plugins::pipewirevideosrc::PipeWireVideoSrc;
-use g2g_plugins::remotewtio::generate_certificate;
+use g2g_plugins::remotewtio::{generate_certificate, SelfSignedCertificate};
 #[cfg(target_os = "linux")]
 use g2g_plugins::screencastportal::PortalSourceTypes;
 #[cfg(target_os = "linux")]
 use g2g_wayland_display::waylanddisplaysrc::{
-    render_node_driver, DisplayNames, WaylandDisplaySrc, SOFTWARE_RENDERING,
+    render_node_driver, DisplayNames, WaylandDisplay, WaylandDisplaySettings, WaylandDisplaySrc,
+    SOFTWARE_RENDERING,
 };
 use tokio::sync::{mpsc, watch};
 
@@ -301,68 +304,87 @@ fn headless_encoder(render_node: &str) -> std::io::Result<HostEncoder> {
 }
 
 #[cfg(target_os = "linux")]
-async fn launch_app(
-    mut names: watch::Receiver<Option<DisplayNames>>,
-    command: &str,
-) -> Result<std::process::Child, Box<dyn Error>> {
-    let names = names
-        .wait_for(Option::is_some)
-        .await
-        .map_err(|_| "the headless display closed before it opened")?
-        .clone()
-        .expect("waited for the names");
+fn launch_app(names: &DisplayNames, command: &str) -> std::io::Result<tokio::process::Child> {
     let x11_display = names
         .x11_display
+        .as_ref()
         .expect("the headless display runs Xwayland");
-    let app = std::process::Command::new("sh")
+    tokio::process::Command::new("sh")
         .arg("-c")
         .arg(command)
-        .env("WAYLAND_DISPLAY", names.wayland_socket)
+        .env("WAYLAND_DISPLAY", &names.wayland_socket)
         .env("DISPLAY", x11_display)
-        .spawn()?;
-    Ok(app)
+        .kill_on_drop(true)
+        .spawn()
+}
+
+#[cfg(target_os = "linux")]
+async fn serve_headless_sessions(
+    address: SocketAddr,
+    certificate: &SelfSignedCertificate,
+    settings: &HostSettings,
+    display: &WaylandDisplay,
+    encoder: &HostEncoder,
+    trace_path: Option<&Path>,
+) -> Result<Infallible, Box<dyn Error>> {
+    loop {
+        let listener = HostListener::bind(address, certificate.clone(), settings)?;
+        let trace = open_trace(trace_path)?;
+        let input = display.input_sender();
+        let host_capture = HostCapture {
+            nodes: vec![GraphNodeRef::source(WaylandDisplaySrc::on_display(display))],
+            encoder: encoder.clone(),
+            cursor_shapes: Some(display.cursor_shapes()),
+        };
+        let open_injector = move |screen| Ok(WaylandDisplayInjector::new(screen, input.clone()));
+        serve(listener, settings, host_capture, open_injector, trace).await;
+    }
 }
 
 #[cfg(target_os = "linux")]
 async fn host_headless(
-    listener: HostListener,
+    address: SocketAddr,
+    certificate: &SelfSignedCertificate,
     settings: &HostSettings,
     fps: u32,
     headless: &HeadlessSettings,
-    trace: Option<Arc<PerfettoTrace>>,
-) {
-    let mut source = WaylandDisplaySrc::new().with_framerate(fps).with_xwayland();
+    trace_path: Option<&Path>,
+) -> Result<(), Box<dyn Error>> {
+    let mut display_settings = WaylandDisplaySettings {
+        framerate_q16: fps << 16,
+        xwayland: true,
+        ..WaylandDisplaySettings::default()
+    };
     if let Some(size) = headless.size {
-        source = source.with_size(size.width, size.height);
+        display_settings.width = size.width;
+        display_settings.height = size.height;
     }
     if let Some(render_node) = &headless.render_node {
-        source = source.with_render_node(render_node);
+        display_settings.render_node = render_node.clone();
     }
-    let encoder = match headless_encoder(source.render_node()) {
-        Ok(encoder) => encoder,
-        Err(e) => {
-            eprintln!("g2g-desktop host: {}: {e}", source.render_node());
-            return;
-        }
-    };
-    let input = source.input_sender();
-    let names = source.display_names();
-    let host_capture = HostCapture {
-        nodes: vec![GraphNodeRef::source(source)],
-        encoder,
-        cursor_shapes: None,
-    };
-    let open_injector = move |screen| Ok(WaylandDisplayInjector::new(screen, input.clone()));
-    let ((), app) = tokio::join!(
-        serve(listener, settings, host_capture, open_injector, trace),
-        launch_app(names, &headless.command)
+    let encoder = headless_encoder(&display_settings.render_node)
+        .map_err(|e| format!("{}: {e}", display_settings.render_node))?;
+    let display = WaylandDisplay::start(display_settings)
+        .await
+        .map_err(|e| format!("starting the headless display: {e:?}"))?;
+    let mut app =
+        launch_app(display.names(), &headless.command).map_err(|e| format!("--run: {e}"))?;
+    let sessions = serve_headless_sessions(
+        address,
+        certificate,
+        settings,
+        &display,
+        &encoder,
+        trace_path,
     );
-    let ended = app.map(|mut app| app.kill().and_then(|()| app.wait()));
-    match ended {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => eprintln!("g2g-desktop host: stopping --run: {e}"),
-        Err(e) => eprintln!("g2g-desktop host: --run: {e}"),
+    let status = tokio::select! {
+        status = app.wait() => status.map_err(|e| format!("--run: {e}"))?,
+        served = sessions => match served? {},
+    };
+    if !status.success() {
+        return Err(format!("--run exited with {status}").into());
     }
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -405,10 +427,7 @@ async fn host_one(
         }
     };
     #[cfg(target_os = "linux")]
-    match &capture.headless {
-        Some(headless) => host_headless(listener, &settings, capture.fps, headless, trace).await,
-        None => host_portal(listener, &settings, &capture, trace).await,
-    }
+    host_portal(listener, &settings, &capture, trace).await;
     #[cfg(target_os = "windows")]
     host_monitor(listener, &settings, &capture, trace).await;
 }
@@ -447,6 +466,18 @@ async fn host(flags: Flags) -> Result<(), Box<dyn Error>> {
         "g2g-desktop host: listening on UDP and TCP port {port}, certificate sha256 {}",
         certificate.sha256_hex
     );
+    #[cfg(target_os = "linux")]
+    if let Some(headless) = &capture.headless {
+        return host_headless(
+            address,
+            &certificate,
+            &settings,
+            capture.fps,
+            headless,
+            trace_path.as_deref(),
+        )
+        .await;
+    }
     loop {
         let listener = HostListener::bind(address, certificate.clone(), &settings)?;
         host_one(

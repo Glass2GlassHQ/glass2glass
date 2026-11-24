@@ -255,12 +255,30 @@ passed, and otherwise sends the last picture again after one second. Clients get
 frame callbacks only when a frame is rendered, so they draw at the rate the
 pipeline takes frames.
 
+The compositor thread belongs to a `WaylandDisplay`. A launch-line source starts
+its own at the negotiated size and rate and stops it when the run ends.
+`WaylandDisplaySrc::on_display` instead attaches to a display the caller
+started, at that display's size and rate, and the display keeps its clients
+when the run ends. Each run picks its own format and memory domain, and the
+GPU renderer rebuilds its output buffers when it attaches. When a run detaches,
+the display releases every key and button that run left held. A render failure
+fails the run that asked for the frame and leaves the display running.
+
+`WaylandDisplay::cursor_shapes()` publishes the pointer image as a
+`CursorShape`: the `wl_shm` buffer of the surface the focused client set
+(re-read on each commit), a named cursor from the `XCURSOR_THEME` theme at
+`XCURSOR_SIZE` (libXcursor's `default` and 24 when unset), or `None` while the
+pointer is hidden. Both sources store premultiplied alpha, which the shape
+converts to straight alpha. The picture itself has no pointer drawn in it.
+
 With `xwayland=true` the run also starts Xwayland (the binary must be on `PATH`)
 and smithay's X11 window manager, and publishes the X display (`:N`) beside the
 Wayland socket once the window manager runs. A managed X11 window is mapped
 fullscreen at the output size and takes keyboard focus, which the window manager
 passes on as X input focus. Override-redirect windows (menus, tooltips) keep the
-position they set.
+position they set. A Wayland drag over an X11 window reaches it as XDND, since
+the pointer focus there is the window's `X11Surface` rather than its Wayland
+surface.
 
 Input arrives as `WindowInput` through `input_sender()`: evdev key codes,
 pointer positions in output pixels, buttons, and wheel steps of 120 per notch,

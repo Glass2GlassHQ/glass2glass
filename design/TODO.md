@@ -36,10 +36,6 @@ The plan is [remote.md](remote.md).
   input through XTest.
 - `ximagesrc`: follow a window or screen resize with `CapsChanged` instead of
   failing.
-- `waylanddisplaysrc`: drop onto X11 windows, which needs a pointer focus that
-  can be an `X11Surface`.
-- `g2g-desktop host --run`: keep the headless desktop and its app running
-  across client reconnects, and send the compositor's cursor to the client.
 - Opus audio from the host's default capture device, on a short queue that
   does not hold the picture.
 - Encode with `d3d11convert ! nvenc` on a Windows host with an NVIDIA GPU,
