@@ -23,7 +23,7 @@ use g2g_core::meta::{
 };
 use g2g_core::{
     AsyncElement, Caps, Dim, G2gError, MultiInputElement, MultiOutputElement, MultiOutputSink,
-    MultiOutputSource, PropValue, PushOutcome, Rate, VideoCodec,
+    MultiOutputSource, PropValue, PushOutcome, Rate, Reconfigure, VideoCodec,
 };
 use g2g_plugins::onvifmetadata::{
     parse_metadata_documents, write_metadata_document, OnvifMetadataCombiner,
@@ -319,6 +319,7 @@ struct Received {
     video: Vec<Frame>,
     documents: Vec<Frame>,
     written_times: Vec<i64>,
+    video_keyframe_requested: bool,
 }
 
 async fn serve_and_receive(delta_lead_in: Duration) -> Received {
@@ -333,6 +334,9 @@ async fn serve_and_receive(delta_lead_in: Duration) -> Received {
         .expect("the first track serves H.264");
     MultiInputElement::configure_pipeline(&mut server, METADATA_TRACK, &Caps::OnvifMetadata)
         .expect("the second track serves ONVIF metadata");
+
+    let video_reverse = MultiInputElement::reverse_channel(&server, VIDEO_TRACK)
+        .expect("the video track has a reverse channel");
 
     let client_done = AtomicBool::new(false);
     let mut src = RtspSrcN::new(format!("rtsp://127.0.0.1:{port}/stream"))
@@ -357,6 +361,10 @@ async fn serve_and_receive(delta_lead_in: Duration) -> Received {
         video: received.frames(VIDEO_TRACK),
         documents: parse(documents).await,
         written_times,
+        video_keyframe_requested: matches!(
+            video_reverse.take(),
+            Some(PushOutcome::Reconfigure(Reconfigure::ForceKeyframe))
+        ),
     }
 }
 
@@ -439,6 +447,12 @@ async fn a_player_joining_before_a_keyframe_gets_both_tracks_on_one_timeline() {
         "only {checked} of {} pictures had a sender wall clock and a document",
         received.video.len()
     );
+}
+
+#[tokio::test]
+async fn a_player_joining_before_a_keyframe_asks_the_video_encoder_for_one() {
+    let received = serve_and_receive(DELTA_LEAD_IN).await;
+    assert!(received.video_keyframe_requested);
 }
 
 #[tokio::test]

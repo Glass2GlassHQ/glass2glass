@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2549: Ask the encoder for a keyframe when a player joins a multi-track `rtspserversink`.
 - M2548: Wake parked tasks after releasing the runtime channel lock.
 - M2547: Name every track with a shared `rtptime` in `rtspserversink`'s RTP-Info so a player keeps video and metadata on one timeline.
 - M2546: Stamp `rtspsrcn` frames in pipeline running time, including after a reconnect.

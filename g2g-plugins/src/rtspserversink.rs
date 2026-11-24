@@ -44,7 +44,8 @@ use tokio::io::AsyncWriteExt;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, Frame,
     G2gError, HardwareError, MultiInputElement, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, Reconfigure, VideoCodec,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, PushOutcome, Rate, Reconfigure,
+    ReverseChannel, VideoCodec,
 };
 
 use crate::clock::PtsWallClock;
@@ -120,6 +121,7 @@ struct ServedTrack {
     rtp_socket: Option<tokio::net::UdpSocket>,
     rtcp_socket: Option<tokio::net::UdpSocket>,
     ended: bool,
+    reverse: ReverseChannel,
 }
 
 #[derive(Debug, Default)]
@@ -384,7 +386,6 @@ pub struct RtspServerSink {
     frames_sent: u64,
     packets_sent: u64,
     sender_reports_sent: u64,
-    keyframe_request_pending: bool,
     newest_pts_ns: Option<u64>,
     /// Last SPS and PPS seen in the stream, offered in the SDP as
     /// `sprop-parameter-sets`. Refreshed as they flow, so a mid-stream
@@ -414,7 +415,6 @@ impl RtspServerSink {
             frames_sent: 0,
             packets_sent: 0,
             sender_reports_sent: 0,
-            keyframe_request_pending: false,
             newest_pts_ns: None,
             sps: None,
             pps: None,
@@ -767,9 +767,12 @@ impl RtspServerSink {
         let pts_ns = frame.timing.pts_ns;
         if media == TrackMedia::H264 {
             let keyframe = crate::annexb::au_is_keyframe(VideoCodec::H264, slice);
-            self.keyframe_request_pending |= self.clients.iter().any(|client| {
+            if self.clients.iter().any(|client| {
                 client.tracks[input].playing() && client.awaiting_keyframe && !keyframe
-            });
+            }) {
+                // gst-rtsp-server's ensure-keyunit-on-start asks the encoder for a keyframe when a player starts
+                self.tracks[input].reverse.request_keyframe();
+            }
         }
         self.broadcast(input, media, slice, pts_ns).await?;
         self.frames_sent += 1;
@@ -951,8 +954,10 @@ impl AsyncElement for RtspServerSink {
     }
 
     fn take_reconfigure(&mut self) -> Option<Reconfigure> {
-        // gst-rtsp-server's ensure-keyunit-on-start asks the encoder for a keyframe when a player starts
-        core::mem::take(&mut self.keyframe_request_pending).then_some(Reconfigure::ForceKeyframe)
+        match self.tracks[0].reverse.take()? {
+            PushOutcome::Reconfigure(reconfigure) => Some(reconfigure),
+            outcome => unreachable!("rtspserversink posts only keyframe requests, not {outcome:?}"),
+        }
     }
 
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
@@ -1023,6 +1028,10 @@ impl MultiInputElement for RtspServerSink {
     // terminal: the players are the destination, so this placeholder is never consulted
     fn output_caps(&self) -> Result<Caps, G2gError> {
         Ok(h264_any())
+    }
+
+    fn reverse_channel(&self, input: usize) -> Option<ReverseChannel> {
+        Some(self.tracks[input].reverse.clone())
     }
 
     fn is_terminal(&self) -> bool {
