@@ -11,6 +11,7 @@ repository.workspace = true
 publish = false
 
 [features]
+ffmpeg = ["display", "g2g-plugins/ffmpeg"]
 display = [
     "dep:g2g-core",
     "dep:g2g-plugins",
@@ -20,7 +21,7 @@ display = [
 
 [target.'cfg(target_os = "linux")'.dependencies]
 g2g-core = { workspace = true, features = ["std", "runtime"], optional = true }
-g2g-plugins = { workspace = true, optional = true }
+g2g-plugins = { workspace = true, features = ["std"], optional = true }
 tokio = { version = "1", features = ["sync"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies.smithay]

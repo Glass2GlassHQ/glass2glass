@@ -70,7 +70,7 @@ use smithay_client_toolkit::{
     subcompositor::SubcompositorState,
 };
 
-use crate::capsfilter::DRM_FOURCC_FORMATS;
+use crate::capsfilter::{drm_format, DRM_FOURCC_FORMATS};
 use crate::clock::wait_to_present;
 use crate::display_aspect::{
     display_size, letterbox, ViewportRectangle, FORCE_ASPECT_RATIO_NAME,
@@ -478,13 +478,6 @@ impl CompositorFormats {
 // drm_fourcc.h
 const DRM_FORMAT_ARGB8888: u32 = u32::from_le_bytes(*b"AR24");
 const DRM_FORMAT_XRGB8888: u32 = u32::from_le_bytes(*b"XR24");
-
-fn drm_format(format: RawVideoFormat) -> Option<u32> {
-    let (fourcc, _) = DRM_FOURCC_FORMATS
-        .iter()
-        .find(|(_, gst_name)| *gst_name == format.gst_name())?;
-    Some(u32::from_le_bytes(fourcc.as_bytes().try_into().ok()?))
-}
 
 fn raw_video_format(drm_format: u32) -> Option<RawVideoFormat> {
     let fourcc = drm_format.to_le_bytes();

@@ -28,10 +28,23 @@ use tokio::sync::{oneshot, watch};
 use crate::display::{
     run_display, DisplayChannels, DisplaySize, FrameReply, Pacing, Picture, Rendering,
 };
-use crate::gpu::GpuOutput;
+use crate::gpu::{GpuFormat, GpuOutput};
+
+#[derive(Debug, Clone, Copy)]
+struct OutputFormat {
+    format: RawVideoFormat,
+    colorimetry: Colorimetry,
+}
 
 // drm's abgr8888 is R, G, B, A in memory
-const OUTPUT_FORMAT: RawVideoFormat = RawVideoFormat::Rgba8;
+const RGBA_OUTPUT: OutputFormat = OutputFormat {
+    format: RawVideoFormat::Rgba8,
+    colorimetry: Colorimetry::UNKNOWN,
+};
+const NV12_OUTPUT: OutputFormat = OutputFormat {
+    format: RawVideoFormat::Nv12,
+    colorimetry: Colorimetry::BT709,
+};
 const SOFTWARE_RENDERING: &str = "software";
 const DEFAULT_RENDER_NODE: &str = "/dev/dri/renderD128";
 const DEFAULT_WIDTH: u32 = 1920;
@@ -46,6 +59,7 @@ pub struct WaylandDisplaySrc {
     frame_limit: u64,
     render_node: String,
     output_memory: MemoryDomainKind,
+    format: RawVideoFormat,
     configured: bool,
     clock_sync: Option<ClockSync>,
     input_sender: Sender<WindowInput>,
@@ -62,6 +76,7 @@ impl core::fmt::Debug for WaylandDisplaySrc {
             .field("frame_limit", &self.frame_limit)
             .field("render_node", &self.render_node)
             .field("output_memory", &self.output_memory)
+            .field("format", &self.format)
             .field("socket_name", &*self.socket_name.borrow())
             .finish_non_exhaustive()
     }
@@ -77,6 +92,7 @@ impl Default for WaylandDisplaySrc {
             frame_limit: u64::MAX,
             render_node: String::from(DEFAULT_RENDER_NODE),
             output_memory: MemoryDomainKind::System,
+            format: RGBA_OUTPUT.format,
             configured: false,
             clock_sync: None,
             input_sender,
@@ -130,24 +146,52 @@ impl WaylandDisplaySrc {
             MemoryDomainKind::System => GpuOutput::System,
             _ => return Err(G2gError::AllocationConflict),
         };
+        let format = match self.format {
+            RawVideoFormat::Rgba8 => GpuFormat::Rgba,
+            RawVideoFormat::Nv12 => GpuFormat::Nv12,
+            _ => return Err(G2gError::CapsMismatch),
+        };
         Ok(Rendering::Gpu {
             render_node: PathBuf::from(&self.render_node),
             output,
+            format,
         })
     }
 
-    pub(crate) fn caps(&self) -> Result<Caps, G2gError> {
+    fn output_formats(&self) -> Vec<OutputFormat> {
+        // nv12 halves both dimensions for its chroma plane
+        let even = self.width.is_multiple_of(2) && self.height.is_multiple_of(2);
+        if self.render_node == SOFTWARE_RENDERING || !even {
+            return Vec::from([RGBA_OUTPUT]);
+        }
+        Vec::from([RGBA_OUTPUT, NV12_OUTPUT])
+    }
+
+    fn caps_for(&self, output: OutputFormat) -> Result<Caps, G2gError> {
         let framerate =
             framerate_q16_from_fraction(self.framerate, 1).ok_or(G2gError::CapsMismatch)?;
         Ok(Caps::RawVideo {
-            format: OUTPUT_FORMAT,
+            format: output.format,
             width: Dim::Fixed(self.width),
             height: Dim::Fixed(self.height),
             framerate: Rate::Fixed(framerate),
             interlace: Interlace::Progressive,
-            colorimetry: Colorimetry::UNKNOWN,
+            colorimetry: output.colorimetry,
             pixel_aspect: PixelAspect::SQUARE,
         })
+    }
+
+    pub(crate) fn rgba_caps(&self) -> Result<Caps, G2gError> {
+        self.caps_for(RGBA_OUTPUT)
+    }
+
+    fn produced_caps(&self) -> Result<CapsSet, G2gError> {
+        let alternatives = self
+            .output_formats()
+            .into_iter()
+            .map(|output| self.caps_for(output))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(CapsSet::from_alternatives(alternatives))
     }
 }
 
@@ -169,22 +213,23 @@ impl SourceLoop for WaylandDisplaySrc {
         Self: 'a;
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
-        core::future::ready(self.caps())
+        core::future::ready(self.rgba_caps())
     }
 
     fn caps_constraint<'a>(
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
-        core::future::ready(
-            self.caps()
-                .map(|caps| CapsConstraint::Produces(CapsSet::one(caps))),
-        )
+        core::future::ready(self.produced_caps().map(CapsConstraint::Produces))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        if *absolute_caps != self.caps()? {
-            return Err(G2gError::CapsMismatch);
+        let mut accepted = None;
+        for output in self.output_formats() {
+            if *absolute_caps == self.caps_for(output)? {
+                accepted = Some(output.format);
+            }
         }
+        self.format = accepted.ok_or(G2gError::CapsMismatch)?;
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -390,14 +435,17 @@ impl SourceLoop for WaylandDisplaySrc {
 
 impl PadTemplates for WaylandDisplaySrc {
     fn pad_templates() -> Vec<PadTemplate> {
-        Vec::from([PadTemplate::source(CapsSet::one(Caps::RawVideo {
-            format: OUTPUT_FORMAT,
+        let alternatives = [RGBA_OUTPUT, NV12_OUTPUT].map(|output| Caps::RawVideo {
+            format: output.format,
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: Interlace::Progressive,
-            colorimetry: Colorimetry::UNKNOWN,
+            colorimetry: output.colorimetry,
             pixel_aspect: PixelAspect::SQUARE,
-        }))])
+        });
+        Vec::from([PadTemplate::source(CapsSet::from_alternatives(
+            alternatives.into(),
+        ))])
     }
 }

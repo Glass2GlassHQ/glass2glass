@@ -351,7 +351,7 @@ jobs:
         # waylanddisplaysrc opens its socket in XDG_RUNTIME_DIR
         run: |
           export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$RUNNER_TEMP}"
-          cargo test --workspace --locked --features linux-full,g2g-desktop/session,g2g-wayland-display/display --no-fail-fast
+          cargo test --workspace --locked --features linux-full,g2g-desktop/session,g2g-wayland-display/ffmpeg --no-fail-fast
       # the linux-full test binaries leave no disk for the steps below
       - name: drop the linux-full test binaries
         run: |

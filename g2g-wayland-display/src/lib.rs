@@ -15,7 +15,7 @@ pub fn register(registry: &mut g2g_core::runtime::Registry) -> &mut g2g_core::ru
     use waylanddisplaysrc::WaylandDisplaySrc;
 
     let declared = WaylandDisplaySrc::new()
-        .caps()
+        .rgba_caps()
         .expect("the default size and rate form valid caps");
     registry.register_source(
         SourceFactory::new("waylanddisplaysrc", declared, || {

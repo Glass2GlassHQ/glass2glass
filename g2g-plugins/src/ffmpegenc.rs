@@ -79,6 +79,7 @@ use ffmpeg_next as ffmpeg;
 
 use crate::ffmpegdec::{open_hw_device, AvBufferRef};
 use g2g_core::caps::framerate_q16_to_fraction;
+use g2g_core::log::short_type_name;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ColorRange, Colorimetry, ConfigureOutcome, Dim,
     ElementMetadata, G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates,
@@ -603,9 +604,10 @@ impl FfmpegVideoEnc {
         }
 
         let pixel = pixel_for(self.format).ok_or(G2gError::CapsMismatch)?;
-        let frame = self
+        let mut frame = self
             .input_frame
-            .get_or_insert_with(|| FfVideo::new(pixel, self.width, self.height));
+            .take()
+            .unwrap_or_else(|| FfVideo::new(pixel, self.width, self.height));
         // SAFETY: `frame` is an allocated AVFrame we own; buffers the encoder still
         // references from the previous frame are swapped for fresh ones first.
         if unsafe { ffmpeg::ffi::av_frame_make_writable(frame.as_mut_ptr()) } < 0 {
@@ -621,11 +623,50 @@ impl FfmpegVideoEnc {
             off = end;
         }
 
-        let mut surface = match &self.vaapi_frames {
-            Some(frames) => Some(upload_to_surface(frames, frame)?),
-            None => None,
+        let packets = match &self.vaapi_frames {
+            Some(frames) => {
+                let mut surface = upload_to_surface(frames, &frame)?;
+                self.send(&mut surface, pts_ns)
+            }
+            None => self.send(&mut frame, pts_ns),
         };
-        let frame = surface.as_mut().unwrap_or(frame);
+        self.input_frame = Some(frame);
+        packets
+    }
+
+    // the encoder takes the dma-buf's pixels as a VA surface imported from its fd, with no copy
+    #[cfg(target_os = "linux")]
+    fn encode_dmabuf(
+        &mut self,
+        dmabuf: &g2g_core::memory::OwnedDmaBuf,
+        pts_ns: u64,
+    ) -> Result<Vec<(Vec<u8>, u64)>, G2gError> {
+        let frames = self
+            .vaapi_frames
+            .as_ref()
+            .ok_or(G2gError::UnsupportedDomain)?;
+        let source = drm_prime_frame(dmabuf, self.format, self.width, self.height)?;
+        let mut surface = FfVideo::empty();
+        // SAFETY: `surface` is an empty AVFrame we own, and takes ownership of the new frames reference.
+        unsafe {
+            (*surface.as_mut_ptr()).format = ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VAAPI as i32;
+            (*surface.as_mut_ptr()).hw_frames_ctx = frames.new_reference()?;
+        }
+        let read = ffmpeg::ffi::AV_HWFRAME_MAP_READ as i32;
+        // SAFETY: `surface` names a VA-API frames context and `source` is a DRM PRIME frame whose descriptor its buffer owns.
+        if unsafe { ffmpeg::ffi::av_hwframe_map(surface.as_mut_ptr(), source.as_ptr(), read) } < 0 {
+            g2g_core::g2g_error!(
+                g2g_core::log::Target::category(short_type_name::<Self>()),
+                "VA-API cannot import the {} dma-buf with DRM format modifier {:#x}",
+                self.format.gst_name(),
+                dmabuf.modifier()
+            );
+            return Err(G2gError::Hardware(HardwareError::Other));
+        }
+        self.send(&mut surface, pts_ns)
+    }
+
+    fn send(&mut self, frame: &mut FfVideo, pts_ns: u64) -> Result<Vec<(Vec<u8>, u64)>, G2gError> {
         let frameno = self.frame_no;
         frame.set_pts(Some(frameno));
         // Picture type I requests an IDR on this frame. NVENC, libx264 and the
@@ -916,6 +957,83 @@ fn rbsp_stop_bit(rbsp: &[u8]) -> Option<usize> {
 // surfaces for in-flight and reference frames, the size ffmpeg's vaapi_encode example uses
 const VAAPI_SURFACE_POOL: i32 = 20;
 
+#[cfg(target_os = "linux")]
+struct DrmPrimeSource {
+    descriptor: ffmpeg::ffi::AVDRMFrameDescriptor,
+    // the producer reuses the buffer once this share drops, which waits for the encoder to release the surface
+    _dmabuf: g2g_core::memory::OwnedDmaBuf,
+}
+
+#[cfg(target_os = "linux")]
+unsafe extern "C" fn free_drm_prime_source(opaque: *mut core::ffi::c_void, _data: *mut u8) {
+    // SAFETY: `opaque` is the box `drm_prime_frame` leaked for this buffer, freed once here.
+    drop(unsafe { Box::from_raw(opaque.cast::<DrmPrimeSource>()) });
+}
+
+#[cfg(target_os = "linux")]
+fn drm_prime_frame(
+    dmabuf: &g2g_core::memory::OwnedDmaBuf,
+    format: RawVideoFormat,
+    width: u32,
+    height: u32,
+) -> Result<FfVideo, G2gError> {
+    let layer_format = crate::capsfilter::drm_format(format).ok_or(G2gError::CapsMismatch)?;
+    let (layout, _) = crate::paddedrows::dmabuf_plane_layout(dmabuf, format, width, height)
+        .ok_or(G2gError::CapsMismatch)?;
+    // SAFETY: the descriptor is plain integers, for which all zero bytes are valid.
+    let mut descriptor: ffmpeg::ffi::AVDRMFrameDescriptor = unsafe { core::mem::zeroed() };
+    descriptor.nb_objects = 1;
+    descriptor.objects[0] = ffmpeg::ffi::AVDRMObjectDescriptor {
+        fd: dmabuf.as_raw(),
+        size: crate::dmabufmap::dmabuf_len(dmabuf)?,
+        format_modifier: dmabuf.modifier(),
+    };
+    descriptor.nb_layers = 1;
+    let layer = &mut descriptor.layers[0];
+    layer.format = layer_format;
+    layer.nb_planes = i32::try_from(layout.count()).map_err(|_| G2gError::CapsMismatch)?;
+    for index in 0..layout.count() {
+        let plane = layout.plane(index).ok_or(G2gError::CapsMismatch)?;
+        let to_isize = |value: usize| isize::try_from(value).map_err(|_| G2gError::CapsMismatch);
+        *layer.planes.get_mut(index).ok_or(G2gError::CapsMismatch)? =
+            ffmpeg::ffi::AVDRMPlaneDescriptor {
+                object_index: 0,
+                offset: to_isize(plane.offset)?,
+                pitch: to_isize(plane.stride)?,
+            };
+    }
+    let source = Box::into_raw(Box::new(DrmPrimeSource {
+        descriptor,
+        _dmabuf: dmabuf.clone(),
+    }));
+    // SAFETY: the buffer wraps the descriptor inside the leaked box, and `free_drm_prime_source` frees the box when the last reference drops.
+    let buffer = unsafe {
+        ffmpeg::ffi::av_buffer_create(
+            core::ptr::addr_of_mut!((*source).descriptor).cast::<u8>(),
+            core::mem::size_of::<ffmpeg::ffi::AVDRMFrameDescriptor>(),
+            Some(free_drm_prime_source),
+            source.cast::<core::ffi::c_void>(),
+            0,
+        )
+    };
+    if buffer.is_null() {
+        // SAFETY: av_buffer_create failed, so the box was not handed over and is freed here.
+        drop(unsafe { Box::from_raw(source) });
+        return Err(G2gError::Hardware(HardwareError::Other));
+    }
+    let mut frame = FfVideo::empty();
+    // SAFETY: `frame` is an empty AVFrame we own, and takes ownership of `buffer`, whose data is the descriptor.
+    unsafe {
+        let raw = frame.as_mut_ptr();
+        (*raw).format = ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_DRM_PRIME as i32;
+        (*raw).width = i32::try_from(width).map_err(|_| G2gError::CapsMismatch)?;
+        (*raw).height = i32::try_from(height).map_err(|_| G2gError::CapsMismatch)?;
+        (*raw).buf[0] = buffer;
+        (*raw).data[0] = (*buffer).data;
+    }
+    Ok(frame)
+}
+
 fn upload_to_surface(frames: &AvBufferRef, software: &FfVideo) -> Result<FfVideo, G2gError> {
     let mut surface = FfVideo::empty();
     // SAFETY: `frames` is an initialised VA-API frames context and `surface` an
@@ -963,10 +1081,14 @@ impl AsyncElement for FfmpegVideoEnc {
     where
         Self: 'a;
 
-    /// Reads host memory, so it takes system frames only. The allocation
-    /// cascade turns that into a download demand on a GPU producer.
     fn input_domains(&self) -> g2g_core::memory::DomainSet {
-        g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
+        use g2g_core::memory::{DomainSet, MemoryDomainKind};
+        let system = DomainSet::only(MemoryDomainKind::System);
+        #[cfg(target_os = "linux")]
+        if matches!(self.backend, Backend::Vaapi(_)) {
+            return system.with(MemoryDomainKind::DmaBuf);
+        }
+        system
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
@@ -1153,10 +1275,17 @@ impl AsyncElement for FfmpegVideoEnc {
                             return Ok(());
                         }
                     }
+                    let pts_ns = frame.timing.pts_ns;
+                    #[cfg(target_os = "linux")]
+                    if let g2g_core::MemoryDomain::DmaBuf(dmabuf) = &frame.domain {
+                        let packets = self.encode_dmabuf(dmabuf, pts_ns)?;
+                        self.emit(packets, out).await?;
+                        return Ok(());
+                    }
                     let slice = frame
                         .domain
-                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    let packets = self.encode(slice, frame.timing.pts_ns)?;
+                        .require_system_slice(short_type_name::<Self>())?;
+                    let packets = self.encode(slice, pts_ns)?;
                     self.emit(packets, out).await?;
                 }
                 PipelinePacket::Eos => {

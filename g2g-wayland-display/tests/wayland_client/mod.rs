@@ -30,8 +30,8 @@ use smithay_client_toolkit::shm::{Shm, ShmHandler};
 use smithay_client_toolkit::{delegate_registry, registry_handlers};
 use tokio::sync::{mpsc, watch};
 
-pub(crate) const WIDTH: u32 = 64;
-pub(crate) const HEIGHT: u32 = 48;
+pub(crate) const WIDTH: u32 = 160;
+pub(crate) const HEIGHT: u32 = 128;
 pub(crate) const FRAMERATE: u32 = 30;
 pub(crate) const BYTES_PER_PIXEL: usize = 4;
 pub(crate) const UPPER_COLOR_ARGB: u32 = 0xFF20_80C0;

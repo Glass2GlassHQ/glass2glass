@@ -317,6 +317,14 @@ pub fn read_memory_feature(caps: &str) -> Option<GstCapsMemory> {
     })
 }
 
+#[cfg(all(target_os = "linux", any(feature = "wayland-sink", feature = "ffmpeg")))]
+pub(crate) fn drm_format(format: g2g_core::RawVideoFormat) -> Option<u32> {
+    let (fourcc, _) = DRM_FOURCC_FORMATS
+        .iter()
+        .find(|(_, gst_name)| *gst_name == format.gst_name())?;
+    Some(u32::from_le_bytes(fourcc.as_bytes().try_into().ok()?))
+}
+
 /// `caps` as GStreamer 1.24+ spells dma-buf video: the `memory:DMABuf`
 /// feature with `format=DMA_DRM, drm-format=<fourcc>`, the inverse of
 /// [`read_memory_feature`]. `None` for anything but raw video in a format

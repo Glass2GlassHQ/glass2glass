@@ -218,6 +218,15 @@ allocation query settles on `DmaBuf`, which a sink that declares
 those buffers with no copy. Otherwise the picture is read back through GLES into
 system memory.
 
+With a render node and even dimensions the source also offers NV12 with BT.709
+limited-range colorimetry, after RGBA, so a caps filter or an NV12-only consumer
+picks it. The compositor then renders into an RGBA texture, and two shader passes
+write the luma plane as an R8 view and the chroma plane as a GR88 view of one
+linear R8 buffer, `height * 3 / 2` rows tall, the chroma rows after the luma rows
+at the same stride. The chroma pass samples between four pixels, so linear
+filtering averages them. A node that cannot render linear R8 and GR88 (NVIDIA)
+fails the run when NV12 is negotiated.
+
 The `run` loop asks the compositor thread for one frame at a time. The thread
 renders once a client has committed since the last frame and a frame period has
 passed, and otherwise sends the last picture again after one second. Clients get

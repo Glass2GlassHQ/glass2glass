@@ -55,7 +55,7 @@ use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::wayland::socket::ListeningSocketSource;
 use tokio::sync::oneshot;
 
-use crate::gpu::{GpuOutput, GpuRenderer};
+use crate::gpu::{GpuFormat, GpuOutput, GpuRenderer};
 
 const LOG_CATEGORY: &str = "WaylandDisplaySrc";
 // xkb keycodes are evdev codes offset by 8
@@ -92,6 +92,7 @@ pub(crate) enum Rendering {
     Gpu {
         render_node: PathBuf,
         output: GpuOutput,
+        format: GpuFormat,
     },
 }
 
@@ -363,7 +364,13 @@ impl DisplayState {
             Rendering::Gpu {
                 render_node,
                 output,
-            } => Renderer::Gpu(Box::new(GpuRenderer::open(&render_node, size, output)?)),
+                format,
+            } => Renderer::Gpu(Box::new(GpuRenderer::open(
+                &render_node,
+                size,
+                output,
+                format,
+            )?)),
         };
         let mut dmabuf_state = DmabufState::new();
         let dmabuf_global = match &renderer {

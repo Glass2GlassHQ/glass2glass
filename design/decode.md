@@ -364,13 +364,19 @@ AV1, VP8/9 and MJPEG, which those H.264-only sinks do not accept.
 | `Vaapi(VaapiCodec)` | `h264_vaapi` / `hevc_vaapi` / `av1_vaapi` | VA-API on a DRM render node, launched as `vah264enc` / `vah265enc` / `vaav1enc`. |
 
 The VA-API backend takes NV12 (and P010 on H.265), as gst's `va` encoders do.
-Each frame is copied into a VA surface from a pool built on a hardware frames
-context, then encoded with `rc_mode` CBR or CQP and `async_depth=1`. Under those
+Each system-memory frame is copied into a VA surface from a pool built on a
+hardware frames context, then encoded with `rc_mode` CBR or CQP and `async_depth=1`. Under those
 launch names the element takes gst's property names and units: `bitrate` in
 kbit/s, `rate-control` (`cbr` | `cqp`), `qpp` (`qp` for AV1, the base q index),
 `key-int-max` and `device-path`. libavcodec 7.1's `hevc_vaapi` on radeonsi codes
 the driver's 16-aligned picture size with no conformance window, so the element
 adds the crop to any H.265 SPS whose coded size exceeds the caps.
+
+On Linux the VA-API backend also takes NV12 and P010 dma-bufs with no copy.
+Each one is described as a DRM PRIME frame with its format modifier and mapped
+onto a VA surface with `av_hwframe_map`. The mapped frame holds a share of the dma-buf
+until the encoder releases the surface, so the producer cannot reuse the buffer
+during the encode.
 
 `max_b_frames = 0`, so output is in presentation order with no reorder hold.
 Parameter sets are in band: the `GLOBAL_HEADER` flag is not set, so SPS/PPS ride

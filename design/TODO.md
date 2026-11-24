@@ -33,10 +33,6 @@ Highest leverage first:
 The plan is [remote.md](remote.md).
 
 - `ximagesrc` for unattended X11 capture, and window capture.
-- VA-API encode on the Linux host through `ffmpegenc`, taking dma-buf frames
-  and converting RGBA to NV12 with `scale_vaapi`.
-- `waylanddisplaysrc`: output a linear NV12 dma-buf from a GLES pass when
-  downstream caps ask for NV12.
 - `waylanddisplaysrc`: run X11 apps through Xwayland with smithay's X11 window
   manager.
 - `waylanddisplaysrc`: take the size and rate from a downstream caps filter, and
