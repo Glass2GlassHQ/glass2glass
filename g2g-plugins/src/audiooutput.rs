@@ -102,7 +102,7 @@ fn report_on(bus: Option<&BusHandle>, error: G2gError) {
 mod device_worker {
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::mpsc::{self, Receiver, RecvError, RecvTimeoutError, SyncSender};
+    use std::sync::mpsc::{self, RecvError, RecvTimeoutError, SyncSender};
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -122,7 +122,7 @@ mod device_worker {
 
     use super::{report_on, OutputDevice};
     use crate::audioconvert::{ns_to_samples, samples_to_ns, silence_byte};
-    use crate::audioworker::WorkerLink;
+    use crate::audioworker::{CommandReceiver, WorkerLink};
 
     pub(crate) enum DeviceCmd {
         Samples(Frame),
@@ -524,7 +524,7 @@ mod device_worker {
         ) -> Result<(), G2gError>
         where
             Open: FnMut(&str) -> Result<Device, G2gError> + Clone + Send + 'static,
-            Play: FnMut(Device, &Receiver<DeviceCmd>, &mut PlayoutGate) -> PlayEnd
+            Play: FnMut(Device, &CommandReceiver<DeviceCmd>, &mut PlayoutGate) -> PlayEnd
                 + Clone
                 + Send
                 + 'static,
@@ -677,7 +677,7 @@ mod device_worker {
 
         pub(crate) fn recv(
             &mut self,
-            rx: &Receiver<DeviceCmd>,
+            rx: &CommandReceiver<DeviceCmd>,
         ) -> Result<Option<DeviceStep>, RecvError> {
             if self.disconnected {
                 return Err(RecvError);
@@ -692,7 +692,7 @@ mod device_worker {
         #[cfg(all(target_os = "windows", feature = "wasapi-sink"))]
         pub(crate) fn recv_timeout(
             &mut self,
-            rx: &Receiver<DeviceCmd>,
+            rx: &CommandReceiver<DeviceCmd>,
             timeout: Duration,
         ) -> Result<Option<DeviceStep>, RecvTimeoutError> {
             if self.disconnected {
@@ -708,7 +708,7 @@ mod device_worker {
         #[cfg(not(target_os = "windows"))]
         pub(crate) fn play_in_slices<Device: PausableDevice>(
             &mut self,
-            rx: &Receiver<DeviceCmd>,
+            rx: &CommandReceiver<DeviceCmd>,
             pcm: &[u8],
             geometry: PcmGeometry,
             device: &mut Device,
@@ -731,7 +731,7 @@ mod device_worker {
         // returns whether the device was paused
         pub(crate) fn pause_or_resync(
             &mut self,
-            rx: &Receiver<DeviceCmd>,
+            rx: &CommandReceiver<DeviceCmd>,
             device: &mut impl PausableDevice,
             unwritten_ns: u64,
         ) -> Result<bool, G2gError> {
@@ -828,7 +828,7 @@ mod device_worker {
                 || self.sync.as_ref().is_some_and(ClockSync::is_stopped)
         }
 
-        fn wait_for_command(&mut self, rx: &Receiver<DeviceCmd>, timeout: Duration) {
+        fn wait_for_command(&mut self, rx: &CommandReceiver<DeviceCmd>, timeout: Duration) {
             match rx.recv_timeout(timeout) {
                 Ok(cmd) => self.backlog.push_back(cmd),
                 Err(RecvTimeoutError::Timeout) => {}
@@ -836,7 +836,7 @@ mod device_worker {
             }
         }
 
-        fn admit(&mut self, cmd: DeviceCmd, rx: &Receiver<DeviceCmd>) -> Option<DeviceStep> {
+        fn admit(&mut self, cmd: DeviceCmd, rx: &CommandReceiver<DeviceCmd>) -> Option<DeviceStep> {
             match cmd {
                 // samples queued ahead of a flush belong to the position before a seek
                 DeviceCmd::Samples(_) | DeviceCmd::StartAt(_) if self.pending_flushes.pending() => {
@@ -869,7 +869,11 @@ mod device_worker {
             }
         }
 
-        fn start_playing(&mut self, frame: Frame, rx: &Receiver<DeviceCmd>) -> Option<Frame> {
+        fn start_playing(
+            &mut self,
+            frame: Frame,
+            rx: &CommandReceiver<DeviceCmd>,
+        ) -> Option<Frame> {
             let Some(start) = self.start.take() else {
                 return Some(frame);
             };
@@ -993,12 +997,12 @@ mod device_worker {
 
     pub(crate) fn run_device_worker<Device>(
         first_device: String,
-        rx: Receiver<DeviceCmd>,
+        rx: CommandReceiver<DeviceCmd>,
         mut gate: PlayoutGate,
         fallback: DeviceFallback,
         ready: SyncSender<Result<(), G2gError>>,
         mut open: impl FnMut(&str) -> Result<Device, G2gError>,
-        mut play: impl FnMut(Device, &Receiver<DeviceCmd>, &mut PlayoutGate) -> PlayEnd,
+        mut play: impl FnMut(Device, &CommandReceiver<DeviceCmd>, &mut PlayoutGate) -> PlayEnd,
     ) {
         let mut ready = Some(ready);
         let mut device = first_device;
@@ -1038,7 +1042,7 @@ mod device_worker {
     }
 
     fn play_without_device(
-        rx: &Receiver<DeviceCmd>,
+        rx: &CommandReceiver<DeviceCmd>,
         gate: &mut PlayoutGate,
         fallback: &DeviceFallback,
     ) -> Option<String> {
@@ -1092,7 +1096,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    use crate::audioworker::WorkerLink;
+    use crate::audioworker::{command_queue, WorkerLink};
     use alloc::vec::Vec;
     use g2g_core::bus::Bus;
     use g2g_core::frame::Frame;
@@ -1121,7 +1125,7 @@ mod tests {
         Receiver<Result<(), G2gError>>,
         std::thread::JoinHandle<()>,
     ) {
-        let (tx, rx) = sync_channel(64);
+        let (tx, rx) = command_queue();
         let (ready_tx, ready_rx) = sync_channel(1);
         let fallback = output.fallback(BYTES_PER_SECOND, rendered, 1, |frame| {
             frame.domain.as_system_slice().map(<[u8]>::len)

@@ -25,7 +25,6 @@ use core::future::Future;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
 use ndk::audio::{
@@ -51,6 +50,7 @@ use crate::audiooutput::{
     DeviceCmd, DeviceStep, OutputDevice, PausableDevice, PcmGeometry, PlayEnd, PlayoutGate,
     PlayoutLink,
 };
+use crate::audioworker::CommandReceiver;
 use g2g_core::pcm_caps_any_rate_and_channels;
 
 /// Read / write timeout per AAudio call: 1 second in nanoseconds. Long enough to
@@ -297,7 +297,7 @@ impl PausableDevice for AAudioPause<'_> {
 
 fn play(
     stream: AudioStream,
-    rx: &Receiver<DeviceCmd>,
+    rx: &CommandReceiver<DeviceCmd>,
     gate: &mut PlayoutGate,
     geometry: PcmGeometry,
     rendered: &AtomicU64,

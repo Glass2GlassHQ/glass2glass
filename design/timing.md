@@ -135,7 +135,9 @@ hands its samples to a device thread through `PlayoutLink` (`audiooutput.rs`),
 and that thread runs `run_device_worker`, which owns the start gate, the flush,
 the pause and the resync below as well as device switching and continue-on-error.
 PipeWire's device thread fills a 200 ms byte queue that the realtime callback
-drains.
+drains. A sink whose queue to the device thread is full waits on a waker the
+thread wakes when it takes a command or exits, so a full queue costs the
+executor no polls.
 
 On a `Flush` the sinks skip the samples still queued for their device thread
 (`PendingFlushes`) and drop what the device buffered, so a seek does not first

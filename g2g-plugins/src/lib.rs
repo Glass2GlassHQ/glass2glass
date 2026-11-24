@@ -923,14 +923,17 @@ pub mod flactag;
 // MPEG audio parser element (no_std): an `.mp3` / `.mp2` byte stream -> one
 // MPEG audio frame per buffer, the framing ffmpegaudiodec takes.
 pub mod mpegaudioparse;
-#[cfg(any(
-    all(
-        target_os = "linux",
-        any(feature = "alsa-sink", feature = "pulse-sink", feature = "pipewire")
-    ),
-    all(target_os = "windows", feature = "wasapi-sink"),
-    all(target_os = "macos", feature = "coreaudio"),
-    all(target_os = "android", feature = "aaudio")
+#[cfg(all(
+    test,
+    any(
+        all(
+            target_os = "linux",
+            any(feature = "alsa-sink", feature = "pulse-sink", feature = "pipewire")
+        ),
+        all(target_os = "windows", feature = "wasapi-sink"),
+        all(target_os = "macos", feature = "coreaudio"),
+        all(target_os = "android", feature = "aaudio")
+    )
 ))]
 mod yieldnow;
 // Non-blocking link to a blocking audio device worker thread, shared by the

@@ -29,7 +29,6 @@ use core::pin::Pin;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -63,6 +62,7 @@ use crate::audiooutput::{
     DeviceCmd, DeviceStep, OutputDevice, PausableDevice, PcmGeometry, PlayEnd, PlayoutGate,
     PlayoutLink,
 };
+use crate::audioworker::CommandReceiver;
 use g2g_core::pcm_caps_any_rate_and_channels;
 
 use alloc::boxed::Box;
@@ -361,7 +361,7 @@ impl PausableDevice for SinkState {
 
 fn play(
     mut state: SinkState,
-    rx: &Receiver<DeviceCmd>,
+    rx: &CommandReceiver<DeviceCmd>,
     gate: &mut PlayoutGate,
     geometry: PcmGeometry,
     rendered: &AtomicU64,

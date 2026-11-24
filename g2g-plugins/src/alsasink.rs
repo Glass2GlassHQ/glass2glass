@@ -33,7 +33,6 @@ use core::future::Future;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
 use alloc::boxed::Box;
@@ -53,6 +52,7 @@ use crate::audiooutput::{
     DeviceCmd, DeviceStep, OutputDevice, PausableDevice, PcmGeometry, PlayEnd, PlayoutGate,
     PlayoutLink,
 };
+use crate::audioworker::CommandReceiver;
 use g2g_core::pcm_caps_any_rate_and_channels;
 
 fn alsa_err(code: i32) -> G2gError {
@@ -317,7 +317,7 @@ impl PadTemplates for AlsaSink {
 fn play(
     pcm: Pcm,
     cfg: PcmConfig,
-    rx: &Receiver<DeviceCmd>,
+    rx: &CommandReceiver<DeviceCmd>,
     gate: &mut PlayoutGate,
     rendered: &AtomicU64,
     clock: &DriftClock,

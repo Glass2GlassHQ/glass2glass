@@ -23,20 +23,21 @@
 //! large allocation on a long file and the reason the drain at `Eos` was long
 //! enough to notice.
 //!
-//! So: a bounded queue whose full case yields to the executor instead of
-//! blocking it, and an end-of-stream drain that polls the worker's own
-//! completion flag, yielding between polls. `Eos` still completes only once the
+//! So: a bounded queue whose full case parks the element until the worker takes
+//! a command, and an end-of-stream drain that parks it until the worker
+//! returns. `Eos` still completes only once the
 //! audio has actually played out, which is what a sink owes the pipeline; it
 //! just no longer owns the executor while that happens.
 
+use core::future::poll_fn;
+use core::task::{Poll, Waker};
+use core::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
-use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, RecvError, RecvTimeoutError, SyncSender, TrySendError};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use g2g_core::{G2gError, HardwareError};
-
-use crate::yieldnow::yield_now;
 
 /// Commands buffered between the element and its device thread. One command is
 /// one buffer of samples, so this is a queue depth in buffers: enough that a
@@ -44,6 +45,64 @@ use crate::yieldnow::yield_now;
 /// enough that a long file does not accumulate in memory. At the ~21 ms buffers
 /// an AC-3 or AAC stream decodes to, 64 is well over a second of slack.
 const QUEUE_DEPTH: usize = 64;
+
+#[derive(Debug, Default)]
+struct ElementWaker(Mutex<Option<Waker>>);
+
+impl ElementWaker {
+    fn register(&self, waker: &Waker) {
+        *self.0.lock().expect("no waker holder panics") = Some(waker.clone());
+    }
+
+    fn wake(&self) {
+        let waker = self.0.lock().expect("no waker holder panics").take();
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct CommandReceiver<C> {
+    rx: Receiver<C>,
+    element: Arc<ElementWaker>,
+}
+
+impl<C> CommandReceiver<C> {
+    pub(crate) fn recv(&self) -> Result<C, RecvError> {
+        let received = self.rx.recv();
+        self.element.wake();
+        received
+    }
+
+    pub(crate) fn recv_timeout(&self, timeout: Duration) -> Result<C, RecvTimeoutError> {
+        let received = self.rx.recv_timeout(timeout);
+        self.element.wake();
+        received
+    }
+}
+
+pub(crate) fn command_queue<C>() -> (SyncSender<C>, CommandReceiver<C>) {
+    let (tx, rx) = mpsc::sync_channel(QUEUE_DEPTH);
+    let receiver = CommandReceiver {
+        rx,
+        element: Arc::default(),
+    };
+    (tx, receiver)
+}
+
+struct WorkerExit {
+    finished: Arc<AtomicBool>,
+    element: Arc<ElementWaker>,
+}
+
+// a panicking worker still wakes the element, which then sees the closed queue
+impl Drop for WorkerExit {
+    fn drop(&mut self) {
+        self.finished.store(true, Ordering::Release);
+        self.element.wake();
+    }
+}
 
 /// A device worker thread plus the bounded queue feeding it.
 #[derive(Debug)]
@@ -53,6 +112,7 @@ pub(crate) struct WorkerLink<C: Send + 'static> {
     /// Set by the worker as it returns, so the element can wait for playout
     /// without blocking on `join`.
     finished: Arc<AtomicBool>,
+    element: Arc<ElementWaker>,
 }
 
 impl<C: Send + 'static> WorkerLink<C> {
@@ -60,54 +120,78 @@ impl<C: Send + 'static> WorkerLink<C> {
     /// the device and drains the receiver; the completion flag is set for it.
     pub(crate) fn spawn<F>(name: &str, body: F) -> Result<Self, G2gError>
     where
-        F: FnOnce(Receiver<C>) + Send + 'static,
+        F: FnOnce(CommandReceiver<C>) + Send + 'static,
     {
-        let (tx, rx) = mpsc::sync_channel::<C>(QUEUE_DEPTH);
+        let (tx, rx) = command_queue::<C>();
         let finished = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&finished);
+        let element = Arc::clone(&rx.element);
+        let exit = WorkerExit {
+            finished: Arc::clone(&finished),
+            element: Arc::clone(&element),
+        };
         let worker = thread::Builder::new()
             .name(alloc::string::String::from(name))
             .spawn(move || {
+                let _exit = exit;
                 body(rx);
-                flag.store(true, Ordering::Release);
             })
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
         Ok(Self {
             tx: Some(tx),
             worker: Some(worker),
             finished,
+            element,
         })
     }
 
-    /// Hand one command to the worker, yielding while the queue is full rather
+    /// Hand one command to the worker, parking while the queue is full rather
     /// than blocking the executor. This is where back-pressure from the device
     /// reaches the pipeline, which is what bounds the memory.
-    pub(crate) async fn send(&self, mut cmd: C, err: G2gError) -> Result<(), G2gError> {
-        loop {
-            let Some(tx) = self.tx.as_ref() else {
-                return Err(err);
+    pub(crate) async fn send(&self, cmd: C, err: G2gError) -> Result<(), G2gError> {
+        let Some(tx) = self.tx.as_ref() else {
+            return Err(err);
+        };
+        let mut cmd = Some(cmd);
+        poll_fn(|cx| {
+            let pending = cmd.take().expect("send is not polled after it completes");
+            let back = match tx.try_send(pending) {
+                Ok(()) => return Poll::Ready(Ok(())),
+                Err(TrySendError::Disconnected(_)) => return Poll::Ready(Err(err.clone())),
+                Err(TrySendError::Full(back)) => back,
             };
-            match tx.try_send(cmd) {
-                Ok(()) => return Ok(()),
+            self.element.register(cx.waker());
+            // the worker can take a command between the first try and the register
+            match tx.try_send(back) {
+                Ok(()) => Poll::Ready(Ok(())),
+                Err(TrySendError::Disconnected(_)) => Poll::Ready(Err(err.clone())),
                 Err(TrySendError::Full(back)) => {
-                    cmd = back;
-                    yield_now().await;
+                    cmd = Some(back);
+                    Poll::Pending
                 }
-                Err(TrySendError::Disconnected(_)) => return Err(err),
             }
-        }
+        })
+        .await
     }
 
     /// End of stream: queue `shutdown`, then wait for the worker to finish
-    /// playing out, yielding to the executor throughout. Returns once the audio
+    /// playing out, parked on the executor throughout. Returns once the audio
     /// has actually been played, so a downstream `Eos` still means "the sound
     /// finished", but the rest of the pipeline keeps running while it drains.
     pub(crate) async fn finish(&mut self, shutdown: C, err: G2gError) -> Result<(), G2gError> {
         // A disconnected worker is already gone; nothing left to drain.
         if self.send(shutdown, err.clone()).await.is_ok() {
-            while !self.finished.load(Ordering::Acquire) {
-                yield_now().await;
-            }
+            poll_fn(|cx| {
+                if self.finished.load(Ordering::Acquire) {
+                    return Poll::Ready(());
+                }
+                self.element.register(cx.waker());
+                if self.finished.load(Ordering::Acquire) {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            })
+            .await;
         }
         self.tx = None;
         // The flag is set as the worker returns, so this join is immediate.
@@ -142,6 +226,7 @@ impl<C: Send + 'static> Drop for WorkerLink<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::yieldnow::yield_now;
     use core::future::Future;
     use core::task::Poll;
     use g2g_core::runtime::block_on;
@@ -255,6 +340,32 @@ mod tests {
             played.load(Ordering::Acquire),
             QUEUE_DEPTH * 3,
             "everything queued was played"
+        );
+    }
+
+    #[test]
+    fn a_full_queue_parks_the_sender_until_the_worker_takes_a_command() {
+        let played = Arc::new(AtomicUsize::new(0));
+        let mut link = slow_worker(Duration::from_millis(20), Arc::clone(&played));
+        let polls = block_on(async {
+            // the worker holds one command while it plays, so one more than the queue fills it
+            for _ in 0..=QUEUE_DEPTH {
+                link.send(1, err()).await.expect("queue");
+            }
+            let mut send = alloc::boxed::Box::pin(link.send(1, err()));
+            let mut polls = 0usize;
+            core::future::poll_fn(|cx| {
+                polls += 1;
+                send.as_mut().poll(cx)
+            })
+            .await
+            .expect("queued once the worker took a command");
+            polls
+        });
+        link.abort();
+        assert!(
+            polls <= 3,
+            "the sender was polled {polls} times while it waited for room"
         );
     }
 

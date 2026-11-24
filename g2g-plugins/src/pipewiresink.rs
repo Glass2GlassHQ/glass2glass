@@ -35,7 +35,7 @@ use core::pin::Pin;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use std::collections::VecDeque;
-use std::sync::mpsc::{sync_channel, Receiver};
+use std::sync::mpsc::sync_channel;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -57,6 +57,7 @@ use crate::audiooutput::{
     DeviceCmd, DeviceStep, OutputDevice, PausableDevice, PcmGeometry, PlayEnd, PlayoutGate,
     PlayoutLink,
 };
+use crate::audioworker::CommandReceiver;
 use crate::pwaudio::{format_pod_bytes, frame_bytes, pw_params, ticks_to_ns, FORMATS};
 use g2g_core::pcm_caps_any_rate_and_channels;
 
@@ -415,7 +416,7 @@ impl PausableDevice for QueuedStream<'_> {
 
 fn play(
     mut queue: QueuedStream<'_>,
-    rx: &Receiver<DeviceCmd>,
+    rx: &CommandReceiver<DeviceCmd>,
     gate: &mut PlayoutGate,
     bytes_queued: &AtomicU64,
 ) -> PlayEnd {

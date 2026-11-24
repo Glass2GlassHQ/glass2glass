@@ -30,7 +30,7 @@ use core::pin::Pin;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use std::collections::VecDeque;
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -57,6 +57,7 @@ use crate::audio::{linear_pcm_caps, pcm_params};
 use crate::audiooutput::{
     DeviceCmd, DeviceStep, OutputDevice, PausableDevice, PlayEnd, PlayoutGate, PlayoutLink,
 };
+use crate::audioworker::CommandReceiver;
 use crate::wasapipcm::{audio_err, open_endpoint};
 
 /// Shared-mode endpoint buffer span (100-ns units), 200 ms. Large enough that
@@ -338,7 +339,7 @@ fn open(device: &str, format: &WAVEFORMATEX) -> Result<RenderState, G2gError> {
 
 fn play(
     render: RenderState,
-    rx: &Receiver<DeviceCmd>,
+    rx: &CommandReceiver<DeviceCmd>,
     gate: &mut PlayoutGate,
     rendered: &AtomicU64,
     clock: &DriftClock,
@@ -417,7 +418,7 @@ unsafe fn open_render(device: &str, format: &WAVEFORMATEX) -> Result<RenderState
 /// device switch.
 fn run_render_loop(
     state: &RenderState,
-    rx: &Receiver<DeviceCmd>,
+    rx: &CommandReceiver<DeviceCmd>,
     gate: &mut PlayoutGate,
     rendered: &AtomicU64,
     clock: &DriftClock,
