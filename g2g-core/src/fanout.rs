@@ -976,6 +976,11 @@ pub trait MultiInputElement: ElementBound {
         None
     }
 
+    fn output_domain_follows_input(&self) -> Option<usize> {
+        // the input whose frames leave in the memory they arrived in
+        None
+    }
+
     fn forwards_caps_changes(&self) -> bool {
         false
     }

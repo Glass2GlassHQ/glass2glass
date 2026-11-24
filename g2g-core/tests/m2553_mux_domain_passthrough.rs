@@ -1,0 +1,187 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
+#![cfg(all(feature = "std", feature = "runtime"))]
+
+use core::future::Future;
+use core::pin::Pin;
+
+use g2g_core::memory::{DomainSet, MemoryDomainKind};
+use g2g_core::runtime::{block_on, negotiate_graph, GraphNode, SourceLoop};
+use g2g_core::{
+    AllocationParams, AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, Graph,
+    MultiInputElement, OutputSink, PipelinePacket, Rate, RawVideoFormat,
+};
+
+fn nv12() -> Caps {
+    Caps::RawVideo {
+        format: RawVideoFormat::Nv12,
+        width: Dim::Fixed(640),
+        height: Dim::Fixed(480),
+        framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
+    }
+}
+
+// a hardware decoder that copies to System memory unless a proposal asks for its dma-bufs
+struct DecoderStandIn {
+    settled: MemoryDomainKind,
+}
+
+impl SourceLoop for DecoderStandIn {
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    where
+        Self: 'a;
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&mut self) -> Self::CapsFuture<'_> {
+        core::future::ready(Ok(nv12()))
+    }
+
+    fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn output_domains(&self) -> DomainSet {
+        DomainSet::only(MemoryDomainKind::System).with(MemoryDomainKind::DmaBuf)
+    }
+
+    fn output_memory(&self) -> MemoryDomainKind {
+        self.settled
+    }
+
+    fn configure_allocation(&mut self, params: &AllocationParams) {
+        if let Ok(resolved) = params.clone().resolve_for_producer(self.output_domains()) {
+            self.settled = resolved.domain;
+        }
+    }
+
+    fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
+        Box::pin(async move {
+            out.push(PipelinePacket::Eos).await?;
+            Ok(0)
+        })
+    }
+}
+
+struct DecoratingMux {
+    domain_follows_input: Option<usize>,
+}
+
+impl MultiInputElement for DecoratingMux {
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn input_count(&self) -> usize {
+        1
+    }
+
+    fn output_follows_input(&self) -> Option<usize> {
+        Some(0)
+    }
+
+    fn output_domain_follows_input(&self) -> Option<usize> {
+        self.domain_follows_input
+    }
+
+    fn intercept_caps(&self, _input: usize, upstream: &Caps) -> Result<Caps, G2gError> {
+        Ok(upstream.clone())
+    }
+
+    fn caps_constraint_as_input(&self, _input: usize) -> CapsConstraint<'_> {
+        CapsConstraint::AcceptsAny
+    }
+
+    fn configure_pipeline(
+        &mut self,
+        _input: usize,
+        _absolute_caps: &Caps,
+    ) -> Result<ConfigureOutcome, G2gError> {
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn output_caps(&self) -> Result<Caps, G2gError> {
+        Ok(nv12())
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        _input: usize,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move { out.push(packet).await.map(|_| ()) })
+    }
+}
+
+// a display sink that imports dma-bufs
+struct DmaBufSink;
+
+impl AsyncElement for DmaBufSink {
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&self, upstream: &Caps) -> Result<Caps, G2gError> {
+        Ok(upstream.clone())
+    }
+
+    fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
+        CapsConstraint::AcceptsAny
+    }
+
+    fn input_domains(&self) -> DomainSet {
+        DomainSet::only(MemoryDomainKind::DmaBuf)
+    }
+
+    fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        _packet: PipelinePacket,
+        _out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+fn domain_into_mux(domain_follows_input: Option<usize>) -> MemoryDomainKind {
+    let mut graph: Graph<GraphNode> = Graph::new();
+    let src = graph.add_source(GraphNode::source(DecoderStandIn {
+        settled: MemoryDomainKind::System,
+    }));
+    let mux = graph.add_muxer(
+        GraphNode::muxer(DecoratingMux {
+            domain_follows_input,
+        }),
+        1,
+    );
+    let sink = graph.add_sink(GraphNode::element(DmaBufSink));
+    graph.link(src, mux.input(0)).unwrap();
+    graph.link(mux.output(), sink).unwrap();
+
+    let (_vg, _caps, edge_memory) = block_on(negotiate_graph(graph)).expect("negotiation");
+    edge_memory[0]
+}
+
+#[test]
+fn a_mux_passing_frames_through_carries_the_sinks_domain_to_the_producer() {
+    assert_eq!(domain_into_mux(Some(0)), MemoryDomainKind::DmaBuf);
+}
+
+#[test]
+fn a_mux_declaring_no_pass_through_leaves_the_producer_on_its_default() {
+    assert_eq!(domain_into_mux(None), MemoryDomainKind::System);
+}

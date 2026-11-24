@@ -4442,11 +4442,19 @@ fn cascade_allocation(
                 }
                 let accepts = node_input_domains(vg, node);
                 if let Some(GraphNodeRef::Muxer(mux)) = vg.element(node) {
+                    let forwarded_pad = mux.output_domain_follows_input();
+                    let output_proposal = vg
+                        .out_edges(node)
+                        .first()
+                        .and_then(|&out_e| edge_proposal[out_e].clone());
                     for &in_e in vg.in_edges(node) {
                         let pad = vg.edge(in_e).dst.index as usize;
                         let caps = solution[in_e].clone();
+                        let forwarded = output_proposal
+                            .clone()
+                            .filter(|_| forwarded_pad == Some(pad));
                         edge_proposal[in_e] = narrow_to_input_domains(
-                            mux.propose_allocation_for_input(pad, &caps),
+                            mux.propose_allocation_for_input(pad, &caps).or(forwarded),
                             accepts,
                         );
                     }

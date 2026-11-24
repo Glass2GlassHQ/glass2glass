@@ -612,7 +612,11 @@ Two fan structures have non-trivial joins:
   planned at negotiation. At startup the runner stores it on
   each input edge so the demand crosses the boundary and re-cascades up that
   branch independently (a device-resident interleave muxer asking each video pad
-  for GPU buffers). Mid-stream the same crossing holds: a `CapsChanged` on one
+  for GPU buffers). A muxer whose output frames are one pad's frames passed
+  through in the same memory (`onvifmetadatacombiner`'s video pad) names that
+  pad in `output_domain_follows_input`, and at startup the output link's
+  proposal reaches that pad when the muxer proposes nothing for it, so a
+  decoder behind it settles on the sink's dma-buf. Mid-stream the same crossing holds: a `CapsChanged` on one
   pad re-derives that pad's proposal and re-cascades it up *that pad's branch
   alone* via the `RecascadeRoute::Pad` override (the node-keyed walk would hit
   every input).

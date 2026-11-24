@@ -1194,6 +1194,10 @@ impl MultiInputElement for OnvifMetadataCombiner {
         LatencyReport::buffered(self.latency_ns, None)
     }
 
+    fn output_domain_follows_input(&self) -> Option<usize> {
+        Some(Self::VIDEO)
+    }
+
     /// Named request pads: `video` -> the video pad, anything text-shaped ->
     /// the metadata pad, so a launch line can wire the branches in either order.
     fn input_pad_index(

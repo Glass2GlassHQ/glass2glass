@@ -440,6 +440,9 @@ pub trait DynMultiInputElement: ElementBound {
     /// Dyn-safe mirror of [`MultiInputElement::output_follows_input`]: the input
     /// pad whose caps the merged output follows (identity-passthrough mux), if any.
     fn output_follows_input(&self) -> Option<usize>;
+    fn output_domain_follows_input(&self) -> Option<usize> {
+        None
+    }
     fn forwards_caps_changes(&self) -> bool;
     /// Dyn-safe mirror of [`MultiInputElement::output_batches_inputs`].
     fn output_batches_inputs(&self) -> bool {
@@ -582,6 +585,10 @@ impl<T: MultiInputElement> DynMultiInputElement for T {
 
     fn output_follows_input(&self) -> Option<usize> {
         MultiInputElement::output_follows_input(self)
+    }
+
+    fn output_domain_follows_input(&self) -> Option<usize> {
+        MultiInputElement::output_domain_follows_input(self)
     }
 
     fn forwards_caps_changes(&self) -> bool {
@@ -820,6 +827,10 @@ impl MultiInputElement for MuxRef<'_> {
         self.0.output_follows_input()
     }
 
+    fn output_domain_follows_input(&self) -> Option<usize> {
+        self.0.output_domain_follows_input()
+    }
+
     fn forwards_caps_changes(&self) -> bool {
         self.0.forwards_caps_changes()
     }
@@ -917,6 +928,10 @@ impl<'b> DynMultiInputElement for &'b mut (dyn DynMultiInputElement + 'b) {
 
     fn output_follows_input(&self) -> Option<usize> {
         (**self).output_follows_input()
+    }
+
+    fn output_domain_follows_input(&self) -> Option<usize> {
+        (**self).output_domain_follows_input()
     }
 
     fn forwards_caps_changes(&self) -> bool {

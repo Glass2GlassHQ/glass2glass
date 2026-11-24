@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2553: Carry the output link's memory domain through `onvifmetadatacombiner` to its video producer, so `v4l2slh264dec` decodes into dma-bufs ahead of it.
 - M2552: Release a video frame from `onvifmetadatacombiner` once the metadata has passed its window, instead of always waiting out `latency`.
 - M2551: Convert NV12 and I420 straight to packed RGB layouts in `videoconvert`, without an RGBA intermediate.
 - M2550: Hand an unrecognized file with an unknown extension from `filesrc` on as plain bytes, so `rawvideoparse` reads it.
