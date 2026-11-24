@@ -34,10 +34,10 @@ async fn filesrc_runs_a_markdown_file_as_plain_text() {
     std::fs::write(&path, PROMPT).expect("write temp");
     let registry = default_registry();
 
-    // Prose sniffs as nothing, so without the override the `.md` file has no type.
+    // Prose sniffs as nothing, so without the override the `.md` file is plain bytes.
     let untyped = format!("filesrc location={} ! fakesink", path.display());
     let graph = parse_launch(&registry, &untyped).expect("parses without a caps override");
-    assert!(run_graph(graph, &ZeroClock, LINK_CAPACITY).await.is_err());
+    assert!(run_graph(graph, &ZeroClock, LINK_CAPACITY).await.is_ok());
 
     for properties in ["", "bytestream-format=text"] {
         let line = text_pipeline(&path, properties);
