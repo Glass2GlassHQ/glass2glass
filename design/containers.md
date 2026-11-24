@@ -22,7 +22,10 @@ recognizes wins, so a transport stream saved as `.mpg` reaches `tsdemux`. A file
 that cannot be read for either check fails negotiation, logging the open error
 once, and a missing one fails with `G2gError::FileNotFound`. When the sniff recognizes
 nothing, `probe_output_caps` returns an error and `decodebin` fails the parse
-with `ParseError::UnrecognizedContent` instead of guessing a container. `.m4v`
+with `ParseError::UnrecognizedContent` instead of guessing a container. At
+negotiation the same file is plain bytes (`application/octet-stream`), as gst's
+filesrc emits it, so `filesrc location=x.nv12 ! rawvideoparse` runs. An explicit
+`bytestream-format=auto` still fails negotiation on it. `.m4v`
 has no extension mapping, since it names both an MP4 and a raw MPEG-4 Part 2
 stream. The sniff types a raw H.264 or H.265 stream once it has seen two kinds
 of parameter set behind well-formed NAL units, so a start-code run inside an ID3

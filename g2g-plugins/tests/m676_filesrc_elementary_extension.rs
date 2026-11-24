@@ -110,6 +110,28 @@ async fn filesrc_types_unknown_extension_by_content_sniff() {
     }
 }
 
+#[tokio::test]
+async fn an_unknown_extension_with_unrecognized_content_reaches_rawvideoparse() {
+    const WIDTH: usize = 16;
+    const HEIGHT: usize = 16;
+    const FRAMES: usize = 3;
+    let nv12_frame_bytes = WIDTH * HEIGHT * 3 / 2;
+    let pixels: Vec<u8> = (0..nv12_frame_bytes * FRAMES)
+        .map(|i| (i * 7 % 251) as u8)
+        .collect();
+    let path = temp("raw", "nv12", &pixels);
+    let line = format!(
+        "filesrc location={} ! rawvideoparse format=nv12 width={WIDTH} height={HEIGHT} ! fakesink",
+        path.display()
+    );
+    let graph =
+        parse_launch(&default_registry(), &line).unwrap_or_else(|e| panic!("parses `{line}`: {e}"));
+    let report = run_graph(graph, &ZeroClock, 4).await;
+    std::fs::remove_file(&path).ok();
+    let consumed = report.expect("the dump runs as raw video").frames_consumed;
+    assert_eq!(consumed, FRAMES as u64);
+}
+
 /// `decodebin` auto-plugs from the extension-typed caps: an `.h264` source
 /// expands to an H.264 decode chain, not the MPEG-TS demux default. Needs a
 /// compiled-in H.264 decoder, so gated like the `ffmpeg` registry entries.

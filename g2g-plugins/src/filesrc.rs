@@ -117,8 +117,8 @@ impl FileSrc {
     /// A launch-registry `filesrc` with no pinned type: the media type is
     /// derived from the `location` extension unless a `bytestream-format` property
     /// overrides it, so `filesrc location=X.mp4 ! decodebin` and
-    /// `filesrc location=X.vtt ! subparse` type without an explicit format. Falls
-    /// back to the MPEG-TS default for an unknown / missing extension.
+    /// `filesrc location=X.vtt ! subparse` type without an explicit format. An
+    /// unknown or missing extension types by content sniffing at negotiation.
     pub fn untyped() -> Self {
         Self {
             path: PathBuf::new(),
@@ -158,7 +158,15 @@ impl FileSrc {
         if !self.auto_detect {
             return Ok(());
         }
-        self.caps = sniff_file_caps(&self.path, short_type_name::<Self>())?;
+        let header = read_file_header(&self.path, short_type_name::<Self>())?;
+        self.caps = match file_caps_from_header(&header) {
+            Some(caps) => caps,
+            // gst's filesrc hands unrecognized content on as plain bytes
+            None if !self.format_explicit => Caps::ByteStream {
+                encoding: ByteStreamEncoding::Raw,
+            },
+            None => return Err(G2gError::CapsMismatch),
+        };
         self.auto_detect = false;
         Ok(())
     }
