@@ -839,6 +839,13 @@ fn convert_strided(
             hub,
         ),
         (Rgba8, _) if packed_rgb_layout(to).is_some() => pack_from_rgba(src, to, w, h, src_stride),
+        (Nv12 | I420, _) if packed_rgb_layout(to).is_some() => yuv420_to_rgb(
+            src,
+            (w, h),
+            from == Nv12,
+            packed_rgb_layout(to).expect("a packed RGB format"),
+            matrix,
+        ),
         _ if packed_rgb_layout(to).is_some() => pack_from_rgba(
             &convert_strided(src, from, Rgba8, (w, h), src_stride, matrix, hub),
             to,
@@ -934,10 +941,10 @@ fn convert_strided(
         ),
         (Nv12, I420) => nv12_to_i420(src, w, h),
         (I420, Nv12) => i420_to_nv12(src, w, h),
-        (Nv12, Rgba8) => yuv420_to_rgb(src, w, h, true, 0, 2, matrix),
-        (I420, Rgba8) => yuv420_to_rgb(src, w, h, false, 0, 2, matrix),
-        (Nv12, Bgra8) => yuv420_to_rgb(src, w, h, true, 2, 0, matrix),
-        (I420, Bgra8) => yuv420_to_rgb(src, w, h, false, 2, 0, matrix),
+        (Nv12, Rgba8) => yuv420_to_rgb(src, (w, h), true, RGBA_LAYOUT, matrix),
+        (I420, Rgba8) => yuv420_to_rgb(src, (w, h), false, RGBA_LAYOUT, matrix),
+        (Nv12, Bgra8) => yuv420_to_rgb(src, (w, h), true, BGRA_LAYOUT, matrix),
+        (I420, Bgra8) => yuv420_to_rgb(src, (w, h), false, BGRA_LAYOUT, matrix),
         // YUYV (packed 4:2:2) unpacks directly to these targets.
         (Yuyv, I420) => yuyv_to_yuv420(src, w, h, false),
         (Yuyv, Nv12) => yuyv_to_yuv420(src, w, h, true),
@@ -1695,7 +1702,22 @@ struct PackedRgbLayout {
     alpha: Option<usize>,
 }
 
-// the packed RGB formats that convert through RGBA, none for RGBA itself and every other format
+const RGBA_LAYOUT: PackedRgbLayout = PackedRgbLayout {
+    pixel_bytes: 4,
+    red: 0,
+    green: 1,
+    blue: 2,
+    alpha: Some(3),
+};
+const BGRA_LAYOUT: PackedRgbLayout = PackedRgbLayout {
+    pixel_bytes: 4,
+    red: 2,
+    green: 1,
+    blue: 0,
+    alpha: Some(3),
+};
+
+// the packed RGB formats other than RGBA and BGRA, none for those two and every other format
 fn packed_rgb_layout(format: RawVideoFormat) -> Option<PackedRgbLayout> {
     let layout = |pixel_bytes, red, green, blue, alpha| PackedRgbLayout {
         pixel_bytes,
@@ -1843,46 +1865,53 @@ fn rgb_to_yuv420(
     dst.into_boxed_slice()
 }
 
-/// 4:2:0 YUV -> packed 4-byte RGB(A) through `matrix`. Alpha is set opaque.
-/// `interleaved` selects NV12 vs I420 chroma layout; `r_off`/`b_off` the
-/// destination channel order.
-fn yuv420_to_rgb(
-    src: &[u8],
-    w: usize,
-    h: usize,
-    interleaved: bool,
-    r_off: usize,
-    b_off: usize,
+// one row of pixels, each chroma pair shared by two neighbouring luma samples
+fn write_rgb_row(
+    dst_row: &mut [u8],
+    luma_row: &[u8],
+    chroma: impl Iterator<Item = (u8, u8)>,
+    layout: PackedRgbLayout,
     matrix: &YuvRgbMatrix,
-) -> Box<[u8]> {
-    let mut dst = vec![0u8; w * h * 4];
-    yuv420_to_rgb_into(src, (w, h), interleaved, (r_off, b_off), matrix, &mut dst);
-    dst.into_boxed_slice()
+) {
+    let pixels = dst_row.chunks_exact_mut(layout.pixel_bytes).zip(luma_row);
+    for ((pixel, &luma), (u, v)) in pixels.zip(chroma.flat_map(|uv| [uv, uv])) {
+        let (r, g, b) = matrix.yuv_to_rgb(i32::from(luma), i32::from(u), i32::from(v));
+        pixel[layout.red] = r as u8;
+        pixel[layout.green] = g as u8;
+        pixel[layout.blue] = b as u8;
+    }
 }
 
-/// [`yuv420_to_rgb`] writing the `w * h * 4` bytes into `dst`.
-pub(crate) fn yuv420_to_rgb_into(
+/// 4:2:0 YUV -> packed RGB in `layout` through `matrix`. Alpha and any unused
+/// byte are set opaque. `interleaved` selects NV12 vs I420 chroma layout.
+fn yuv420_to_rgb(
     src: &[u8],
     (w, h): (usize, usize),
     interleaved: bool,
-    (r_off, b_off): (usize, usize),
+    layout: PackedRgbLayout,
     matrix: &YuvRgbMatrix,
-    dst: &mut [u8],
-) {
-    let luma = w * h;
+) -> Box<[u8]> {
+    let mut dst = vec![u8::MAX; w * h * layout.pixel_bytes];
     let (cw, ch) = chroma_420_size(w, h);
-    for y in 0..h {
-        for x in 0..w {
-            let (u_at, v_at) = chroma_420_offsets(luma, cw * ch, (y / 2) * cw + x / 2, interleaved);
-            let (u, v) = (src[u_at] as i32, src[v_at] as i32);
-            let (r, g, b) = matrix.yuv_to_rgb(src[y * w + x] as i32, u, v);
-            let p = (y * w + x) * 4;
-            dst[p + r_off] = r as u8;
-            dst[p + 1] = g as u8;
-            dst[p + b_off] = b as u8;
-            dst[p + 3] = 255;
+    let (luma_plane, chroma_planes) = src.split_at(w * h);
+    let (u_plane, v_plane) = chroma_planes.split_at(cw * ch);
+    let rows = dst
+        .chunks_exact_mut(w * layout.pixel_bytes)
+        .zip(luma_plane.chunks_exact(w));
+    for (y, (dst_row, luma_row)) in rows.enumerate() {
+        let chroma_row = y / 2 * cw;
+        if interleaved {
+            let pairs = chroma_planes[2 * chroma_row..][..2 * cw].as_chunks::<2>().0;
+            let chroma = pairs.iter().map(|&[u, v]| (u, v));
+            write_rgb_row(dst_row, luma_row, chroma, layout, matrix);
+        } else {
+            let u_row = &u_plane[chroma_row..][..cw];
+            let v_row = &v_plane[chroma_row..][..cw];
+            let chroma = u_row.iter().copied().zip(v_row.iter().copied());
+            write_rgb_row(dst_row, luma_row, chroma, layout, matrix);
         }
     }
+    dst.into_boxed_slice()
 }
 
 #[cfg(test)]
@@ -1990,6 +2019,30 @@ mod tests {
                         convert_via_hub(&src, from, to, w, h, &matrix, &mut HubScratch::default());
                     let direct = convert(&src, from, to, w, h, Colorimetry::UNKNOWN);
                     assert_eq!(direct, hub, "{from:?} -> {to:?} {w}x{h}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn yuv420_converts_to_each_packed_rgb_format_as_through_rgba() {
+        let packed = g2g_core::caps::ALL_RAW_VIDEO_FORMATS
+            .iter()
+            .copied()
+            .filter(|&format| packed_rgb_layout(format).is_some());
+        for to in packed {
+            for from in [RawVideoFormat::Nv12, RawVideoFormat::I420] {
+                for (w, h) in GEOMETRIES {
+                    let src: Vec<u8> = (0..frame_byte_size(from, w, h))
+                        .map(|index| (index * 37 + 11) as u8)
+                        .collect();
+                    let (w, h) = (w as usize, h as usize);
+                    let matrix = YuvRgbMatrix::new(Colorimetry::UNKNOWN);
+                    let interleaved = from == RawVideoFormat::Nv12;
+                    let rgba = yuv420_to_rgb(&src, (w, h), interleaved, RGBA_LAYOUT, &matrix);
+                    let through_rgba = pack_from_rgba(&rgba, to, w, h, w * 4);
+                    let direct = convert(&src, from, to, w, h, Colorimetry::UNKNOWN);
+                    assert_eq!(direct, through_rgba, "{from:?} -> {to:?} {w}x{h}");
                 }
             }
         }
@@ -2325,7 +2378,7 @@ mod tests {
         ] {
             let src: Vec<u8> = (0..4).flat_map(|_| [r, g, b, 255]).collect();
             let nv12 = rgb_to_yuv420(&src, 2, 2, 0, 2, true, 8, &matrix);
-            let rgba = yuv420_to_rgb(&nv12, 2, 2, true, 0, 2, &matrix);
+            let rgba = yuv420_to_rgb(&nv12, (2, 2), true, RGBA_LAYOUT, &matrix);
             for px in rgba.as_chunks::<4>().0 {
                 assert!(
                     (px[0] as i32 - r as i32).abs() <= ROUND_TRIP_TOLERANCE
