@@ -2,20 +2,35 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
+use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use g2g_core::runtime::{run_graph, GraphNode};
+use g2g_core::Graph;
 use g2g_core::PipelineClock;
+use g2g_plugins::appsink::{register_appsink_pull, AppSink, AppSinkPull};
+use g2g_plugins::windowinput::{PointerButton, WindowInput};
 use g2g_wayland_display::waylanddisplaysrc::DisplayNames;
+use g2g_wayland_display::waylanddisplaysrc::{InputSender, WaylandDisplaySrc};
 use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState};
+use smithay_client_toolkit::data_device_manager::data_device::{
+    DataDevice, DataDeviceData, DataDeviceHandler,
+};
+use smithay_client_toolkit::data_device_manager::data_offer::{DataOfferHandler, DragOffer};
+use smithay_client_toolkit::data_device_manager::data_source::{DataSourceHandler, DragSource};
+use smithay_client_toolkit::data_device_manager::{DataDeviceManagerState, WritePipe};
 use smithay_client_toolkit::dispatch2::Dispatch2;
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
 use smithay_client_toolkit::reexports::client::globals::registry_queue_init;
+use smithay_client_toolkit::reexports::client::protocol::wl_data_device::WlDataDevice;
+use smithay_client_toolkit::reexports::client::protocol::wl_data_device_manager::DndAction;
+use smithay_client_toolkit::reexports::client::protocol::wl_data_source::WlDataSource;
 use smithay_client_toolkit::reexports::client::protocol::{
     wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface,
 };
-use smithay_client_toolkit::reexports::client::{Connection, QueueHandle, WEnum};
+use smithay_client_toolkit::reexports::client::{Connection, Proxy, QueueHandle, WEnum};
 use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
 use smithay_client_toolkit::seat::pointer::{PointerEvent, PointerEventKind, PointerHandler};
 use smithay_client_toolkit::seat::{Capability, SeatHandler, SeatState};
@@ -36,6 +51,14 @@ pub(crate) const BYTES_PER_PIXEL: usize = 4;
 pub(crate) const UPPER_COLOR_ARGB: u32 = 0xFF20_80C0;
 pub(crate) const LOWER_COLOR_ARGB: u32 = 0xFFC0_4010;
 pub(crate) const TIMEOUT: Duration = Duration::from_secs(10);
+// the client starts a drag when this button goes down over its window
+const DRAG_BUTTON: PointerButton = PointerButton::Middle;
+const DRAG_ICON_SIZE: u32 = 16;
+const DRAG_ICON_COLOR_ARGB: u32 = 0xFF30_C050;
+const DRAG_PAYLOAD: &str = "dragged text";
+const DRAG_MIME_TYPE: &str = "text/plain;charset=utf-8";
+const DRAG_START: (u32, u32) = (20, 20);
+const DRAG_END: (u32, u32) = (60, 30);
 
 pub(crate) struct ZeroClock;
 impl PipelineClock for ZeroClock {
@@ -52,12 +75,18 @@ pub(crate) enum ClientEvent {
     Key { code: u32, pressed: bool },
     PointerMotion { x: f64, y: f64 },
     Button { code: u32, pressed: bool },
+    DropAccepted,
+    Dropped(String),
 }
 
 struct Client {
     registry_state: RegistryState,
     seat_state: SeatState,
     output_state: OutputState,
+    compositor: CompositorState,
+    data_device_manager: DataDeviceManagerState,
+    data_device: Option<DataDevice>,
+    drag: Option<(DragSource, wl_surface::WlSurface)>,
     shm: Shm,
     pool: SlotPool,
     window: Window,
@@ -91,6 +120,33 @@ impl Client {
         buffer.attach_to(surface).expect("attaches");
         self.window.commit();
         self.drawn = true;
+    }
+
+    fn start_drag(&mut self, qh: &QueueHandle<Self>, serial: u32) {
+        let data_device = self
+            .data_device
+            .as_ref()
+            .expect("the seat has a data device");
+        let source = self.data_device_manager.create_drag_and_drop_source(
+            qh,
+            [DRAG_MIME_TYPE],
+            DndAction::Copy,
+        );
+        let icon = self.compositor.create_surface(qh);
+        let side = DRAG_ICON_SIZE as i32;
+        let stride = side * BYTES_PER_PIXEL as i32;
+        let (buffer, canvas) = self
+            .pool
+            .create_buffer(side, side, stride, wl_shm::Format::Argb8888)
+            .expect("the pool grows for the icon");
+        for pixel in canvas.as_chunks_mut::<BYTES_PER_PIXEL>().0 {
+            *pixel = DRAG_ICON_COLOR_ARGB.to_le_bytes();
+        }
+        icon.damage_buffer(0, 0, side, side);
+        buffer.attach_to(&icon).expect("attaches");
+        icon.commit();
+        source.start_drag(data_device, self.window.wl_surface(), Some(&icon), serial);
+        self.drag = Some((source, icon));
     }
 }
 
@@ -139,6 +195,101 @@ fn rgb_at(picture: &[u8], stride: usize, x: u32, y: u32) -> [u8; 3] {
     pixel
 }
 
+fn rgb_under_drag_icon(picture: &[u8], (pointer_x, pointer_y): (u32, u32)) -> [u8; 3] {
+    let middle = DRAG_ICON_SIZE / 2;
+    let stride = WIDTH as usize * BYTES_PER_PIXEL;
+    rgb_at(picture, stride, pointer_x + middle, pointer_y + middle)
+}
+
+async fn wait_for_picture(pull: &AppSinkPull, shows: impl Fn(&[u8]) -> bool) -> bool {
+    tokio::time::timeout(TIMEOUT, async {
+        loop {
+            let frame = pull.pull().await.expect("the source keeps producing");
+            let picture = frame.domain.as_system_slice().expect("system memory");
+            if shows(picture) {
+                return;
+            }
+        }
+    })
+    .await
+    .is_ok()
+}
+
+async fn wait_for_drag_icon(pull: &AppSinkPull, pointer: (u32, u32), argb: u32) -> bool {
+    wait_for_picture(pull, |picture| {
+        rgb_under_drag_icon(picture, pointer) == rgb(argb)
+    })
+    .await
+}
+
+fn send(input: &InputSender, event: WindowInput) {
+    input.send(event).expect("the display takes input");
+}
+
+// the source must output system memory at WIDTH x HEIGHT
+pub(crate) async fn drag_reaches_the_drop_target(source: WaylandDisplaySrc, channel: &str) {
+    let input = source.input_sender();
+    let mut display_names = source.display_names();
+    let pull = register_appsink_pull(channel);
+    let mut graph: Graph<GraphNode> = Graph::new();
+    let source_node = graph.add_source(GraphNode::source(source));
+    let sink_node = graph.add_sink(GraphNode::element(AppSink::new().with_channel(channel)));
+    graph.link(source_node, sink_node).expect("links");
+    let checks = async {
+        let mut events = connect_client(&mut display_names).await;
+        client_globals(&mut events).await;
+        let stride = WIDTH as usize * BYTES_PER_PIXEL;
+        assert!(
+            wait_for_picture(&pull, |picture| shows_client(picture, stride)).await,
+            "a frame shows the client's window"
+        );
+        let (start_x, start_y) = DRAG_START;
+        let (end_x, end_y) = DRAG_END;
+        send(
+            &input,
+            WindowInput::Pointer {
+                x: start_x,
+                y: start_y,
+            },
+        );
+        send(
+            &input,
+            WindowInput::Button {
+                button: DRAG_BUTTON,
+                down: true,
+            },
+        );
+        // the drag starts once the client answers the press, and only motion after that reaches a drop target
+        assert!(
+            wait_for_drag_icon(&pull, DRAG_START, DRAG_ICON_COLOR_ARGB).await,
+            "a frame shows the drag icon where the drag starts"
+        );
+        send(&input, WindowInput::Pointer { x: end_x, y: end_y });
+        assert!(
+            wait_for_drag_icon(&pull, DRAG_END, DRAG_ICON_COLOR_ARGB).await,
+            "the drag icon follows the pointer"
+        );
+        // smithay cancels a drop the target has not accepted yet
+        wait_for_client_event(&mut events, &ClientEvent::DropAccepted).await;
+        send(
+            &input,
+            WindowInput::Button {
+                button: DRAG_BUTTON,
+                down: false,
+            },
+        );
+        wait_for_client_event(&mut events, &ClientEvent::Dropped(DRAG_PAYLOAD.into())).await;
+        assert!(
+            wait_for_drag_icon(&pull, DRAG_END, UPPER_COLOR_ARGB).await,
+            "the drag icon goes away after the drop"
+        );
+    };
+    tokio::select! {
+        result = run_graph(graph, &ZeroClock, 2) => panic!("the graph ended first: {result:?}"),
+        () = checks => {}
+    }
+}
+
 pub(crate) fn shows_client(picture: &[u8], stride: usize) -> bool {
     let x = WIDTH / 2;
     rgb_at(picture, stride, x, HEIGHT / 4) == rgb(UPPER_COLOR_ARGB)
@@ -157,6 +308,8 @@ fn run_client(socket: PathBuf, events: mpsc::UnboundedSender<ClientEvent>) {
     let compositor = CompositorState::bind(&globals, &qh).expect("wl_compositor");
     let xdg_shell = XdgShell::bind(&globals, &qh).expect("xdg_wm_base");
     let shm = Shm::bind(&globals, &qh).expect("wl_shm");
+    let data_device_manager =
+        DataDeviceManagerState::bind(&globals, &qh).expect("wl_data_device_manager");
     let window =
         xdg_shell.create_window(compositor.create_surface(&qh), WindowDecorations::None, &qh);
     window.commit();
@@ -165,6 +318,10 @@ fn run_client(socket: PathBuf, events: mpsc::UnboundedSender<ClientEvent>) {
         registry_state: RegistryState::new(&globals),
         seat_state: SeatState::new(&globals, &qh),
         output_state: OutputState::new(&globals, &qh),
+        compositor,
+        data_device_manager,
+        data_device: None,
+        drag: None,
         pool: SlotPool::new(pool_bytes, &shm).expect("shm pool"),
         shm,
         window,
@@ -258,6 +415,7 @@ impl SeatHandler for Client {
         }
         if capability == Capability::Pointer && self.pointer.is_none() {
             self.pointer = Some(self.seat_state.get_pointer(qh, &seat).expect("pointer"));
+            self.data_device = Some(self.data_device_manager.get_data_device(qh, &seat));
         }
     }
     fn remove_capability(
@@ -298,7 +456,7 @@ impl PointerHandler for Client {
     fn pointer_frame(
         &mut self,
         _: &Connection,
-        _: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
         _: &wl_pointer::WlPointer,
         events: &[PointerEvent],
     ) {
@@ -310,10 +468,15 @@ impl PointerHandler for Client {
                         y: event.position.1,
                     }
                 }
-                PointerEventKind::Press { button, .. } => ClientEvent::Button {
-                    code: button,
-                    pressed: true,
-                },
+                PointerEventKind::Press { button, serial, .. } => {
+                    if button == DRAG_BUTTON.evdev_code() {
+                        self.start_drag(qh, serial);
+                    }
+                    ClientEvent::Button {
+                        code: button,
+                        pressed: true,
+                    }
+                }
                 PointerEventKind::Release { button, .. } => ClientEvent::Button {
                     code: button,
                     pressed: false,
@@ -323,6 +486,104 @@ impl PointerHandler for Client {
             let _ = self.events.send(client_event);
         }
     }
+}
+
+impl DataDeviceHandler for Client {
+    fn enter(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        data_device: &WlDataDevice,
+        _: f64,
+        _: f64,
+        _: &wl_surface::WlSurface,
+    ) {
+        let offer = drag_offer(data_device);
+        offer.accept_mime_type(offer.serial, Some(String::from(DRAG_MIME_TYPE)));
+        offer.set_actions(DndAction::Copy, DndAction::Copy);
+    }
+    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
+    fn motion(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice, _: f64, _: f64) {}
+    fn selection(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
+    fn drop_performed(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        data_device: &WlDataDevice,
+    ) {
+        let offer = drag_offer(data_device);
+        let mut pipe = offer
+            .receive(String::from(DRAG_MIME_TYPE))
+            .expect("the dropped offer has the mime type");
+        offer.finish();
+        let events = self.events.clone();
+        // this thread also serves the drag source, which writes the payload
+        std::thread::spawn(move || {
+            let mut payload = String::new();
+            pipe.read_to_string(&mut payload)
+                .expect("reads the payload");
+            let _ = events.send(ClientEvent::Dropped(payload));
+        });
+    }
+}
+
+fn drag_offer(data_device: &WlDataDevice) -> DragOffer {
+    data_device
+        .data::<DataDeviceData>()
+        .and_then(DataDeviceData::drag_offer)
+        .expect("a drag is over the window")
+}
+
+impl DataOfferHandler for Client {
+    fn source_actions(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &mut DragOffer,
+        _: DndAction,
+    ) {
+    }
+    fn selected_action(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &mut DragOffer,
+        action: DndAction,
+    ) {
+        if action == DndAction::Copy {
+            let _ = self.events.send(ClientEvent::DropAccepted);
+        }
+    }
+}
+
+impl DataSourceHandler for Client {
+    fn accept_mime(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &WlDataSource,
+        _: Option<String>,
+    ) {
+    }
+    fn send_request(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &WlDataSource,
+        _: String,
+        mut pipe: WritePipe,
+    ) {
+        pipe.write_all(DRAG_PAYLOAD.as_bytes())
+            .expect("writes the payload");
+    }
+    fn cancelled(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource) {
+        self.drag = None;
+    }
+    fn dnd_dropped(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource) {}
+    fn dnd_finished(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource) {
+        self.drag = None;
+    }
+    fn action(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource, _: DndAction) {}
 }
 
 impl OutputHandler for Client {

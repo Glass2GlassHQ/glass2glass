@@ -199,8 +199,8 @@ The run opens the next free `wayland-N` socket in `XDG_RUNTIME_DIR` and
 publishes the name on `display_names()`. The compositor offers `wl_compositor`,
 `wl_subcompositor`, `wl_shm`, `xdg_wm_base`, `wl_seat` with a keyboard and a
 pointer, `wl_output` with `xdg_output`, and `wl_data_device_manager`. GTK 4
-refuses a display without the last one. Drag and drop is refused, the
-clipboard works. Every toplevel is configured fullscreen at the output size and
+refuses a display without the last one. The clipboard and drag and drop work
+between Wayland clients, and the drag icon is drawn at the pointer. Every toplevel is configured fullscreen at the output size and
 takes keyboard focus. The output is RGBA. A downstream caps filter picks the
 size and rate, and each field the filter leaves unset takes its `width`,
 `height` or `framerate` property, as `videotestsrc` does.

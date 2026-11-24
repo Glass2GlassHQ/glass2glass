@@ -13,8 +13,9 @@ use g2g_plugins::registry::default_registry;
 use g2g_plugins::windowinput::{PointerButton, WindowInput};
 use g2g_wayland_display::waylanddisplaysrc::{WaylandDisplaySrc, SOFTWARE_RENDERING};
 use wayland_client::{
-    client_globals, connect_client, shows_client, wait_for_client_event, ClientEvent, ZeroClock,
-    BYTES_PER_PIXEL, FRAMERATE, HEIGHT, TIMEOUT, WIDTH,
+    client_globals, connect_client, drag_reaches_the_drop_target, shows_client,
+    wait_for_client_event, ClientEvent, ZeroClock, BYTES_PER_PIXEL, FRAMERATE, HEIGHT, TIMEOUT,
+    WIDTH,
 };
 
 // gtk 4 refuses to open a display that lacks this interface
@@ -169,4 +170,13 @@ async fn a_launch_line_sets_the_size_and_frame_count() {
         pull.pull().await.is_none(),
         "the stream ends after one frame"
     );
+}
+
+#[tokio::test]
+async fn a_drag_shows_its_icon_and_drops_its_data() {
+    let source = WaylandDisplaySrc::new()
+        .with_size(WIDTH, HEIGHT)
+        .with_framerate(FRAMERATE)
+        .with_render_node(SOFTWARE_RENDERING);
+    drag_reaches_the_drop_target(source, "m2541_software_drag").await;
 }

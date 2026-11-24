@@ -22,11 +22,13 @@ use smithay::backend::renderer::{
 use smithay::desktop::space::render_output;
 use smithay::desktop::{Space, Window};
 use smithay::output::Output;
-use smithay::utils::{DeviceFd, Rectangle, Transform};
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::utils::{DeviceFd, Physical, Point, Rectangle, Transform};
 use smithay::wayland::dmabuf::{DmabufFeedback, DmabufFeedbackBuilder};
 
 use crate::display::{
-    hardware_error, DisplaySize, Picture, BACKGROUND, BYTES_PER_PIXEL, OUTPUT_FOURCC,
+    drag_icon_elements, hardware_error, DisplaySize, Picture, BACKGROUND, BYTES_PER_PIXEL,
+    OUTPUT_FOURCC,
 };
 
 const MAX_OUTPUT_BUFFERS: usize = 8;
@@ -137,6 +139,7 @@ impl GpuRenderer {
         &mut self,
         output: &Output,
         space: &Space<Window>,
+        drag_icon: Option<(&WlSurface, Point<i32, Physical>)>,
         damage_tracker: &mut OutputDamageTracker,
     ) -> Result<Picture, G2gError> {
         let size = self.size;
@@ -167,6 +170,7 @@ impl GpuRenderer {
                     &mut framebuffer,
                     output,
                     space,
+                    drag_icon,
                     damage_tracker,
                 )?;
                 match self.output {
@@ -195,6 +199,7 @@ impl GpuRenderer {
                         &mut framebuffer,
                         output,
                         space,
+                        drag_icon,
                         damage_tracker,
                     )?;
                 }
@@ -273,8 +278,10 @@ fn composite(
     framebuffer: &mut GlesTarget<'_>,
     output: &Output,
     space: &Space<Window>,
+    drag_icon: Option<(&WlSurface, Point<i32, Physical>)>,
     damage_tracker: &mut OutputDamageTracker,
 ) -> Result<(), G2gError> {
+    let drag_icon = drag_icon_elements(gles, drag_icon);
     let result = render_output::<_, WaylandSurfaceRenderElement<GlesRenderer>, _, _>(
         output,
         gles,
@@ -282,7 +289,7 @@ fn composite(
         1.0,
         0,
         [space],
-        &[],
+        &drag_icon,
         damage_tracker,
         BACKGROUND,
     )

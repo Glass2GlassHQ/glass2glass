@@ -17,17 +17,23 @@ use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::input::{Axis, AxisSource, ButtonState, InputTime, KeyState};
 use smithay::backend::renderer::damage::OutputDamageTracker;
-use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
+use smithay::backend::renderer::element::surface::{
+    render_elements_from_surface_tree, WaylandSurfaceRenderElement,
+};
+use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::pixman::PixmanRenderer;
 use smithay::backend::renderer::utils::on_commit_buffer_handler;
-use smithay::backend::renderer::{Bind, ImportDma, Offscreen};
+use smithay::backend::renderer::{
+    Bind, ImportAll, ImportDma, Offscreen, Renderer as SmithayRenderer,
+};
 use smithay::desktop::space::render_output;
+use smithay::desktop::utils::send_frames_surface_tree;
 use smithay::desktop::{PopupKind, PopupManager, Space, Window, WindowSurfaceType};
-use smithay::input::dnd::DndGrabHandler;
+use smithay::input::dnd::{DnDGrab, DndGrabHandler, DndTarget, GrabType, Source};
 use smithay::input::keyboard::{
     FilterResult, KeyboardTarget, Keycode, KeysymHandle, ModifiersState, XkbConfig,
 };
-use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
+use smithay::input::pointer::{AxisFrame, ButtonEvent, Focus, MotionEvent};
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::channel::{Channel, Event as ChannelEvent};
@@ -41,11 +47,13 @@ use smithay::reexports::wayland_server::backend::ClientData;
 use smithay::reexports::wayland_server::protocol::{wl_buffer, wl_seat, wl_surface::WlSurface};
 use smithay::reexports::wayland_server::Resource;
 use smithay::reexports::wayland_server::{Client, Display, DisplayHandle};
-use smithay::utils::{IsAlive, Logical, Point, Rectangle, Serial, Transform, SERIAL_COUNTER};
+use smithay::utils::{
+    IsAlive, Logical, Physical, Point, Rectangle, Serial, Transform, SERIAL_COUNTER,
+};
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
     get_parent, is_sync_subsurface, with_states, CompositorClientState, CompositorHandler,
-    CompositorState,
+    CompositorState, SurfaceAttributes,
 };
 use smithay::wayland::dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier};
 use smithay::wayland::output::{OutputHandler, OutputManagerState};
@@ -397,16 +405,40 @@ struct DisplayState {
     damaged: bool,
     last_frame: Option<(Instant, Picture)>,
     held_buttons: Vec<u32>,
+    drag_icon: Option<DragIcon>,
     stopped: bool,
+}
+
+#[derive(Debug)]
+struct DragIcon {
+    surface: WlSurface,
+    // wayland clients move the hotspot by attaching the icon buffer with an offset
+    offset: Point<i32, Logical>,
+}
+
+pub(crate) fn drag_icon_elements<R>(
+    renderer: &mut R,
+    drag_icon: Option<(&WlSurface, Point<i32, Physical>)>,
+) -> Vec<WaylandSurfaceRenderElement<R>>
+where
+    R: SmithayRenderer + ImportAll,
+    R::TextureId: Clone + 'static,
+{
+    let Some((surface, location)) = drag_icon else {
+        return Vec::new();
+    };
+    render_elements_from_surface_tree(renderer, surface, location, 1.0, 1.0, Kind::Unspecified)
 }
 
 fn render_software(
     software: &mut SoftwareRenderer,
     output: &Output,
     space: &Space<Window>,
+    drag_icon: Option<(&WlSurface, Point<i32, Physical>)>,
     damage_tracker: &mut OutputDamageTracker,
 ) -> Result<(), G2gError> {
     let age = usize::from(software.rendered_once);
+    let drag_icon = drag_icon_elements(&mut software.pixman, drag_icon);
     let mut framebuffer = software
         .pixman
         .bind(&mut software.image)
@@ -418,7 +450,7 @@ fn render_software(
         1.0,
         age,
         [space],
-        &[],
+        &drag_icon,
         damage_tracker,
         BACKGROUND,
     )
@@ -568,6 +600,7 @@ impl DisplayState {
             damaged: true,
             last_frame: None,
             held_buttons: Vec::new(),
+            drag_icon: None,
             stopped: false,
         })
     }
@@ -663,19 +696,28 @@ impl DisplayState {
     }
 
     fn render(&mut self) -> Result<Picture, G2gError> {
+        let pointer = self.seat.get_pointer().expect("the seat has a pointer");
+        let drag_icon = self.drag_icon.as_ref().map(|icon| {
+            let location = pointer.current_location() + icon.offset.to_f64();
+            (&icon.surface, location.to_physical(1.0).to_i32_round())
+        });
         let picture = match &mut self.renderer {
             Renderer::Software(software) => {
                 render_software(
                     software,
                     &self.output,
                     &self.space,
+                    drag_icon,
                     &mut self.damage_tracker,
                 )?;
                 Picture::System(copy_picture(&software.image, self.size))
             }
-            Renderer::Gpu(gpu) => {
-                gpu.render(&self.output, &self.space, &mut self.damage_tracker)?
-            }
+            Renderer::Gpu(gpu) => gpu.render(
+                &self.output,
+                &self.space,
+                drag_icon,
+                &mut self.damage_tracker,
+            )?,
         };
         self.damaged = false;
 
@@ -684,6 +726,15 @@ impl DisplayState {
             window.send_frame(&self.output, elapsed, Some(Duration::ZERO), |_, _| {
                 Some(self.output.clone())
             });
+        }
+        if let Some(icon) = &self.drag_icon {
+            send_frames_surface_tree(
+                &icon.surface,
+                &self.output,
+                elapsed,
+                Some(Duration::ZERO),
+                |_, _| Some(self.output.clone()),
+            );
         }
         self.space.refresh();
         self.popups.cleanup();
@@ -744,6 +795,9 @@ impl DisplayState {
                 };
                 pointer.motion(self, under, &motion);
                 pointer.frame(self);
+                if self.drag_icon.is_some() {
+                    self.damaged = true;
+                }
             }
             WindowInput::Button { button, down } => {
                 let serial = SERIAL_COUNTER.next_serial();
@@ -877,6 +931,21 @@ impl CompositorHandler for DisplayState {
                     toplevel.send_configure();
                 }
             }
+        }
+        if let Some(icon) = self
+            .drag_icon
+            .as_mut()
+            .filter(|icon| icon.surface == *surface)
+        {
+            icon.offset += with_states(surface, |states| {
+                states
+                    .cached_state
+                    .get::<SurfaceAttributes>()
+                    .current()
+                    .buffer_delta
+                    .take()
+                    .unwrap_or_default()
+            });
         }
         self.popups.commit(surface);
         if let Some(PopupKind::Xdg(popup)) = self.popups.find_popup(surface) {
@@ -1033,9 +1102,46 @@ impl DataDeviceHandler for DisplayState {
     }
 }
 
-impl DndGrabHandler for DisplayState {}
+impl DndGrabHandler for DisplayState {
+    fn dropped(
+        &mut self,
+        _target: Option<DndTarget<'_, Self>>,
+        _validated: bool,
+        _seat: Seat<Self>,
+        _location: Point<f64, Logical>,
+    ) {
+        self.drag_icon = None;
+        self.damaged = true;
+    }
 
-impl WaylandDndGrabHandler for DisplayState {}
+    fn cancelled(&mut self, _seat: Seat<Self>, _location: Point<f64, Logical>) {
+        self.drag_icon = None;
+        self.damaged = true;
+    }
+}
+
+impl WaylandDndGrabHandler for DisplayState {
+    fn dnd_requested<S: Source>(
+        &mut self,
+        source: S,
+        icon: Option<WlSurface>,
+        seat: Seat<Self>,
+        serial: Serial,
+        grab_type: GrabType,
+    ) {
+        let pointer = seat.get_pointer().expect("the seat has a pointer");
+        let (GrabType::Pointer, Some(start_data)) = (grab_type, pointer.grab_start_data()) else {
+            source.cancel();
+            return;
+        };
+        self.drag_icon = icon.map(|surface| DragIcon {
+            surface,
+            offset: Point::default(),
+        });
+        let grab = DnDGrab::new_pointer(&self.display_handle, start_data, source, seat);
+        pointer.set_grab(self, grab, serial, Focus::Keep);
+    }
+}
 
 impl OutputHandler for DisplayState {}
 

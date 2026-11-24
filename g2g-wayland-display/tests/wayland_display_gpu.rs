@@ -25,8 +25,9 @@ use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::{Bind, ExportMem, ImportDma, TextureMapping};
 use smithay::utils::{DeviceFd, Rectangle};
 use wayland_client::{
-    client_globals, connect_client, shows_client, wait_for_client_event, ClientEvent, ZeroClock,
-    BYTES_PER_PIXEL, FRAMERATE, HEIGHT, TIMEOUT, WIDTH,
+    client_globals, connect_client, drag_reaches_the_drop_target, shows_client,
+    wait_for_client_event, ClientEvent, ZeroClock, BYTES_PER_PIXEL, FRAMERATE, HEIGHT, TIMEOUT,
+    WIDTH,
 };
 
 const DRI_DIRECTORY: &str = "/dev/dri";
@@ -312,6 +313,14 @@ async fn gpu_rendering_writes_nv12_planes_for_an_nv12_sink() {
                 render_node.display()
             );
         }
+    }
+}
+
+#[tokio::test]
+async fn gpu_rendering_draws_the_drag_icon() {
+    for render_node in render_nodes() {
+        let channel = format!("m2541_gpu_drag_{}", render_node.display());
+        drag_reaches_the_drop_target(gpu_source(&render_node), &channel).await;
     }
 }
 
