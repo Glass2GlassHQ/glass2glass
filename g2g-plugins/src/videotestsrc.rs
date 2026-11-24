@@ -28,6 +28,10 @@ use g2g_core::{
 
 use crate::livesource::LivePacer;
 use crate::videoconvert::{convert, FORMATS};
+use crate::videosizeandrate::{
+    requested_dimension, VideoSizeAndRate, MAX_REQUESTED_DIMENSION_TEXT, MAX_REQUESTED_FPS,
+    MIN_REQUESTED_DIMENSION_TEXT, REQUESTED_DIMENSION,
+};
 
 /// Synthetic content drawn into each frame. Some animate with the frame index
 /// (gradient, snow, moving-bar, ball, zone-plate); the calibration patterns
@@ -74,12 +78,7 @@ pub enum Pattern {
 /// ```
 #[derive(Debug)]
 pub struct VideoTestSrc {
-    width: u32,
-    height: u32,
-    framerate_q16: u32,
-    width_pinned: bool,
-    height_pinned: bool,
-    framerate_pinned: bool,
+    size_and_rate: VideoSizeAndRate,
     target_frames: u64,
     pattern: Pattern,
     format: RawVideoFormat,
@@ -115,12 +114,7 @@ impl VideoTestSrc {
     /// `framerate` is in nominal fps; stored internally as Q16 fixed-point.
     pub fn new(width: u32, height: u32, framerate: u32, target_frames: u64) -> Self {
         Self {
-            width,
-            height,
-            framerate_q16: framerate << 16,
-            width_pinned: false,
-            height_pinned: false,
-            framerate_pinned: false,
+            size_and_rate: VideoSizeAndRate::new(width, height, framerate << 16),
             target_frames,
             pattern: Pattern::default(),
             format: DRAWN_FORMAT,
@@ -156,12 +150,7 @@ impl VideoTestSrc {
         pool: BufferPool<Box<[u8]>>,
     ) -> Self {
         Self {
-            width,
-            height,
-            framerate_q16: framerate << 16,
-            width_pinned: false,
-            height_pinned: false,
-            framerate_pinned: false,
+            size_and_rate: VideoSizeAndRate::new(width, height, framerate << 16),
             target_frames,
             pattern: Pattern::default(),
             format: DRAWN_FORMAT,
@@ -207,9 +196,9 @@ impl VideoTestSrc {
     fn caps(&self) -> Caps {
         raw_caps(
             DRAWN_FORMAT,
-            Dim::Fixed(self.width),
-            Dim::Fixed(self.height),
-            Rate::Fixed(self.framerate_q16),
+            Dim::Fixed(self.size_and_rate.width()),
+            Dim::Fixed(self.size_and_rate.height()),
+            Rate::Fixed(self.size_and_rate.framerate_q16()),
         )
     }
 
@@ -223,46 +212,14 @@ impl VideoTestSrc {
     }
 
     fn produced_caps(&self) -> CapsSet {
-        let mut widths = vec![(0, Dim::Fixed(self.width))];
-        if !self.width_pinned {
-            widths.push((1, REQUESTED_DIMENSION));
-        }
-        let mut heights = vec![(0, Dim::Fixed(self.height))];
-        if !self.height_pinned {
-            heights.push((1, REQUESTED_DIMENSION));
-        }
-        let mut framerates = vec![(0, Rate::Fixed(self.framerate_q16))];
-        if !self.framerate_pinned {
-            framerates.push((1, REQUESTED_FRAMERATE));
-        }
-        let mut alternatives = Vec::new();
-        for format in self.produced_formats() {
-            for (width_open, width) in &widths {
-                for (height_open, height) in &heights {
-                    for (framerate_open, framerate) in &framerates {
-                        let open_fields = width_open + height_open + framerate_open;
-                        let caps =
-                            raw_caps(*format, width.clone(), height.clone(), framerate.clone());
-                        alternatives.push((open_fields, caps));
-                    }
-                }
-            }
-        }
-        // fewest open fields first: fixation keeps each property a filter leaves unset
-        alternatives.sort_by_key(|(open_fields, _)| *open_fields);
-        CapsSet::from_alternatives(alternatives.into_iter().map(|(_, caps)| caps).collect())
+        self.size_and_rate.produced_caps(
+            self.produced_formats(),
+            REQUESTED_FRAMERATE,
+            |format, width, height, framerate| Some(raw_caps(format, width, height, framerate)),
+        )
     }
 }
 
-const MIN_REQUESTED_DIMENSION: u32 = 1;
-const MAX_REQUESTED_DIMENSION: u32 = 16_384;
-const MIN_REQUESTED_DIMENSION_TEXT: &str = "1";
-const MAX_REQUESTED_DIMENSION_TEXT: &str = "16384";
-const MAX_REQUESTED_FPS: u32 = 1_000;
-const REQUESTED_DIMENSION: Dim = Dim::Range {
-    min: MIN_REQUESTED_DIMENSION,
-    max: MAX_REQUESTED_DIMENSION,
-};
 const REQUESTED_FRAMERATE: Rate = Rate::Range {
     min_q16: 0,
     max_q16: MAX_REQUESTED_FPS << 16,
@@ -270,15 +227,6 @@ const REQUESTED_FRAMERATE: Rate = Rate::Range {
 
 const DRAWN_FORMAT: RawVideoFormat = RawVideoFormat::Rgba8;
 const DRAWN_BYTES_PER_PIXEL: usize = 4;
-
-// the property takes the same sizes a caps filter can ask for
-fn requested_dimension(value: &PropValue) -> Result<u32, PropError> {
-    let dimension = value.as_uint().ok_or(PropError::Type)?;
-    u32::try_from(dimension)
-        .ok()
-        .filter(|d| (MIN_REQUESTED_DIMENSION..=MAX_REQUESTED_DIMENSION).contains(d))
-        .ok_or(PropError::Value)
-}
 
 // the factory's declared output, ahead of the other formats its template lists
 #[cfg(feature = "std")]
@@ -316,7 +264,7 @@ impl SourceLoop for VideoTestSrc {
         if !self.is_live {
             return LatencyReport::ZERO;
         }
-        let period_ns = framerate_q16_period_ns(self.framerate_q16).unwrap_or(0);
+        let period_ns = framerate_q16_period_ns(self.size_and_rate.framerate_q16()).unwrap_or(0);
         LatencyReport::live(period_ns, None)
     }
 
@@ -339,9 +287,6 @@ impl SourceLoop for VideoTestSrc {
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let Caps::RawVideo {
             format,
-            width: Dim::Fixed(width),
-            height: Dim::Fixed(height),
-            framerate: Rate::Fixed(framerate_q16),
             colorimetry,
             ..
         } = *absolute_caps
@@ -351,11 +296,9 @@ impl SourceLoop for VideoTestSrc {
         if !self.produced_formats().contains(&format) {
             return Err(G2gError::CapsMismatch);
         }
+        self.size_and_rate.configure(absolute_caps)?;
         self.format = format;
         self.colorimetry = colorimetry;
-        self.width = width;
-        self.height = height;
-        self.framerate_q16 = framerate_q16;
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -366,7 +309,7 @@ impl SourceLoop for VideoTestSrc {
                 return Err(G2gError::NotConfigured);
             }
 
-            let fps_q16 = u64::from(self.framerate_q16);
+            let fps_q16 = u64::from(self.size_and_rate.framerate_q16());
             let pts_step_ns: u64 = (1_000_000_000u64 << 16).checked_div(fps_q16).unwrap_or(0);
             // a 0/1 framerate is a still image, which gst sends as one frame
             let frame_limit = if fps_q16 == 0 {
@@ -375,8 +318,8 @@ impl SourceLoop for VideoTestSrc {
                 self.target_frames
             };
 
-            let bytes_per_frame = (self.width as usize)
-                .checked_mul(self.height as usize)
+            let bytes_per_frame = (self.size_and_rate.width() as usize)
+                .checked_mul(self.size_and_rate.height() as usize)
                 .and_then(|n| n.checked_mul(DRAWN_BYTES_PER_PIXEL))
                 .ok_or(G2gError::CapsMismatch)?;
             let mut drawn = if self.format == DRAWN_FORMAT {
@@ -403,7 +346,7 @@ impl SourceLoop for VideoTestSrc {
                     fill_pattern(
                         self.pattern,
                         &mut buf.as_mut()[..bytes_per_frame],
-                        self.width,
+                        self.size_and_rate.width(),
                         seq,
                     );
                     MemoryDomain::System(SystemSlice::from_pool(buf, bytes_per_frame))
@@ -413,7 +356,7 @@ impl SourceLoop for VideoTestSrc {
                     // strides on this same allocation. Record the data pointer
                     // and bytes for the zero-copy / correctness assertions.
                     let mut buf = vec![0u8; bytes_per_frame].into_boxed_slice();
-                    fill_pattern(self.pattern, &mut buf, self.width, seq);
+                    fill_pattern(self.pattern, &mut buf, self.size_and_rate.width(), seq);
                     if self.emitted_frames.len() == RECORDED_FRAMES {
                         self.emitted_frames.remove(0);
                     }
@@ -422,21 +365,25 @@ impl SourceLoop for VideoTestSrc {
                     self.emitted_ptrs.push(backing.as_ptr() as usize);
                     let view = TensorView::contiguous(
                         TensorDType::U8,
-                        &[self.height, self.width, DRAWN_BYTES_PER_PIXEL as u32],
+                        &[
+                            self.size_and_rate.height(),
+                            self.size_and_rate.width(),
+                            DRAWN_BYTES_PER_PIXEL as u32,
+                        ],
                     );
                     MemoryDomain::SystemView(SystemView::new(backing, view))
                 } else if self.format == DRAWN_FORMAT {
                     let mut buf = vec![0u8; bytes_per_frame].into_boxed_slice();
-                    fill_pattern(self.pattern, &mut buf, self.width, seq);
+                    fill_pattern(self.pattern, &mut buf, self.size_and_rate.width(), seq);
                     MemoryDomain::System(SystemSlice::from_boxed(buf))
                 } else {
-                    fill_pattern(self.pattern, &mut drawn, self.width, seq);
+                    fill_pattern(self.pattern, &mut drawn, self.size_and_rate.width(), seq);
                     let converted = convert(
                         &drawn,
                         DRAWN_FORMAT,
                         self.format,
-                        self.width as usize,
-                        self.height as usize,
+                        self.size_and_rate.width() as usize,
+                        self.size_and_rate.height() as usize,
                         self.colorimetry,
                     );
                     MemoryDomain::System(SystemSlice::from_boxed(converted))
@@ -521,13 +468,11 @@ impl SourceLoop for VideoTestSrc {
                 Ok(())
             }
             "width" => {
-                self.width = requested_dimension(&value)?;
-                self.width_pinned = true;
+                self.size_and_rate.pin_width(requested_dimension(&value)?);
                 Ok(())
             }
             "height" => {
-                self.height = requested_dimension(&value)?;
-                self.height_pinned = true;
+                self.size_and_rate.pin_height(requested_dimension(&value)?);
                 Ok(())
             }
             "framerate" => {
@@ -541,8 +486,7 @@ impl SourceLoop for VideoTestSrc {
                 if rounds_to_still || framerate_q16 > MAX_REQUESTED_FPS << 16 {
                     return Err(PropError::Value);
                 }
-                self.framerate_q16 = framerate_q16;
-                self.framerate_pinned = true;
+                self.size_and_rate.pin_framerate_q16(framerate_q16);
                 Ok(())
             }
             _ => Err(PropError::Unknown),
@@ -554,10 +498,13 @@ impl SourceLoop for VideoTestSrc {
             "pattern" => Some(PropValue::Str(pattern_to_str(self.pattern).into())),
             "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.target_frames)),
             "is-live" => Some(PropValue::Bool(self.is_live)),
-            "width" => Some(PropValue::Uint(self.width as u64)),
-            "height" => Some(PropValue::Uint(self.height as u64)),
+            "width" => Some(PropValue::Uint(self.size_and_rate.width() as u64)),
+            "height" => Some(PropValue::Uint(self.size_and_rate.height() as u64)),
             // Report the integral fps numerator over /1 (Q16 stores fps*65536).
-            "framerate" => Some(PropValue::Fraction((self.framerate_q16 >> 16) as i32, 1)),
+            "framerate" => Some(PropValue::Fraction(
+                (self.size_and_rate.framerate_q16() >> 16) as i32,
+                1,
+            )),
             _ => None,
         }
     }

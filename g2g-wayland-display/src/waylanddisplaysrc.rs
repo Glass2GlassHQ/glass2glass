@@ -7,7 +7,7 @@ use core::pin::Pin;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use g2g_core::caps::{fps_period_ns, framerate_q16_from_fraction};
+use g2g_core::caps::framerate_q16_period_ns;
 use g2g_core::frame::Frame;
 use g2g_core::log::Target;
 use g2g_core::memory::{DomainSet, MemoryDomainKind, SystemSlice};
@@ -20,6 +20,10 @@ use g2g_core::{
 };
 use g2g_plugins::numbuffers::{
     finished_at_zero_limit, get_num_buffers, num_buffers_property, set_num_buffers,
+};
+use g2g_plugins::videosizeandrate::{
+    requested_dimension, VideoSizeAndRate, MAX_REQUESTED_DIMENSION_TEXT, MAX_REQUESTED_FPS,
+    MIN_REQUESTED_DIMENSION_TEXT, REQUESTED_DIMENSION,
 };
 use g2g_plugins::windowinput::WindowInput;
 use smithay::reexports::calloop::channel::{channel, Channel, Sender};
@@ -51,6 +55,13 @@ const DEFAULT_RENDER_NODE: &str = "/dev/dri/renderD128";
 const DEFAULT_WIDTH: u32 = 1920;
 const DEFAULT_HEIGHT: u32 = 1080;
 const DEFAULT_FRAMERATE: u32 = 60;
+const MIN_REQUESTED_FPS: u32 = 1;
+const MIN_REQUESTED_FPS_TEXT: &str = "1";
+const MAX_REQUESTED_FPS_TEXT: &str = "1000";
+const REQUESTED_FRAMERATE: Rate = Rate::Range {
+    min_q16: MIN_REQUESTED_FPS << 16,
+    max_q16: MAX_REQUESTED_FPS << 16,
+};
 const REPEAT_AFTER: Duration = Duration::from_secs(1);
 const SYS_CLASS_DRM: &str = "/sys/class/drm";
 
@@ -77,9 +88,7 @@ pub struct DisplayNames {
 }
 
 pub struct WaylandDisplaySrc {
-    width: u32,
-    height: u32,
-    framerate: u32,
+    size_and_rate: VideoSizeAndRate,
     frame_limit: u64,
     render_node: String,
     xwayland: bool,
@@ -95,9 +104,7 @@ pub struct WaylandDisplaySrc {
 impl core::fmt::Debug for WaylandDisplaySrc {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("WaylandDisplaySrc")
-            .field("width", &self.width)
-            .field("height", &self.height)
-            .field("framerate", &self.framerate)
+            .field("size_and_rate", &self.size_and_rate)
             .field("frame_limit", &self.frame_limit)
             .field("render_node", &self.render_node)
             .field("xwayland", &self.xwayland)
@@ -112,9 +119,11 @@ impl Default for WaylandDisplaySrc {
     fn default() -> Self {
         let (input_sender, input) = channel();
         Self {
-            width: DEFAULT_WIDTH,
-            height: DEFAULT_HEIGHT,
-            framerate: DEFAULT_FRAMERATE,
+            size_and_rate: VideoSizeAndRate::new(
+                DEFAULT_WIDTH,
+                DEFAULT_HEIGHT,
+                DEFAULT_FRAMERATE << 16,
+            ),
             frame_limit: u64::MAX,
             render_node: String::from(DEFAULT_RENDER_NODE),
             xwayland: false,
@@ -135,13 +144,13 @@ impl WaylandDisplaySrc {
     }
 
     pub fn with_size(mut self, width: u32, height: u32) -> Self {
-        self.width = width;
-        self.height = height;
+        self.size_and_rate.pin_width(width);
+        self.size_and_rate.pin_height(height);
         self
     }
 
     pub fn with_framerate(mut self, framerate: u32) -> Self {
-        self.framerate = framerate;
+        self.size_and_rate.pin_framerate_q16(framerate << 16);
         self
     }
 
@@ -194,42 +203,48 @@ impl WaylandDisplaySrc {
         })
     }
 
-    fn output_formats(&self) -> Vec<OutputFormat> {
-        // nv12 halves both dimensions for its chroma plane
-        let even = self.width.is_multiple_of(2) && self.height.is_multiple_of(2);
-        if self.render_node == SOFTWARE_RENDERING || !even {
-            return Vec::from([RGBA_OUTPUT]);
+    fn output_formats(&self) -> &'static [OutputFormat] {
+        if self.render_node == SOFTWARE_RENDERING {
+            return &[RGBA_OUTPUT];
         }
-        Vec::from([RGBA_OUTPUT, NV12_OUTPUT])
+        &[RGBA_OUTPUT, NV12_OUTPUT]
     }
 
-    fn caps_for(&self, output: OutputFormat) -> Result<Caps, G2gError> {
-        let framerate =
-            framerate_q16_from_fraction(self.framerate, 1).ok_or(G2gError::CapsMismatch)?;
-        Ok(Caps::RawVideo {
-            format: output.format,
-            width: Dim::Fixed(self.width),
-            height: Dim::Fixed(self.height),
-            framerate: Rate::Fixed(framerate),
-            interlace: Interlace::Progressive,
-            colorimetry: output.colorimetry,
-            pixel_aspect: PixelAspect::SQUARE,
-        })
-    }
-
-    pub(crate) fn rgba_caps(&self) -> Result<Caps, G2gError> {
-        self.caps_for(RGBA_OUTPUT)
-    }
-
-    fn produced_caps(&self) -> Result<CapsSet, G2gError> {
-        let alternatives = self
-            .output_formats()
-            .into_iter()
-            .map(|output| self.caps_for(output))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(CapsSet::from_alternatives(alternatives))
+    fn produced_caps(&self) -> CapsSet {
+        self.size_and_rate
+            .produced_caps(self.output_formats(), REQUESTED_FRAMERATE, caps_for)
     }
 }
+
+// nv12 halves both dimensions for its chroma plane
+fn fits_format(format: RawVideoFormat, dimension: &Dim) -> bool {
+    format != RawVideoFormat::Nv12 || dimension.fixed().is_none_or(|d| d.is_multiple_of(2))
+}
+
+fn caps_for(output: OutputFormat, width: Dim, height: Dim, framerate: Rate) -> Option<Caps> {
+    if !fits_format(output.format, &width) || !fits_format(output.format, &height) {
+        return None;
+    }
+    Some(Caps::RawVideo {
+        format: output.format,
+        width,
+        height,
+        framerate,
+        interlace: Interlace::Progressive,
+        colorimetry: output.colorimetry,
+        pixel_aspect: PixelAspect::SQUARE,
+    })
+}
+
+pub(crate) const DECLARED_CAPS: Caps = Caps::RawVideo {
+    format: RGBA_OUTPUT.format,
+    width: REQUESTED_DIMENSION,
+    height: REQUESTED_DIMENSION,
+    framerate: REQUESTED_FRAMERATE,
+    interlace: Interlace::Progressive,
+    colorimetry: RGBA_OUTPUT.colorimetry,
+    pixel_aspect: PixelAspect::SQUARE,
+};
 
 #[derive(Debug)]
 struct DisplayThread {
@@ -280,23 +295,37 @@ impl SourceLoop for WaylandDisplaySrc {
         Self: 'a;
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
-        core::future::ready(self.rgba_caps())
+        let rgba = caps_for(
+            RGBA_OUTPUT,
+            Dim::Fixed(self.size_and_rate.width()),
+            Dim::Fixed(self.size_and_rate.height()),
+            Rate::Fixed(self.size_and_rate.framerate_q16()),
+        );
+        core::future::ready(rgba.ok_or(G2gError::CapsMismatch))
     }
 
     fn caps_constraint<'a>(
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
-        core::future::ready(self.produced_caps().map(CapsConstraint::Produces))
+        core::future::ready(Ok(CapsConstraint::Produces(self.produced_caps())))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let mut accepted = None;
-        for output in self.output_formats() {
-            if *absolute_caps == self.caps_for(output)? {
-                accepted = Some(output.format);
-            }
+        let Caps::RawVideo {
+            format,
+            width,
+            height,
+            ..
+        } = absolute_caps
+        else {
+            return Err(G2gError::CapsMismatch);
+        };
+        let fits = fits_format(*format, width) && fits_format(*format, height);
+        if !fits || !self.produced_caps().accepts(absolute_caps) {
+            return Err(G2gError::CapsMismatch);
         }
-        self.format = accepted.ok_or(G2gError::CapsMismatch)?;
+        self.size_and_rate.configure(absolute_caps)?;
+        self.format = *format;
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -313,14 +342,17 @@ impl SourceLoop for WaylandDisplaySrc {
     fn properties(&self) -> &'static [PropertySpec] {
         const PROPERTIES: &[PropertySpec] = &[
             PropertySpec::new("width", PropKind::Uint, "output width in pixels")
+                .with_range(MIN_REQUESTED_DIMENSION_TEXT, MAX_REQUESTED_DIMENSION_TEXT)
                 .with_default("1920"),
             PropertySpec::new("height", PropKind::Uint, "output height in pixels")
+                .with_range(MIN_REQUESTED_DIMENSION_TEXT, MAX_REQUESTED_DIMENSION_TEXT)
                 .with_default("1080"),
             PropertySpec::new(
                 "framerate",
                 PropKind::Uint,
                 "highest output rate in frames per second, also the refresh clients see",
             )
+            .with_range(MIN_REQUESTED_FPS_TEXT, MAX_REQUESTED_FPS_TEXT)
             .with_default("60"),
             PropertySpec::new(
                 "render-node",
@@ -340,16 +372,17 @@ impl SourceLoop for WaylandDisplaySrc {
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
-        let as_u32 = |value: &PropValue| {
-            value
-                .as_uint()
-                .and_then(|value| u32::try_from(value).ok())
-                .ok_or(PropError::Type)
-        };
         match name {
-            "width" => self.width = as_u32(&value)?,
-            "height" => self.height = as_u32(&value)?,
-            "framerate" => self.framerate = as_u32(&value)?,
+            "width" => self.size_and_rate.pin_width(requested_dimension(&value)?),
+            "height" => self.size_and_rate.pin_height(requested_dimension(&value)?),
+            "framerate" => {
+                let fps = value.as_uint().ok_or(PropError::Type)?;
+                let fps = u32::try_from(fps)
+                    .ok()
+                    .filter(|fps| (MIN_REQUESTED_FPS..=MAX_REQUESTED_FPS).contains(fps))
+                    .ok_or(PropError::Value)?;
+                self.size_and_rate.pin_framerate_q16(fps << 16);
+            }
             "render-node" => {
                 self.render_node = value.as_str().ok_or(PropError::Type)?.to_owned();
             }
@@ -362,9 +395,11 @@ impl SourceLoop for WaylandDisplaySrc {
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
-            "width" => Some(PropValue::Uint(self.width.into())),
-            "height" => Some(PropValue::Uint(self.height.into())),
-            "framerate" => Some(PropValue::Uint(self.framerate.into())),
+            "width" => Some(PropValue::Uint(self.size_and_rate.width().into())),
+            "height" => Some(PropValue::Uint(self.size_and_rate.height().into())),
+            "framerate" => Some(PropValue::Uint(
+                (self.size_and_rate.framerate_q16() >> 16).into(),
+            )),
             "render-node" => Some(PropValue::Str(self.render_node.clone())),
             "xwayland" => Some(PropValue::Bool(self.xwayland)),
             "num-buffers" => Some(get_num_buffers(self.frame_limit)),
@@ -394,7 +429,8 @@ impl SourceLoop for WaylandDisplaySrc {
     }
 
     fn latency(&self) -> LatencyReport {
-        LatencyReport::live(fps_period_ns(self.framerate), None)
+        let period_ns = framerate_q16_period_ns(self.size_and_rate.framerate_q16()).unwrap_or(0);
+        LatencyReport::live(period_ns, None)
     }
 
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
@@ -407,10 +443,11 @@ impl SourceLoop for WaylandDisplaySrc {
             }
             let rendering = self.rendering()?;
             let input = self.input.take().ok_or(G2gError::NotConfigured)?;
-            let period_ns = fps_period_ns(self.framerate);
+            let period_ns = framerate_q16_period_ns(self.size_and_rate.framerate_q16())
+                .ok_or(G2gError::CapsMismatch)?;
             let size = DisplaySize {
-                width: self.width,
-                height: self.height,
+                width: self.size_and_rate.width(),
+                height: self.size_and_rate.height(),
             };
             let pacing = Pacing {
                 frame_period: Duration::from_nanos(period_ns),

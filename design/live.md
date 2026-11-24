@@ -201,8 +201,9 @@ publishes the name on `display_names()`. The compositor offers `wl_compositor`,
 pointer, `wl_output` with `xdg_output`, and `wl_data_device_manager`. GTK 4
 refuses a display without the last one. Drag and drop is refused, the
 clipboard works. Every toplevel is configured fullscreen at the output size and
-takes keyboard focus. The output is RGBA at the `width`, `height` and
-`framerate` properties.
+takes keyboard focus. The output is RGBA. A downstream caps filter picks the
+size and rate, and each field the filter leaves unset takes its `width`,
+`height` or `framerate` property, as `videotestsrc` does.
 
 `render-node` picks the renderer. With a DRM render node path (the default is
 `/dev/dri/renderD128`) smithay's GLES renderer composites on that GPU and the
@@ -218,7 +219,7 @@ allocation query settles on `DmaBuf`, which a sink that declares
 those buffers with no copy. Otherwise the picture is read back through GLES into
 system memory.
 
-With a render node and even dimensions the source also offers NV12 with BT.709
+With a render node the source also offers NV12 at even sizes with BT.709
 limited-range colorimetry, after RGBA, so a caps filter or an NV12-only consumer
 picks it. The compositor then renders into an RGBA texture, and two shader passes
 write the luma plane as an R8 view and the chroma plane as a GR88 view of one

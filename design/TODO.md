@@ -33,8 +33,7 @@ Highest leverage first:
 The plan is [remote.md](remote.md).
 
 - `ximagesrc` for unattended X11 capture, and window capture.
-- `waylanddisplaysrc`: take the size and rate from a downstream caps filter, and
-  support drag and drop.
+- `waylanddisplaysrc`: support drag and drop.
 - `g2g-desktop host --run`: keep the headless desktop and its app running
   across client reconnects, and send the compositor's cursor to the client.
 - Opus audio from the host's default capture device, on a short queue that

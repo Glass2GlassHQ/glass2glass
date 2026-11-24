@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2541: Take the `waylanddisplaysrc` size and rate from a downstream caps filter.
 - M2540: Run an app on a headless desktop with `g2g-desktop host --run`.
 - M2538: Add `dmabuftocuda` so `nvenc` encodes `waylanddisplaysrc` output on NVIDIA.
 - M2537: Run X11 apps in `waylanddisplaysrc` through Xwayland.

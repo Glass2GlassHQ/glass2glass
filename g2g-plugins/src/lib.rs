@@ -977,6 +977,8 @@ pub mod flvmuxn;
 // Container content sniffing (no_std): guess a ByteStreamEncoding from a header.
 pub mod typefind;
 pub mod videotestsrc;
+// Width, height and framerate a property sets or a downstream caps filter picks.
+pub mod videosizeandrate;
 // Pool-backed passthrough transform whose buffer pool is rebuilt to the
 // downstream allocation proposal, including the mid-stream β re-cascade.
 pub mod poolstage;
