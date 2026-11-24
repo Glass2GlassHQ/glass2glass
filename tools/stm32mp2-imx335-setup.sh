@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: MPL-2.0
 
 # Sets the IMX335 camera on an STM32MP2 board to WIDTH x HEIGHT on the main
-# pipe (/dev/video1), the media setup in ST's launch_camera_control_mp25.sh.
+# pipe (dcmipp_main_capture), the media setup in ST's launch_camera_control_mp25.sh.
 # With the aux pipe linked, the main pipe fails to stream until
 # stm32mp2-imx335-aux-setup.sh runs again.
 #

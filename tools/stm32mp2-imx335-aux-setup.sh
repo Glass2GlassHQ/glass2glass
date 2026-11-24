@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: MPL-2.0
 
-# Scales the ISP output to WIDTH x HEIGHT RGB888 on the aux pipe (/dev/video2),
+# Scales the ISP output to WIDTH x HEIGHT RGB888 on the aux pipe (dcmipp_aux_capture),
 # the NPU input. Run it after stm32mp2-imx335-setup.sh.
 #
 # Usage (on the board): stm32mp2-imx335-aux-setup.sh WIDTH HEIGHT
