@@ -1231,8 +1231,8 @@ buffer may differ from the input in size and memory kind. On input it checks
 and copies bytes, and on output the pull returns either system bytes or a dma-buf,
 the FFI `G2gOut` carrying a `kind` discriminant, and the shell wraps a dma-buf frame
 back into a `GstBuffer` via `gst_dmabuf_allocator_alloc` with the fd dup'ed. The
-buffer is sized from the negotiated video info, with a `GstVideoMeta` for a padded
-stride or an offset, and the pulled g2g frame rides as qdata on the read-only
+memory spans the whole dma-buf, and `G2gOut` carries where each plane sits in it, so
+the buffer gets a `GstVideoMeta` whenever that layout differs from the caps' own, and the pulled g2g frame rides as qdata on the read-only
 `GstMemory` until GStreamer frees it, so a recycling producer upstream cannot reuse
 the buffer while downstream still reads it. A full
 `dma-buf in -> glass2glass(identity) -> dma-buf out` round-trip is validated with a

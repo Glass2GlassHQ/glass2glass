@@ -14,7 +14,7 @@ const _: () = assert!(MAX_PLANES == GST_VIDEO_MAX_PLANES);
 
 // mirrors `G2gGstWrapPlanes` in the gstwrap helper and `G2gBridgePlanes` in the bridge shell
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct GstVideoPlanes {
     count: c_uint,
     offsets: [usize; GST_VIDEO_MAX_PLANES],
@@ -72,6 +72,18 @@ impl GstVideoPlanes {
             planes.size = planes.size.max(end);
         }
         Some(planes)
+    }
+
+    // offsets count from the start of the dma-buf's fd
+    #[cfg(all(target_os = "linux", feature = "std"))]
+    pub fn of_dmabuf(
+        dmabuf: &g2g_core::memory::OwnedDmaBuf,
+        format: RawVideoFormat,
+        width: u32,
+        height: u32,
+    ) -> Option<Self> {
+        let (layout, _) = crate::paddedrows::dmabuf_plane_layout(dmabuf, format, width, height)?;
+        Self::of_layout(&layout, format, width, height)
     }
 
     pub fn size(&self) -> usize {

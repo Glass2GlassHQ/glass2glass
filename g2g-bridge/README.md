@@ -7,7 +7,7 @@ GStreamer-loadable element wrapping the graph.
 The `wgpu` feature adds `wgpucompositor`, `wgpuupload` and `wgpudownload` to the
 elements a `fragment` can use, and on Linux `dmabuftowgpu` and `wgputodmabuf`. Input caps
 with the `memory:DMABuf` feature feed the fragment dma-buf frames only, so it
-must start with `dmabuftowgpu`. Linear `drm-format` values only.
+must start with `dmabuftowgpu`, which reads linear `drm-format` values only.
 
 The `gst-analytics` feature carries analytics metadata across the element both
 ways: a buffer's `GstAnalyticsRelationMeta` reaches the fragment as an

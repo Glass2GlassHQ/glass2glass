@@ -16,11 +16,11 @@ use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 use core::slice;
 
-use g2g_core::memory::SystemSlice;
+use g2g_core::memory::{OwnedDmaBuf, SystemSlice};
 use g2g_core::meta::FrameMetaSet;
-use g2g_core::{Frame, MemoryDomain};
+use g2g_core::{Caps, Dim, Frame, MemoryDomain};
 
-use g2g_plugins::capsfilter::{normalize_gst_caps, parse_caps};
+use g2g_plugins::capsfilter::{normalize_gst_caps, parse_caps, read_memory_feature};
 use g2g_plugins::gstplanes::GstVideoPlanes;
 
 #[cfg(feature = "gst-analytics")]
@@ -156,6 +156,7 @@ pub extern "C" fn gst_plugin_glass2glass_register() {
 #[derive(Debug)]
 pub struct G2gBridge {
     graph: BridgeGraph,
+    output_caps: Option<Caps>,
     #[cfg(feature = "gst-analytics")]
     analytics_in: GstAnalyticsReader,
     #[cfg(feature = "gst-analytics")]
@@ -189,10 +190,9 @@ pub struct G2gOut {
     data: *const u8,
     len: usize,
     /// DMABUF path: the descriptor (still owned by the g2g frame; the C side
-    /// `dup`s it to build a `GstBuffer`) plus its plane stride and offset.
+    /// `dup`s it to build a `GstBuffer`) plus where each plane sits in it.
     fd: c_int,
-    stride: u32,
-    offset: u32,
+    planes: GstVideoPlanes,
     pts_ns: u64,
     /// Type-erased `Box<Frame>` keeping the payload (`data` or `fd`) alive until
     /// release.
@@ -232,9 +232,11 @@ pub unsafe extern "C" fn g2g_bridge_create(
         Some(s) => normalize_gst_caps(s),
         None => in_caps.clone(),
     };
+    let output_caps = read_memory_feature(&out_caps).and_then(|memory| parse_caps(&memory.caps));
     match BridgeGraph::with_output_caps(fragment, &in_caps, &out_caps) {
         Ok(graph) => Box::into_raw(Box::new(G2gBridge {
             graph,
+            output_caps,
             #[cfg(feature = "gst-analytics")]
             analytics_in: GstAnalyticsReader::default(),
             #[cfg(feature = "gst-analytics")]
@@ -363,6 +365,26 @@ const PULL_ENDED: c_int = -1;
 const PULL_UNSUPPORTED_DOMAIN: c_int = -2;
 const PULL_GRAPH_FAILED: c_int = -3;
 
+#[cfg(target_os = "linux")]
+fn dmabuf_planes(dmabuf: &OwnedDmaBuf, output_caps: Option<&Caps>) -> Option<GstVideoPlanes> {
+    let Some(Caps::RawVideo {
+        format,
+        width: Dim::Fixed(width),
+        height: Dim::Fixed(height),
+        ..
+    }) = output_caps
+    else {
+        return None;
+    };
+    GstVideoPlanes::of_dmabuf(dmabuf, *format, *width, *height)
+}
+
+// gst has no dma-buf memory off Linux
+#[cfg(not(target_os = "linux"))]
+fn dmabuf_planes(_dmabuf: &OwnedDmaBuf, _output_caps: Option<&Caps>) -> Option<GstVideoPlanes> {
+    None
+}
+
 /// Block until the next processed frame and lend it to C via `*out`. Returns 1
 /// with `*out` filled (`kind` selects the system-bytes vs dma-buf payload), -1 at
 /// end-of-stream (or null handle), -2 for a memory domain the shell cannot hand
@@ -393,8 +415,7 @@ pub unsafe extern "C" fn g2g_bridge_pull_buf(bridge: *mut G2gBridge, out: *mut G
             data: slice.as_slice().as_ptr(),
             len: slice.as_slice().len(),
             fd: -1,
-            stride: 0,
-            offset: 0,
+            planes: GstVideoPlanes::default(),
             pts_ns,
             owner: ptr::null_mut(),
         },
@@ -410,16 +431,25 @@ pub unsafe extern "C" fn g2g_bridge_pull_buf(bridge: *mut G2gBridge, out: *mut G
             );
             return PULL_UNSUPPORTED_DOMAIN;
         }
-        g2g_core::MemoryDomain::DmaBuf(dmabuf) => G2gOut {
-            kind: 1,
-            data: ptr::null(),
-            len: 0,
-            fd: dmabuf.as_raw(),
-            stride: dmabuf.stride,
-            offset: dmabuf.offset,
-            pts_ns,
-            owner: ptr::null_mut(),
-        },
+        g2g_core::MemoryDomain::DmaBuf(dmabuf) => {
+            let Some(planes) = dmabuf_planes(dmabuf, bridge.output_caps.as_ref()) else {
+                g2g_core::g2g_error!(
+                    g2g_core::log::Target::category("g2g-bridge"),
+                    "the dma-buf planes do not fit the output caps {:?}",
+                    bridge.output_caps
+                );
+                return PULL_UNSUPPORTED_DOMAIN;
+            };
+            G2gOut {
+                kind: 1,
+                data: ptr::null(),
+                len: 0,
+                fd: dmabuf.as_raw(),
+                planes,
+                pts_ns,
+                owner: ptr::null_mut(),
+            }
+        }
         _ => return PULL_UNSUPPORTED_DOMAIN,
     };
     // Only now transfer ownership (so an early `-2` return does not leak the box).
@@ -545,6 +575,7 @@ mod tests {
 
     extern "C" {
         fn g2g_bridge_planes_size() -> usize;
+        fn g2g_bridge_out_size() -> usize;
     }
 
     #[test]
@@ -552,5 +583,57 @@ mod tests {
         // SAFETY: returns a sizeof, no arguments.
         let c_size = unsafe { g2g_bridge_planes_size() };
         assert_eq!(c_size, core::mem::size_of::<GstVideoPlanes>());
+    }
+
+    #[test]
+    fn out_matches_the_c_struct() {
+        // SAFETY: returns a sizeof, no arguments.
+        let c_size = unsafe { g2g_bridge_out_size() };
+        assert_eq!(c_size, core::mem::size_of::<G2gOut>());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_dmabuf_hands_its_own_plane_layout_to_c() {
+        use g2g_core::meta::{Plane, PlaneLayout};
+        use g2g_core::RawVideoFormat;
+        use std::os::fd::IntoRawFd;
+
+        let (width, height, stride, chroma_offset) = (16, 8, 64, 64 * 16);
+        let caps = c"video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format=NV12,width=16,height=8,framerate=30/1";
+        // SAFETY: the strings are NUL-terminated and outlive the call.
+        let bridge = unsafe { g2g_bridge_create(c"identity".as_ptr(), caps.as_ptr(), ptr::null()) };
+        assert!(!bridge.is_null(), "the bridge builds");
+        // chroma follows padded luma rows, past where plane 0's stride and the height put it
+        let layout = PlaneLayout::new(&[
+            Plane { offset: 0, stride },
+            Plane {
+                offset: chroma_offset,
+                stride,
+            },
+        ])
+        .expect("two planes");
+        let fd = std::fs::File::open("/dev/null")
+            .expect("open /dev/null")
+            .into_raw_fd();
+        // SAFETY: `fd` is a fresh fd this test solely owns; ownership transfers to the OwnedDmaBuf.
+        let dmabuf =
+            unsafe { OwnedDmaBuf::from_raw(fd, stride as u32, 0) }.with_plane_layout(layout);
+        // SAFETY: `bridge` is the live handle created above.
+        let graph = unsafe { &(*bridge).graph };
+        assert!(graph.push_dmabuf(dmabuf, 0));
+
+        let mut out = core::mem::MaybeUninit::<G2gOut>::uninit();
+        // SAFETY: `bridge` is live and `out` is writable.
+        assert_eq!(unsafe { g2g_bridge_pull_buf(bridge, out.as_mut_ptr()) }, 1);
+        // SAFETY: a return of 1 fills `out`.
+        let mut out = unsafe { out.assume_init() };
+        let expected = GstVideoPlanes::of_layout(&layout, RawVideoFormat::Nv12, width, height)
+            .expect("the layout fits NV12");
+        assert_eq!(out.planes, expected);
+        // SAFETY: `out` came from `g2g_bridge_pull_buf` and is released once.
+        unsafe { g2g_bridge_out_release(&mut out) };
+        // SAFETY: `bridge` came from `g2g_bridge_create` and is destroyed once.
+        unsafe { g2g_bridge_destroy(bridge) };
     }
 }

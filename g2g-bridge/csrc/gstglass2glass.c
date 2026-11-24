@@ -28,27 +28,29 @@
 
 /* ---- Rust C-ABI core (src/ffi.rs) ---------------------------------------- */
 typedef struct G2gBridge G2gBridge;
-typedef struct {
-  int kind; /* 0 = system bytes, 1 = dma-buf fd */
-  const unsigned char *data;
-  size_t len;
-  int fd;
-  unsigned int stride;
-  unsigned int offset;
-  unsigned long long pts_ns;
-  void *owner;
-} G2gOut;
 
 /* The Rust side mirrors the plane arrays below with a fixed length of 4. */
 G_STATIC_ASSERT(GST_VIDEO_MAX_PLANES == 4);
 
-/* where each plane of a tightly packed g2g frame sits (`GstVideoPlanes` in g2g-plugins) */
+/* where each plane of a g2g frame sits (`GstVideoPlanes` in g2g-plugins) */
 typedef struct {
   unsigned int n_planes;
   size_t offsets[GST_VIDEO_MAX_PLANES];
   int strides[GST_VIDEO_MAX_PLANES];
   size_t size;
 } G2gBridgePlanes;
+
+typedef struct {
+  int kind; /* 0 = system bytes, 1 = dma-buf fd */
+  const unsigned char *data;
+  size_t len;
+  int fd;
+  G2gBridgePlanes planes; /* dma-buf only, offsets count from the start of `fd` */
+  unsigned long long pts_ns;
+  void *owner;
+} G2gOut;
+
+
 
 extern G2gBridge *g2g_bridge_create(const char *fragment, const char *in_caps,
                                     const char *out_caps);
@@ -515,27 +517,6 @@ static gboolean push_input(GstGlass2Glass *self, GstBuffer *in) {
 }
 
 #ifndef _WIN32
-/* The plane layout g2g gives a dma-buf frame at this luma stride, and its size. */
-static gsize dmabuf_layout(const GstVideoInfo *info, guint stride, guint offset,
-                           gsize offsets[GST_VIDEO_MAX_PLANES],
-                           gint strides[GST_VIDEO_MAX_PLANES]) {
-  const GstVideoFormatInfo *finfo = info->finfo;
-  gsize next = offset;
-  for (guint plane = 0; plane < GST_VIDEO_INFO_N_PLANES(info); plane++) {
-    guint comp = 0;
-    while (GST_VIDEO_FORMAT_INFO_PLANE(finfo, comp) != plane)
-      comp++;
-    guint plane_stride = stride * GST_VIDEO_FORMAT_INFO_PSTRIDE(finfo, comp) /
-                         GST_VIDEO_FORMAT_INFO_PSTRIDE(finfo, 0);
-    plane_stride >>= GST_VIDEO_FORMAT_INFO_W_SUB(finfo, comp);
-    gint rows = GST_VIDEO_FORMAT_INFO_SCALE_HEIGHT(finfo, comp, GST_VIDEO_INFO_HEIGHT(info));
-    offsets[plane] = next;
-    strides[plane] = (gint)plane_stride;
-    next += (gsize)plane_stride * rows;
-  }
-  return next;
-}
-
 static void release_held_frame(gpointer held) {
   g2g_bridge_out_release(held);
   g_free(held);
@@ -557,14 +538,16 @@ static GstBuffer *wrap_output(GstGlass2Glass *self, G2gOut *out) {
     if (!self->dmabuf_alloc)
       self->dmabuf_alloc = gst_dmabuf_allocator_new();
     const GstVideoInfo *info = &self->out_info;
-    gboolean default_layout =
-        out->offset == 0 && (gint)out->stride == GST_VIDEO_INFO_PLANE_STRIDE(info, 0);
-    gsize offsets[GST_VIDEO_MAX_PLANES];
-    gint strides[GST_VIDEO_MAX_PLANES];
-    gsize size = default_layout ? GST_VIDEO_INFO_SIZE(info)
-                                : dmabuf_layout(info, out->stride, out->offset, offsets, strides);
+    const G2gBridgePlanes *planes = &out->planes;
+    if (planes->n_planes != GST_VIDEO_INFO_N_PLANES(info))
+      return NULL;
+    gboolean default_layout = layout_is_tight(planes, info->offset, info->stride);
+    /* a tiled buffer is larger than its rows, so the memory spans the whole dma-buf */
+    off_t size = lseek(out->fd, 0, SEEK_END);
+    if (size <= 0)
+      return NULL;
     /* dup: the g2g frame owns `out->fd`; GStreamer's dma-buf memory owns its own. */
-    GstMemory *mem = gst_dmabuf_allocator_alloc(self->dmabuf_alloc, dup(out->fd), size);
+    GstMemory *mem = gst_dmabuf_allocator_alloc(self->dmabuf_alloc, dup(out->fd), (gsize)size);
     if (!mem)
       return NULL;
     /* Hold the frame until GStreamer frees the memory: its producer recycles the buffer on release. */
@@ -579,7 +562,7 @@ static GstBuffer *wrap_output(GstGlass2Glass *self, G2gOut *out) {
     if (!default_layout)
       gst_buffer_add_video_meta_full(buf, GST_VIDEO_FRAME_FLAG_NONE, GST_VIDEO_INFO_FORMAT(info),
                                      GST_VIDEO_INFO_WIDTH(info), GST_VIDEO_INFO_HEIGHT(info),
-                                     GST_VIDEO_INFO_N_PLANES(info), offsets, strides);
+                                     planes->n_planes, planes->offsets, planes->strides);
     return buf;
 #endif
   }
@@ -752,6 +735,8 @@ static void gst_glass2glass_init(GstGlass2Glass *self) {
 
 size_t g2g_bridge_planes_size(void);
 size_t g2g_bridge_planes_size(void) { return sizeof(G2gBridgePlanes); }
+size_t g2g_bridge_out_size(void);
+size_t g2g_bridge_out_size(void) { return sizeof(G2gOut); }
 
 /* ---- plugin init --------------------------------------------------------- */
 /* The plugin entry points (`gst_plugin_glass2glass_get_desc` / `_register`) and

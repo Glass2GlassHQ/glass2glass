@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2572: Hand each plane of a dma-buf frame to the GStreamer bridge shell, not just the first.
 - M2571: Carry caps alignment over the remote wire and mark the H.264/H.265 encoders `alignment=au`.
 - M2570: Carry the dma-buf modifier across `unixfd`, `localdmabuf` and the GStreamer bridge.
 - M2569: Read the modifier suffix of GStreamer's `drm-format`, accepting an explicit linear modifier.
