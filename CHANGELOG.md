@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2555: Skip the SSD decoder's argmax index pass for anchors whose best score is under the confidence threshold.
 - M2554: Report `onvifmetadatacombiner` latency as `latency` plus one video frame, and forward a mid-stream consumer demand through it to the video producer.
 - M2553: Carry the output link's memory domain through `onvifmetadatacombiner` to its video producer, so `v4l2slh264dec` decodes into dma-bufs ahead of it.
 - M2552: Release a video frame from `onvifmetadatacombiner` once the metadata has passed its window, instead of always waiting out `latency`.

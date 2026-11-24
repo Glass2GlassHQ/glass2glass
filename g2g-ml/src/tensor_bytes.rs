@@ -106,15 +106,22 @@ impl<'a> TensorWords<'a> {
     }
 
     /// The largest value in `range` and the first index holding it, as numpy's
-    /// `argmax` picks. Halves are compared by their bits, so only the winner
-    /// is converted.
-    pub fn argmax(&self, range: core::ops::Range<usize>) -> Option<(usize, f32)> {
+    /// `argmax` picks, or `None` when that value is not above `threshold`.
+    /// Halves are compared by their bits, so only the winner is converted.
+    pub fn argmax_above(
+        &self,
+        range: core::ops::Range<usize>,
+        threshold: f32,
+    ) -> Option<(usize, f32)> {
         let start = range.start;
         match self {
             Self::F32(words) => {
                 let row = words.get(range)?;
                 let values = || row.iter().map(|word| f32::from_le_bytes(*word));
                 let max = values().fold(f32::MIN, f32::max);
+                if max <= threshold {
+                    return None;
+                }
                 let index = values().position(|value| value == max)?;
                 Some((start + index, max))
             }
@@ -124,9 +131,13 @@ impl<'a> TensorWords<'a> {
                     row.iter()
                         .map(|word| f16_order_key(u16::from_le_bytes(*word)))
                 };
-                let max = keys().max()?;
-                let index = keys().position(|key| key == max)?;
-                Some((start + index, f16_to_f32(u16::from_le_bytes(row[index]))))
+                let max_key = keys().max()?;
+                let index = keys().position(|key| key == max_key)?;
+                let max = f16_to_f32(u16::from_le_bytes(row[index]));
+                if max <= threshold {
+                    return None;
+                }
+                Some((start + index, max))
             }
         }
     }
@@ -312,11 +323,13 @@ mod tests {
                 .collect();
             let f32_words = TensorWords::new(TensorDType::F32, &f32_bytes).unwrap();
             let f16_words = TensorWords::new(TensorDType::F16, &f16_bytes).unwrap();
-            assert_eq!(
-                f16_words.argmax(0..row.len()),
-                f32_words.argmax(0..row.len()),
-                "{row:?}"
-            );
+            for threshold in [f32::MIN, -1.0, 0.125] {
+                assert_eq!(
+                    f16_words.argmax_above(0..row.len(), threshold),
+                    f32_words.argmax_above(0..row.len(), threshold),
+                    "{row:?} above {threshold}"
+                );
+            }
         }
     }
 

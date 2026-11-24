@@ -651,10 +651,7 @@ fn decode_ssd(
             let row = index * outputs.score_columns;
             let (best, confidence) = outputs
                 .scores
-                .argmax(row + 1..row + outputs.score_columns)?;
-            if confidence <= conf_threshold {
-                return None;
-            }
+                .argmax_above(row + 1..row + outputs.score_columns, conf_threshold)?;
             let column = best - row;
             let corners = |words: &TensorWords<'_>| -> [f32; BOX_CHANNELS] {
                 core::array::from_fn(|corner| words.value(index * BOX_CHANNELS + corner))
