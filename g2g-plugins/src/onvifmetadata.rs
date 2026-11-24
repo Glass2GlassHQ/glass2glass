@@ -58,8 +58,9 @@ use g2g_core::meta::{
 };
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError,
-    LatencyReport, MemoryDomain, MultiInputElement, MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    LatencyReport, MemoryDomain, MultiInputElement, MultiOutputElement, MultiOutputSink,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec,
 };
 
 use crate::st2038ancdemux::push_to_ports;
