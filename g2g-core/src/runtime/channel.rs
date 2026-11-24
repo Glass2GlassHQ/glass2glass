@@ -10,7 +10,7 @@ use core::pin::Pin;
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::task::{Context, Poll, Waker};
 
-use spin::Mutex;
+use spin::{Mutex, MutexGuard};
 
 #[cfg(feature = "std")]
 use crate::caps::Caps;
@@ -55,11 +55,19 @@ struct Inner<T> {
     receivers: usize,
 }
 
-impl<T> Inner<T> {
-    fn wake_senders(&mut self) {
-        for waker in self.send_wakers.drain(..) {
-            waker.wake();
+fn wake_senders<'a, T>(inner: &'a Mutex<Inner<T>>, mut g: MutexGuard<'a, Inner<T>>) {
+    loop {
+        let Some(waker) = g.send_wakers.pop() else {
+            return;
+        };
+        let more = !g.send_wakers.is_empty();
+        // spin::Mutex keeps other threads spinning while a wake, which can enter the kernel, holds it
+        drop(g);
+        waker.wake();
+        if !more {
+            return;
         }
+        g = inner.lock();
     }
 }
 
@@ -84,12 +92,17 @@ impl<T> Clone for Sender<T> {
 
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
-        let mut g = self.inner.lock();
-        g.senders -= 1;
-        if g.senders == 0 {
-            if let Some(w) = g.recv_waker.take() {
-                w.wake();
+        let waker = {
+            let mut g = self.inner.lock();
+            g.senders -= 1;
+            if g.senders == 0 {
+                g.recv_waker.take()
+            } else {
+                None
             }
+        };
+        if let Some(w) = waker {
+            w.wake();
         }
     }
 }
@@ -102,16 +115,13 @@ impl<T> Drop for Receiver<T> {
         // request carries the reply sender its caller is parked on), and that
         // wait would otherwise never end. Taken under the lock and dropped
         // outside it: a value's own `Drop` may lock another channel.
-        let orphaned = {
-            let mut g = self.inner.lock();
-            g.receivers -= 1;
-            if g.receivers == 0 {
-                g.wake_senders();
-                core::mem::take(&mut g.queue)
-            } else {
-                VecDeque::new()
-            }
-        };
+        let mut g = self.inner.lock();
+        g.receivers -= 1;
+        if g.receivers != 0 {
+            return;
+        }
+        let orphaned = core::mem::take(&mut g.queue);
+        wake_senders(&self.inner, g);
         drop(orphaned);
     }
 }
@@ -136,7 +146,9 @@ impl<T> Sender<T> {
             return Err((value, SendError::Full));
         }
         g.queue.push_back(value);
-        if let Some(w) = g.recv_waker.take() {
+        let waker = g.recv_waker.take();
+        drop(g);
+        if let Some(w) = waker {
             w.wake();
         }
         Ok(())
@@ -164,7 +176,9 @@ impl<T> Sender<T> {
         if g.queue.len() < g.capacity {
             let v = value.take().expect("poll_send called without a value");
             g.queue.push_back(v);
-            if let Some(w) = g.recv_waker.take() {
+            let waker = g.recv_waker.take();
+            drop(g);
+            if let Some(w) = waker {
                 w.wake();
             }
             return Poll::Ready(Ok(()));
@@ -236,7 +250,7 @@ impl<T> Receiver<T> {
         let mut g = self.inner.lock();
         let v = g.queue.pop_front();
         if v.is_some() {
-            g.wake_senders();
+            wake_senders(&self.inner, g);
         }
         v
     }
@@ -259,7 +273,7 @@ impl<'a, T> Future for RecvFuture<'a, T> {
         let this = self.get_mut();
         let mut g = this.receiver.inner.lock();
         if let Some(v) = g.queue.pop_front() {
-            g.wake_senders();
+            wake_senders(&this.receiver.inner, g);
             return Poll::Ready(Some(v));
         }
         if g.senders == 0 {
