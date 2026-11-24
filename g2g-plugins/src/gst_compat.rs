@@ -228,8 +228,8 @@ static GST_MAP: &[(&str, GstEquivalent)] = &[
     // `rtmp2sink` is an alias (`location` on both); `rtmpsrc` instead listens for
     // a publisher on `address` / `port`, so the source name only gets a pointer.
     ("rtmp2src", GstEquivalent::Renamed("rtmpsrc")),
-    // gst's X11 screen grab; g2g's screen source is the ScreenCaptureKit one and
-    // shares none of ximagesrc's region / pointer properties.
+    // the `x11` feature builds ximagesrc on Linux, so the feature catalog answers there
+    #[cfg(target_os = "macos")]
     ("ximagesrc", GstEquivalent::Renamed("screencapturesrc")),
     // `equalizer-3bands` / `spectrum` / `clockoverlay` / `splitmuxsink` are
     // registered elements, so gst_equivalent resolves them to Available before this

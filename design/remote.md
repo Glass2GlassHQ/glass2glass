@@ -214,14 +214,6 @@ The host encodes with `d3d11convert ! nvenc` on an NVIDIA GPU and falls back to
 `mfh264enc hardware=true`. Capture runs in the interactive session, never in
 session 0, and the host rebuilds the graph after `AccessLost` fails the source.
 
-### ximagesrc
-
-`x11` feature, Linux, xcb shared memory. `display-index` selects the screen.
-Output is system memory in the format the server gives, and `videoconvert`
-follows. `gst_compat` maps the name `ximagesrc` to `screencapturesrc` today.
-That mapping changes to this element on Linux and stays `screencapturesrc` on
-macOS.
-
 ### display-index elsewhere
 
 `screencapturesrc` gains `display-index` and stops hard-coding the first

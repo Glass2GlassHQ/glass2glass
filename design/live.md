@@ -187,6 +187,27 @@ consumer takes only system memory. The matrix and range come from the output
 caps, BT.601 limited range when they are untagged, which is what
 `videoconvert` writes for the same caps.
 
+### XImageSrc
+
+`XImageSrc` (`ximagesrc`, `x11`, Linux) captures an X11 screen or one window
+through MIT-SHM 1.2, with the properties of gst's `ximagesrc`. `display-name`
+picks the display and screen as `DISPLAY` does. `xid`, or `xname` matched
+exactly against `WM_NAME` depth first, picks a window, and the root window is
+the default. `startx`, `starty`, `endx` and `endy` cut an inclusive region out
+of it, where an end of 0 is the far edge, and a region outside the window fails
+the probe. Output is BGRx in system memory, and a window whose pixels are not
+32-bit BGRx fails the probe. The rate comes from a downstream caps filter and
+is 25 fps when none asks, the rate gst fixates.
+
+The worker runs on the same desktop capture loop as `D3D11ScreenCaptureSrc`.
+With `use-damage` an XDamage object on the window marks a change, and the image
+is read only then. Without it every period reads the image. With `show-pointer`
+the XFixes cursor image is blended in at the pointer, refetched when XFixes
+reports a new cursor, and a pointer move counts as a change. The X server
+refuses a read whose area is not on screen and inside the window, so a window
+that shrinks below the region, moves partly off screen or unmaps fails the
+source. A window that grows keeps the captured area.
+
 ### WaylandDisplaySrc
 
 `WaylandDisplaySrc` (`waylanddisplaysrc`, Linux) runs a headless Wayland

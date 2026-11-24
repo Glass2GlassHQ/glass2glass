@@ -105,7 +105,8 @@ impl PipelineClock for UnixEpochClock {
 /// feature, where a frame has nowhere to carry it.
 #[cfg(any(
     feature = "rtsp",
-    all(target_os = "windows", feature = "d3d11-screen-capture")
+    all(target_os = "windows", feature = "d3d11-screen-capture"),
+    all(target_os = "linux", feature = "x11")
 ))]
 #[cfg(feature = "metadata")]
 pub(crate) fn attach_wall_clock(frame: &mut g2g_core::frame::Frame, unix_nanos: i64) {
@@ -114,7 +115,8 @@ pub(crate) fn attach_wall_clock(frame: &mut g2g_core::frame::Frame, unix_nanos: 
 
 #[cfg(any(
     feature = "rtsp",
-    all(target_os = "windows", feature = "d3d11-screen-capture")
+    all(target_os = "windows", feature = "d3d11-screen-capture"),
+    all(target_os = "linux", feature = "x11")
 ))]
 #[cfg(not(feature = "metadata"))]
 pub(crate) fn attach_wall_clock(_frame: &mut g2g_core::frame::Frame, _unix_nanos: i64) {}

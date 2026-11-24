@@ -2884,6 +2884,14 @@ fn register_autoplug_candidates(reg: &mut Registry) {
         )
         .with_experimental(),
     );
+    #[cfg(all(target_os = "linux", feature = "x11"))]
+    reg.register_source(
+        SourceFactory::new("ximagesrc", crate::ximagesrc::DECLARED_CAPS, || {
+            Box::new(crate::ximagesrc::XImageSrc::new())
+        })
+        .with_template_outputs::<crate::ximagesrc::XImageSrc>()
+        .with_experimental(),
+    );
     #[cfg(all(target_os = "windows", feature = "wasapi-src"))]
     reg.register_source(
         SourceFactory::new(
@@ -3328,6 +3336,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "avfvideosrc" => "avfoundation" on "macos";
         "avfaudiosrc" => "avfoundation" on "macos";
         "screencapturesrc" => "screencapture" on "macos";
+        "ximagesrc" => "x11" on "linux";
         "mfvideosrc" => "mf-video-src" on "windows";
         "wasapisrc" => "wasapi-src" on "windows";
         "d3d11videosink" => "d3d11-sink" on "windows";

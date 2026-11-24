@@ -4735,6 +4735,7 @@ dependencies = [
  "windows",
  "windows-core",
  "winit",
+ "x11rb 0.14.0",
  "zbus",
  "zeroize",
  "zlib-rs",

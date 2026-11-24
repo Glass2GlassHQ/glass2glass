@@ -977,6 +977,8 @@ pub mod flvmuxn;
 // Container content sniffing (no_std): guess a ByteStreamEncoding from a header.
 pub mod typefind;
 pub mod videotestsrc;
+#[cfg(all(target_os = "linux", feature = "x11"))]
+pub mod ximagesrc;
 // Width, height and framerate a property sets or a downstream caps filter picks.
 pub mod videosizeandrate;
 // Pool-backed passthrough transform whose buffer pool is rebuilt to the
@@ -1767,7 +1769,10 @@ mod d3d11texture;
 mod d3d11video;
 #[cfg(all(target_os = "windows", feature = "d3d12-decode"))]
 pub mod d3d12videodec;
-#[cfg(all(target_os = "windows", feature = "d3d11-screen-capture"))]
+#[cfg(any(
+    all(target_os = "windows", feature = "d3d11-screen-capture"),
+    all(target_os = "linux", feature = "x11")
+))]
 mod desktopcapture;
 #[cfg(all(target_os = "windows", feature = "d3d12-decode"))]
 mod dxva;

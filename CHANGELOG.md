@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2543: Add `ximagesrc` for X11 screen and window capture.
 - M2542: Support drag and drop between apps in `waylanddisplaysrc`.
 - M2541: Take the `waylanddisplaysrc` size and rate from a downstream caps filter.
 - M2540: Run an app on a headless desktop with `g2g-desktop host --run`.

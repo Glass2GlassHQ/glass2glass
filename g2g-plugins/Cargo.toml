@@ -31,7 +31,7 @@ linux-full = [
     "ffmpeg", "ffmpeg-long-tail", "v4l2",
     "opus", "vorbis", "aac-decode", "mpeg-audio-decode", "openh264", "webrtcdsp", "vpx", "av1-encode", "mjpeg", "mjpeg-encode", "png", "webp", "hqdn3d",
     "alsa-sink", "alsa-src", "pulse-sink", "pulse-src", "pipewire", "portal", "decklink",
-    "wayland-sink", "gl-sink", "kms-sink", "wgpu-sink", "wgpu-present", "vello-overlay", "analytics",
+    "wayland-sink", "gl-sink", "kms-sink", "x11", "wgpu-sink", "wgpu-present", "vello-overlay", "analytics",
     "analytics-json", "mqtt", "embedding-index",
     "declarative-yaml", "script-rhai", "observe", "mcp", "tui", "latency-bench",
     "matroska-compression", "matroska-decrypt",
@@ -50,7 +50,7 @@ release-binary = [
 ]
 release-binary-linux = [
     "release-binary", "plugin-signing", "shm", "unixfd", "v4l2", "vulkan-video",
-    "kms-sink", "wayland-sink", "wgpu-present", "cuda", "nvenc", "nvdec", "cuda-wgpu", "dmabuf-cuda",
+    "kms-sink", "wayland-sink", "x11", "wgpu-present", "cuda", "nvenc", "nvdec", "cuda-wgpu", "dmabuf-cuda",
     "gl-sink", "alsa-sink", "alsa-src", "openh264", "ffmpeg-long-tail", "vpx",
 ]
 release-binary-macos = ["release-binary", "vtdecode", "vtencode", "metal-sink", "coreaudio", "audiotoolbox-aac", "avfoundation", "screencapture", "vpx", "ffmpeg-long-tail"]
@@ -393,6 +393,8 @@ d3d11-sink = ["std", "dep:windows"]
 # Windows desktop capture through DXGI Desktop Duplication, BGRA in system
 # memory or a D3D11 texture (d3d11screencapturesrc). Windows-only, implies std.
 d3d11-screen-capture = ["std", "dep:windows"]
+# X11 screen and window capture over MIT-SHM (ximagesrc). Linux-only, implies std.
+x11 = ["std", "dep:x11rb", "dep:libc"]
 # Windows GPU colour conversion of D3D11 textures through a D3D11 video
 # processor (d3d11convert). Windows-only, implies std.
 d3d11-convert = ["std", "dep:windows"]
@@ -1377,6 +1379,7 @@ v4l = { version = "0.14", optional = true }
 # is a Linux camera stack. Known to build against libcamera >= 0.4.
 libcamera = { version = "0.7", optional = true }
 smithay-client-toolkit = { version = "0.21", optional = true }
+x11rb = { version = "0.14", optional = true, features = ["shm", "damage", "xfixes"] }
 # The libwayland-backed client backend, so a display / surface raw pointer can be
 # handed to a native API (Vulkan WSI under `wgpu-present`). The GL sinks get the
 # same backend through wayland-egl.

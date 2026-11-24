@@ -32,7 +32,10 @@ Highest leverage first:
 
 The plan is [remote.md](remote.md).
 
-- `ximagesrc` for unattended X11 capture, and window capture.
+- `g2g-desktop host` on an X11 display: capture with `ximagesrc` and inject
+  input through XTest.
+- `ximagesrc`: follow a window or screen resize with `CapsChanged` instead of
+  failing.
 - `waylanddisplaysrc`: drop onto X11 windows, which needs a pointer focus that
   can be an `X11Surface`.
 - `g2g-desktop host --run`: keep the headless desktop and its app running
