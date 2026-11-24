@@ -231,19 +231,40 @@ fn failed_negotiation_ends_the_drain() {
     assert!(bridge.finish().is_err(), "the run reports the failure");
 }
 
-// GStreamer exported this from a GL texture here, the suffix is a tiled NVIDIA layout.
-const TILED_DRM_FORMAT: &str = "AB24:0x020000001056bb03";
+// GStreamer exported this from a GL texture here, a tiled AMD layout
+const TILED_MODIFIER: u64 = 0x0200_0000_1056_bb03;
 
+#[cfg(unix)]
 #[test]
-fn tiled_dmabuf_caps_fail_to_build() {
+fn a_pushed_dmabuf_takes_the_modifier_of_tiled_caps() {
+    use g2g_core::memory::{MemoryDomain, OwnedDmaBuf};
+    use std::os::fd::IntoRawFd;
+
     let caps = format!(
-        "video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format={TILED_DRM_FORMAT},width=2,height=2,framerate=30/1"
+        "video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format=AB24:0x{TILED_MODIFIER:016x},width=2,height=2,framerate=30/1"
     );
-    let err = BridgeGraph::new("dmabuftowgpu", &caps).expect_err("a tiled dma-buf");
+    let bridge = BridgeGraph::new("identity", &caps).expect("tiled dma-buf caps build");
+    assert_eq!(bridge.output_modifier(), TILED_MODIFIER);
+    let fd = std::fs::File::open("/dev/null")
+        .expect("open /dev/null")
+        .into_raw_fd();
+    // SAFETY: `fd` is a fresh fd this test solely owns; ownership transfers to
+    // the OwnedDmaBuf, which closes it once.
+    let dmabuf = unsafe { OwnedDmaBuf::from_raw(fd, 8, 0) };
     assert!(
-        matches!(err, BridgeError::UnsupportedDmaBufCaps(_)),
-        "surfaced as unsupported dma-buf caps: {err}"
+        bridge.push_dmabuf(dmabuf, 0),
+        "feed accepted the dma-buf frame"
     );
+    bridge.end_of_stream();
+
+    let mut modifiers = Vec::new();
+    while let Some(frame) = bridge.pull_blocking() {
+        let MemoryDomain::DmaBuf(dmabuf) = &frame.domain else {
+            panic!("the frame left the dma-buf domain");
+        };
+        modifiers.push(dmabuf.modifier());
+    }
+    assert_eq!(modifiers, vec![TILED_MODIFIER]);
 }
 
 #[cfg(target_os = "linux")]

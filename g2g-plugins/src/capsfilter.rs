@@ -349,10 +349,11 @@ pub(crate) fn drm_format(format: g2g_core::RawVideoFormat) -> Option<u32> {
 }
 
 /// `caps` as GStreamer 1.24+ spells dma-buf video: the `memory:DMABuf`
-/// feature with `format=DMA_DRM, drm-format=<fourcc>`, the inverse of
+/// feature with `format=DMA_DRM, drm-format=<fourcc>`, followed by
+/// `:0x<modifier>` for any modifier but linear, the inverse of
 /// [`read_memory_feature`]. `None` for anything but raw video in a format
-/// with a linear drm fourcc.
-pub fn dmabuf_gst_caps(caps: &Caps) -> Option<String> {
+/// with a drm fourcc.
+pub fn dmabuf_gst_caps(caps: &Caps, modifier: u64) -> Option<String> {
     let Caps::RawVideo { .. } = caps else {
         return None;
     };
@@ -368,7 +369,11 @@ pub fn dmabuf_gst_caps(caps: &Caps) -> Option<String> {
             .iter()
             .find(|(_, known)| *known == format)?;
         rewritten.push(alloc::format!("{FORMAT_FIELD}{DMA_DRM_FORMAT}"));
-        rewritten.push(alloc::format!("{DRM_FORMAT_FIELD}{fourcc}"));
+        rewritten.push(match modifier {
+            g2g_core::memory::DRM_FORMAT_MOD_LINEAR => alloc::format!("{DRM_FORMAT_FIELD}{fourcc}"),
+            // gst prints the modifier as sixteen zero-padded hex digits
+            modifier => alloc::format!("{DRM_FORMAT_FIELD}{fourcc}:0x{modifier:016x}"),
+        });
     }
     Some(rewritten.join(","))
 }
@@ -377,6 +382,9 @@ pub fn dmabuf_gst_caps(caps: &Caps) -> Option<String> {
 mod tests {
     use super::*;
     use g2g_core::{Dim, Rate, RawVideoFormat, VideoCodec};
+
+    // drm_fourcc.h I915_FORMAT_MOD_X_TILED, a tiled layout gst names after the fourcc
+    const X_TILED: u64 = 0x0100_0000_0000_0001;
 
     fn nv12(w: u32, h: u32) -> Caps {
         Caps::RawVideo {
@@ -540,10 +548,26 @@ mod tests {
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
             pixel_aspect: g2g_core::PixelAspect::Any,
         };
-        let written = dmabuf_gst_caps(&caps).expect("RGBA has a drm fourcc");
-        let read = read_memory_feature(&written).expect("the fourcc is known");
-        assert!(read.dmabuf);
-        assert_eq!(parse_caps(&read.caps), Some(caps));
+        for modifier in [g2g_core::memory::DRM_FORMAT_MOD_LINEAR, X_TILED] {
+            let written = dmabuf_gst_caps(&caps, modifier).expect("RGBA has a drm fourcc");
+            let read = read_memory_feature(&written).expect("the fourcc is known");
+            assert!(read.dmabuf);
+            assert_eq!(read.modifier, modifier);
+            assert_eq!(parse_caps(&read.caps), Some(caps.clone()));
+        }
+    }
+
+    #[test]
+    fn a_linear_drm_format_is_written_as_a_bare_fourcc() {
+        let caps = nv12(64, 32);
+        let written = dmabuf_gst_caps(&caps, g2g_core::memory::DRM_FORMAT_MOD_LINEAR)
+            .expect("NV12 has a drm fourcc");
+        assert!(written.contains("drm-format=NV12,"), "{written}");
+        let tiled = dmabuf_gst_caps(&caps, X_TILED).expect("NV12 has a drm fourcc");
+        assert!(
+            tiled.contains("drm-format=NV12:0x0100000000000001,"),
+            "{tiled}"
+        );
     }
 
     #[test]
@@ -561,8 +585,6 @@ mod tests {
 
     #[test]
     fn a_drm_format_modifier_suffix_is_read_off_the_fourcc() {
-        // drm_fourcc.h I915_FORMAT_MOD_X_TILED, a tiled layout gst names after the fourcc
-        const X_TILED: u64 = 0x0100_0000_0000_0001;
         let caps = |drm_format: &str| {
             alloc::format!(
                 "video/x-raw(memory:DMABuf),format=DMA_DRM,width=64,height=32,drm-format={drm_format}"

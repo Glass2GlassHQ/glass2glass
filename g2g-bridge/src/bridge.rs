@@ -56,8 +56,8 @@ pub enum BridgeError {
     Parse(ParseError),
     /// The dedicated run thread could not be spawned.
     Spawn(std::io::Error),
-    /// `memory:DMABuf` caps whose `drm-format` names no pixel format
-    /// `dmabuftowgpu` imports, or a non-linear modifier.
+    /// `memory:DMABuf` caps whose `drm-format` names no pixel format g2g knows,
+    /// or a modifier that is not hex.
     UnsupportedDmaBufCaps(String),
 }
 
@@ -96,6 +96,8 @@ pub struct BridgeGraph {
     /// channel stops back-pressuring the graph and it can reach EOS.
     pull: Option<AppSinkPull>,
     join: Option<JoinHandle<Result<RunStats, G2gError>>>,
+    input_modifier: u64,
+    output_modifier: u64,
 }
 
 impl BridgeGraph {
@@ -111,7 +113,8 @@ impl BridgeGraph {
     /// Caps carrying the `memory:DMABuf` feature declare dma-buf input: the
     /// fragment's first element must take the `DmaBuf` domain (`dmabuftowgpu`),
     /// and a GStreamer 1.24+ `format=DMA_DRM, drm-format=<fourcc>` is read as the
-    /// pixel format it names. Plain caps take system memory or dma-buf.
+    /// pixel format it names. A `:0x<modifier>` suffix sets the modifier of
+    /// every pushed dma-buf. Plain caps take system memory or dma-buf.
     ///
     /// The sub-graph's output caps are pinned equal to its input (the
     /// caps/size-preserving case). For a fragment that rescales or reformats, use
@@ -144,7 +147,7 @@ impl BridgeGraph {
             true => DMABUF_DOMAINS,
             false => OUTPUT_DOMAINS,
         };
-        let (input_caps, output_caps) = (input.caps, output.caps);
+        let (input_caps, output_caps) = (&input.caps, &output.caps);
 
         let id = SEQ.fetch_add(1, Ordering::Relaxed);
         let in_ch = format!("__g2g_bridge_{id}_in");
@@ -194,6 +197,8 @@ impl BridgeGraph {
             feed: Some(feed),
             pull: Some(pull),
             join: Some(join),
+            input_modifier: input.modifier,
+            output_modifier: output.modifier,
         })
     }
 
@@ -207,6 +212,12 @@ impl BridgeGraph {
     }
 
     pub fn push_frame(&self, domain: MemoryDomain, pts_ns: u64, meta: FrameMetaSet) -> bool {
+        let domain = match domain {
+            MemoryDomain::DmaBuf(dmabuf) => {
+                MemoryDomain::DmaBuf(dmabuf.with_modifier(self.input_modifier))
+            }
+            domain => domain,
+        };
         self.feed
             .as_ref()
             .is_some_and(|f| f.push_frame(domain, pts_ns, meta))
@@ -221,9 +232,16 @@ impl BridgeGraph {
     /// import / download). With a system-memory fragment, use [`push`](Self::push)
     /// instead; a `DmaBuf` frame handed to such a graph has no consumer.
     pub fn push_dmabuf(&self, dmabuf: OwnedDmaBuf, pts_ns: u64) -> bool {
+        let dmabuf = dmabuf.with_modifier(self.input_modifier);
         self.feed
             .as_ref()
             .is_some_and(|f| f.push_dmabuf(dmabuf, pts_ns))
+    }
+
+    /// The drm format modifier the output caps declare, which every dma-buf
+    /// frame handed back has to carry.
+    pub fn output_modifier(&self) -> u64 {
+        self.output_modifier
     }
 
     /// Drain one processed frame if ready. Returns [`Pull::Empty`] when the graph
@@ -293,13 +311,7 @@ impl Drop for BridgeGraph {
 }
 
 fn read_gst_caps(caps: &str) -> Result<GstCapsMemory, BridgeError> {
-    let memory = read_memory_feature(caps)
-        .ok_or_else(|| BridgeError::UnsupportedDmaBufCaps(caps.to_string()))?;
-    // the bridge hands dma-bufs on without their modifier, so only linear ones pass
-    if memory.modifier != g2g_core::memory::DRM_FORMAT_MOD_LINEAR {
-        return Err(BridgeError::UnsupportedDmaBufCaps(caps.to_string()));
-    }
-    Ok(memory)
+    read_memory_feature(caps).ok_or_else(|| BridgeError::UnsupportedDmaBufCaps(caps.to_string()))
 }
 
 /// Borrow a system-memory frame's bytes, the common case for the bridge (the

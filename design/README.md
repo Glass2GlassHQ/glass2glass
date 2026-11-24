@@ -217,10 +217,14 @@ pub struct OwnedDmaBuf {
 
 `modifier` is the buffer's DRM format modifier, `DRM_FORMAT_MOD_LINEAR` unless
 the producer sets another with `with_modifier`. `waylandsink` and `kmssink`
-import a buffer with its modifier. Every consumer that reads linear rows calls
+import a buffer with its modifier. `unixfdsink` writes it into the
+`drm-format` of its caps and `unixfdsrc` sets it on each received buffer, the
+`localdmabuf` record carries it, and the bridge sets the modifier of its input
+caps on each pushed dma-buf. Every consumer that reads linear rows calls
 `require_linear` and fails on any other modifier: the CPU mappings in
-`dmabufmap`, `dmabuftowgpu`, `wgpupreprocess`, `hipupload`, the V4L2 stateless encoders,
-`gstwrap`, `unixfd`, `localdmabufsink` and the bridge's C output.
+`dmabufmap`, `dmabuftowgpu`, `wgpupreprocess`, `hipupload`, the V4L2 stateless encoders
+and `gstwrap`. `unixfdsrc` maps only a linear dma-buf into system memory, so with
+a tiled one it offers the `DmaBuf` domain alone.
 
 Every hardware handle is reference-counted, an `Arc`-held keep-alive owner or an
 `Arc`-shared fd for DMABUF, so the underlying file descriptor or GPU allocation
@@ -1194,10 +1198,11 @@ since GStreamer may still hand a plain-caps element dma-buf memory. `memory:DMAB
 output caps narrow the `appsink` to `dmabuf` the same way. GStreamer 1.24+ dma-buf
 caps name the pixels as `format=DMA_DRM, drm-format=<fourcc>`. `BridgeGraph` maps the
 fourcc of each format `dmabuftowgpu` imports back to the plain format, and fails
-construction on any other fourcc or on a non-linear modifier, since the import
-reads linear rows only. `read_memory_feature` splits a `<fourcc>:0x<modifier>`
-value and reports the modifier, so an explicit linear one (`:0x0000000000000000`)
-passes, and `unixfdsrc` refuses a non-linear one the same way. The shell reads such caps through `gst_video_info_dma_drm_*`.
+construction on any other fourcc. `read_memory_feature` splits a `<fourcc>:0x<modifier>`
+value and reports the modifier, and `dmabuf_gst_caps` writes one back for any
+modifier but linear, as gst does. A dma-buf frame the bridge hands back must carry
+the modifier of the output caps, since the shell describes the buffer by those caps
+alone, so `g2g_bridge_pull_buf` returns -2 for any other. The shell reads such caps through `gst_video_info_dma_drm_*`.
 The wgpu elements, `wgpucompositor`, `wgpuupload` and `wgpudownload`, are in the
 registry only with the crate's `wgpu` feature, which also brings in `dmabuftowgpu`
 and `wgputodmabuf` on Linux, so a plugin built with `--features gstreamer,wgpu` runs a

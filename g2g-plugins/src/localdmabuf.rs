@@ -47,7 +47,9 @@ use tokio::net::UnixStream;
 
 use g2g_core::clock::ClockSync;
 use g2g_core::log::io_err;
-use g2g_core::memory::{DmaBufReleaseWaker, MemoryDomain, MemoryDomainKind, OwnedDmaBuf, SyncFd};
+use g2g_core::memory::{
+    DmaBufReleaseWaker, MemoryDomain, MemoryDomainKind, OwnedDmaBuf, SyncFd, DRM_FORMAT_MOD_LINEAR,
+};
 use g2g_core::meta::{Plane, PlaneLayout, MAX_PLANES};
 use g2g_core::pad_template::{PadTemplate, PadTemplates};
 use g2g_core::query::LatencyReport;
@@ -92,7 +94,7 @@ const TAG_SYNC: u8 = 3;
 const TAG_RELEASE: u8 = 4;
 
 /// Fixed record length: tag + format + geometry + sequence + timing + keyframe +
-/// sync value + plane layout.
+/// sync value + plane layout + modifier.
 const RECORD_LEN: usize = 1  // tag
     + 1                      // format (raw_format_to_u8)
     + 4 * 4                  // width, height, stride, offset
@@ -101,10 +103,12 @@ const RECORD_LEN: usize = 1  // tag
     + 1                      // keyframe
     + 8                      // sync_value (timeline value to wait on; 0 = frame carries no sync)
     + 1                      // plane count (0 = the dma-buf carries no plane layout)
-    + MAX_PLANES * PLANE_BYTES; // each plane's offset and stride
+    + MAX_PLANES * PLANE_BYTES // each plane's offset and stride
+    + 8; // drm format modifier
 const PLANE_COUNT_AT: usize = 75;
 const PLANES_AT: usize = PLANE_COUNT_AT + 1;
 const PLANE_BYTES: usize = 8 * 2;
+const MODIFIER_AT: usize = PLANES_AT + MAX_PLANES * PLANE_BYTES;
 
 /// The per-frame descriptor (everything except the fd, which travels as
 /// ancillary data). For a CAPS record only tag/format/width/height are read; for
@@ -123,6 +127,7 @@ struct Record {
     /// buffer (0 = no GPU sync; the producer synchronised itself).
     sync_value: u64,
     plane_layout: Option<PlaneLayout>,
+    modifier: u64,
 }
 
 impl Record {
@@ -138,6 +143,7 @@ impl Record {
             timing: FrameTiming::default(),
             sync_value: 0,
             plane_layout: None,
+            modifier: DRM_FORMAT_MOD_LINEAR,
         }
     }
 
@@ -168,6 +174,7 @@ impl Record {
                 b[at + 8..at + 16].copy_from_slice(&(plane.stride as u64).to_le_bytes());
             }
         }
+        b[MODIFIER_AT..MODIFIER_AT + 8].copy_from_slice(&self.modifier.to_le_bytes());
         b
     }
 
@@ -209,6 +216,7 @@ impl Record {
             },
             sync_value: u64_at(67),
             plane_layout,
+            modifier: u64_at(MODIFIER_AT),
         })
     }
 }
@@ -474,7 +482,6 @@ impl AsyncElement for DmaBufSink {
                         // the wire codec instead.
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    dmabuf.require_linear(g2g_core::log::short_type_name::<Self>())?;
                     let (format, w, h) = self
                         .configured_caps
                         .as_ref()
@@ -502,6 +509,7 @@ impl AsyncElement for DmaBufSink {
                         timing: frame.timing,
                         sync_value: dmabuf.sync_value().unwrap_or(0),
                         plane_layout: dmabuf.plane_layout().copied(),
+                        modifier: dmabuf.modifier(),
                     };
                     let fd = dmabuf.as_raw();
                     // a pooled producer such as a V4L2 decoder rewrites the buffer once every share in this process drops
@@ -788,7 +796,8 @@ impl SourceLoop for DmaBufSrc {
                         // process owns it exclusively; `OwnedDmaBuf` closes it once
                         // on drop.
                         let mut dmabuf =
-                            unsafe { OwnedDmaBuf::from_raw(fd, rec.stride, rec.offset) };
+                            unsafe { OwnedDmaBuf::from_raw(fd, rec.stride, rec.offset) }
+                                .with_modifier(rec.modifier);
                         if let Some(layout) = rec.plane_layout {
                             dmabuf = dmabuf.with_plane_layout(layout);
                         }
@@ -831,6 +840,9 @@ impl SourceLoop for DmaBufSrc {
 mod tests {
     use super::*;
 
+    // drm_fourcc.h I915_FORMAT_MOD_X_TILED
+    const X_TILED: u64 = 0x0100_0000_0000_0001;
+
     #[test]
     fn record_round_trips() {
         let rec = Record {
@@ -852,6 +864,7 @@ mod tests {
             },
             sync_value: 7,
             plane_layout: None,
+            modifier: X_TILED,
         };
         let bytes = rec.encode();
         assert_eq!(bytes.len(), RECORD_LEN);
@@ -909,7 +922,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_dmabuf_arrives_with_the_plane_layout_it_was_sent_with() {
+    async fn a_dmabuf_arrives_with_the_plane_layout_and_modifier_it_was_sent_with() {
         let (width, height) = (16, 8);
         let decoded_rows = 16;
         let stride = 32;
@@ -923,7 +936,9 @@ mod tests {
         ])
         .unwrap();
         let caps = caps_of(RawVideoFormat::Nv12, width, height);
-        let dmabuf = null_dmabuf(stride as u32).with_plane_layout(layout);
+        let dmabuf = null_dmabuf(stride as u32)
+            .with_plane_layout(layout)
+            .with_modifier(X_TILED);
         let (_sink, source) = connected_pair("layout", &caps, dmabuf).await;
         let mut received = crate::testutil::CollectSink::default();
         source.with_frame_limit(1).run(&mut received).await.unwrap();
@@ -939,6 +954,7 @@ mod tests {
             panic!("the frame is not a dma-buf");
         };
         assert_eq!(dmabuf.plane_layout(), Some(&layout));
+        assert_eq!(dmabuf.modifier(), X_TILED);
     }
 
     struct DroppingSink;

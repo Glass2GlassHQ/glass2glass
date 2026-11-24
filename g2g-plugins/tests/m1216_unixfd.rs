@@ -29,11 +29,13 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::{MemoryDomain, MemoryDomainKind, OwnedDmaBuf, SyncFile, SystemSlice};
+use g2g_core::memory::{
+    MemoryDomain, MemoryDomainKind, OwnedDmaBuf, SyncFile, SystemSlice, DRM_FORMAT_MOD_LINEAR,
+};
 use g2g_core::meta::{Plane, PlaneLayout};
 use g2g_core::runtime::{parse_launch, run_graph, RunStats, SourceLoop};
 use g2g_core::{
-    AsyncElement, Caps, ClockSync, Colorimetry, Dim, FrameTiming, G2gError, Interlace,
+    AsyncElement, Caps, ClockSync, Colorimetry, Dim, DomainSet, FrameTiming, G2gError, Interlace,
     MonotonicClock, OutputSink, PipelineClock, PipelinePacket, PropError, PropValue, PropertySpec,
     PushOutcome, Rate, RawVideoFormat,
 };
@@ -423,6 +425,36 @@ async fn a_dmabuf_crosses_as_a_dmabuf_with_its_layout() {
             .flat_map(|row| row[..ROW_BYTES].to_vec())
             .collect();
         assert_eq!(rows, frame_bytes(index as u64), "frame {index}");
+    }
+}
+
+#[tokio::test]
+async fn a_tiled_dmabuf_crosses_with_its_modifier() {
+    // drm_fourcc.h I915_FORMAT_MOD_X_TILED
+    const X_TILED: u64 = 0x0100_0000_0000_0001;
+    let caps = rgba_caps(WIDTH, HEIGHT);
+    let (mut sink, mut source) = connected_pair(SocketType::Path, "tiled");
+    sink.configure_pipeline(&caps).expect("the sink binds");
+    let packets = (0..FRAMES)
+        .map(|index| dmabuf_frame(padded_dmabuf(index).with_modifier(X_TILED), index))
+        .collect();
+    let (_, received) = tokio::time::timeout(RUN_DEADLINE, async {
+        tokio::join!(feed(&mut sink, &caps, packets), receive(&mut source))
+    })
+    .await
+    .expect("the loopback finishes");
+    let (_, count, out) = received.expect("the source runs");
+
+    assert_eq!(count, FRAMES);
+    assert_eq!(
+        source.output_domains(),
+        DomainSet::only(MemoryDomainKind::DmaBuf)
+    );
+    for (index, frame) in out.frames().into_iter().enumerate() {
+        let MemoryDomain::DmaBuf(dmabuf) = &frame.domain else {
+            panic!("frame {index} is not a dma-buf");
+        };
+        assert_eq!(dmabuf.modifier(), X_TILED, "frame {index}");
     }
 }
 
@@ -990,7 +1022,8 @@ async fn a_dropped_memfd_frame_is_released() {
 #[tokio::test]
 async fn a_dropped_dmabuf_frame_is_released() {
     let caps = rgba_caps(WIDTH, HEIGHT);
-    let dmabuf_caps = g2g_plugins::capsfilter::dmabuf_gst_caps(&caps).expect("RGBA has a fourcc");
+    let dmabuf_caps = g2g_plugins::capsfilter::dmabuf_gst_caps(&caps, DRM_FORMAT_MOD_LINEAR)
+        .expect("RGBA has a fourcc");
     release_on_drop(dmabuf_caps).await;
 }
 

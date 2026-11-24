@@ -366,7 +366,7 @@ const PULL_GRAPH_FAILED: c_int = -3;
 /// Block until the next processed frame and lend it to C via `*out`. Returns 1
 /// with `*out` filled (`kind` selects the system-bytes vs dma-buf payload), -1 at
 /// end-of-stream (or null handle), -2 for a memory domain the shell cannot hand
-/// back, -3 when the sub-graph stopped with an error (caps that did not
+/// back or a dma-buf whose modifier differs from the output caps, -3 when the sub-graph stopped with an error (caps that did not
 /// negotiate, an element that failed). The embedded `appsink` takes dma-buf or
 /// system memory, so the auto-plug downloads a wgpu or CUDA frame first; -2 is
 /// left for a domain g2g has no download converter for.
@@ -398,7 +398,16 @@ pub unsafe extern "C" fn g2g_bridge_pull_buf(bridge: *mut G2gBridge, out: *mut G
             pts_ns,
             owner: ptr::null_mut(),
         },
-        g2g_core::MemoryDomain::DmaBuf(dmabuf) if dmabuf.require_linear("g2g-bridge").is_err() => {
+        // the C side describes the buffer by the output caps alone
+        g2g_core::MemoryDomain::DmaBuf(dmabuf)
+            if dmabuf.modifier() != bridge.graph.output_modifier() =>
+        {
+            g2g_core::g2g_error!(
+                g2g_core::log::Target::category("g2g-bridge"),
+                "the output caps declare modifier {:#x} but the frame has {:#x}",
+                bridge.graph.output_modifier(),
+                dmabuf.modifier()
+            );
             return PULL_UNSUPPORTED_DOMAIN;
         }
         g2g_core::MemoryDomain::DmaBuf(dmabuf) => G2gOut {

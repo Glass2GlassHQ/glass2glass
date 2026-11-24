@@ -319,8 +319,7 @@ libraries installed.
   split, then open the device at `configure_pipeline`.
 - **Dma-buf modifiers:** pass each consumer's accepted format and modifier pairs
   to the producer through `AllocationParams`, import tiled buffers in
-  `dmabuftowgpu` and `hipupload`, carry the modifier across `unixfd`,
-  `localdmabufsink` and the bridge's C output. First find which producers hand out
+  `dmabuftowgpu` and `hipupload`. First find which producers hand out
   tiled buffers (Vulkan decode on RADV, PipeWire screen capture).
 
 ## Containers

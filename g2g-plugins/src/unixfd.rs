@@ -425,6 +425,39 @@ async fn send_to_clients(
     forgotten_memfds
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BufferMemory {
+    System,
+    DmaBuf { modifier: u64 },
+}
+
+impl BufferMemory {
+    fn is_dmabuf(self) -> bool {
+        self != BufferMemory::System
+    }
+
+    // system memory rows are always linear
+    fn modifier(self) -> u64 {
+        match self {
+            BufferMemory::System => DRM_FORMAT_MOD_LINEAR,
+            BufferMemory::DmaBuf { modifier } => modifier,
+        }
+    }
+
+    fn is_linear(self) -> bool {
+        self.modifier() == DRM_FORMAT_MOD_LINEAR
+    }
+
+    fn of(domain: &MemoryDomain) -> Self {
+        match domain {
+            MemoryDomain::DmaBuf(dmabuf) => BufferMemory::DmaBuf {
+                modifier: dmabuf.modifier(),
+            },
+            _ => BufferMemory::System,
+        }
+    }
+}
+
 /// # Example
 ///
 /// ```no_run
@@ -443,9 +476,9 @@ pub struct UnixFdSink {
     listener: Option<AsyncFd<UnixListener>>,
     clients: Vec<Client>,
     caps: Option<Caps>,
-    /// Whether the input is dma-buf, fixed by the first frame. The caps a client
+    /// What the input frames are, fixed by the first frame. The caps a client
     /// is sent depend on it, so they wait for it.
-    dmabuf_input: Option<bool>,
+    input_memory: Option<BufferMemory>,
     clock: Option<ClockSync>,
     next_buffer_id: u64,
     memfd_pool: MemfdPool,
@@ -462,7 +495,7 @@ impl Default for UnixFdSink {
             listener: None,
             clients: Vec::new(),
             caps: None,
-            dmabuf_input: None,
+            input_memory: None,
             clock: None,
             next_buffer_id: FIRST_BUFFER_ID,
             memfd_pool: MemfdPool::default(),
@@ -515,14 +548,14 @@ impl UnixFdSink {
     }
 
     fn caps_text(&self) -> Result<Option<String>, G2gError> {
-        let (Some(caps), Some(dmabuf)) = (&self.caps, self.dmabuf_input) else {
+        let (Some(caps), Some(memory)) = (&self.caps, self.input_memory) else {
             return Ok(None);
         };
-        match dmabuf {
-            true => dmabuf_gst_caps(caps)
+        match memory {
+            BufferMemory::DmaBuf { modifier } => dmabuf_gst_caps(caps, modifier)
                 .map(Some)
                 .ok_or(G2gError::CapsMismatch),
-            false => Ok(Some(caps.to_gst_string())),
+            BufferMemory::System => Ok(Some(caps.to_gst_string())),
         }
     }
 
@@ -575,16 +608,19 @@ impl UnixFdSink {
 
     async fn send_frame(&mut self, frame: Frame) -> Result<(), G2gError> {
         self.service_clients().await?;
-        let dmabuf = matches!(frame.domain, MemoryDomain::DmaBuf(_));
+        let memory = BufferMemory::of(&frame.domain);
         // the wire cannot carry the fence, so the frame leaves only once its GPU writes finish
         if let MemoryDomain::DmaBuf(fenced) = &frame.domain {
             crate::dmabuffence::wait_for_producer(fenced).await?;
         }
-        if self.dmabuf_input.is_some_and(|seen| seen != dmabuf) {
+        if self
+            .input_memory
+            .is_some_and(|seen| seen.is_dmabuf() != memory.is_dmabuf())
+        {
             return Err(G2gError::UnsupportedDomain);
         }
-        self.dmabuf_input = Some(dmabuf);
-        if !dmabuf && self.min_memory_size < 0 {
+        self.input_memory = Some(memory);
+        if !memory.is_dmabuf() && self.min_memory_size < 0 {
             return Err(G2gError::UnsupportedDomain);
         }
         while self.wait_for_connection && self.clients.is_empty() {
@@ -640,7 +676,6 @@ impl UnixFdSink {
         let geometry = raw_video_geometry(caps);
         let (memory, fd) = match &frame.domain {
             MemoryDomain::DmaBuf(dmabuf) => {
-                dmabuf.require_linear(g2g_core::log::short_type_name::<Self>())?;
                 let fd = dmabuf.as_raw();
                 buffer.memory_type = MEMORY_TYPE_DMABUF;
                 // dmabuf_plane_layout counts plane offsets from the start of the fd
@@ -1069,7 +1104,7 @@ pub struct UnixFdSrc {
     socket_type: SocketType,
     stream: Option<Socket>,
     caps: Option<Caps>,
-    dmabuf_caps: bool,
+    peer_memory: BufferMemory,
     /// The domain the allocation cascade settled on, when it ran.
     allocated_domain: Option<MemoryDomainKind>,
     keep_row_padding: bool,
@@ -1083,7 +1118,7 @@ impl Default for UnixFdSrc {
             socket_type: SocketType::Path,
             stream: None,
             caps: None,
-            dmabuf_caps: false,
+            peer_memory: BufferMemory::System,
             allocated_domain: None,
             keep_row_padding: false,
             clock: None,
@@ -1126,9 +1161,9 @@ impl UnixFdSrc {
                 .ok_or_else(|| protocol_error("sink closed the socket before sending caps"))?;
             match command.command {
                 COMMAND_CAPS => {
-                    let (caps, dmabuf) = read_caps(&command.payload)?;
+                    let (caps, memory) = read_caps(&command.payload)?;
                     self.caps = Some(caps.clone());
-                    self.dmabuf_caps = dmabuf;
+                    self.peer_memory = memory;
                     self.stream = Some(stream);
                     return Ok(caps);
                 }
@@ -1141,7 +1176,7 @@ impl UnixFdSrc {
     }
 
     fn emits_dmabuf(&self) -> bool {
-        self.dmabuf_caps
+        self.peer_memory.is_dmabuf()
             && self.allocated_domain.unwrap_or(self.output_memory()) == MemoryDomainKind::DmaBuf
     }
 
@@ -1201,15 +1236,24 @@ impl UnixFdSrc {
             releases.push(buffer.id);
             return Ok((owned_frame_bytes(Box::default()), None));
         }
+        let modifier = self.peer_memory.modifier();
         if self.emits_dmabuf() {
             let [memory] = buffer.memories.as_slice() else {
                 return Err(G2gError::UnsupportedDomain);
             };
             let fd = fds.pop().ok_or_else(missing_fd)?;
             require_covered(&fd, memory)?;
-            let dmabuf = received_dmabuf(fd, caps, meta, memory)?;
+            let dmabuf = received_dmabuf(fd, caps, meta, memory)?.with_modifier(modifier);
             held_dmabufs.push((buffer.id, dmabuf.clone()));
             return Ok((MemoryDomain::DmaBuf(dmabuf), None));
+        }
+        if !self.peer_memory.is_linear() {
+            g2g_core::g2g_error!(
+                Target::category("unixfdsrc"),
+                "maps dma-bufs in linear layout but the peer sent modifier {:#x}",
+                modifier
+            );
+            return Err(G2gError::UnsupportedDomain);
         }
         if let [memory] = buffer.memories.as_slice() {
             let fd = fds.pop().ok_or_else(missing_fd)?;
@@ -1273,20 +1317,18 @@ impl UnixFdSrc {
     }
 }
 
-fn read_caps(payload: &[u8]) -> Result<(Caps, bool), G2gError> {
+fn read_caps(payload: &[u8]) -> Result<(Caps, BufferMemory), G2gError> {
     let text =
         decode_caps(payload).ok_or_else(|| protocol_error("caps are not NUL-terminated text"))?;
     let memory = read_memory_feature(&normalize_gst_caps(text)).ok_or(G2gError::CapsMismatch)?;
-    if memory.modifier != DRM_FORMAT_MOD_LINEAR {
-        g2g_core::g2g_error!(
-            Target::category("unixfdsrc"),
-            "the peer sends dma-bufs with modifier {:#x}, unixfdsrc carries linear ones only",
-            memory.modifier
-        );
-        return Err(G2gError::CapsMismatch);
-    }
     let caps = parse_caps(&memory.caps).ok_or(G2gError::CapsMismatch)?;
-    Ok((caps, memory.dmabuf))
+    let buffer_memory = match memory.dmabuf {
+        true => BufferMemory::DmaBuf {
+            modifier: memory.modifier,
+        },
+        false => BufferMemory::System,
+    };
+    Ok((caps, buffer_memory))
 }
 
 /// Send what the source owes: every release a dropped system frame queued, and
@@ -1384,13 +1426,15 @@ impl SourceLoop for UnixFdSrc {
     }
 
     /// Plain caps are mapped memfds. `memory:DMABuf` caps hand the dma-buf on,
-    /// or map it when downstream needs system memory. Before the caps arrive
-    /// either is possible.
+    /// or map it when downstream needs system memory and its rows are linear.
+    /// Before the caps arrive either is possible.
     fn output_domains(&self) -> DomainSet {
+        let dmabuf = DomainSet::only(MemoryDomainKind::DmaBuf);
         let system = DomainSet::only(MemoryDomainKind::System);
-        match (&self.caps, self.dmabuf_caps) {
-            (Some(_), false) => system,
-            _ => DomainSet::only(MemoryDomainKind::DmaBuf).with(MemoryDomainKind::System),
+        match (&self.caps, self.peer_memory) {
+            (Some(_), BufferMemory::System) => system,
+            (Some(_), memory) if !memory.is_linear() => dmabuf,
+            _ => dmabuf.with(MemoryDomainKind::System),
         }
     }
 
@@ -1402,9 +1446,10 @@ impl SourceLoop for UnixFdSrc {
 
     fn configure_allocation(&mut self, params: &AllocationParams) {
         self.keep_row_padding = params.meta_requests.wants::<PlaneLayout>();
-        let dmabuf = self.dmabuf_caps
+        let dmabuf = self.peer_memory.is_dmabuf()
             && (params.domain == MemoryDomainKind::DmaBuf
-                || !params.accepts.contains(MemoryDomainKind::System));
+                || !params.accepts.contains(MemoryDomainKind::System)
+                || !self.peer_memory.is_linear());
         self.allocated_domain = Some(match dmabuf {
             true => MemoryDomainKind::DmaBuf,
             false => MemoryDomainKind::System,
@@ -1445,10 +1490,11 @@ impl SourceLoop for UnixFdSrc {
                         sequence += 1;
                     }
                     COMMAND_CAPS => {
-                        let (caps, dmabuf) = read_caps(&command.payload)?;
-                        if dmabuf != self.dmabuf_caps {
+                        let (caps, memory) = read_caps(&command.payload)?;
+                        if memory.is_dmabuf() != self.peer_memory.is_dmabuf() {
                             return Err(G2gError::UnsupportedDomain);
                         }
+                        self.peer_memory = memory;
                         if self.caps.as_ref() != Some(&caps) {
                             self.caps = Some(caps.clone());
                             out.push(PipelinePacket::CapsChanged(caps)).await?;
