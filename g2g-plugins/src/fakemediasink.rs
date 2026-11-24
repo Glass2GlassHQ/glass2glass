@@ -8,23 +8,20 @@
 //! negotiated and exercised, where a plain `fakesink` would happily swallow the
 //! undecoded stream instead and hide the missing decoder.
 //!
-//! `silent=false` records a `chain: <bytes> bytes, pts: <ns>` line per buffer in
-//! `last-message` and on the debug log, which is what gst's fakesink prints when
-//! its own `silent` is off.
+//! `silent=false` records a line per buffer in `last-message` and on the debug
+//! log, as `fakesink` does.
 
 use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
-use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
-use alloc::{format, vec};
 
-use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::{
-    g2g_debug, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
-    G2gError, Interlace, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, Rate,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
+    Interlace, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropValue,
+    PropertySpec, Rate,
 };
 
 #[cfg(feature = "std")]
@@ -33,7 +30,7 @@ use g2g_core::progress::SinkPosition;
 use g2g_core::{ClockCandidate, ClockPriority, ClockSync, MonotonicClock, PresentationPacer};
 
 use crate::audioconvert::RAW_AUDIO_FORMATS;
-use crate::fakesink::FakeSink;
+use crate::fakesink::{FakeSink, FAKE_SINK_PROPS};
 
 /// The channel count and rate an audio template leaves open (`Caps::Audio`'s own
 /// wildcards).
@@ -73,14 +70,11 @@ fn raw_audio_caps() -> CapsSet {
     )
 }
 
-/// What the two sinks share: the counting `FakeSink` they delegate to, plus the
-/// `silent` / `last-message` pair that is the only knob either applies.
+/// What the two sinks share: the counting `FakeSink` they delegate to, whose
+/// `silent` / `last-message` pair is the only knob either applies.
 #[derive(Debug, Default)]
 struct CountingFake {
     inner: FakeSink,
-    silent: bool,
-    last_message: String,
-    log_name: LogName,
     #[cfg(feature = "std")]
     playout: Option<FakePlayout>,
 }
@@ -94,12 +88,8 @@ struct FakePlayout {
 }
 
 impl CountingFake {
-    /// gst's `fakevideosink` / `fakeaudiosink` both default `silent` on.
     fn new() -> Self {
-        Self {
-            silent: true,
-            ..Self::default()
-        }
+        Self::default()
     }
 
     #[cfg(feature = "std")]
@@ -129,8 +119,9 @@ impl CountingFake {
     #[cfg(feature = "std")]
     fn set_clock_sync(&mut self, sync: ClockSync) {
         if let Some(playout) = &mut self.playout {
-            playout.pacer.set_clock_sync(sync);
+            playout.pacer.set_clock_sync(sync.clone());
         }
+        AsyncElement::set_clock_sync(&mut self.inner, sync);
     }
 
     #[cfg(feature = "std")]
@@ -168,66 +159,7 @@ impl CountingFake {
             _ => {}
         }
     }
-
-    fn note(&mut self, packet: &PipelinePacket) {
-        if self.silent {
-            return;
-        }
-        if let PipelinePacket::DataFrame(frame) = packet {
-            let bytes = frame.domain.as_system_slice().map_or(0, <[u8]>::len);
-            self.last_message = format!("chain: {bytes} bytes, pts: {}", frame.timing.pts_ns);
-            g2g_debug!(self, "{}", self.last_message);
-        }
-    }
-
-    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
-        match name {
-            "silent" => {
-                self.silent = value.as_bool().ok_or(PropError::Type)?;
-                Ok(())
-            }
-            "last-message" => Err(PropError::ReadOnly),
-            _ => Err(PropError::Unknown),
-        }
-    }
-
-    fn get_property(&self, name: &str) -> Option<PropValue> {
-        match name {
-            "silent" => Some(PropValue::Bool(self.silent)),
-            "last-message" => Some(PropValue::Str(self.last_message.clone())),
-            _ => None,
-        }
-    }
 }
-
-impl LogSource for CountingFake {
-    fn log_category(&self) -> &'static str {
-        short_type_name::<Self>()
-    }
-    fn log_instance(&self) -> Option<&str> {
-        self.log_name.instance()
-    }
-    fn log_category_override(&self) -> Option<&str> {
-        self.log_name.category()
-    }
-}
-
-/// The `silent` / `last-message` pair both sinks declare, named and defaulted as
-/// gst's fake sinks.
-static FAKE_MEDIA_PROPS: &[PropertySpec] = &[
-    PropertySpec::new(
-        "silent",
-        PropKind::Bool,
-        "stop recording a line per buffer in last-message",
-    )
-    .with_default("true"),
-    PropertySpec::new(
-        "last-message",
-        PropKind::Str,
-        "the most recent buffer's line, empty while silent",
-    )
-    .read_only(),
-];
 
 /// Both sinks do the same thing with a packet, differing only in what they
 /// accept, so the element bodies are this one macro.
@@ -256,7 +188,7 @@ macro_rules! fake_media_sink {
 
             /// The most recent buffer's line, empty while `silent`.
             pub fn last_message(&self) -> &str {
-                &self.fake.last_message
+                self.fake.inner.last_message()
             }
         }
 
@@ -302,7 +234,6 @@ macro_rules! fake_media_sink {
                 out: &'a mut dyn OutputSink,
             ) -> Self::ProcessFuture<'a> {
                 Box::pin(async move {
-                    self.fake.note(&packet);
                     #[cfg(feature = "std")]
                     self.fake.play(&packet).await;
                     AsyncElement::process(&mut self.fake.inner, packet, out).await
@@ -325,15 +256,15 @@ macro_rules! fake_media_sink {
             }
 
             fn properties(&self) -> &'static [PropertySpec] {
-                FAKE_MEDIA_PROPS
+                FAKE_SINK_PROPS
             }
 
             fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
-                self.fake.set_property(name, value)
+                AsyncElement::set_property(&mut self.fake.inner, name, value)
             }
 
             fn get_property(&self, name: &str) -> Option<PropValue> {
-                self.fake.get_property(name)
+                AsyncElement::get_property(&self.fake.inner, name)
             }
         }
 

@@ -20,6 +20,7 @@ use core::task::{Context, Poll};
 use std::time::Duration;
 
 use g2g_core::frame::Frame;
+use g2g_core::log::ClockTime;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, Bus, BusMessage, ByteStreamEncoding, Caps, Dim, FrameTiming,
@@ -31,6 +32,7 @@ use g2g_plugins::checksumsink::ChecksumSink;
 use g2g_plugins::chopmydata::ChopMyData;
 use g2g_plugins::errorignore::ErrorIgnore;
 use g2g_plugins::fakemediasink::{FakeAudioSink, FakeVideoSink};
+use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::fpsdisplaysink::FpsDisplaySink;
 
 impl CollectSink {
@@ -608,6 +610,40 @@ async fn fakeaudiosink_stays_quiet_by_default() {
         sink.last_message(),
         "",
         "gst's fake sinks default to silent"
+    );
+}
+
+#[derive(Debug)]
+struct StoppedClock(u64);
+
+impl g2g_core::PipelineClock for StoppedClock {
+    fn now_ns(&self) -> u64 {
+        self.0
+    }
+}
+
+#[tokio::test]
+async fn fakesink_records_the_running_time_each_buffer_arrived_at() {
+    const BASE_TIME_NS: u64 = 2_000_000_000;
+    const ARRIVAL_CLOCK_NS: u64 = 5_000_000_000;
+    let mut sink = FakeSink::new();
+    sink.set_property("silent", PropValue::Bool(false))
+        .expect("`silent` property");
+    sink.set_clock_sync(g2g_core::ClockSync::new(
+        std::sync::Arc::new(StoppedClock(ARRIVAL_CLOCK_NS)),
+        BASE_TIME_NS,
+    ));
+    sink.configure_pipeline(&pcm_caps()).expect("configure");
+    let mut out = CollectSink::default();
+    sink.process(byte_frame(vec![0u8; FAKE_BUFFER_BYTES], 0, 0), &mut out)
+        .await
+        .expect("swallowing");
+
+    let running_time = ClockTime(ARRIVAL_CLOCK_NS - BASE_TIME_NS).to_string();
+    let message = sink.last_message();
+    assert!(
+        message.contains(&FAKE_BUFFER_BYTES.to_string()) && message.contains(&running_time),
+        "{message:?} names the buffer's size and the running time {running_time}"
     );
 }
 

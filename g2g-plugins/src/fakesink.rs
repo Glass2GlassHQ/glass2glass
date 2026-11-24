@@ -11,13 +11,20 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 
+use g2g_core::log::{short_type_name, ClockTime, LogName, LogSource};
 use g2g_core::metrics::{LatencyHistogram, LatencySnapshot};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, MemoryDomain,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, Segment,
+    g2g_debug, AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, FrameTiming,
+    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec, Segment,
 };
+
+#[cfg(feature = "std")]
+use g2g_core::ClockSync;
 
 #[cfg(feature = "std")]
 use g2g_core::metrics::monotonic_ns;
@@ -69,7 +76,29 @@ pub struct FakeSink {
     /// Materialized (dense row-major) bytes of the most recent `SystemView`
     /// frame, for correctness checks on a strided transform's output.
     last_view_bytes: Option<Vec<u8>>,
+    // the inverse of `silent`, so the derived default matches gst's silent fake sinks
+    records_each_buffer: bool,
+    last_message: String,
+    log_name: LogName,
+    #[cfg(feature = "std")]
+    clock_sync: Option<ClockSync>,
 }
+
+/// The `silent` / `last-message` pair of gst's fake sinks.
+pub(crate) static FAKE_SINK_PROPS: &[PropertySpec] = &[
+    PropertySpec::new(
+        "silent",
+        PropKind::Bool,
+        "stop recording a line per buffer in last-message",
+    )
+    .with_default("true"),
+    PropertySpec::new(
+        "last-message",
+        PropKind::Str,
+        "the most recent buffer's line, empty while silent",
+    )
+    .read_only(),
+];
 
 impl FakeSink {
     pub fn new() -> Self {
@@ -127,6 +156,49 @@ impl FakeSink {
     pub fn last_view_bytes(&self) -> Option<&[u8]> {
         self.last_view_bytes.as_deref()
     }
+
+    /// The most recent buffer's line, empty while `silent`.
+    pub fn last_message(&self) -> &str {
+        &self.last_message
+    }
+
+    fn record_buffer(&mut self, bytes: usize, timing: &FrameTiming) {
+        self.last_message = format!(
+            "chain: {bytes} bytes, pts: {}, running time: {}",
+            ClockTime(timing.pts_ns),
+            self.running_time()
+        );
+        g2g_debug!(self, "{}", self.last_message);
+    }
+
+    #[cfg(feature = "std")]
+    fn running_time(&self) -> String {
+        let Some(sync) = &self.clock_sync else {
+            return String::from("none");
+        };
+        let running_ns = sync
+            .now_ns()
+            .saturating_sub(sync.base_time())
+            .saturating_sub(sync.paused_total_ns());
+        format!("{}", ClockTime(running_ns))
+    }
+
+    #[cfg(not(feature = "std"))]
+    fn running_time(&self) -> String {
+        String::from("none")
+    }
+}
+
+impl LogSource for FakeSink {
+    fn log_category(&self) -> &'static str {
+        short_type_name::<Self>()
+    }
+    fn log_instance(&self) -> Option<&str> {
+        self.log_name.instance()
+    }
+    fn log_category_override(&self) -> Option<&str> {
+        self.log_name.category()
+    }
 }
 
 impl AsyncElement for FakeSink {
@@ -153,6 +225,34 @@ impl AsyncElement for FakeSink {
         Ok(ConfigureOutcome::Accepted)
     }
 
+    fn properties(&self) -> &'static [PropertySpec] {
+        FAKE_SINK_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "silent" => {
+                self.records_each_buffer = !value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            "last-message" => Err(PropError::ReadOnly),
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "silent" => Some(PropValue::Bool(!self.records_each_buffer)),
+            "last-message" => Some(PropValue::Str(self.last_message.clone())),
+            _ => None,
+        }
+    }
+
+    #[cfg(feature = "std")]
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.clock_sync = Some(sync);
+    }
+
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
             "Fake sink",
@@ -175,6 +275,10 @@ impl AsyncElement for FakeSink {
                 PipelinePacket::DataFrame(f) => {
                     self.last_sequence = Some(f.sequence);
                     self.received += 1;
+                    if self.records_each_buffer {
+                        let bytes = f.domain.as_system_slice().map_or(0, <[u8]>::len);
+                        self.record_buffer(bytes, &f.timing);
+                    }
                     // M180: stride-aware path. A shared-view frame is recorded
                     // by its backing pointer (the zero-copy witness) and
                     // materialized for correctness checks; a contiguous frame
