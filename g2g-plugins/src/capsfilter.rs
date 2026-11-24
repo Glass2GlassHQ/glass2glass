@@ -279,23 +279,43 @@ pub struct GstCapsMemory {
     /// The caps without the feature, in the form [`parse_caps`] reads.
     pub caps: String,
     pub dmabuf: bool,
+    // the drm-format modifier, DRM_FORMAT_MOD_LINEAR when the caps name none
+    pub modifier: u64,
+}
+
+// gst writes drm-format as a fourcc, then for a non-linear layout a colon and the modifier in hex
+fn split_drm_format(value: &str) -> Option<(&str, u64)> {
+    let Some((fourcc, modifier)) = value.split_once(':') else {
+        return Some((value, g2g_core::memory::DRM_FORMAT_MOD_LINEAR));
+    };
+    let digits = modifier.strip_prefix("0x")?;
+    Some((fourcc, u64::from_str_radix(digits, 16).ok()?))
 }
 
 /// Read the `memory:DMABuf` feature off a [`normalize_gst_caps`] string. A
 /// GStreamer 1.24+ `format=DMA_DRM, drm-format=<fourcc>` is read as the pixel
 /// format it names. `None` for dma-buf caps whose `drm-format` names no format
-/// in `DRM_FOURCC_FORMATS`, or carries a non-linear modifier.
+/// in `DRM_FOURCC_FORMATS` or a modifier that is not hex.
 pub fn read_memory_feature(caps: &str) -> Option<GstCapsMemory> {
     let (media_type, fields) = caps.split_once(',').unwrap_or((caps, ""));
     let Some(media_type) = media_type.strip_suffix(DMABUF_CAPS_FEATURE) else {
         return Some(GstCapsMemory {
             caps: caps.into(),
             dmabuf: false,
+            modifier: g2g_core::memory::DRM_FORMAT_MOD_LINEAR,
         });
     };
-    let drm_format = fields
+    let drm_format = match fields
         .split(',')
-        .find_map(|field| field.strip_prefix(DRM_FORMAT_FIELD));
+        .find_map(|field| field.strip_prefix(DRM_FORMAT_FIELD))
+    {
+        Some(value) => Some(split_drm_format(value)?),
+        None => None,
+    };
+    let fourcc = drm_format.map(|(fourcc, _)| fourcc);
+    let modifier = drm_format.map_or(g2g_core::memory::DRM_FORMAT_MOD_LINEAR, |(_, modifier)| {
+        modifier
+    });
     let mut rewritten = alloc::vec![String::from(media_type)];
     for field in fields.split(',').filter(|field| !field.is_empty()) {
         if field.starts_with(DRM_FORMAT_FIELD) {
@@ -305,15 +325,15 @@ pub fn read_memory_feature(caps: &str) -> Option<GstCapsMemory> {
             rewritten.push(field.into());
             continue;
         }
-        // a modifier suffix (a tiled layout) matches no entry
         let (_, format) = DRM_FOURCC_FORMATS
             .iter()
-            .find(|(known, _)| Some(*known) == drm_format)?;
+            .find(|(known, _)| Some(*known) == fourcc)?;
         rewritten.push(alloc::format!("{FORMAT_FIELD}{format}"));
     }
     Some(GstCapsMemory {
         caps: rewritten.join(","),
         dmabuf: true,
+        modifier,
     })
 }
 
@@ -533,8 +553,27 @@ mod tests {
             read_memory_feature(plain),
             Some(GstCapsMemory {
                 caps: plain.into(),
-                dmabuf: false
+                dmabuf: false,
+                modifier: g2g_core::memory::DRM_FORMAT_MOD_LINEAR,
             })
         );
+    }
+
+    #[test]
+    fn a_drm_format_modifier_suffix_is_read_off_the_fourcc() {
+        // drm_fourcc.h I915_FORMAT_MOD_X_TILED, a tiled layout gst names after the fourcc
+        const X_TILED: u64 = 0x0100_0000_0000_0001;
+        let caps = |drm_format: &str| {
+            alloc::format!(
+                "video/x-raw(memory:DMABuf),format=DMA_DRM,width=64,height=32,drm-format={drm_format}"
+            )
+        };
+        let linear = read_memory_feature(&caps("NV12:0x0000000000000000")).expect("a known fourcc");
+        assert_eq!(linear.modifier, g2g_core::memory::DRM_FORMAT_MOD_LINEAR);
+        assert_eq!(linear.caps, "video/x-raw,format=NV12,width=64,height=32");
+        let tiled = read_memory_feature(&caps("NV12:0x0100000000000001")).expect("a known fourcc");
+        assert_eq!(tiled.modifier, X_TILED);
+        assert_eq!(tiled.caps, linear.caps);
+        assert_eq!(read_memory_feature(&caps("NV12:tiled")), None);
     }
 }

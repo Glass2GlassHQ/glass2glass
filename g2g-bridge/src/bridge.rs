@@ -293,7 +293,13 @@ impl Drop for BridgeGraph {
 }
 
 fn read_gst_caps(caps: &str) -> Result<GstCapsMemory, BridgeError> {
-    read_memory_feature(caps).ok_or_else(|| BridgeError::UnsupportedDmaBufCaps(caps.to_string()))
+    let memory = read_memory_feature(caps)
+        .ok_or_else(|| BridgeError::UnsupportedDmaBufCaps(caps.to_string()))?;
+    // the bridge hands dma-bufs on without their modifier, so only linear ones pass
+    if memory.modifier != g2g_core::memory::DRM_FORMAT_MOD_LINEAR {
+        return Err(BridgeError::UnsupportedDmaBufCaps(caps.to_string()));
+    }
+    Ok(memory)
 }
 
 /// Borrow a system-memory frame's bytes, the common case for the bridge (the

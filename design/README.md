@@ -1194,8 +1194,10 @@ since GStreamer may still hand a plain-caps element dma-buf memory. `memory:DMAB
 output caps narrow the `appsink` to `dmabuf` the same way. GStreamer 1.24+ dma-buf
 caps name the pixels as `format=DMA_DRM, drm-format=<fourcc>`. `BridgeGraph` maps the
 fourcc of each format `dmabuftowgpu` imports back to the plain format, and fails
-construction on any other fourcc or on a modifier suffix, since the import reads
-linear rows only. The shell reads such caps through `gst_video_info_dma_drm_*`.
+construction on any other fourcc or on a non-linear modifier, since the import
+reads linear rows only. `read_memory_feature` splits a `<fourcc>:0x<modifier>`
+value and reports the modifier, so an explicit linear one (`:0x0000000000000000`)
+passes, and `unixfdsrc` refuses a non-linear one the same way. The shell reads such caps through `gst_video_info_dma_drm_*`.
 The wgpu elements, `wgpucompositor`, `wgpuupload` and `wgpudownload`, are in the
 registry only with the crate's `wgpu` feature, which also brings in `dmabuftowgpu`
 and `wgputodmabuf` on Linux, so a plugin built with `--features gstreamer,wgpu` runs a

@@ -55,8 +55,10 @@ use tokio::io::unix::AsyncFd;
 use tokio::sync::Notify;
 
 use g2g_core::frame::Frame;
-use g2g_core::log::io_err;
-use g2g_core::memory::{DomainSet, MemoryDomainKind, OwnedDmaBuf, SystemSlice};
+use g2g_core::log::{io_err, Target};
+use g2g_core::memory::{
+    DomainSet, MemoryDomainKind, OwnedDmaBuf, SystemSlice, DRM_FORMAT_MOD_LINEAR,
+};
 use g2g_core::meta::{Plane, PlaneLayout};
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
@@ -1275,6 +1277,14 @@ fn read_caps(payload: &[u8]) -> Result<(Caps, bool), G2gError> {
     let text =
         decode_caps(payload).ok_or_else(|| protocol_error("caps are not NUL-terminated text"))?;
     let memory = read_memory_feature(&normalize_gst_caps(text)).ok_or(G2gError::CapsMismatch)?;
+    if memory.modifier != DRM_FORMAT_MOD_LINEAR {
+        g2g_core::g2g_error!(
+            Target::category("unixfdsrc"),
+            "the peer sends dma-bufs with modifier {:#x}, unixfdsrc carries linear ones only",
+            memory.modifier
+        );
+        return Err(G2gError::CapsMismatch);
+    }
     let caps = parse_caps(&memory.caps).ok_or(G2gError::CapsMismatch)?;
     Ok((caps, memory.dmabuf))
 }

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2569: Read the modifier suffix of GStreamer's `drm-format`, accepting an explicit linear modifier.
 - M2568: Host an X11 display in `g2g-desktop` through `ximagesrc` and XTest (`--x11-display`).
 - M2567: Follow a resized window or screen in `ximagesrc` with `CapsChanged`.
 - M2566: Grab the desktop's shortcuts in the Linux `g2g-desktop` client window, released by Escape (`--keyboard-grab`).
