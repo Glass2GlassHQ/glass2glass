@@ -462,12 +462,7 @@ static MFVIDEOSRC_PROPS: &[PropertySpec] = &[
         "device symbolic link, the persistent id; outranks device-index",
     ),
     PropertySpec::new("format", PropKind::Str, "pixel format: NV12 | YUY2").with_default("NV12"),
-    PropertySpec::new(
-        "num-buffers",
-        PropKind::Int,
-        "frames to capture then EOS (-1 = forever)",
-    )
-    .with_default("-1"),
+    crate::numbuffers::num_buffers_property("frames to capture then EOS (-1 = forever)"),
 ];
 
 /// The MF attributes describing one enumerated capture device.

@@ -379,13 +379,7 @@ static WHIPSERVERSRC_PROPS: &[PropertySpec] = &[
         "PEM PKCS#8 private key matching tls-cert-file",
     ),
     VIDEO_CODEC_PROP,
-    PropertySpec::new(
-        "num-buffers",
-        PropKind::Int,
-        "access units across every pad then EOS (-1 = unbounded)",
-    )
-    .with_default("-1")
-    .with_range("-1", "9223372036854775807"),
+    crate::numbuffers::num_buffers_property("access units across every pad then EOS (-1 = unbounded)"),
     PropertySpec::new(
         "max-publishers",
         PropKind::Uint,

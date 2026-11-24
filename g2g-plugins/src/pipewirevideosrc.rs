@@ -489,13 +489,7 @@ impl SourceLoop for PipeWireVideoSrc {
                 "where frames land: mmap (copy into system memory) | dmabuf (share the producer's buffer)",
             )
             .with_default("mmap"),
-            PropertySpec::new(
-                "num-buffers",
-                PropKind::Int,
-                "frames to capture then EOS (-1 = forever)",
-            )
-            .with_default("-1")
-            .with_range("-1", "9223372036854775807"),
+            crate::numbuffers::num_buffers_property("frames to capture then EOS (-1 = forever)"),
             #[cfg(feature = "portal")]
             PropertySpec::new(
                 "portal",

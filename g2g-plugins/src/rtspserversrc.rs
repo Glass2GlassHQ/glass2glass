@@ -445,13 +445,9 @@ static SRC_PROPS: &[PropertySpec] = &[
     PropertySpec::new("framerate", PropKind::Uint, "declared frame rate hint, fps")
         .with_default("30"),
     crate::rtspingest::ENCODING_NAME_PROPERTY,
-    PropertySpec::new(
-        "num-buffers",
-        PropKind::Int,
+    crate::numbuffers::num_buffers_property(
         "access units to emit then EOS (-1 = until the publisher disconnects)",
-    )
-    .with_default("-1")
-    .with_range("-1", "9223372036854775807"),
+    ),
     PropertySpec::new(
         "max-sessions",
         PropKind::Uint,

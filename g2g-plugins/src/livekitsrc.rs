@@ -50,7 +50,7 @@ use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::query::LatencyReport;
 use g2g_core::{
     g2g_warn, Caps, G2gError, MultiOutputSink, MultiOutputSource, NetworkFailure, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec,
+    PropError, PropValue, PropertySpec,
 };
 
 use crate::arrivalstamp::ArrivalStamp;
@@ -217,13 +217,9 @@ pub(crate) async fn answer_offer(
 /// builder (`livekitsrc url=... room=... api-key=... api-secret=...`).
 static LIVEKITSRC_PROPS: &[PropertySpec] = room_property_table![
     VIDEO_CODEC_PROP,
-    PropertySpec::new(
-        "num-buffers",
-        PropKind::Int,
-        "access units to emit across both tracks then EOS (-1 = until the room ends)",
-    )
-    .with_default("-1")
-    .with_range("-1", "9223372036854775807"),
+    crate::numbuffers::num_buffers_property(
+        "access units to emit across both tracks then EOS (-1 = until the room ends)"
+    ),
     LIVEKIT_TURN_SERVER_PROP,
     TURN_USER_PROP,
     TURN_PASS_PROP,

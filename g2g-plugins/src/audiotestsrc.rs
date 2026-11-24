@@ -303,12 +303,7 @@ static AUDIOTESTSRC_PROPS: &[PropertySpec] = &[
     PropertySpec::new("samplerate", PropKind::Uint, "samples per second"),
     PropertySpec::new("channels", PropKind::Uint, "channel count"),
     PropertySpec::new("freq", PropKind::Uint, "test tone frequency in Hz"),
-    PropertySpec::new(
-        "num-buffers",
-        PropKind::Int,
-        "buffers to emit then EOS (-1 = forever)",
-    )
-    .with_default("-1"),
+    crate::numbuffers::num_buffers_property("buffers to emit then EOS (-1 = forever)"),
     PropertySpec::new(
         "wave",
         PropKind::Str,

@@ -485,12 +485,7 @@ static PULSESRC_PROPS: &[PropertySpec] = &[
         "fragment span in microseconds (one recorded buffer)",
     )
     .with_default("10000"),
-    PropertySpec::new(
-        "num-buffers",
-        PropKind::Int,
-        "fragments to record then EOS (-1 = forever)",
-    )
-    .with_default("-1"),
+    crate::numbuffers::num_buffers_property("fragments to record then EOS (-1 = forever)"),
 ];
 
 // =================================================================

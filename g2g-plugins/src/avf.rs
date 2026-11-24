@@ -405,12 +405,7 @@ impl SourceLoop for AvfVideoSrc {
                 "emit retained IOSurface-backed CVPixelBuffers (zero-copy) instead of packed NV12",
             )
             .with_default("false"),
-            PropertySpec::new(
-                "num-buffers",
-                PropKind::Int,
-                "frames to emit then EOS (-1 = forever)",
-            )
-            .with_default("-1"),
+            crate::numbuffers::num_buffers_property("frames to emit then EOS (-1 = forever)"),
         ];
         PROPS
     }
@@ -673,12 +668,7 @@ impl SourceLoop for AvfAudioSrc {
             PropertySpec::new("samplerate", PropKind::Uint, "samples per second")
                 .with_default("48000"),
             PropertySpec::new("channels", PropKind::Uint, "channel count").with_default("2"),
-            PropertySpec::new(
-                "num-buffers",
-                PropKind::Int,
-                "buffers to capture then EOS (-1 = forever)",
-            )
-            .with_default("-1"),
+            crate::numbuffers::num_buffers_property("buffers to capture then EOS (-1 = forever)"),
         ];
         PROPS
     }

@@ -571,13 +571,7 @@ static VIDEOTESTSRC_PROPS: &[PropertySpec] = &[
             "gradient | snow | bar | moving-bar | smpte | checkers-8 | checker | ball | zone-plate | black",
         )
         .with_default("smpte"),
-    PropertySpec::new(
-        "num-buffers",
-        PropKind::Int,
-        "frames to emit then EOS (-1 = forever)",
-    )
-    .with_range("-1", "9223372036854775807")
-    .with_default("-1"),
+    crate::numbuffers::num_buffers_property("frames to emit then EOS (-1 = forever)"),
     PropertySpec::new("width", PropKind::Uint, "frame width in pixels")
         .with_range(MIN_REQUESTED_DIMENSION_TEXT, MAX_REQUESTED_DIMENSION_TEXT)
         .with_default("320"),

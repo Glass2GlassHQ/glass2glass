@@ -68,9 +68,6 @@ const DEFAULT_BLOCKSIZE_TEXT: &str = "4096";
 const MAX_BLOCKSIZE_TEXT: &str = "1073741824";
 const PORT_MIN_TEXT: &str = "0";
 const PORT_MAX_TEXT: &str = "65535";
-/// The `num-buffers` value that means "run until the peer closes".
-const UNLIMITED_BUFFERS_TEXT: &str = "-1";
-const MAX_BUFFERS_TEXT: &str = "9223372036854775807";
 
 /// The `host` spec. gst words the blurb differently for a listener and a dialer,
 /// so the element supplies it.
@@ -105,13 +102,8 @@ const BLOCKSIZE_SPEC: PropertySpec = PropertySpec::new(
 .with_range("1", MAX_BLOCKSIZE_TEXT);
 
 /// The run length both sources take.
-const NUM_BUFFERS_SPEC: PropertySpec = PropertySpec::new(
-    "num-buffers",
-    PropKind::Int,
-    "chunks to emit then EOS (-1 = until the peer closes)",
-)
-.with_default(UNLIMITED_BUFFERS_TEXT)
-.with_range(UNLIMITED_BUFFERS_TEXT, MAX_BUFFERS_TEXT);
+const NUM_BUFFERS_SPEC: PropertySpec =
+    crate::numbuffers::num_buffers_property("chunks to emit then EOS (-1 = until the peer closes)");
 
 /// Where an element reaches its peer. `host` is a name or a literal address (gst
 /// defaults it to `localhost`), so it is resolved at bind / connect time instead

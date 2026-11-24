@@ -405,13 +405,7 @@ static MOQTSESSIONSRC_PROPS: &[PropertySpec] = &[
         "groups before the live edge to FETCH on join and emit before the live objects (0 = start live)",
     )
     .with_default("0"),
-    PropertySpec::new(
-        "num-buffers",
-        PropKind::Int,
-        "frames to emit across all pads then EOS, init segments included (-1 = until the broadcast ends)",
-    )
-    .with_default("-1")
-    .with_range("-1", "9223372036854775807"),
+    crate::numbuffers::num_buffers_property("frames to emit across all pads then EOS, init segments included (-1 = until the broadcast ends)"),
     PropertySpec::new(
         "timeout",
         PropKind::Uint,

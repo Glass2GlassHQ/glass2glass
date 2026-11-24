@@ -564,12 +564,7 @@ const CAPTURE_PROPS: [PropertySpec; 8] = [
         PropKind::Uint,
         "requested capture rate, fps (best effort)",
     ),
-    PropertySpec::new(
-        "num-buffers",
-        PropKind::Int,
-        "frames to emit then EOS (-1 = forever)",
-    )
-    .with_default("-1"),
+    crate::numbuffers::num_buffers_property("frames to emit then EOS (-1 = forever)"),
     PropertySpec::new(
         "io-mode",
         PropKind::Str,

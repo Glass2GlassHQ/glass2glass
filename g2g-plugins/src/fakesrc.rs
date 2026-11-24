@@ -200,13 +200,7 @@ const MAX_BUFFER_SIZE: u64 = i32::MAX as u64;
 
 /// `FakeSrc`'s settable properties, named and defaulted as gst `fakesrc`.
 static FAKESRC_PROPS: &[PropertySpec] = &[
-    PropertySpec::new(
-        "num-buffers",
-        PropKind::Int,
-        "buffers to emit then EOS (-1 = forever)",
-    )
-    .with_range("-1", "9223372036854775807")
-    .with_default("-1"),
+    crate::numbuffers::num_buffers_property("buffers to emit then EOS (-1 = forever)"),
     PropertySpec::new("sizemax", PropKind::Uint, "bytes per emitted buffer")
         .with_range("0", "2147483647")
         .with_default("4096"),

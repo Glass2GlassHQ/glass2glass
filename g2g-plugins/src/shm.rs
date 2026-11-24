@@ -96,7 +96,6 @@ const MAX_SHM_SIZE_TEXT: &str = "4294967295";
 /// The `buffer-time` value that means "wait as long as it takes".
 const BUFFER_TIME_DISABLED_TEXT: &str = "-1";
 const MAX_INT64_TEXT: &str = "9223372036854775807";
-const UNLIMITED_BUFFERS_TEXT: &str = "-1";
 
 fn protocol_error(reason: &'static str) -> G2gError {
     io_err(IoError::new(ErrorKind::InvalidData, reason))
@@ -975,13 +974,7 @@ static SRC_PROPS: &[PropertySpec] = &[
     ),
     BYTESTREAM_FORMAT_PROPERTY,
     CAPS_PROPERTY,
-    PropertySpec::new(
-        "num-buffers",
-        PropKind::Int,
-        "frames to emit then EOS (-1 = until the sink closes)",
-    )
-    .with_default(UNLIMITED_BUFFERS_TEXT)
-    .with_range(UNLIMITED_BUFFERS_TEXT, MAX_INT64_TEXT),
+    crate::numbuffers::num_buffers_property("frames to emit then EOS (-1 = until the sink closes)"),
     PropertySpec::new(
         "shm-area-name",
         PropKind::Str,

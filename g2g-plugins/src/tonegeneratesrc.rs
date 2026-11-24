@@ -226,12 +226,7 @@ static TONE_PROPS: &[PropertySpec] = &[
     )
     .with_range("1", "2147483647")
     .with_default("1024"),
-    PropertySpec::new(
-        "num-buffers",
-        PropKind::Int,
-        "buffers to emit then EOS (-1 = forever)",
-    )
-    .with_default("-1"),
+    crate::numbuffers::num_buffers_property("buffers to emit then EOS (-1 = forever)"),
 ];
 
 impl PadTemplates for ToneGenerateSrc {

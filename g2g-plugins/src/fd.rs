@@ -242,13 +242,7 @@ static FDSRC_PROPS: &[PropertySpec] = &[
     )
     .with_range("1", "4294967295")
     .with_default("4096"),
-    PropertySpec::new(
-        "num-buffers",
-        PropKind::Int,
-        "chunks to emit then EOS (-1 = until EOF)",
-    )
-    .with_range("-1", "9223372036854775807")
-    .with_default("-1"),
+    crate::numbuffers::num_buffers_property("chunks to emit then EOS (-1 = until EOF)"),
 ];
 
 /// # Example

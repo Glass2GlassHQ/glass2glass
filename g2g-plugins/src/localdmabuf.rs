@@ -66,13 +66,9 @@ const LOCATION_PROP: &[PropertySpec] = &[LOCATION_SPEC];
 /// The receive end also takes gst `basesrc`'s frame count.
 const SRC_PROPS: &[PropertySpec] = &[
     LOCATION_SPEC,
-    PropertySpec::new(
-        "num-buffers",
-        PropKind::Int,
+    crate::numbuffers::num_buffers_property(
         "frames to emit then EOS (-1 = until the sender ends the stream)",
-    )
-    .with_default("-1")
-    .with_range("-1", "9223372036854775807"),
+    ),
 ];
 
 use crate::abortondrop::AbortOnDrop;

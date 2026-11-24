@@ -221,13 +221,7 @@ impl SourceLoop for SrtSrc {
                 PropKind::Str,
                 "AES passphrase (empty = unencrypted)",
             ),
-            PropertySpec::new(
-                "num-buffers",
-                PropKind::Int,
-                "payloads to emit then EOS (-1 = until error/shutdown)",
-            )
-            .with_default("-1")
-            .with_range("-1", "9223372036854775807"),
+            crate::numbuffers::num_buffers_property("payloads to emit then EOS (-1 = until error/shutdown)"),
             PropertySpec::new(
                 "keep-listening",
                 PropKind::Bool,

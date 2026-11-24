@@ -300,12 +300,7 @@ static DTMFSRC_PROPS: &[PropertySpec] = &[
     )
     .with_range("0", "36")
     .with_default("16"),
-    PropertySpec::new(
-        "num-buffers",
-        PropKind::Int,
-        "buffers to emit then EOS (-1 = forever)",
-    )
-    .with_default("-1"),
+    crate::numbuffers::num_buffers_property("buffers to emit then EOS (-1 = forever)"),
 ];
 
 impl PadTemplates for DtmfSrc {

@@ -290,12 +290,7 @@ static IMAGEFREEZE_PROPS: &[PropertySpec] = &[
         "output frames per second (e.g. 30/1)",
     )
     .with_default(DEFAULT_FRAMERATE_TEXT),
-    PropertySpec::new(
-        "num-buffers",
-        PropKind::Int,
-        "frames to emit before stopping (-1 = unlimited)",
-    )
-    .with_default("-1"),
+    crate::numbuffers::num_buffers_property("frames to emit before stopping (-1 = unlimited)"),
 ];
 
 #[cfg(test)]

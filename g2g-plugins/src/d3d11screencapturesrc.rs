@@ -256,12 +256,7 @@ static D3D11SCREENCAPTURESRC_PROPS: &[PropertySpec] = &[
         "frames per second, repeating the last image when the desktop has not changed",
     )
     .with_default("60"),
-    PropertySpec::new(
-        "num-buffers",
-        PropKind::Int,
-        "frames to capture then EOS (-1 = forever)",
-    )
-    .with_default("-1"),
+    crate::numbuffers::num_buffers_property("frames to capture then EOS (-1 = forever)"),
 ];
 
 impl SourceLoop for D3D11ScreenCaptureSrc {

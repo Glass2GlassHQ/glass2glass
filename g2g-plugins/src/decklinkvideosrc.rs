@@ -438,12 +438,7 @@ impl SourceLoop for DeckLinkVideoSrc {
                 "Attach the VANC packets of each frame as AncillaryMeta",
             )
             .with_default("false"),
-            PropertySpec::new(
-                "num-buffers",
-                PropKind::Int,
-                "frames to capture then EOS (-1 = forever)",
-            )
-            .with_default("-1"),
+            crate::numbuffers::num_buffers_property("frames to capture then EOS (-1 = forever)"),
             PropertySpec::new(
                 "signal",
                 PropKind::Bool,

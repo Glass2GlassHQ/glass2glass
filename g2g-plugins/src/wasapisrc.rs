@@ -260,12 +260,7 @@ static WASAPISRC_PROPS: &[PropertySpec] = &[
         "capture a render endpoint's output (system audio) instead of a capture endpoint",
     )
     .with_default("false"),
-    PropertySpec::new(
-        "num-buffers",
-        PropKind::Int,
-        "buffers to capture then EOS (-1 = forever)",
-    )
-    .with_default("-1"),
+    crate::numbuffers::num_buffers_property("buffers to capture then EOS (-1 = forever)"),
 ];
 
 impl PadTemplates for WasapiSrc {

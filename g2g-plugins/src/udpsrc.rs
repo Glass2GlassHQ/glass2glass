@@ -626,13 +626,7 @@ impl SourceLoop for UdpSrc {
             )
             .with_range("0", "65535")
             .read_only(),
-            PropertySpec::new(
-                "num-buffers",
-                PropKind::Int,
-                "buffers (raw) or access units (RTP) to emit then EOS (-1 = until error/shutdown)",
-            )
-            .with_default("-1")
-            .with_range("-1", "9223372036854775807"),
+            crate::numbuffers::num_buffers_property("buffers (raw) or access units (RTP) to emit then EOS (-1 = until error/shutdown)"),
             PropertySpec::new(
                 "jitter-latency",
                 PropKind::Uint,

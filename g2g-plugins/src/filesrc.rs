@@ -488,13 +488,7 @@ static FILESRC_PROPS: &[PropertySpec] = &[
     )
     .with_default("65536")
     .with_range("1", "1073741824"),
-    PropertySpec::new(
-        "num-buffers",
-        PropKind::Int,
-        "chunks to emit then EOS (-1 = forever)",
-    )
-    .with_range("-1", "9223372036854775807")
-    .with_default("-1"),
+    crate::numbuffers::num_buffers_property("chunks to emit then EOS (-1 = forever)"),
 ];
 
 /// Sniff a file's own header for its media type: a container (-> `ByteStream`),

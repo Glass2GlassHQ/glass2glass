@@ -334,12 +334,7 @@ impl SourceLoop for ScreenCaptureSrc {
                 "emit retained IOSurface-backed CVPixelBuffers (zero-copy) instead of packed NV12",
             )
             .with_default("false"),
-            PropertySpec::new(
-                "num-buffers",
-                PropKind::Int,
-                "frames to emit then EOS (-1 = forever)",
-            )
-            .with_default("-1"),
+            crate::numbuffers::num_buffers_property("frames to emit then EOS (-1 = forever)"),
         ];
         PROPS
     }

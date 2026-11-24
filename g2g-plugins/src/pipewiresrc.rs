@@ -356,13 +356,7 @@ static PIPEWIRESRC_PROPS: &[PropertySpec] = &[
     .with_default("S16LE"),
     PropertySpec::new("samplerate", PropKind::Uint, "samples per second").with_default("48000"),
     PropertySpec::new("channels", PropKind::Uint, "channel count").with_default("2"),
-    PropertySpec::new(
-        "num-buffers",
-        PropKind::Int,
-        "buffers to capture then EOS (-1 = forever)",
-    )
-    .with_default("-1")
-    .with_range("-1", "9223372036854775807"),
+    crate::numbuffers::num_buffers_property("buffers to capture then EOS (-1 = forever)"),
     PropertySpec::new(
         "provide-clock",
         PropKind::Bool,

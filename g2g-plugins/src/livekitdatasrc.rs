@@ -299,13 +299,7 @@ static LIVEKITDATASRC_PROPS: &[PropertySpec] = room_property_table![
         "emit only packets from this participant, every sender when empty",
     )
     .with_default(""),
-    PropertySpec::new(
-        "num-buffers",
-        PropKind::Int,
-        "packets to emit then EOS (-1 = until the room ends)",
-    )
-    .with_default("-1")
-    .with_range("-1", "9223372036854775807"),
+    crate::numbuffers::num_buffers_property("packets to emit then EOS (-1 = until the room ends)"),
     LIVEKIT_TURN_SERVER_PROP,
     TURN_USER_PROP,
     TURN_PASS_PROP,

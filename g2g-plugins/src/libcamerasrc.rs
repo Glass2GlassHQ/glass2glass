@@ -974,13 +974,7 @@ static LIBCAMERA_PROPS: &[PropertySpec] = &[
         PropKind::Double,
         "colour saturation (1.0 = default, 0 = grey)",
     ),
-    PropertySpec::new(
-        "num-buffers",
-        PropKind::Int,
-        "frames to capture then EOS (-1 = forever)",
-    )
-    .with_default("-1")
-    .with_range("-1", "9223372036854775807"),
+    crate::numbuffers::num_buffers_property("frames to capture then EOS (-1 = forever)"),
 ];
 
 #[cfg(test)]

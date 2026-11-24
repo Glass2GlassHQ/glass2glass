@@ -177,13 +177,9 @@ static WHEPSESSION_PROPS: &[PropertySpec] = &[
     TURN_USER_PROP,
     TURN_PASS_PROP,
     VIDEO_CODEC_PROP,
-    PropertySpec::new(
-        "num-buffers",
-        PropKind::Int,
+    crate::numbuffers::num_buffers_property(
         "access units across both tracks then EOS (-1 = unbounded)",
-    )
-    .with_default("-1")
-    .with_range("-1", "9223372036854775807"),
+    ),
 ];
 
 impl MultiOutputSource for WebRtcWhepSessionSrc {

@@ -812,13 +812,7 @@ const RTSPSRCN_PROPS: &[PropertySpec] = &[
     .with_default(DEFAULT_USER_AGENT),
     PropertySpec::new("user-id", PropKind::Str, "RTSP auth username"),
     PropertySpec::new("user-pw", PropKind::Str, "RTSP auth password"),
-    PropertySpec::new(
-        "num-buffers",
-        PropKind::Int,
-        "access units each pad emits then EOS (-1 = until the server disconnects)",
-    )
-    .with_default("-1")
-    .with_range("-1", "9223372036854775807"),
+    crate::numbuffers::num_buffers_property("access units each pad emits then EOS (-1 = until the server disconnects)"),
     PropertySpec::new(
         "width",
         PropKind::Uint,

@@ -313,11 +313,5 @@ static MQTTSRC_PROPS: &[PropertySpec] = broker_property_table![
     PropertySpec::new("qos", PropKind::Uint, "MQTT quality of service level")
         .with_range("0", QOS_MAX_TEXT)
         .with_default(DEFAULT_QOS_TEXT),
-    PropertySpec::new(
-        "num-buffers",
-        PropKind::Int,
-        "messages to emit then EOS (-1 = until shutdown)",
-    )
-    .with_default("-1")
-    .with_range("-1", "9223372036854775807"),
+    crate::numbuffers::num_buffers_property("messages to emit then EOS (-1 = until shutdown)"),
 ];

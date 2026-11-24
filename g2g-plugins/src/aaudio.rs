@@ -787,10 +787,5 @@ static AAUDIOSRC_PROPS: &[PropertySpec] = &[
     PropertySpec::new("samplerate", PropKind::Uint, "requested samples per second")
         .with_default("48000"),
     PropertySpec::new("channels", PropKind::Uint, "requested channel count").with_default("2"),
-    PropertySpec::new(
-        "num-buffers",
-        PropKind::Int,
-        "buffers to capture then EOS (-1 = forever)",
-    )
-    .with_default("-1"),
+    crate::numbuffers::num_buffers_property("buffers to capture then EOS (-1 = forever)"),
 ];

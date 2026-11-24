@@ -47,7 +47,7 @@ use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::query::LatencyReport;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError, HardwareError, MultiOutputSink,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, ReverseChannel,
+    PipelinePacket, PropError, PropValue, PropertySpec, ReverseChannel,
 };
 
 use crate::arrivalstamp::ArrivalStamp;
@@ -74,18 +74,12 @@ use crate::webrtc_util::{
 const VIDEO: usize = 0;
 const AUDIO: usize = 1;
 const TOKEN_TTL_SECS: u64 = 3600;
-const UNLIMITED_BUFFERS_TEXT: &str = "-1";
-const MAX_BUFFERS_TEXT: &str = "9223372036854775807";
 
 static LIVEKITDUPLEX_PROPS: &[PropertySpec] = room_property_table![
     VIDEO_CODEC_PROP,
-    PropertySpec::new(
-        "num-buffers",
-        PropKind::Int,
+    crate::numbuffers::num_buffers_property(
         "access units to receive across both tracks then EOS (-1 = until the room ends)",
-    )
-    .with_default(UNLIMITED_BUFFERS_TEXT)
-    .with_range(UNLIMITED_BUFFERS_TEXT, MAX_BUFFERS_TEXT),
+    ),
     LINGER_MS_PROP,
     LIVEKIT_TURN_SERVER_PROP,
     TURN_USER_PROP,

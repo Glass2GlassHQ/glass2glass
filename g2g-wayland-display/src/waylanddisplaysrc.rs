@@ -18,7 +18,7 @@ use g2g_core::{
     PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 use g2g_plugins::numbuffers::{
-    finished_at_zero_limit, get_num_buffers, set_num_buffers, NUM_BUFFERS_PROPERTY,
+    finished_at_zero_limit, get_num_buffers, num_buffers_property, set_num_buffers,
 };
 use g2g_plugins::windowinput::WindowInput;
 use smithay::reexports::calloop::channel::{channel, Channel, Sender};
@@ -178,7 +178,7 @@ impl SourceLoop for WaylandDisplaySrc {
                 "highest output rate in frames per second, also the refresh clients see",
             )
             .with_default("60"),
-            NUM_BUFFERS_PROPERTY,
+            num_buffers_property("frames to render then EOS (-1 = forever)"),
         ];
         PROPERTIES
     }

@@ -577,12 +577,7 @@ static CAMERA2SRC_PROPS: &[PropertySpec] = &[
         "capture frame rate, requested as a fixed auto-exposure target range",
     )
     .with_default("30"),
-    PropertySpec::new(
-        "num-buffers",
-        PropKind::Int,
-        "frames to emit then EOS (-1 = forever)",
-    )
-    .with_default("-1"),
+    crate::numbuffers::num_buffers_property("frames to emit then EOS (-1 = forever)"),
 ];
 
 /// Pack a decoded `YUV_420_888` image to tight NV12. The capture caps fix the

@@ -376,12 +376,7 @@ static ALSASRC_PROPS: &[PropertySpec] = &[
         "period span in microseconds (one captured buffer)",
     )
     .with_default("10000"),
-    PropertySpec::new(
-        "num-buffers",
-        PropKind::Int,
-        "periods to capture then EOS (-1 = forever)",
-    )
-    .with_default("-1"),
+    crate::numbuffers::num_buffers_property("periods to capture then EOS (-1 = forever)"),
     PropertySpec::new(
         "provide-clock",
         PropKind::Bool,

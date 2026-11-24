@@ -682,13 +682,9 @@ static WEBRTCSRC_PROPS: &[PropertySpec] = &[
     SOURCE_RECONNECT_PROP,
     RECONNECT_BACKOFF_PROP,
     RECONNECT_BACKOFF_MAX_PROP,
-    PropertySpec::new(
-        "num-buffers",
-        PropKind::Int,
+    crate::numbuffers::num_buffers_property(
         "access units to emit then EOS (-1 = until the session ends)",
-    )
-    .with_default("-1")
-    .with_range("-1", "9223372036854775807"),
+    ),
 ];
 
 #[cfg(test)]

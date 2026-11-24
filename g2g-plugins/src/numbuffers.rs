@@ -12,13 +12,11 @@
 
 use g2g_core::{PropError, PropKind, PropValue, PropertySpec};
 
-pub const NUM_BUFFERS_PROPERTY: PropertySpec = PropertySpec::new(
-    "num-buffers",
-    PropKind::Int,
-    "frames to produce then EOS (-1 = forever)",
-)
-.with_default("-1")
-.with_range("-1", "9223372036854775807");
+pub const fn num_buffers_property(description: &'static str) -> PropertySpec {
+    PropertySpec::new("num-buffers", PropKind::Int, description)
+        .with_default("-1")
+        .with_range("-1", "9223372036854775807")
+}
 
 /// Set a `u64` buffer-limit field from a gst-style `num-buffers` value:
 /// negative selects unlimited (`u64::MAX`), n >= 0 a bounded run (0 emits
