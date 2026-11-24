@@ -98,41 +98,7 @@ async fn rtsp_player_handshakes_then_receives_rtp() {
 
     // The player: connect, run the handshake, then receive RTP and depayload.
     let client = async move {
-        let mut ctrl = tokio::net::TcpStream::connect(rtsp_addr)
-            .await
-            .expect("connect rtsp");
-        let url = "rtsp://127.0.0.1/stream";
-
-        ctrl.write_all(format!("OPTIONS {url} RTSP/1.0\r\nCSeq: 1\r\n\r\n").as_bytes())
-            .await
-            .unwrap();
-        assert!(read_response(&mut ctrl).await.contains("200 OK"));
-
-        ctrl.write_all(
-            format!("DESCRIBE {url} RTSP/1.0\r\nCSeq: 2\r\nAccept: application/sdp\r\n\r\n")
-                .as_bytes(),
-        )
-        .await
-        .unwrap();
-        assert!(read_response(&mut ctrl)
-            .await
-            .contains("m=video 0 RTP/AVP 96"));
-
-        let setup = format!(
-            "SETUP {url}/streamid=0 RTSP/1.0\r\nCSeq: 3\r\nTransport: RTP/AVP;unicast;client_port={client_rtp_port}-{}\r\n\r\n",
-            client_rtp_port + 1,
-        );
-        ctrl.write_all(setup.as_bytes()).await.unwrap();
-        let setup_resp = read_response(&mut ctrl).await;
-        assert!(setup_resp.contains("Session:"), "SETUP assigns a session");
-        assert!(setup_resp.contains("server_port="));
-
-        ctrl.write_all(
-            format!("PLAY {url} RTSP/1.0\r\nCSeq: 4\r\nSession: 12345678\r\n\r\n").as_bytes(),
-        )
-        .await
-        .unwrap();
-        assert!(read_response(&mut ctrl).await.contains("200 OK"));
+        let _session = play_over_udp(rtsp_addr, client_rtp_port).await;
 
         // Now receive the RTP stream and recover the access units.
         let mut depay = RtpH264Depayloader::new();
@@ -207,6 +173,150 @@ async fn bind_client_pair() -> (tokio::net::UdpSocket, tokio::net::UdpSocket) {
     panic!("no adjacent udp port pair available");
 }
 
+struct UdpSession {
+    control: tokio::net::TcpStream,
+    setup_response: String,
+    server_rtcp: std::net::SocketAddr,
+}
+
+// OPTIONS, DESCRIBE, SETUP with RTP/UDP to `client_rtp_port` and the port above it, then PLAY
+async fn play_over_udp(rtsp_addr: std::net::SocketAddr, client_rtp_port: u16) -> UdpSession {
+    let mut control = tokio::net::TcpStream::connect(rtsp_addr)
+        .await
+        .expect("connect rtsp");
+    let url = "rtsp://127.0.0.1/stream";
+
+    control
+        .write_all(format!("OPTIONS {url} RTSP/1.0\r\nCSeq: 1\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    assert!(read_response(&mut control).await.contains("200 OK"));
+
+    control
+        .write_all(
+            format!("DESCRIBE {url} RTSP/1.0\r\nCSeq: 2\r\nAccept: application/sdp\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+    assert!(read_response(&mut control)
+        .await
+        .contains("m=video 0 RTP/AVP 96"));
+
+    let setup = format!(
+        "SETUP {url}/streamid=0 RTSP/1.0\r\nCSeq: 3\r\nTransport: RTP/AVP;unicast;client_port={client_rtp_port}-{}\r\n\r\n",
+        client_rtp_port + 1,
+    );
+    control.write_all(setup.as_bytes()).await.unwrap();
+    let setup_response = read_response(&mut control).await;
+    assert!(
+        setup_response.contains("Session:"),
+        "SETUP assigns a session"
+    );
+    let server_rtp_port: u16 = setup_response
+        .split("server_port=")
+        .nth(1)
+        .and_then(|s| s.split('-').next())
+        .and_then(|p| p.trim().parse().ok())
+        .expect("server_port in SETUP response");
+
+    control
+        .write_all(
+            format!("PLAY {url} RTSP/1.0\r\nCSeq: 4\r\nSession: 12345678\r\n\r\n").as_bytes(),
+        )
+        .await
+        .unwrap();
+    assert!(read_response(&mut control).await.contains("200 OK"));
+    UdpSession {
+        control,
+        setup_response,
+        server_rtcp: std::net::SocketAddr::from(([127, 0, 0, 1], server_rtp_port + 1)),
+    }
+}
+
+// 33 ms is a whole number of 90 kHz ticks, so every frame sits this far past one, under half a tick
+#[cfg(feature = "metadata")]
+const PAST_TICK_NS: u64 = 5_000;
+
+#[cfg(feature = "metadata")]
+#[tokio::test]
+async fn sender_reports_name_the_instant_of_their_rtp_timestamp() {
+    const FIRST_FRAME_UNIX_NS: i64 = 1_700_000_000_000_000_000;
+    const FRAME_PERIOD_NS: u64 = 33_000_000;
+
+    let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind rtsp");
+    let rtsp_addr = listener.local_addr().unwrap();
+    let mut sink = RtspServerSink::from_listener(listener)
+        .unwrap()
+        .with_rtp(96, 0x1234_5678)
+        .with_rtcp_sr_interval(std::time::Duration::from_millis(1));
+    sink.configure_pipeline(&h264_caps()).expect("configure");
+
+    let (rtp, rtcp_sock) = bind_client_pair().await;
+    let client_rtp_port = rtp.local_addr().unwrap().port();
+    let client_done = std::sync::atomic::AtomicBool::new(false);
+
+    let client = async {
+        let _session = play_over_udp(rtsp_addr, client_rtp_port).await;
+        let mut buf = [0u8; 2048];
+        let report = loop {
+            let recv =
+                tokio::time::timeout(std::time::Duration::from_secs(5), rtcp_sock.recv(&mut buf))
+                    .await;
+            let n = recv
+                .expect("a sender report within 5 s")
+                .expect("recv rtcp");
+            let report =
+                rtcp::parse_compound(&buf[..n])
+                    .into_iter()
+                    .find_map(|packet| match packet {
+                        RtcpPacket::SenderReport { ntp, rtp_ts, .. } => Some((ntp, rtp_ts)),
+                        _ => None,
+                    });
+            if let Some(report) = report {
+                break report;
+            }
+        };
+        client_done.store(true, std::sync::atomic::Ordering::Relaxed);
+        report
+    };
+
+    let server = async {
+        let mut null = NullOut;
+        let mut i = 0u64;
+        while !client_done.load(std::sync::atomic::Ordering::Relaxed) {
+            let mut frame = Frame::new(
+                MemoryDomain::System(SystemSlice::from_boxed(
+                    access_unit((i % 8) as u8).into_boxed_slice(),
+                )),
+                FrameTiming {
+                    pts_ns: i * FRAME_PERIOD_NS + PAST_TICK_NS,
+                    ..FrameTiming::default()
+                },
+                i,
+            );
+            frame.meta.attach(g2g_core::meta::WallClockMeta {
+                unix_nanos: FIRST_FRAME_UNIX_NS + (i * FRAME_PERIOD_NS) as i64,
+            });
+            sink.process(PipelinePacket::DataFrame(frame), &mut null)
+                .await
+                .expect("stream frame");
+            i += 1;
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    };
+
+    let ((ntp, rtp_ts), ()) = tokio::join!(client, server);
+    let pts_zero_unix_ns = FIRST_FRAME_UNIX_NS - PAST_TICK_NS as i64;
+    let rtp_instant_unix_ns =
+        pts_zero_unix_ns + g2g_plugins::rtpklv::pts_ns_from_rtp(rtp_ts) as i64;
+    assert_eq!(
+        Some(ntp),
+        g2g_core::ntp_from_unix_nanos(rtp_instant_unix_ns),
+        "the sender report's NTP time is the instant of RTP timestamp {rtp_ts}"
+    );
+}
+
 #[tokio::test]
 async fn sender_reports_flow_and_a_silent_player_is_reaped() {
     // Timeline (generous margins for CI): the player keepalives via RTCP RRs
@@ -230,48 +340,18 @@ async fn sender_reports_flow_and_a_silent_player_is_reaped() {
     let client_rtp_port = rtp.local_addr().unwrap().port();
 
     let client = async move {
-        let mut ctrl = tokio::net::TcpStream::connect(rtsp_addr)
-            .await
-            .expect("connect rtsp");
-        let url = "rtsp://127.0.0.1/stream";
-
-        ctrl.write_all(format!("OPTIONS {url} RTSP/1.0\r\nCSeq: 1\r\n\r\n").as_bytes())
-            .await
-            .unwrap();
-        read_response(&mut ctrl).await;
-        ctrl.write_all(format!("DESCRIBE {url} RTSP/1.0\r\nCSeq: 2\r\n\r\n").as_bytes())
-            .await
-            .unwrap();
-        read_response(&mut ctrl).await;
-
-        let setup = format!(
-            "SETUP {url}/streamid=0 RTSP/1.0\r\nCSeq: 3\r\nTransport: RTP/AVP;unicast;client_port={client_rtp_port}-{}\r\n\r\n",
-            client_rtp_port + 1,
-        );
-        ctrl.write_all(setup.as_bytes()).await.unwrap();
-        let setup_resp = read_response(&mut ctrl).await;
+        let session = play_over_udp(rtsp_addr, client_rtp_port).await;
         // 300 ms rounds up to a whole-second advertisement.
         assert!(
-            setup_resp.contains(";timeout=1"),
-            "SETUP advertises the session timeout: {setup_resp}"
+            session.setup_response.contains(";timeout=1"),
+            "SETUP advertises the session timeout: {}",
+            session.setup_response
         );
-        let server_rtp_port: u16 = setup_resp
-            .split("server_port=")
-            .nth(1)
-            .and_then(|s| s.split('-').next())
-            .and_then(|p| p.trim().parse().ok())
-            .expect("server_port in SETUP response");
-
-        ctrl.write_all(
-            format!("PLAY {url} RTSP/1.0\r\nCSeq: 4\r\nSession: 12345678\r\n\r\n").as_bytes(),
-        )
-        .await
-        .unwrap();
-        read_response(&mut ctrl).await;
+        let ctrl = session.control;
         let started = std::time::Instant::now();
 
         // Keepalive phase: receive RTP + RTCP, send an RR every 100 ms.
-        let server_rtcp = std::net::SocketAddr::from(([127, 0, 0, 1], server_rtp_port + 1));
+        let server_rtcp = session.server_rtcp;
         let mut sr_seen = false;
         let mut last_rtp_at_ms = 0u64;
         let mut pkt = [0u8; 2048];
