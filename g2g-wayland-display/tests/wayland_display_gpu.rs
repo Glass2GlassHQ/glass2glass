@@ -199,14 +199,14 @@ async fn client_reaches_frames(
     mut shows_client: impl FnMut(&Frame) -> bool,
 ) {
     let source = gpu_source(render_node);
-    let mut socket_names = source.socket_names();
+    let mut display_names = source.display_names();
     let pull = register_appsink_pull(channel);
     let mut graph: Graph<GraphNode> = Graph::new();
     let source_node = graph.add_source(GraphNode::source(source));
     let sink_node = graph.add_sink(GraphNode::element(sink.with_channel(channel)));
     graph.link(source_node, sink_node).expect("links");
     let checks = async {
-        let mut events = connect_client(&mut socket_names).await;
+        let mut events = connect_client(&mut display_names).await;
         let interfaces = client_globals(&mut events).await;
         assert!(
             interfaces.iter().any(|name| name == LINUX_DMABUF_INTERFACE),
@@ -362,7 +362,7 @@ async fn vaapi_encodes_nv12_dma_bufs_from_the_display() {
         let channel = format!("m2539_{}", render_node.display());
         let node_path = render_node.to_string_lossy();
         let source = gpu_source(&render_node).with_num_buffers(ENCODED_FRAMES);
-        let mut socket_names = source.socket_names();
+        let mut display_names = source.display_names();
         let encoder = FfmpegVideoEnc::new()
             .with_backend(Backend::Vaapi(VaapiCodec::H264))
             .with_device_path(&node_path);
@@ -376,7 +376,7 @@ async fn vaapi_encodes_nv12_dma_bufs_from_the_display() {
         graph.link(encoder_node, decoder_node).expect("links");
         graph.link(decoder_node, sink_node).expect("links");
         let checks = async {
-            let mut events = connect_client(&mut socket_names).await;
+            let mut events = connect_client(&mut display_names).await;
             client_globals(&mut events).await;
             let mut client_shown = false;
             while let Some(frame) = pull.pull().await {

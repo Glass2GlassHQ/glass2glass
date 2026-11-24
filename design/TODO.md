@@ -33,8 +33,6 @@ Highest leverage first:
 The plan is [remote.md](remote.md).
 
 - `ximagesrc` for unattended X11 capture, and window capture.
-- `waylanddisplaysrc`: run X11 apps through Xwayland with smithay's X11 window
-  manager.
 - `waylanddisplaysrc`: take the size and rate from a downstream caps filter, and
   support drag and drop.
 - `dmabuftocuda`: import a dma-buf into CUDA so `nvenc` encodes

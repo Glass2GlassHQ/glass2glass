@@ -2,7 +2,10 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
+use std::borrow::Cow;
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -21,20 +24,24 @@ use smithay::backend::renderer::{Bind, ImportDma, Offscreen};
 use smithay::desktop::space::render_output;
 use smithay::desktop::{PopupKind, PopupManager, Space, Window, WindowSurfaceType};
 use smithay::input::dnd::DndGrabHandler;
-use smithay::input::keyboard::{FilterResult, Keycode, XkbConfig};
+use smithay::input::keyboard::{
+    FilterResult, KeyboardTarget, Keycode, KeysymHandle, ModifiersState, XkbConfig,
+};
 use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::channel::{Channel, Event as ChannelEvent};
 use smithay::reexports::calloop::generic::Generic;
-use smithay::reexports::calloop::{EventLoop, Interest, Mode as TriggerMode, PostAction};
+use smithay::reexports::calloop::{
+    EventLoop, Interest, LoopHandle, Mode as TriggerMode, PostAction,
+};
 use smithay::reexports::pixman::Image;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::backend::ClientData;
 use smithay::reexports::wayland_server::protocol::{wl_buffer, wl_seat, wl_surface::WlSurface};
 use smithay::reexports::wayland_server::Resource;
 use smithay::reexports::wayland_server::{Client, Display, DisplayHandle};
-use smithay::utils::{Logical, Point, Serial, Transform, SERIAL_COUNTER};
+use smithay::utils::{IsAlive, Logical, Point, Rectangle, Serial, Transform, SERIAL_COUNTER};
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
     get_parent, is_sync_subsurface, with_states, CompositorClientState, CompositorHandler,
@@ -43,6 +50,7 @@ use smithay::wayland::compositor::{
 use smithay::wayland::dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier};
 use smithay::wayland::output::{OutputHandler, OutputManagerState};
 use smithay::wayland::pointer_constraints::PointerConstraintsHandler;
+use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::selection::data_device::{
     set_data_device_focus, DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler,
 };
@@ -53,9 +61,15 @@ use smithay::wayland::shell::xdg::{
 };
 use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::wayland::socket::ListeningSocketSource;
+use smithay::wayland::xwayland_shell::{XWaylandShellHandler, XWaylandShellState};
+use smithay::xwayland::xwm::{Reorder, ResizeEdge, XwmId};
+use smithay::xwayland::{
+    X11Surface, X11Wm, XWayland, XWaylandClientData, XWaylandEvent, XwmHandler,
+};
 use tokio::sync::oneshot;
 
 use crate::gpu::{GpuFormat, GpuOutput, GpuRenderer};
+use crate::waylanddisplaysrc::DisplayNames;
 
 const LOG_CATEGORY: &str = "WaylandDisplaySrc";
 // xkb keycodes are evdev codes offset by 8
@@ -96,10 +110,20 @@ pub(crate) enum Rendering {
     },
 }
 
+#[derive(Debug)]
+pub(crate) struct DisplaySettings {
+    pub(crate) size: DisplaySize,
+    pub(crate) pacing: Pacing,
+    pub(crate) rendering: Rendering,
+    pub(crate) xwayland: bool,
+}
+
+pub(crate) type NamesReply = oneshot::Sender<Result<DisplayNames, G2gError>>;
+
 pub(crate) struct DisplayChannels {
     pub(crate) frame_requests: Channel<FrameReply>,
     pub(crate) input: Channel<WindowInput>,
-    pub(crate) socket_name: oneshot::Sender<Result<String, G2gError>>,
+    pub(crate) names: NamesReply,
 }
 
 pub(crate) fn hardware_error(what: &str, error: impl core::fmt::Debug) -> G2gError {
@@ -108,25 +132,31 @@ pub(crate) fn hardware_error(what: &str, error: impl core::fmt::Debug) -> G2gErr
 }
 
 pub(crate) fn run_display(
-    size: DisplaySize,
-    pacing: Pacing,
-    rendering: Rendering,
+    settings: DisplaySettings,
     channels: DisplayChannels,
 ) -> Result<(), G2gError> {
     let DisplayChannels {
         frame_requests,
         input,
-        socket_name,
+        names,
     } = channels;
-    let started = start_display(size, pacing, rendering, frame_requests, input);
-    let (mut event_loop, mut state) = match started {
+    let xwayland = settings.xwayland;
+    let (mut event_loop, mut state) = match start_display(settings, frame_requests, input) {
         Ok(started) => started,
         Err(error) => {
-            let _ = socket_name.send(Err(error.clone()));
+            let _ = names.send(Err(error.clone()));
             return Err(error);
         }
     };
-    let _ = socket_name.send(Ok(state.socket_name.clone()));
+    state.names_reply = Some(names);
+    if xwayland {
+        if let Err(error) = spawn_xwayland(&mut state) {
+            state.fail_startup(error.clone());
+            return Err(error);
+        }
+    } else {
+        state.publish_names(None);
+    }
     while !state.stopped {
         let timeout = state.time_until_next_frame(Instant::now());
         event_loop
@@ -141,10 +171,35 @@ pub(crate) fn run_display(
     Ok(())
 }
 
+fn spawn_xwayland(state: &mut DisplayState) -> Result<(), G2gError> {
+    let (xwayland, client) = XWayland::spawn(
+        &state.display_handle,
+        None,
+        std::iter::empty::<(String, String)>(),
+        std::iter::empty::<String>(),
+        true,
+        Stdio::null(),
+        Stdio::null(),
+        |_| (),
+    )
+    .map_err(|error| hardware_error("starting Xwayland", error))?;
+    state
+        .loop_handle
+        .insert_source(xwayland, move |event, _, state| match event {
+            XWaylandEvent::Ready {
+                x11_socket,
+                display_number,
+            } => state.start_window_manager(x11_socket, display_number, client.clone()),
+            XWaylandEvent::Error => {
+                state.fail_startup(hardware_error("Xwayland exited during startup", ()));
+            }
+        })
+        .map_err(|error| hardware_error("watching Xwayland", error))?;
+    Ok(())
+}
+
 fn start_display(
-    size: DisplaySize,
-    pacing: Pacing,
-    rendering: Rendering,
+    settings: DisplaySettings,
     frame_requests: Channel<FrameReply>,
     input: Channel<WindowInput>,
 ) -> Result<(EventLoop<'static, DisplayState>, DisplayState), G2gError> {
@@ -199,7 +254,7 @@ fn start_display(
         })
         .map_err(|error| hardware_error("receiving input", error))?;
 
-    let state = DisplayState::new(display_handle, socket_name, size, pacing, rendering)?;
+    let state = DisplayState::new(display_handle, loop_handle, socket_name, settings)?;
     Ok((event_loop, state))
 }
 
@@ -209,6 +264,99 @@ struct ClientState {
 }
 
 impl ClientData for ClientState {}
+
+#[derive(Debug, Clone, PartialEq)]
+enum FocusedSurface {
+    Wayland(WlSurface),
+    X11(Box<X11Surface>),
+}
+
+impl FocusedSurface {
+    fn of_window(window: &Window) -> Option<Self> {
+        if let Some(toplevel) = window.toplevel() {
+            return Some(Self::Wayland(toplevel.wl_surface().clone()));
+        }
+        window
+            .x11_surface()
+            .map(|surface| Self::X11(Box::new(surface.clone())))
+    }
+}
+
+impl IsAlive for FocusedSurface {
+    fn alive(&self) -> bool {
+        match self {
+            Self::Wayland(surface) => surface.alive(),
+            Self::X11(surface) => surface.alive(),
+        }
+    }
+}
+
+impl WaylandFocus for FocusedSurface {
+    fn wl_surface(&self) -> Option<Cow<'_, WlSurface>> {
+        match self {
+            Self::Wayland(surface) => Some(Cow::Borrowed(surface)),
+            Self::X11(surface) => WaylandFocus::wl_surface(&**surface),
+        }
+    }
+}
+
+impl KeyboardTarget<DisplayState> for FocusedSurface {
+    fn enter(
+        &self,
+        seat: &Seat<DisplayState>,
+        state: &mut DisplayState,
+        keys: Vec<KeysymHandle<'_>>,
+        serial: Serial,
+    ) {
+        match self {
+            Self::Wayland(surface) => KeyboardTarget::enter(surface, seat, state, keys, serial),
+            Self::X11(surface) => KeyboardTarget::enter(&**surface, seat, state, keys, serial),
+        }
+    }
+
+    fn leave(&self, seat: &Seat<DisplayState>, state: &mut DisplayState, serial: Serial) {
+        match self {
+            Self::Wayland(surface) => KeyboardTarget::leave(surface, seat, state, serial),
+            Self::X11(surface) => KeyboardTarget::leave(&**surface, seat, state, serial),
+        }
+    }
+
+    fn key(
+        &self,
+        seat: &Seat<DisplayState>,
+        state: &mut DisplayState,
+        key: KeysymHandle<'_>,
+        key_state: KeyState,
+        serial: Serial,
+        time: InputTime,
+    ) {
+        match self {
+            Self::Wayland(surface) => {
+                KeyboardTarget::key(surface, seat, state, key, key_state, serial, time);
+            }
+            Self::X11(surface) => {
+                KeyboardTarget::key(&**surface, seat, state, key, key_state, serial, time);
+            }
+        }
+    }
+
+    fn modifiers(
+        &self,
+        seat: &Seat<DisplayState>,
+        state: &mut DisplayState,
+        modifiers: ModifiersState,
+        serial: Serial,
+    ) {
+        match self {
+            Self::Wayland(surface) => {
+                KeyboardTarget::modifiers(surface, seat, state, modifiers, serial);
+            }
+            Self::X11(surface) => {
+                KeyboardTarget::modifiers(&**surface, seat, state, modifiers, serial);
+            }
+        }
+    }
+}
 
 struct SoftwareRenderer {
     pixman: PixmanRenderer,
@@ -223,7 +371,9 @@ enum Renderer {
 
 struct DisplayState {
     display_handle: DisplayHandle,
+    loop_handle: LoopHandle<'static, DisplayState>,
     socket_name: String,
+    names_reply: Option<NamesReply>,
     size: DisplaySize,
     pacing: Pacing,
     started: Instant,
@@ -234,6 +384,8 @@ struct DisplayState {
     _dmabuf_global: Option<DmabufGlobal>,
     data_device_state: DataDeviceState,
     _output_manager_state: OutputManagerState,
+    xwayland_shell_state: XWaylandShellState,
+    window_manager: Option<X11Wm>,
     seat_state: SeatState<DisplayState>,
     seat: Seat<DisplayState>,
     space: Space<Window>,
@@ -297,16 +449,22 @@ fn copy_picture(image: &Image<'static, 'static>, size: DisplaySize) -> Vec<u8> {
 impl DisplayState {
     fn new(
         display_handle: DisplayHandle,
+        loop_handle: LoopHandle<'static, DisplayState>,
         socket_name: String,
-        size: DisplaySize,
-        pacing: Pacing,
-        rendering: Rendering,
+        settings: DisplaySettings,
     ) -> Result<Self, G2gError> {
+        let DisplaySettings {
+            size,
+            pacing,
+            rendering,
+            ..
+        } = settings;
         let compositor_state = CompositorState::new::<Self>(&display_handle);
         let xdg_shell_state = XdgShellState::new::<Self>(&display_handle);
         let shm_state = ShmState::new::<Self>(&display_handle, Vec::new());
         let data_device_state = DataDeviceState::new::<Self>(&display_handle);
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&display_handle);
+        let xwayland_shell_state = XWaylandShellState::new::<Self>(&display_handle);
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(&display_handle, "seat0");
         seat.add_keyboard(
@@ -384,7 +542,9 @@ impl DisplayState {
 
         Ok(Self {
             display_handle,
+            loop_handle,
             socket_name,
+            names_reply: None,
             size,
             pacing,
             started: Instant::now(),
@@ -395,6 +555,8 @@ impl DisplayState {
             _dmabuf_global: dmabuf_global,
             data_device_state,
             _output_manager_state: output_manager_state,
+            xwayland_shell_state,
+            window_manager: None,
             seat_state,
             seat,
             space,
@@ -408,6 +570,59 @@ impl DisplayState {
             held_buttons: Vec::new(),
             stopped: false,
         })
+    }
+
+    fn publish_names(&mut self, x11_display: Option<String>) {
+        if let Some(reply) = self.names_reply.take() {
+            // the element drops its receiver when the run ends
+            let _ = reply.send(Ok(DisplayNames {
+                wayland_socket: self.socket_name.clone(),
+                x11_display,
+            }));
+        }
+    }
+
+    fn fail_startup(&mut self, error: G2gError) {
+        if let Some(reply) = self.names_reply.take() {
+            let _ = reply.send(Err(error));
+        }
+        self.stopped = true;
+    }
+
+    fn start_window_manager(
+        &mut self,
+        x11_socket: UnixStream,
+        display_number: u32,
+        client: Client,
+    ) {
+        let started = X11Wm::start_wm(
+            self.loop_handle.clone(),
+            &self.display_handle,
+            x11_socket,
+            client,
+        );
+        match started {
+            Ok(window_manager) => {
+                self.window_manager = Some(window_manager);
+                self.publish_names(Some(format!(":{display_number}")));
+            }
+            Err(error) => {
+                self.fail_startup(hardware_error("starting the X11 window manager", error))
+            }
+        }
+    }
+
+    fn output_rectangle(&self) -> Rectangle<i32, Logical> {
+        self.space
+            .output_geometry(&self.output)
+            .expect("the output is mapped at construction")
+    }
+
+    fn x11_window(&self, surface: &X11Surface) -> Option<Window> {
+        self.space
+            .elements()
+            .find(|window| window.x11_surface() == Some(surface))
+            .cloned()
     }
 
     fn next_frame_due(&self) -> Option<Instant> {
@@ -497,9 +712,7 @@ impl DisplayState {
             return;
         };
         self.space.raise_element(&window, true);
-        let surface = window
-            .toplevel()
-            .map(|toplevel| toplevel.wl_surface().clone());
+        let surface = FocusedSurface::of_window(&window);
         let keyboard = self.seat.get_keyboard().expect("the seat has a keyboard");
         keyboard.set_focus(self, surface, serial);
         for window in self.space.elements() {
@@ -617,8 +830,7 @@ impl DisplayState {
             .space
             .elements()
             .last()
-            .and_then(|window| window.toplevel())
-            .map(|toplevel| toplevel.wl_surface().clone());
+            .and_then(FocusedSurface::of_window);
         let keyboard = self.seat.get_keyboard().expect("the seat has a keyboard");
         keyboard.set_focus(self, surface, SERIAL_COUNTER.next_serial());
     }
@@ -630,9 +842,13 @@ impl CompositorHandler for DisplayState {
     }
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
+        // smithay inserts the Xwayland client with its own client data
+        if let Some(xwayland) = client.get_data::<XWaylandClientData>() {
+            return &xwayland.compositor_state;
+        }
         &client
             .get_data::<ClientState>()
-            .expect("every client is inserted with ClientState")
+            .expect("the socket inserts every other client with ClientState")
             .compositor_state
     }
 
@@ -676,11 +892,7 @@ impl DisplayState {
     fn window_for(&self, surface: &WlSurface) -> Option<Window> {
         self.space
             .elements()
-            .find(|window| {
-                window
-                    .toplevel()
-                    .is_some_and(|toplevel| toplevel.wl_surface() == surface)
-            })
+            .find(|window| window.wl_surface().as_deref() == Some(surface))
             .cloned()
     }
 }
@@ -737,7 +949,11 @@ impl XdgShellHandler for DisplayState {
         self.space
             .map_element(Window::new_wayland_window(surface), (0, 0), true);
         let keyboard = self.seat.get_keyboard().expect("the seat has a keyboard");
-        keyboard.set_focus(self, Some(wl_surface), SERIAL_COUNTER.next_serial());
+        keyboard.set_focus(
+            self,
+            Some(FocusedSurface::Wayland(wl_surface)),
+            SERIAL_COUNTER.next_serial(),
+        );
         self.damaged = true;
     }
 
@@ -776,7 +992,7 @@ impl XdgShellHandler for DisplayState {
 }
 
 impl SeatHandler for DisplayState {
-    type KeyboardFocus = WlSurface;
+    type KeyboardFocus = FocusedSurface;
     type PointerFocus = WlSurface;
     type TouchFocus = WlSurface;
 
@@ -784,9 +1000,26 @@ impl SeatHandler for DisplayState {
         &mut self.seat_state
     }
 
-    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
-        let client = focused.and_then(|surface| self.display_handle.get_client(surface.id()).ok());
+    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&FocusedSurface>) {
+        let client = focused
+            .and_then(WaylandFocus::wl_surface)
+            .and_then(|surface| self.display_handle.get_client(surface.id()).ok());
         set_data_device_focus(&self.display_handle, seat, client);
+        let Some(FocusedSurface::X11(surface)) = focused else {
+            return;
+        };
+        let Some(window_manager) = self.window_manager.as_mut() else {
+            return;
+        };
+        let raised = window_manager
+            .raise_window(&**surface)
+            .and_then(|()| surface.set_activated(true));
+        if let Err(error) = raised {
+            g2g_core::g2g_warn!(
+                Target::category(LOG_CATEGORY),
+                "could not activate an X11 window: {error}"
+            );
+        }
     }
 }
 
@@ -805,6 +1038,110 @@ impl DndGrabHandler for DisplayState {}
 impl WaylandDndGrabHandler for DisplayState {}
 
 impl OutputHandler for DisplayState {}
+
+impl XWaylandShellHandler for DisplayState {
+    fn xwayland_shell_state(&mut self) -> &mut XWaylandShellState {
+        &mut self.xwayland_shell_state
+    }
+}
+
+fn warn_x11(what: &str, error: impl core::fmt::Display) {
+    g2g_core::g2g_warn!(Target::category(LOG_CATEGORY), "{what}: {error}");
+}
+
+impl XwmHandler for DisplayState {
+    fn xwm_state(&mut self, _: XwmId) -> &mut X11Wm {
+        self.window_manager
+            .as_mut()
+            .expect("X11 events arrive only from a running window manager")
+    }
+
+    fn new_window(&mut self, _: XwmId, _: X11Surface) {}
+
+    fn new_override_redirect_window(&mut self, _: XwmId, _: X11Surface) {}
+
+    fn map_window_request(&mut self, _: XwmId, surface: X11Surface) {
+        let output = self.output_rectangle();
+        if let Err(error) = surface.set_mapped(true) {
+            warn_x11("could not map an X11 window", error);
+            return;
+        }
+        if let Err(error) = surface.set_fullscreen(true) {
+            warn_x11("could not make an X11 window fullscreen", error);
+        }
+        if let Err(error) = surface.configure(output) {
+            warn_x11("could not size an X11 window", error);
+        }
+        self.space
+            .map_element(Window::new_x11_window(surface.clone()), output.loc, true);
+        let keyboard = self.seat.get_keyboard().expect("the seat has a keyboard");
+        keyboard.set_focus(
+            self,
+            Some(FocusedSurface::X11(Box::new(surface))),
+            SERIAL_COUNTER.next_serial(),
+        );
+        self.damaged = true;
+    }
+
+    fn mapped_override_redirect_window(&mut self, _: XwmId, surface: X11Surface) {
+        let location = surface.last_configure().loc;
+        self.space
+            .map_element(Window::new_x11_window(surface), location, true);
+        self.damaged = true;
+    }
+
+    fn unmapped_window(&mut self, _: XwmId, surface: X11Surface) {
+        if let Some(window) = self.x11_window(&surface) {
+            self.space.unmap_elem(&window);
+        }
+        if !surface.is_override_redirect() {
+            if let Err(error) = surface.set_mapped(false) {
+                warn_x11("could not unmap an X11 window", error);
+            }
+        }
+        self.focus_top_window();
+        self.damaged = true;
+    }
+
+    fn destroyed_window(&mut self, _: XwmId, _: X11Surface) {}
+
+    fn configure_request(
+        &mut self,
+        _: XwmId,
+        surface: X11Surface,
+        _: Option<i32>,
+        _: Option<i32>,
+        _: Option<u32>,
+        _: Option<u32>,
+        _: Option<Reorder>,
+    ) {
+        // managed windows stay fullscreen whatever size they ask for
+        if let Err(error) = surface.configure(self.output_rectangle()) {
+            warn_x11("could not size an X11 window", error);
+        }
+    }
+
+    fn configure_notify(
+        &mut self,
+        _: XwmId,
+        surface: X11Surface,
+        geometry: Rectangle<i32, Logical>,
+        _: Option<u32>,
+    ) {
+        if let Some(window) = self.x11_window(&surface) {
+            self.space.map_element(window, geometry.loc, false);
+            self.damaged = true;
+        }
+    }
+
+    fn resize_request(&mut self, _: XwmId, _: X11Surface, _: u32, _: ResizeEdge) {}
+
+    fn move_request(&mut self, _: XwmId, _: X11Surface, _: u32) {}
+
+    fn disconnected(&mut self, _: XwmId) {
+        self.window_manager = None;
+    }
+}
 
 impl PointerConstraintsHandler for DisplayState {}
 

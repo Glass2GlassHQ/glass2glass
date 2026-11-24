@@ -26,7 +26,8 @@ use smithay::reexports::calloop::channel::{channel, Channel, Sender};
 use tokio::sync::{oneshot, watch};
 
 use crate::display::{
-    run_display, DisplayChannels, DisplaySize, FrameReply, Pacing, Picture, Rendering,
+    run_display, DisplayChannels, DisplaySettings, DisplaySize, FrameReply, Pacing, Picture,
+    Rendering,
 };
 use crate::gpu::{GpuFormat, GpuOutput};
 
@@ -52,19 +53,28 @@ const DEFAULT_HEIGHT: u32 = 1080;
 const DEFAULT_FRAMERATE: u32 = 60;
 const REPEAT_AFTER: Duration = Duration::from_secs(1);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplayNames {
+    // clients set WAYLAND_DISPLAY to this socket name
+    pub wayland_socket: String,
+    // X11 clients set DISPLAY to this, present when the source runs Xwayland
+    pub x11_display: Option<String>,
+}
+
 pub struct WaylandDisplaySrc {
     width: u32,
     height: u32,
     framerate: u32,
     frame_limit: u64,
     render_node: String,
+    xwayland: bool,
     output_memory: MemoryDomainKind,
     format: RawVideoFormat,
     configured: bool,
     clock_sync: Option<ClockSync>,
     input_sender: Sender<WindowInput>,
     input: Option<Channel<WindowInput>>,
-    socket_name: watch::Sender<String>,
+    names: watch::Sender<Option<DisplayNames>>,
 }
 
 impl core::fmt::Debug for WaylandDisplaySrc {
@@ -75,9 +85,10 @@ impl core::fmt::Debug for WaylandDisplaySrc {
             .field("framerate", &self.framerate)
             .field("frame_limit", &self.frame_limit)
             .field("render_node", &self.render_node)
+            .field("xwayland", &self.xwayland)
             .field("output_memory", &self.output_memory)
             .field("format", &self.format)
-            .field("socket_name", &*self.socket_name.borrow())
+            .field("names", &*self.names.borrow())
             .finish_non_exhaustive()
     }
 }
@@ -91,13 +102,14 @@ impl Default for WaylandDisplaySrc {
             framerate: DEFAULT_FRAMERATE,
             frame_limit: u64::MAX,
             render_node: String::from(DEFAULT_RENDER_NODE),
+            xwayland: false,
             output_memory: MemoryDomainKind::System,
             format: RGBA_OUTPUT.format,
             configured: false,
             clock_sync: None,
             input_sender,
             input: Some(input),
-            socket_name: watch::channel(String::new()).0,
+            names: watch::channel(None).0,
         }
     }
 }
@@ -128,13 +140,18 @@ impl WaylandDisplaySrc {
         self
     }
 
+    pub fn with_xwayland(mut self) -> Self {
+        self.xwayland = true;
+        self
+    }
+
     pub fn input_sender(&self) -> Sender<WindowInput> {
         self.input_sender.clone()
     }
 
-    pub fn socket_names(&self) -> watch::Receiver<String> {
-        // clients set WAYLAND_DISPLAY to this name, which stays empty until the run opens the socket
-        self.socket_name.subscribe()
+    pub fn display_names(&self) -> watch::Receiver<Option<DisplayNames>> {
+        // None until the run opens the wayland socket and, with Xwayland, its window manager runs
+        self.names.subscribe()
     }
 
     fn rendering(&self) -> Result<Rendering, G2gError> {
@@ -195,10 +212,41 @@ impl WaylandDisplaySrc {
     }
 }
 
-fn join_display(handle: std::thread::JoinHandle<Result<(), G2gError>>) -> Result<(), G2gError> {
-    handle
-        .join()
-        .map_err(|_| G2gError::Hardware(HardwareError::Other))?
+#[derive(Debug)]
+struct DisplayThread {
+    frame_requests: Option<Sender<FrameReply>>,
+    handle: Option<std::thread::JoinHandle<Result<(), G2gError>>>,
+}
+
+impl DisplayThread {
+    fn request_frame(&self, reply: FrameReply) -> bool {
+        self.frame_requests
+            .as_ref()
+            .is_some_and(|frame_requests| frame_requests.send(reply).is_ok())
+    }
+
+    fn join(&mut self) -> Result<(), G2gError> {
+        // the display loop stops once its frame request channel closes
+        self.frame_requests = None;
+        let Some(handle) = self.handle.take() else {
+            return Ok(());
+        };
+        handle
+            .join()
+            .map_err(|_| G2gError::Hardware(HardwareError::Other))?
+    }
+}
+
+impl Drop for DisplayThread {
+    fn drop(&mut self) {
+        // a cancelled run must not leave the compositor and Xwayland running past the process exit
+        if let Err(error) = self.join() {
+            g2g_core::g2g_warn!(
+                Target::category("WaylandDisplaySrc"),
+                "the display thread failed after the run was cancelled: {error:?}"
+            );
+        }
+    }
 }
 
 impl SourceLoop for WaylandDisplaySrc {
@@ -261,6 +309,12 @@ impl SourceLoop for WaylandDisplaySrc {
                 "DRM render node the compositor renders with, or software for the CPU renderer",
             )
             .with_default(DEFAULT_RENDER_NODE),
+            PropertySpec::new(
+                "xwayland",
+                PropKind::Bool,
+                "run Xwayland so X11 apps can connect, needs the Xwayland binary on PATH",
+            )
+            .with_default("false"),
             num_buffers_property("frames to render then EOS (-1 = forever)"),
         ];
         PROPERTIES
@@ -280,6 +334,7 @@ impl SourceLoop for WaylandDisplaySrc {
             "render-node" => {
                 self.render_node = value.as_str().ok_or(PropError::Type)?.to_owned();
             }
+            "xwayland" => self.xwayland = value.as_bool().ok_or(PropError::Type)?,
             "num-buffers" => set_num_buffers(&mut self.frame_limit, &value)?,
             _ => return Err(PropError::Unknown),
         }
@@ -292,6 +347,7 @@ impl SourceLoop for WaylandDisplaySrc {
             "height" => Some(PropValue::Uint(self.height.into())),
             "framerate" => Some(PropValue::Uint(self.framerate.into())),
             "render-node" => Some(PropValue::Str(self.render_node.clone())),
+            "xwayland" => Some(PropValue::Bool(self.xwayland)),
             "num-buffers" => Some(get_num_buffers(self.frame_limit)),
             _ => None,
         }
@@ -341,39 +397,49 @@ impl SourceLoop for WaylandDisplaySrc {
                 frame_period: Duration::from_nanos(period_ns),
                 repeat_after: REPEAT_AFTER,
             };
+            let settings = DisplaySettings {
+                size,
+                pacing,
+                rendering,
+                xwayland: self.xwayland,
+            };
             let (frame_request_sender, frame_requests) = channel::<FrameReply>();
-            let (socket_sender, socket_receiver) = oneshot::channel();
+            let (names_sender, names_receiver) = oneshot::channel();
             let handle = std::thread::Builder::new()
                 .name(String::from("g2g-waylanddisplaysrc"))
                 .spawn(move || {
                     run_display(
-                        size,
-                        pacing,
-                        rendering,
+                        settings,
                         DisplayChannels {
                             frame_requests,
                             input,
-                            socket_name: socket_sender,
+                            names: names_sender,
                         },
                     )
                 })
                 .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-            let socket_name = match socket_receiver.await {
-                Ok(Ok(socket_name)) => socket_name,
+            let mut display = DisplayThread {
+                frame_requests: Some(frame_request_sender),
+                handle: Some(handle),
+            };
+            let names = match names_receiver.await {
+                Ok(Ok(names)) => names,
                 Ok(Err(error)) => {
-                    join_display(handle)?;
+                    display.join()?;
                     return Err(error);
                 }
                 Err(_) => {
-                    join_display(handle)?;
+                    display.join()?;
                     return Err(G2gError::Hardware(HardwareError::Other));
                 }
             };
             g2g_core::g2g_info!(
                 Target::category("WaylandDisplaySrc"),
-                "clients connect with WAYLAND_DISPLAY={socket_name}"
+                "clients connect with WAYLAND_DISPLAY={} DISPLAY={}",
+                names.wayland_socket,
+                names.x11_display.as_deref().unwrap_or("(no Xwayland)")
             );
-            self.socket_name.send_replace(socket_name);
+            self.names.send_replace(Some(names));
 
             let clock_sync = self.clock_sync.clone();
             let mut anchor = CaptureAnchor::new();
@@ -383,7 +449,7 @@ impl SourceLoop for WaylandDisplaySrc {
             let mut downstream_open = true;
             while sequence < self.frame_limit {
                 let (reply, picture) = oneshot::channel();
-                if frame_request_sender.send(reply).is_err() {
+                if !display.request_frame(reply) {
                     break;
                 }
                 let Ok(picture) = picture.await else {
@@ -423,8 +489,7 @@ impl SourceLoop for WaylandDisplaySrc {
                 }
                 sequence += 1;
             }
-            drop(frame_request_sender);
-            join_display(handle)?;
+            display.join()?;
             if downstream_open {
                 out.push(PipelinePacket::Eos).await?;
             }

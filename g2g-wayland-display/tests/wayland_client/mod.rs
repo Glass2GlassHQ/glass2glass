@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use g2g_core::PipelineClock;
+use g2g_wayland_display::waylanddisplaysrc::DisplayNames;
 use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState};
 use smithay_client_toolkit::dispatch2::Dispatch2;
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
@@ -94,15 +95,18 @@ impl Client {
 }
 
 pub(crate) async fn connect_client(
-    socket_names: &mut watch::Receiver<String>,
+    display_names: &mut watch::Receiver<Option<DisplayNames>>,
 ) -> mpsc::UnboundedReceiver<ClientEvent> {
     let runtime_dir = PathBuf::from(
         std::env::var_os("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR names where sockets go"),
     );
-    let socket_name = tokio::time::timeout(TIMEOUT, socket_names.wait_for(|name| !name.is_empty()))
+    let socket_name = tokio::time::timeout(TIMEOUT, display_names.wait_for(Option::is_some))
         .await
         .expect("the display opens its socket")
         .expect("the source is alive")
+        .as_ref()
+        .expect("waited for the names")
+        .wayland_socket
         .clone();
     let (event_sender, events) = mpsc::unbounded_channel();
     let socket = runtime_dir.join(socket_name);

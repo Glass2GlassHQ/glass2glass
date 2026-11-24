@@ -196,7 +196,7 @@ published, since it depends on smithay's git master, and its elements reach a
 launch line through `g2g_wayland_display::register`.
 
 The run opens the next free `wayland-N` socket in `XDG_RUNTIME_DIR` and
-publishes the name on `socket_names()`. The compositor offers `wl_compositor`,
+publishes the name on `display_names()`. The compositor offers `wl_compositor`,
 `wl_subcompositor`, `wl_shm`, `xdg_wm_base`, `wl_seat` with a keyboard and a
 pointer, `wl_output` with `xdg_output`, and `wl_data_device_manager`. GTK 4
 refuses a display without the last one. Drag and drop is refused, the
@@ -232,6 +232,13 @@ renders once a client has committed since the last frame and a frame period has
 passed, and otherwise sends the last picture again after one second. Clients get
 frame callbacks only when a frame is rendered, so they draw at the rate the
 pipeline takes frames.
+
+With `xwayland=true` the run also starts Xwayland (the binary must be on `PATH`)
+and smithay's X11 window manager, and publishes the X display (`:N`) beside the
+Wayland socket once the window manager runs. A managed X11 window is mapped
+fullscreen at the output size and takes keyboard focus, which the window manager
+passes on as X input focus. Override-redirect windows (menus, tooltips) keep the
+position they set.
 
 Input arrives as `WindowInput` through `input_sender()`: evdev key codes,
 pointer positions in output pixels, buttons, and wheel steps of 120 per notch,

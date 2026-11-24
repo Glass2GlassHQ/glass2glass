@@ -36,12 +36,14 @@ features = [
     "renderer_gl",
     "renderer_pixman",
     "wayland_frontend",
+    "xwayland",
 ]
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 g2g-plugins = { workspace = true, features = ["std"] }
 smithay-client-toolkit = { version = "0.21", default-features = false }
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+x11rb = "0.14"
 
 [lints]
 workspace = true

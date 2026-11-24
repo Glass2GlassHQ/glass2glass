@@ -33,7 +33,7 @@ async fn a_client_window_reaches_the_frames_and_input_reaches_the_client() {
         .with_framerate(FRAMERATE)
         .with_render_node(SOFTWARE_RENDERING);
     let input = source.input_sender();
-    let mut socket_names = source.socket_names();
+    let mut display_names = source.display_names();
     let pull = register_appsink_pull("m2534_frames");
     let mut graph: Graph<GraphNode> = Graph::new();
     let source_node = graph.add_source(GraphNode::source(source));
@@ -42,7 +42,7 @@ async fn a_client_window_reaches_the_frames_and_input_reaches_the_client() {
     ));
     graph.link(source_node, sink_node).expect("links");
     let checks = async {
-        let mut events = connect_client(&mut socket_names).await;
+        let mut events = connect_client(&mut display_names).await;
         let interfaces = client_globals(&mut events).await;
         assert!(
             interfaces.iter().any(|name| name == GTK_REQUIRED_INTERFACE),
