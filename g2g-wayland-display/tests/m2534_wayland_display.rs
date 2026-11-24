@@ -551,3 +551,79 @@ async fn a_shared_display_publishes_the_cursor_its_client_sets() {
         () = checks => {}
     }
 }
+
+#[tokio::test]
+async fn a_press_on_a_window_leaves_an_x11_menu_above_it() {
+    const FRAMES_AFTER_PRESS: usize = 2;
+    let source = WaylandDisplaySrc::new()
+        .with_size(WIDTH, HEIGHT)
+        .with_framerate(FRAMERATE)
+        .with_render_node(SOFTWARE_RENDERING)
+        .with_xwayland();
+    let input = source.input_sender();
+    let mut display_names = source.display_names();
+    let pull = register_appsink_pull("m2561_menu_stacking");
+    let mut graph: Graph<GraphNode> = Graph::new();
+    let source_node = graph.add_source(GraphNode::source(source));
+    let sink_node = graph.add_sink(GraphNode::element(
+        AppSink::new().with_channel("m2561_menu_stacking"),
+    ));
+    graph.link(source_node, sink_node).expect("links");
+    let checks = async {
+        let mut events = connect_client(&mut display_names).await;
+        client_globals(&mut events).await;
+        let stride = WIDTH as usize * BYTES_PER_PIXEL;
+        assert!(
+            wait_for_picture(&pull, |picture| shows_client(picture, stride)).await,
+            "a frame shows the Wayland client's window"
+        );
+        let x11_display = display_names
+            .borrow()
+            .as_ref()
+            .and_then(|names| names.x11_display.clone())
+            .expect("the source runs Xwayland");
+        let (xdnd_sender, _xdnd_events) = mpsc::unbounded_channel();
+        std::thread::spawn(move || run_xdnd_target(x11_display, xdnd_sender));
+        let (menu_x, menu_y) = X11_DROP_POINT;
+        let shows_menu = |picture: &[u8]| rgb_at(picture, stride, menu_x, menu_y) == X11_TARGET_RGB;
+        assert!(
+            wait_for_picture(&pull, shows_menu).await,
+            "a frame shows the X11 menu"
+        );
+
+        input
+            .send(WindowInput::Pointer {
+                x: POINTER_X,
+                y: POINTER_Y,
+            })
+            .expect("the display takes input");
+        for down in [true, false] {
+            input
+                .send(WindowInput::Button {
+                    button: PointerButton::Left,
+                    down,
+                })
+                .expect("the display takes input");
+        }
+        wait_for_client_event(
+            &mut events,
+            &ClientEvent::Button {
+                code: PointerButton::Left.evdev_code(),
+                pressed: false,
+            },
+        )
+        .await;
+        for _ in 0..FRAMES_AFTER_PRESS {
+            let frame = pull.pull().await.expect("the source keeps producing");
+            let picture = frame.domain.as_system_slice().expect("system memory");
+            assert!(
+                shows_menu(picture),
+                "the menu stays above the pressed window"
+            );
+        }
+    };
+    tokio::select! {
+        result = run_graph(graph, &ZeroClock, 2) => panic!("the graph ended first: {result:?}"),
+        () = checks => {}
+    }
+}

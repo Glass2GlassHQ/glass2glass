@@ -1270,6 +1270,23 @@ impl DisplayState {
         Some((focus, (surface_location + window_location).to_f64()))
     }
 
+    fn raise_override_redirect_windows(&mut self) {
+        // X11 menus and tooltips are override-redirect and must stay above every managed window
+        let menus: Vec<Window> = self
+            .space
+            .elements()
+            .filter(|window| {
+                window
+                    .x11_surface()
+                    .is_some_and(X11Surface::is_override_redirect)
+            })
+            .cloned()
+            .collect();
+        for menu in menus {
+            self.space.raise_element(&menu, false);
+        }
+    }
+
     fn focus_window_under_pointer(&mut self, serial: Serial) {
         let pointer = self.seat.get_pointer().expect("the seat has a pointer");
         let Some(window) = self
@@ -1280,6 +1297,8 @@ impl DisplayState {
             return;
         };
         self.space.raise_element(&window, true);
+        self.raise_override_redirect_windows();
+        self.damaged = true;
         let surface = FocusedSurface::of_window(&window);
         let keyboard = self.seat.get_keyboard().expect("the seat has a keyboard");
         keyboard.set_focus(self, surface, serial);
@@ -1538,6 +1557,7 @@ impl XdgShellHandler for DisplayState {
         let wl_surface = surface.wl_surface().clone();
         self.space
             .map_element(Window::new_wayland_window(surface), (0, 0), true);
+        self.raise_override_redirect_windows();
         let keyboard = self.seat.get_keyboard().expect("the seat has a keyboard");
         keyboard.set_focus(
             self,
@@ -1706,6 +1726,7 @@ impl XwmHandler for DisplayState {
         }
         self.space
             .map_element(Window::new_x11_window(surface.clone()), output.loc, true);
+        self.raise_override_redirect_windows();
         let keyboard = self.seat.get_keyboard().expect("the seat has a keyboard");
         keyboard.set_focus(
             self,
@@ -1762,6 +1783,7 @@ impl XwmHandler for DisplayState {
     ) {
         if let Some(window) = self.x11_window(&surface) {
             self.space.map_element(window, geometry.loc, false);
+            self.raise_override_redirect_windows();
             self.damaged = true;
         }
     }

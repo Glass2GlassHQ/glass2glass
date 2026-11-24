@@ -276,7 +276,7 @@ and smithay's X11 window manager, and publishes the X display (`:N`) beside the
 Wayland socket once the window manager runs. A managed X11 window is mapped
 fullscreen at the output size and takes keyboard focus, which the window manager
 passes on as X input focus. Override-redirect windows (menus, tooltips) keep the
-position they set. A Wayland drag over an X11 window reaches it as XDND, since
+position they set and stay above every managed window. A Wayland drag over an X11 window reaches it as XDND, since
 the pointer focus there is the window's `X11Surface` rather than its Wayland
 surface.
 
