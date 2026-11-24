@@ -314,7 +314,7 @@ async fn encoded_colorimetry_comes_back_through_h264parse() {
             framerate: Rate::Fixed(FPS << 16),
             colorimetry: Colorimetry::BT709,
             pixel_aspect: g2g_core::PixelAspect::Any,
-            alignment: g2g_core::BitstreamAlignment::Unspecified,
+            alignment: g2g_core::BitstreamAlignment::AccessUnit,
         }],
         "the encoder announces the input colorimetry on its output caps"
     );

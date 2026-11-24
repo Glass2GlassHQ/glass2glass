@@ -466,7 +466,7 @@ impl NvEnc {
             framerate: self.framerate.clone(),
             colorimetry: self.colorimetry,
             pixel_aspect: self.pixel_aspect,
-            alignment: g2g_core::BitstreamAlignment::Unspecified,
+            alignment: g2g_core::BitstreamAlignment::AccessUnit,
         }
     }
 
@@ -1166,7 +1166,7 @@ impl AsyncElement for NvEnc {
                 framerate: framerate.clone(),
                 colorimetry: coded_colorimetry(*format, *colorimetry),
                 pixel_aspect: *pixel_aspect,
-                alignment: g2g_core::BitstreamAlignment::Unspecified,
+                alignment: g2g_core::BitstreamAlignment::AccessUnit,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -1338,7 +1338,7 @@ impl PadTemplates for NvEnc {
                     framerate: Rate::Any,
                     colorimetry: g2g_core::Colorimetry::UNKNOWN,
                     pixel_aspect: g2g_core::PixelAspect::Any,
-                    alignment: g2g_core::BitstreamAlignment::Unspecified,
+                    alignment: g2g_core::BitstreamAlignment::AccessUnit,
                 })
                 .collect(),
         );

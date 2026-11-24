@@ -66,8 +66,9 @@ use crate::tensor::MAX_TENSOR_RANK;
 /// video caps; version 3 added the u16 channel-layout mask to audio
 /// caps; version 4 widened the timecode frame count to u16; version 5 added the
 /// pixel aspect ratio to both video caps; version 7 sends a frame's age since
-/// arrival instead of the sender's own arrival stamp.
-pub const WIRE_VERSION: u8 = 7;
+/// arrival instead of the sender's own arrival stamp; version 8 added the
+/// bitstream alignment to compressed video caps.
+pub const WIRE_VERSION: u8 = 8;
 
 /// Failure decoding (or encoding) a [`PipelinePacket`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -705,6 +706,25 @@ fn get_rate(r: &mut Reader) -> Result<Rate, WireError> {
     })
 }
 
+fn bitstream_alignment_to_u8(alignment: crate::BitstreamAlignment) -> u8 {
+    match alignment {
+        crate::BitstreamAlignment::Unspecified => 0,
+        crate::BitstreamAlignment::AccessUnit => 1,
+        crate::BitstreamAlignment::Nal => 2,
+        crate::BitstreamAlignment::FieldPair => 3,
+    }
+}
+
+fn bitstream_alignment_from_u8(tag: u8) -> Result<crate::BitstreamAlignment, WireError> {
+    Ok(match tag {
+        0 => crate::BitstreamAlignment::Unspecified,
+        1 => crate::BitstreamAlignment::AccessUnit,
+        2 => crate::BitstreamAlignment::Nal,
+        3 => crate::BitstreamAlignment::FieldPair,
+        _ => return Err(WireError::BadTag),
+    })
+}
+
 fn st2038_alignment_to_u8(alignment: St2038Alignment) -> u8 {
     match alignment {
         St2038Alignment::Packet => 0,
@@ -841,7 +861,7 @@ fn put_caps(w: &mut Writer, c: &Caps) {
             framerate,
             colorimetry,
             pixel_aspect,
-            alignment: _,
+            alignment,
         } => {
             w.u8(0);
             put_video_codec(w, *codec);
@@ -850,6 +870,7 @@ fn put_caps(w: &mut Writer, c: &Caps) {
             put_rate(w, framerate);
             put_colorimetry(w, colorimetry);
             put_pixel_aspect(w, pixel_aspect);
+            w.u8(bitstream_alignment_to_u8(*alignment));
         }
         Caps::RawVideo {
             format,
@@ -986,7 +1007,7 @@ fn get_caps(r: &mut Reader) -> Result<Caps, WireError> {
             framerate: get_rate(r)?,
             colorimetry: get_colorimetry(r)?,
             pixel_aspect: get_pixel_aspect(r)?,
-            alignment: crate::BitstreamAlignment::Unspecified,
+            alignment: bitstream_alignment_from_u8(r.u8()?)?,
         },
         1 => Caps::RawVideo {
             format: raw_format_from_u8(r.u8()?)?,
@@ -1912,7 +1933,7 @@ mod tests {
                 pixel_aspect: crate::PixelAspect::Exact(
                     crate::AspectRatio::new(8, 9).expect("nonzero"),
                 ),
-                alignment: crate::BitstreamAlignment::Unspecified,
+                alignment: crate::BitstreamAlignment::AccessUnit,
             },
             Caps::RawVideo {
                 format: RawVideoFormat::Nv12,

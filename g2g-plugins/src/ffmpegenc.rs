@@ -165,6 +165,14 @@ impl Backend {
         }
     }
 
+    // avcodec hands back each picture as one packet, and gst names that alignment for h264 and h265 only
+    fn alignment(self) -> g2g_core::BitstreamAlignment {
+        match self.codec() {
+            VideoCodec::H264 | VideoCodec::H265 => g2g_core::BitstreamAlignment::AccessUnit,
+            _ => g2g_core::BitstreamAlignment::Unspecified,
+        }
+    }
+
     // the VA-API formats match gst's vah264enc / vah265enc / vaav1enc sink pads
     fn input_formats(self) -> &'static [RawVideoFormat] {
         match self {
@@ -430,7 +438,7 @@ impl FfmpegVideoEnc {
             framerate: self.framerate.clone(),
             colorimetry: self.colorimetry,
             pixel_aspect: self.pixel_aspect,
-            alignment: g2g_core::BitstreamAlignment::Unspecified,
+            alignment: self.backend.alignment(),
         }
     }
 
@@ -1108,6 +1116,7 @@ impl AsyncElement for FfmpegVideoEnc {
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let formats = self.backend.input_formats();
         let codec = self.backend.codec();
+        let alignment = self.backend.alignment();
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
             Caps::RawVideo {
                 format,
@@ -1124,7 +1133,7 @@ impl AsyncElement for FfmpegVideoEnc {
                 framerate: framerate.clone(),
                 colorimetry: *colorimetry,
                 pixel_aspect: *pixel_aspect,
-                alignment: g2g_core::BitstreamAlignment::Unspecified,
+                alignment,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -1320,7 +1329,7 @@ impl FfmpegVideoEnc {
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
             pixel_aspect: g2g_core::PixelAspect::Any,
-            alignment: g2g_core::BitstreamAlignment::Unspecified,
+            alignment: backend.alignment(),
         };
         let sink = CapsSet::from_alternatives(
             backend
@@ -1772,7 +1781,7 @@ mod tests {
                 framerate: Rate::Fixed(30 << 16),
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 pixel_aspect: g2g_core::PixelAspect::Any,
-                alignment: g2g_core::BitstreamAlignment::Unspecified,
+                alignment: g2g_core::BitstreamAlignment::AccessUnit,
             }],
             "output caps announced once"
         );

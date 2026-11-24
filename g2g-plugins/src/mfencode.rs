@@ -950,7 +950,7 @@ impl PadTemplates for MfEncode {
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
             pixel_aspect: g2g_core::PixelAspect::Any,
-            alignment: g2g_core::BitstreamAlignment::Unspecified,
+            alignment: g2g_core::BitstreamAlignment::AccessUnit,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::one(nv12)),
@@ -1337,7 +1337,7 @@ fn compressed_caps(codec: VideoCodec, w: u32, h: u32, framerate: Rate) -> Caps {
         framerate,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
         pixel_aspect: g2g_core::PixelAspect::Any,
-        alignment: g2g_core::BitstreamAlignment::Unspecified,
+        alignment: g2g_core::BitstreamAlignment::AccessUnit,
     }
 }
 
@@ -1360,7 +1360,7 @@ fn derive_output_caps(codec: VideoCodec, input: &Caps) -> CapsSet {
             framerate: framerate.clone(),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
             pixel_aspect: g2g_core::PixelAspect::Any,
-            alignment: g2g_core::BitstreamAlignment::Unspecified,
+            alignment: g2g_core::BitstreamAlignment::AccessUnit,
         }),
         _ => CapsSet::from_alternatives(Vec::new()),
     }
@@ -1449,7 +1449,7 @@ mod tests {
                 framerate: Rate::Fixed(30 << 16),
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 pixel_aspect: g2g_core::PixelAspect::Any,
-                alignment: g2g_core::BitstreamAlignment::Unspecified,
+                alignment: g2g_core::BitstreamAlignment::AccessUnit,
             }]
         );
 
@@ -1555,7 +1555,7 @@ mod tests {
                 framerate: Rate::Fixed(30 << 16),
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 pixel_aspect: g2g_core::PixelAspect::Any,
-                alignment: g2g_core::BitstreamAlignment::Unspecified,
+                alignment: g2g_core::BitstreamAlignment::AccessUnit,
             }]
         );
     }

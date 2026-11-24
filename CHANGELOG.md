@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2571: Carry caps alignment over the remote wire and mark the H.264/H.265 encoders `alignment=au`.
 - M2570: Carry the dma-buf modifier across `unixfd`, `localdmabuf` and the GStreamer bridge.
 - M2569: Read the modifier suffix of GStreamer's `drm-format`, accepting an explicit linear modifier.
 - M2568: Host an X11 display in `g2g-desktop` through `ximagesrc` and XTest (`--x11-display`).

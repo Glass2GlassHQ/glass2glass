@@ -986,8 +986,11 @@ Unspecified, AccessUnit, Nal). Unspecified is the wildcard, and AccessUnit again
 Nal does not intersect. The MP4 and Matroska demuxers declare AccessUnit for
 H.264/H.265, since a sample is one access unit, and `NalParse` passes such a buffer
 on whole instead of splitting it on first-slice flags. A re-framing h264parse or
-h265parse refines its output to AccessUnit, as gst's parsers default to. The remote
-wire format does not carry the field, so received caps read Unspecified.
+h265parse refines its output to AccessUnit, as gst's parsers default to. So do
+`ffmpegenc` for H.264/H.265, `nvenc`, `mfh264enc` and `openh264enc`, which emit one
+picture per buffer. The remote wire format carries the field, so a receiving
+parser passes each picture on as it arrives instead of holding it until the next
+one starts.
 
 A codec with no typed `VideoCodec` / `AudioFormat` still decodes when libavcodec
 has a decoder for it, behind the `ffmpeg-long-tail` feature. `avidemux`, the mp4
