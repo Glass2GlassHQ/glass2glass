@@ -135,8 +135,8 @@ fn reference_rgb(bytes: &[u8], width: u32, height: u32) -> Vec<[u8; 3]> {
             let chroma_at = chroma_offset + (y / 2) * chroma_stride + (x / 2) * 2;
             let luma =
                 weights.luma_gain * (normalized(bytes[y * luma_stride + x]) - weights.luma_floor);
-            let cb = normalized(bytes[chroma_at]) - 0.5;
-            let cr = normalized(bytes[chroma_at + 1]) - 0.5;
+            let cb = normalized(bytes[chroma_at]) - weights.chroma_neutral;
+            let cr = normalized(bytes[chroma_at + 1]) - weights.chroma_neutral;
             rgb.push([
                 to_code(luma + weights.red_from_cr * cr),
                 to_code(luma + weights.green_from_cb * cb + weights.green_from_cr * cr),
