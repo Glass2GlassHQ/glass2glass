@@ -671,6 +671,20 @@ fn h264_fmtp(sps: Option<&[u8]>, pps: Option<&[u8]>) -> Option<String> {
     ))
 }
 
+/// SDP `a=rtpmap` encoding name of an uncompressed ONVIF metadata track
+/// (Streaming spec 5.2.2.4).
+pub const ONVIF_METADATA_ENCODING: &str = "vnd.onvif.metadata";
+
+pub fn onvif_metadata_media_section(payload_type: u8, stream_id: usize) -> String {
+    media_section(
+        "application",
+        payload_type,
+        &format!("{ONVIF_METADATA_ENCODING}/{VIDEO_CLOCK_HZ}"),
+        None,
+        stream_id,
+    )
+}
+
 // RFC 7798 §7.1 parameter sets, as ffmpeg writes them
 pub fn h265_media_section(
     payload_type: u8,

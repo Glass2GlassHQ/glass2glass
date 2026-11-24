@@ -124,9 +124,72 @@ impl AsyncElement for St2038Extractor {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExtractorPort {
+pub(crate) enum ExtractorPort {
     Video,
-    St2038 { caps_emitted: bool },
+    Side { caps_emitted: bool },
+}
+
+// port 0 sends the video on and every other port the side stream
+pub(crate) fn extractor_ports(count: usize) -> Vec<ExtractorPort> {
+    (0..count)
+        .map(|port| match port {
+            0 => ExtractorPort::Video,
+            _ => ExtractorPort::Side {
+                caps_emitted: false,
+            },
+        })
+        .collect()
+}
+
+pub(crate) fn name_extractor_ports(
+    pad_names: &[&str],
+    side_pad: &str,
+) -> Result<Vec<ExtractorPort>, usize> {
+    let mut ports = Vec::with_capacity(pad_names.len());
+    for (index, name) in pad_names.iter().enumerate() {
+        ports.push(match *name {
+            "" | VIDEO_PAD => ExtractorPort::Video,
+            name if name == side_pad => ExtractorPort::Side {
+                caps_emitted: false,
+            },
+            _ => return Err(index),
+        });
+    }
+    Ok(ports)
+}
+
+pub(crate) fn ports_where(
+    ports: &[ExtractorPort],
+    kind: impl Fn(&ExtractorPort) -> bool,
+) -> Vec<usize> {
+    (0..ports.len())
+        .filter(|&index| kind(&ports[index]))
+        .collect()
+}
+
+pub(crate) async fn forward_to_every_port(
+    packet: PipelinePacket,
+    port_count: usize,
+    out: &mut dyn MultiOutputSink,
+) -> Result<(), G2gError> {
+    match packet {
+        PipelinePacket::Segment(segment) => {
+            push_to_ports(0..port_count, || PipelinePacket::Segment(segment), out).await
+        }
+        PipelinePacket::Flush => push_to_ports(0..port_count, || PipelinePacket::Flush, out).await,
+        PipelinePacket::Gap {
+            pts_ns,
+            duration_ns,
+        } => {
+            let gap = || PipelinePacket::Gap {
+                pts_ns,
+                duration_ns,
+            };
+            push_to_ports(0..port_count, gap, out).await
+        }
+        // the runner broadcasts the trailing Eos
+        _ => Ok(()),
+    }
 }
 
 #[derive(Debug)]
@@ -139,17 +202,9 @@ pub struct St2038ExtractorN {
 }
 
 impl St2038ExtractorN {
-    // port 0 sends the video on and every other port the ST 2038 stream
     pub fn new(ports: usize) -> Self {
         Self {
-            ports: (0..ports)
-                .map(|port| match port {
-                    0 => ExtractorPort::Video,
-                    _ => ExtractorPort::St2038 {
-                        caps_emitted: false,
-                    },
-                })
-                .collect(),
+            ports: extractor_ports(ports),
             framerate: Rate::Any,
             remove_ancillary_meta: false,
             sequence: 0,
@@ -208,7 +263,7 @@ impl St2038ExtractorN {
             self.sequence += 1;
         }
         for index in 0..self.ports.len() {
-            let ExtractorPort::St2038 { caps_emitted } = &mut self.ports[index] else {
+            let ExtractorPort::Side { caps_emitted } = &mut self.ports[index] else {
                 continue;
             };
             let Some(st2038_frame) = &st2038_frame else {
@@ -227,19 +282,13 @@ impl St2038ExtractorN {
         Ok(())
     }
 
-    fn ports_where(&self, kind: impl Fn(&ExtractorPort) -> bool) -> Vec<usize> {
-        (0..self.ports.len())
-            .filter(|&index| kind(&self.ports[index]))
-            .collect()
-    }
-
     async fn push_video(
         &self,
         mut frame: Frame,
         out: &mut dyn MultiOutputSink,
     ) -> Result<(), G2gError> {
         frame.domain.make_shareable();
-        let video_ports = self.ports_where(|port| *port == ExtractorPort::Video);
+        let video_ports = ports_where(&self.ports, |port| *port == ExtractorPort::Video);
         push_to_ports(
             video_ports,
             || PipelinePacket::DataFrame(frame.share()),
@@ -256,7 +305,7 @@ impl St2038ExtractorN {
         let framerate = caps.framerate();
         let framerate_changed = framerate != self.framerate;
         self.framerate = framerate;
-        let video_ports = self.ports_where(|port| *port == ExtractorPort::Video);
+        let video_ports = ports_where(&self.ports, |port| *port == ExtractorPort::Video);
         push_to_ports(
             video_ports,
             || PipelinePacket::CapsChanged(caps.clone()),
@@ -266,8 +315,9 @@ impl St2038ExtractorN {
         if !framerate_changed {
             return Ok(());
         }
-        let announced_st2038_ports =
-            self.ports_where(|port| *port == ExtractorPort::St2038 { caps_emitted: true });
+        let announced_st2038_ports = ports_where(&self.ports, |port| {
+            *port == ExtractorPort::Side { caps_emitted: true }
+        });
         let caps = st2038_caps(self.framerate.clone());
         push_to_ports(
             announced_st2038_ports,
@@ -300,26 +350,14 @@ impl MultiOutputElement for St2038ExtractorN {
     fn port_caps_constraint(&self, port: usize) -> Option<CapsConstraint<'_>> {
         match self.ports.get(port)? {
             ExtractorPort::Video => Some(CapsConstraint::IdentityAny),
-            ExtractorPort::St2038 { .. } => {
-                Some(CapsConstraint::DerivedOutput(Box::new(|input| {
-                    CapsSet::one(st2038_caps(input.framerate()))
-                })))
-            }
+            ExtractorPort::Side { .. } => Some(CapsConstraint::DerivedOutput(Box::new(|input| {
+                CapsSet::one(st2038_caps(input.framerate()))
+            }))),
         }
     }
 
     fn name_output_ports(&mut self, pad_names: &[&str]) -> Result<(), usize> {
-        let mut ports = Vec::with_capacity(pad_names.len());
-        for (index, name) in pad_names.iter().enumerate() {
-            ports.push(match *name {
-                "" | VIDEO_PAD => ExtractorPort::Video,
-                ST2038_PAD => ExtractorPort::St2038 {
-                    caps_emitted: false,
-                },
-                _ => return Err(index),
-            });
-        }
-        self.ports = ports;
+        self.ports = name_extractor_ports(pad_names, ST2038_PAD)?;
         Ok(())
     }
 
@@ -362,29 +400,7 @@ impl MultiOutputElement for St2038ExtractorN {
                     self.push_video(frame, out).await
                 }
                 PipelinePacket::CapsChanged(caps) => self.handle_caps(caps, out).await,
-                PipelinePacket::Segment(segment) => {
-                    push_to_ports(
-                        0..self.ports.len(),
-                        || PipelinePacket::Segment(segment),
-                        out,
-                    )
-                    .await
-                }
-                PipelinePacket::Flush => {
-                    push_to_ports(0..self.ports.len(), || PipelinePacket::Flush, out).await
-                }
-                PipelinePacket::Gap {
-                    pts_ns,
-                    duration_ns,
-                } => {
-                    let gap = || PipelinePacket::Gap {
-                        pts_ns,
-                        duration_ns,
-                    };
-                    push_to_ports(0..self.ports.len(), gap, out).await
-                }
-                // the runner broadcasts the trailing Eos
-                _ => Ok(()),
+                other => forward_to_every_port(other, self.ports.len(), out).await,
             }
         })
     }

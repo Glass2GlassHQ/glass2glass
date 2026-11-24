@@ -70,6 +70,7 @@ use crate::reconnect::{
 };
 use crate::rtcp::SenderClock;
 use crate::rtspclient::{transports_from_flags, transports_to_flags, LowerTransport};
+use crate::sdp::ONVIF_METADATA_ENCODING;
 use crate::typefind::{elementary_video_caps, PLACEHOLDER_FRAMERATE};
 
 /// User-Agent sent on DESCRIBE / SETUP unless `user-agent` overrides it. Also
@@ -81,9 +82,6 @@ pub const VIDEO_PORT: usize = 0;
 /// The audio track's output pad, present only when the SDP offered audio.
 pub const AUDIO_PORT: usize = 1;
 
-/// SDP `a=rtpmap` encoding name of an uncompressed ONVIF metadata track
-/// (Streaming spec 5.2.2.4).
-const ONVIF_METADATA_ENCODING: &str = "vnd.onvif.metadata";
 /// The GZIP variant's encoding name as retina spells it. The Streaming spec
 /// writes it [`ONVIF_METADATA_SPEC_GZIP_ENCODING`] instead.
 const ONVIF_METADATA_GZIP_ENCODING: &str = "vnd.onvif.metadata.gzip";

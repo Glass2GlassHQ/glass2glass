@@ -1170,6 +1170,22 @@ pub fn default_registry() -> Registry {
             Box::new(crate::onvifmetadata::OnvifMetadataParse::new())
         }),
     );
+    // the sending half: `relationmeta2onvifmeta ! onvifmetadataextractor name=e`
+    // writes each frame's analytics as a document and sends it from `e.meta_src`
+    // with the video on `e.src`, for `rtspserversink` to serve as a second track
+    #[cfg(feature = "onvif")]
+    reg.register_launch(LaunchFactory::new(
+        "relationmeta2onvifmeta",
+        Vec::new(),
+        || Box::new(crate::onvifmetadata::RelationMeta2OnvifMeta::new()),
+    ));
+    #[cfg(feature = "onvif")]
+    reg.register_demux(
+        g2g_core::runtime::DemuxFactory::new("onvifmetadataextractor", |outputs| {
+            Box::new(crate::onvifmetadata::OnvifMetadataExtractor::new(outputs))
+        })
+        .routing_one_named_pad(),
+    );
     // VobSub (DVD subpicture) decoder (M899): bitmap cues become full-frame
     // transparent RGBA canvases a compositor paints over the video,
     // e.g. `mkvdemux stream=vobsub ! vobsubdec ! c.` .
@@ -3194,6 +3210,8 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "onvifsrc" => "onvif";
         "onvifmetadataparse" => "onvif";
         "onvifmetadatacombiner" => "onvif";
+        "relationmeta2onvifmeta" => "onvif";
+        "onvifmetadataextractor" => "onvif";
         "udpsrc" => "udp-ingress";
         "udpsink" => "udp-egress";
         // The alias needs its own row: without `udp-egress` there is no
@@ -3709,6 +3727,12 @@ fn register_feature_gated(reg: &mut Registry) {
         "rtspserversink",
         || Box::new(RtspServerSink::new("0.0.0.0:8554".parse().unwrap())),
     ));
+    // one served track per linked pad, H.264 or ONVIF metadata
+    // (`v ! s.sink_0  m ! s.sink_1  rtspserversink name=s`)
+    #[cfg(feature = "rtsp-server")]
+    reg.register_muxer(MuxerFactory::new("rtspserversink", |inputs| {
+        Box::new(RtspServerSink::new("0.0.0.0:8554".parse().unwrap()).with_tracks(inputs))
+    }));
     #[cfg(feature = "rtsp-server")]
     reg.register_source(SourceFactory::new(
         "rtspserversrc",

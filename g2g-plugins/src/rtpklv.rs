@@ -47,7 +47,11 @@ pub fn rtp_timestamp_at_clock(pts_ns: u64, clock_hz: u64) -> u32 {
     // days), matching the mpegts conversions; rounded to the nearest tick, since
     // a PTS truncated to whole ns (1/30 s = 33_333_333) sits just under its
     // exact tick; the cast wraps into the 32-bit RTP field as the wire requires.
-    ((pts_ns as u128 * clock_hz as u128 + 500_000_000) / 1_000_000_000) as u32
+    unwrapped_rtp_ticks(pts_ns, clock_hz) as u32
+}
+
+fn unwrapped_rtp_ticks(pts_ns: u64, clock_hz: u64) -> u128 {
+    (pts_ns as u128 * clock_hz as u128 + 500_000_000) / 1_000_000_000
 }
 
 /// The nanosecond presentation time a 90 kHz RTP timestamp names, relative to
@@ -56,6 +60,11 @@ pub fn rtp_timestamp_at_clock(pts_ns: u64, clock_hz: u64) -> u32 {
 /// tick (11.1 us).
 pub fn pts_ns_from_rtp(rtp_timestamp: u32) -> u64 {
     pts_ns_from_ticks(u64::from(rtp_timestamp))
+}
+
+// the PTS of the unwrapped 90 kHz tick `rtp_timestamp_from_pts` rounds `pts_ns` to
+pub fn pts_ns_at_rtp_tick(pts_ns: u64) -> u64 {
+    (unwrapped_rtp_ticks(pts_ns, RTP_CLOCK_HZ) * 1_000_000_000 / RTP_CLOCK_HZ as u128) as u64
 }
 
 fn pts_ns_from_ticks(ticks: u64) -> u64 {

@@ -51,16 +51,21 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
+use g2g_core::memory::SystemSlice;
 use g2g_core::meta::{
     AnalyticsMeta, AnalyticsNode, BBox, FrameMeta, ObjectDetection, Propagation, RelationKind,
     Tracking, Transform, WallClockMeta,
 };
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError,
-    MultiInputElement, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec,
+    MemoryDomain, MultiInputElement, MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate,
+    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
+use crate::st2038ancdemux::push_to_ports;
+use crate::st2038extractor::{
+    extractor_ports, forward_to_every_port, name_extractor_ports, ports_where, ExtractorPort,
+};
 use crate::xmlutil::days_from_civil;
 
 /// The ONVIF schema namespace every scene-description element lives in.
@@ -1003,7 +1008,11 @@ impl OnvifMetadataCombiner {
         let Some(newest_video) = self.newest_video.map(|n| n.on(axis)) else {
             return;
         };
-        let cutoff = newest_video.saturating_sub(self.max_lateness_ns as i64);
+        let mut cutoff = newest_video.saturating_sub(self.max_lateness_ns as i64);
+        // a held frame still takes the metadata from its own start on, however far the video has run ahead
+        if let Some(oldest_held) = self.held.front() {
+            cutoff = cutoff.min(oldest_held.at.on(axis));
+        }
         while self
             .pending
             .front()
@@ -1321,6 +1330,334 @@ impl LogSource for OnvifMetadataCombiner {
     fn log_instance(&self) -> Option<&str> {
         self.log_name.instance()
     }
+    fn log_category_override(&self) -> Option<&str> {
+        self.log_name.category()
+    }
+}
+
+// ---- document writing ----
+
+// ONVIF's normalized frame system runs -1..1 about the picture centre with y up
+fn normalized_x(x: f32) -> f32 {
+    2.0 * x - 1.0
+}
+
+fn normalized_y(y: f32) -> f32 {
+    1.0 - 2.0 * y
+}
+
+pub fn write_metadata_document(analytics: &AnalyticsMeta, unix_nanos: i64) -> String {
+    let mut document = alloc::format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+         <tt:MetadataStream xmlns:tt=\"{ONVIF_SCHEMA_NS}\"><tt:VideoAnalytics>\
+         <tt:Frame UtcTime=\"{}\">",
+        crate::xmlutil::iso8601_utc_ns(unix_nanos)
+    );
+    for (index, node) in analytics.nodes.iter().enumerate() {
+        let AnalyticsNode::Detection(detection) = node else {
+            continue;
+        };
+        let object_id = analytics.tracking_id(index).unwrap_or(index as u64);
+        let bbox = detection.bbox;
+        let left = normalized_x(bbox.x);
+        let right = normalized_x(bbox.x + bbox.w);
+        let top = normalized_y(bbox.y);
+        let bottom = normalized_y(bbox.y + bbox.h);
+        document.push_str(&alloc::format!(
+            "<tt:Object ObjectId=\"{object_id}\"><tt:Appearance><tt:Shape>\
+             <tt:BoundingBox left=\"{left}\" top=\"{top}\" right=\"{right}\" bottom=\"{bottom}\"/>\
+             <tt:CenterOfGravity x=\"{}\" y=\"{}\"/></tt:Shape>",
+            (left + right) / 2.0,
+            (top + bottom) / 2.0,
+        ));
+        if detection.label != UNCLASSIFIED_LABEL {
+            let class_name = match analytics.class_name(detection.label) {
+                Some(name) => crate::xmlutil::xml_escape(name),
+                None => detection.label.to_string(),
+            };
+            document.push_str(&alloc::format!(
+                "<tt:Class><tt:Type Likelihood=\"{}\">{class_name}</tt:Type></tt:Class>",
+                detection.confidence
+            ));
+        }
+        document.push_str("</tt:Appearance></tt:Object>");
+    }
+    document.push_str("</tt:Frame></tt:VideoAnalytics></tt:MetadataStream>");
+    document
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OnvifDocumentMeta {
+    pub document: String,
+}
+
+impl FrameMeta for OnvifDocumentMeta {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
+    }
+    fn clone_box(&self) -> Box<dyn FrameMeta> {
+        Box::new(self.clone())
+    }
+}
+
+// ---- relationmeta2onvifmeta ----
+
+#[derive(Debug, Default)]
+pub struct RelationMeta2OnvifMeta {
+    wall_clock: Option<crate::clock::PtsWallClock>,
+}
+
+impl RelationMeta2OnvifMeta {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn describe(&mut self, frame: &mut Frame) {
+        let wall_clock = *self
+            .wall_clock
+            .get_or_insert_with(|| crate::clock::PtsWallClock::from_first_frame(frame));
+        let unix_nanos = wall_clock.unix_nanos_at(frame.timing.pts_ns);
+        // receivers rebuild the frame's time from a 90 kHz RTP timestamp, one tick later stays inside that frame
+        let utc_nanos = unix_nanos.saturating_add_unsigned(crate::rtpklv::pts_ns_from_rtp(1));
+        let empty = AnalyticsMeta::new();
+        let analytics = frame.meta.get::<AnalyticsMeta>().unwrap_or(&empty);
+        let document = write_metadata_document(analytics, utc_nanos);
+        frame.meta.attach(OnvifDocumentMeta { document });
+        frame.meta.attach(WallClockMeta { unix_nanos });
+    }
+}
+
+impl AsyncElement for RelationMeta2OnvifMeta {
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Relation metadata to ONVIF metadata",
+            "Metadata",
+            "Writes each frame's analytics as an ONVIF tt:MetadataStream document",
+            crate::AARON_BOXER,
+        )
+    }
+
+    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        Ok(upstream_caps.clone())
+    }
+
+    fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            match packet {
+                PipelinePacket::DataFrame(mut frame) => {
+                    self.describe(&mut frame);
+                    out.push(PipelinePacket::DataFrame(frame)).await.map(|_| ())
+                }
+                // the runner arm forwards the trailing Eos
+                PipelinePacket::Eos => Ok(()),
+                other => out.push(other).await.map(|_| ()),
+            }
+        })
+    }
+}
+
+// ---- onvifmetadataextractor ----
+
+const EXTRACTOR_METADATA_PAD: &str = "meta_src";
+
+static ONVIF_METADATA_EXTRACTOR_PROPS: &[PropertySpec] = &[PropertySpec::new(
+    "remove-metadata",
+    PropKind::Bool,
+    "remove the ONVIF document from the video frames sent on",
+)
+.with_default("false")];
+
+#[derive(Debug)]
+pub struct OnvifMetadataExtractor {
+    ports: Vec<ExtractorPort>,
+    remove_metadata: bool,
+    sequence: u64,
+    log_name: LogName,
+}
+
+impl OnvifMetadataExtractor {
+    pub fn new(ports: usize) -> Self {
+        Self {
+            ports: extractor_ports(ports),
+            remove_metadata: false,
+            sequence: 0,
+            log_name: LogName::default(),
+        }
+    }
+
+    async fn push_document(
+        &mut self,
+        frame: &Frame,
+        out: &mut dyn MultiOutputSink,
+    ) -> Result<(), G2gError> {
+        let document_frame = frame.meta.get::<OnvifDocumentMeta>().map(|meta| {
+            let bytes = meta.document.as_bytes().to_vec().into_boxed_slice();
+            let mut document_frame = Frame::new(
+                MemoryDomain::System(SystemSlice::from_boxed(bytes)),
+                frame.timing,
+                self.sequence,
+            );
+            if let Some(wall_clock) = frame.meta.get::<WallClockMeta>() {
+                document_frame.meta.attach(*wall_clock);
+            }
+            document_frame.domain.make_shareable();
+            document_frame
+        });
+        if document_frame.is_some() {
+            self.sequence += 1;
+        }
+        for index in 0..self.ports.len() {
+            let ExtractorPort::Side { caps_emitted } = &mut self.ports[index] else {
+                continue;
+            };
+            let Some(document_frame) = &document_frame else {
+                let gap = PipelinePacket::Gap {
+                    pts_ns: frame.timing.pts_ns,
+                    duration_ns: frame.timing.duration_ns,
+                };
+                out.push_to(index, gap).await?;
+                continue;
+            };
+            if !*caps_emitted {
+                *caps_emitted = true;
+                out.push_to(index, PipelinePacket::CapsChanged(Caps::OnvifMetadata))
+                    .await?;
+            }
+            out.push_to(index, PipelinePacket::DataFrame(document_frame.share()))
+                .await?;
+        }
+        Ok(())
+    }
+}
+
+impl MultiOutputElement for OnvifMetadataExtractor {
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        Ok(upstream_caps.clone())
+    }
+
+    fn caps_constraint_as_input(&self) -> CapsConstraint<'_> {
+        CapsConstraint::AcceptsAny
+    }
+
+    fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn port_caps_constraint(&self, port: usize) -> Option<CapsConstraint<'_>> {
+        match self.ports.get(port)? {
+            ExtractorPort::Video => Some(CapsConstraint::IdentityAny),
+            ExtractorPort::Side { .. } => Some(CapsConstraint::DerivedOutput(Box::new(|_input| {
+                CapsSet::one(Caps::OnvifMetadata)
+            }))),
+        }
+    }
+
+    fn name_output_ports(&mut self, pad_names: &[&str]) -> Result<(), usize> {
+        self.ports = name_extractor_ports(pad_names, EXTRACTOR_METADATA_PAD)?;
+        Ok(())
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "ONVIF metadata extractor",
+            "Metadata",
+            "Sends the ONVIF document a video frame carries on its own pad",
+            crate::AARON_BOXER,
+        )
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        ONVIF_METADATA_EXTRACTOR_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "remove-metadata" => self.remove_metadata = value.as_bool().ok_or(PropError::Type)?,
+            _ => return Err(PropError::Unknown),
+        }
+        Ok(())
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        (name == "remove-metadata").then_some(PropValue::Bool(self.remove_metadata))
+    }
+
+    fn set_instance_name(&mut self, name: String) {
+        self.log_name.set_instance(name);
+    }
+
+    fn set_log_category(&mut self, category: String) {
+        self.log_name.set_category(category);
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn MultiOutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            match packet {
+                PipelinePacket::DataFrame(mut frame) => {
+                    self.push_document(&frame, out).await?;
+                    if self.remove_metadata {
+                        frame.meta.remove::<OnvifDocumentMeta>();
+                    }
+                    frame.domain.make_shareable();
+                    let video_ports =
+                        ports_where(&self.ports, |port| *port == ExtractorPort::Video);
+                    push_to_ports(
+                        video_ports,
+                        || PipelinePacket::DataFrame(frame.share()),
+                        out,
+                    )
+                    .await
+                }
+                PipelinePacket::CapsChanged(caps) => {
+                    let video_ports =
+                        ports_where(&self.ports, |port| *port == ExtractorPort::Video);
+                    push_to_ports(
+                        video_ports,
+                        || PipelinePacket::CapsChanged(caps.clone()),
+                        out,
+                    )
+                    .await
+                }
+                other => forward_to_every_port(other, self.ports.len(), out).await,
+            }
+        })
+    }
+}
+
+impl LogSource for OnvifMetadataExtractor {
+    fn log_category(&self) -> &'static str {
+        short_type_name::<Self>()
+    }
+
+    fn log_instance(&self) -> Option<&str> {
+        self.log_name.instance()
+    }
+
     fn log_category_override(&self) -> Option<&str> {
         self.log_name.category()
     }

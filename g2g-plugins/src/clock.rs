@@ -121,6 +121,34 @@ pub(crate) fn attach_wall_clock(frame: &mut g2g_core::frame::Frame, unix_nanos: 
 #[cfg(not(feature = "metadata"))]
 pub(crate) fn attach_wall_clock(_frame: &mut g2g_core::frame::Frame, _unix_nanos: i64) {}
 
+// the wall-clock time of PTS zero, fixed by the first frame so later frames map along the PTS
+#[cfg(any(feature = "rtsp-server", feature = "onvif"))]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PtsWallClock {
+    pts_zero_unix_ns: i64,
+}
+
+#[cfg(any(feature = "rtsp-server", feature = "onvif"))]
+impl PtsWallClock {
+    pub(crate) fn from_first_frame(frame: &g2g_core::frame::Frame) -> Self {
+        #[cfg(feature = "metadata")]
+        let wall_clock = frame
+            .meta
+            .get::<g2g_core::WallClockMeta>()
+            .map(|wall_clock| wall_clock.unix_nanos);
+        #[cfg(not(feature = "metadata"))]
+        let wall_clock: Option<i64> = None;
+        let unix_ns = wall_clock.unwrap_or_else(g2g_core::metrics::unix_time_ns);
+        Self {
+            pts_zero_unix_ns: unix_ns.saturating_sub_unsigned(frame.timing.pts_ns),
+        }
+    }
+
+    pub(crate) fn unix_nanos_at(&self, pts_ns: u64) -> i64 {
+        self.pts_zero_unix_ns.saturating_add_unsigned(pts_ns)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

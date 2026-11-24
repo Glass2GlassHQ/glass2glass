@@ -947,6 +947,21 @@ mid-stream on an interleaved control connection and are consumed there.
 Validated end to end over loopback: handshake, RTP recovery, SR delivery on both
 transports, RR-extended lifetime, and silent-client reap.
 
+Linked on several pads (`v ! s.sink_0  m ! s.sink_1  rtspserversink name=s`),
+the sink serves one track per pad, each H.264 or ONVIF metadata
+(`vnd.onvif.metadata/90000`) by the caps its pad configures with, in pad order in
+the SDP. Each track has its own RTP/RTCP socket pair, SSRC (`ssrc` plus the pad
+index) and sequence numbering per player. The responder routes each SETUP to a
+track by `a=control` as it does for a publisher's ANNOUNCE, and PLAY starts every
+track the player SETUP. A metadata document is split across packets with the
+marker on the last, as RFC 6597 does KLV. Only H.264 waits for a player's first
+keyframe. Sender reports of every track map PTS to wall clock through one
+`PtsWallClock`, fixed by the first frame's `WallClockMeta`, else the time of day,
+and each report names the instant of the 90 kHz tick its RTP timestamp rounds
+to, so a receiver rebuilds the same wall clock for a picture and for the
+document describing it. gst's `rtspsrc` with `rtponvifmetadatadepay` plays both
+tracks over UDP and TCP-interleaved.
+
 `RtspServerSrc` and `RtspServerSrcN` record what a publisher sends. The
 handshake (`rtspingest.rs`) binds an RTP/RTCP UDP socket pair for each track the
 ANNOUNCE lists, and the responder routes each SETUP by its URL to the track whose

@@ -9,13 +9,11 @@
 //!
 //! Scope: the method set a player (DESCRIBE / SETUP / PLAY / PAUSE / TEARDOWN)
 //! or a publisher (ANNOUNCE / SETUP / RECORD) drives, one session. A player is
-//! served one H.264 track over RTP/AVP. A publisher's ANNOUNCE may list several
-//! tracks, and each SETUP is routed to its track by the section's `a=control`
-//! URL. Both transports are negotiated: unicast UDP (the `client_port` range,
-//! `RtspEvent::Setup`) and TCP-interleaved (RFC 2326 §10.12, the `interleaved=`
-//! channels, `RtspEvent::SetupInterleaved`); the ingest I/O layer
-//! (`RtspServerSrc`) serves both, while the serving sink
-//! (`RtspServerSink`) is UDP-only for now.
+//! served the tracks of the server's SDP over RTP/AVP, a publisher's ANNOUNCE
+//! may list several tracks, and either way each SETUP is routed to its track by
+//! the section's `a=control` URL. Both transports are negotiated: unicast UDP
+//! (the `client_port` range, `RtspEvent::Setup`) and TCP-interleaved (RFC 2326
+//! §10.12, the `interleaved=` channels, `RtspEvent::SetupInterleaved`).
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -185,6 +183,16 @@ pub enum TrackTransport {
     Interleaved { rtp_channel: u8, rtcp_channel: u8 },
 }
 
+fn tracks_of(sdp: &str) -> Vec<AnnouncedTrack> {
+    scan_sections(sdp)
+        .iter()
+        .map(|section| AnnouncedTrack {
+            control: section.control.clone(),
+            media: SdpMedia::from_section(section),
+        })
+        .collect()
+}
+
 // a relative control is resolved against the session URL the publisher SETUPs under
 fn uri_names_control(uri: &str, control: &str) -> bool {
     // older gst publishers append the session URL's query after the control
@@ -209,9 +217,12 @@ pub struct RtspResponder {
     /// Session timeout advertised at SETUP (RFC 2326 §12.37); the I/O layer reaps
     /// a client silent (no request, no RTCP) past it.
     timeout_secs: u32,
-    announced: Vec<AnnouncedTrack>,
-    // indexed like `announced`, empty when the I/O layer receives every track on `server_rtp_port`
+    // the publisher's ANNOUNCEd tracks, or the tracks this server's own SDP offers
+    tracks: Vec<AnnouncedTrack>,
+    // indexed like `tracks`, empty when the I/O layer uses `server_rtp_port` for every track
     track_server_ports: Vec<u16>,
+    // indexed like `tracks`, empty when every track sends as `ssrc`
+    track_ssrcs: Vec<u32>,
     track_transports: Vec<Option<TrackTransport>>,
     // the video codec an ingest server records, a publisher announcing another is refused
     ingest_codec: Option<VideoCodec>,
@@ -234,8 +245,9 @@ impl RtspResponder {
             client_rtp_port: None,
             interleaved: None,
             timeout_secs: DEFAULT_SESSION_TIMEOUT_SECS,
-            announced: Vec::new(),
+            tracks: Vec::new(),
             track_server_ports: Vec::new(),
+            track_ssrcs: Vec::new(),
             track_transports: Vec::new(),
             ingest_codec: None,
         }
@@ -263,9 +275,20 @@ impl RtspResponder {
         self.interleaved
     }
 
+    /// Route each SETUP to one of the media sections of the SDP this server
+    /// offers, advertising that track's `server_rtp_ports` entry and sending
+    /// as its `ssrcs` entry, both indexed in SDP order.
+    pub fn serving_tracks(mut self, server_rtp_ports: Vec<u16>, ssrcs: Vec<u32>) -> Self {
+        self.tracks = tracks_of(&self.sdp);
+        self.track_transports = alloc::vec![None; self.tracks.len()];
+        self.track_server_ports = server_rtp_ports;
+        self.track_ssrcs = ssrcs;
+        self
+    }
+
     /// The media sections of the publisher's ANNOUNCE, empty before one.
     pub fn announced_tracks(&self) -> &[AnnouncedTrack] {
-        &self.announced
+        &self.tracks
     }
 
     /// The UDP port each announced track's RTP is received on, in
@@ -281,11 +304,11 @@ impl RtspResponder {
         &self.track_transports
     }
 
-    fn announced_track_for(&self, uri: &str) -> Option<usize> {
-        if let [_only] = self.announced.as_slice() {
+    fn track_for(&self, uri: &str) -> Option<usize> {
+        if let [_only] = self.tracks.as_slice() {
             return Some(0);
         }
-        self.announced.iter().position(|track| {
+        self.tracks.iter().position(|track| {
             track
                 .control
                 .as_deref()
@@ -298,6 +321,13 @@ impl RtspResponder {
             .and_then(|index| self.track_server_ports.get(index))
             .copied()
             .unwrap_or(self.server_rtp_port)
+    }
+
+    fn ssrc_for(&self, track: Option<usize>) -> u32 {
+        track
+            .and_then(|index| self.track_ssrcs.get(index))
+            .copied()
+            .unwrap_or(self.ssrc)
     }
 
     /// The session identifier assigned at `SETUP`.
@@ -340,13 +370,7 @@ impl RtspResponder {
                 else {
                     return (self.respond(req.cseq, "200 OK", &[], b""), RtspEvent::None);
                 };
-                let announced: Vec<AnnouncedTrack> = scan_sections(sdp)
-                    .iter()
-                    .map(|section| AnnouncedTrack {
-                        control: section.control.clone(),
-                        media: SdpMedia::from_section(section),
-                    })
-                    .collect();
+                let announced = tracks_of(sdp);
                 let codec = announced.iter().find_map(|track| match track.media.as_ref()?.caps {
                     Caps::CompressedVideo { codec, .. } => Some(codec),
                     _ => None,
@@ -360,11 +384,11 @@ impl RtspResponder {
                 self.sdp = sdp.to_string();
                 self.track_transports = alloc::vec![None; announced.len()];
                 self.track_server_ports.clear();
-                self.announced = announced;
+                self.tracks = announced;
                 (
                     self.respond(req.cseq, "200 OK", &[], b""),
                     RtspEvent::Announce {
-                        tracks: self.announced.len(),
+                        tracks: self.tracks.len(),
                     },
                 )
             }
@@ -372,8 +396,8 @@ impl RtspResponder {
                 // RFC 2326 §12.37: the timeout param tells the client how often to
                 // keepalive (GET_PARAMETER / OPTIONS / RTCP) before it is reaped.
                 let session = format!("{};timeout={}", self.session_id, self.timeout_secs);
-                let track = self.announced_track_for(&req.uri);
-                if !self.announced.is_empty() && track.is_none() {
+                let track = self.track_for(&req.uri);
+                if !self.tracks.is_empty() && track.is_none() {
                     return (
                         self.respond(req.cseq, "404 Not Found", &[], b""),
                         RtspEvent::None,
@@ -394,7 +418,7 @@ impl RtspResponder {
                     }
                     let transport = format!(
                         "RTP/AVP/TCP;unicast;interleaved={rtp_ch}-{rtcp_ch};ssrc={:08X}",
-                        self.ssrc,
+                        self.ssrc_for(track),
                     );
                     let resp = self.respond(
                         req.cseq,
@@ -430,7 +454,7 @@ impl RtspResponder {
                     port.saturating_add(1),
                     server_port,
                     server_port.saturating_add(1),
-                    self.ssrc,
+                    self.ssrc_for(track),
                 );
                 let resp = self.respond(
                     req.cseq,

@@ -615,6 +615,47 @@ async fn each_video_frame_gets_the_metadata_of_its_own_window() {
     assert_eq!(ids_per_frame(&frames), [[0], [1], [2], [3]]);
 }
 
+// a picture is held for `latency` while the video runs on, and its metadata has to outlast that hold
+#[tokio::test]
+async fn a_steady_stream_keeps_each_pictures_metadata_until_it_goes_out() {
+    // seven of these frames are the first to reach the 200 ms latency, 31 ms past it
+    const PERIOD_NS: u64 = 33_000_000;
+    const PICTURES: u64 = 12;
+    let mut combiner = combiner();
+    let mut sink = CollectSink::default();
+    for index in 0..PICTURES {
+        let pts = index * PERIOD_NS;
+        let wall = VIDEO_START_NANOS + pts as i64;
+        let PipelinePacket::DataFrame(mut picture) = video_frame(pts, Some(wall)) else {
+            unreachable!("video_frame builds a data frame");
+        };
+        picture.timing.duration_ns = PERIOD_NS;
+        combiner
+            .process(
+                OnvifMetadataCombiner::VIDEO,
+                PipelinePacket::DataFrame(picture),
+                &mut sink,
+            )
+            .await
+            .expect("the video frame is held or released");
+        combiner
+            .process(
+                OnvifMetadataCombiner::METADATA,
+                parsed_metadata(index, pts, Some(wall + 10_000)),
+                &mut sink,
+            )
+            .await
+            .expect("the metadata queues");
+    }
+    combiner
+        .process(OnvifMetadataCombiner::VIDEO, PipelinePacket::Eos, &mut sink)
+        .await
+        .expect("EOS flushes what is held");
+
+    let want: Vec<Vec<u64>> = (0..PICTURES).map(|index| vec![index]).collect();
+    assert_eq!(ids_per_frame(&sink.take_frames()), want);
+}
+
 #[tokio::test]
 async fn metadata_older_than_max_lateness_is_dropped() {
     let mut combiner = combiner();

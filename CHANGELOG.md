@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2545: Serve analytics as an ONVIF metadata track beside H.264 with `relationmeta2onvifmeta`, `onvifmetadataextractor` and a two-track `rtspserversink`.
 - M2544: Let a format-less `video/x-raw` filter match every non-Bayer raw format.
 - M2543: Add `ximagesrc` for X11 screen and window capture.
 - M2542: Support drag and drop between apps in `waylanddisplaysrc`.

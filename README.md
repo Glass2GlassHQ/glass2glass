@@ -620,8 +620,8 @@ cargo clippy --workspace --all-targets
 | :--- | :--- | :--- |
 | `RtspSrc` (video) / `RtspSrcN` (video + audio, plus the ONVIF analytics metadata track under `onvif-metadata=true`) | `rtsp` | retina |
 | `RtspClientSink` (`rtspclientsink`: publishes H.264 / H.265 + AAC / Opus to an RTSP server with ANNOUNCE / RECORD, TCP-interleaved or UDP, Basic / Digest auth, RTCP sender reports, keepalive, reconnect) | `rtsp-client-sink` | none |
-| `RtspServerSink` (serves the pipeline's H.264 to RTSP players) / `RtspServerSrc` (`rtspserversrc`: records a publisher's H.264 / H.265, plus its AAC on a second pad in sync by RTCP sender reports, over UDP or TCP-interleaved) / `RtspServerSrcN` (one video publisher per pad, concurrently) | `rtsp-server` | none |
-| `OnvifSrc` (camera discovery + stream-URI resolution) / `OnvifMetadataParse` / `OnvifMetadataCombiner` | `onvif` | reqwest + roxmltree |
+| `RtspServerSink` (serves the pipeline's H.264, and an ONVIF metadata track on a second pad, to RTSP players) / `RtspServerSrc` (`rtspserversrc`: records a publisher's H.264 / H.265, plus its AAC on a second pad in sync by RTCP sender reports, over UDP or TCP-interleaved) / `RtspServerSrcN` (one video publisher per pad, concurrently) | `rtsp-server` | none |
+| `OnvifSrc` (camera discovery + stream-URI resolution) / `OnvifMetadataParse` / `OnvifMetadataCombiner` / `RelationMeta2OnvifMeta` / `OnvifMetadataExtractor` | `onvif` | reqwest + roxmltree |
 | `H264Parse` | (default) | none |
 | `FfmpegH264Dec` (sw / `NvdecCuvid` / `NvdecCuda` / `Vaapi`) | `ffmpeg` | Linux + libavcodec, or Windows + a shared ffmpeg named by `FFMPEG_DIR` |
 | `FfmpegVideoEnc` (`x264enc`, `ffmpegenc`), and `vah264enc` / `vah265enc` / `vaav1enc` on VA-API GPUs | `ffmpeg` | Linux + libavcodec (+ the GPU's VA-API driver), or Windows + a shared ffmpeg named by `FFMPEG_DIR` |

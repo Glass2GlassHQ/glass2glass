@@ -76,6 +76,13 @@ pub(crate) fn iso8601_utc(secs: u64) -> String {
     format!("{year:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
 }
 
+#[cfg(feature = "onvif")]
+pub(crate) fn iso8601_utc_ns(unix_nanos: i64) -> String {
+    let nanos = unix_nanos.rem_euclid(1_000_000_000);
+    let (year, m, d, hh, mm, ss) = civil_signed(unix_nanos.div_euclid(1_000_000_000));
+    format!("{year:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}.{nanos:09}Z")
+}
+
 /// Format microseconds since the Unix epoch as
 /// `CCYY-MM-DDThh:mm:ss.ssssssZ`, the W3C XML `xs:dateTime` profile pytak
 /// writes for CoT `time` / `start` / `stale` (`W3C_XML_DATETIME =

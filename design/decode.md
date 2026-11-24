@@ -826,8 +826,28 @@ falls in the frame's window, its own duration else the next frame's start,
 appends to whatever `AnalyticsMeta` a detector upstream already wrote rather than
 replacing it, appends event messages to the frame's `OnvifEventMeta` the same
 way, and drops metadata more than `max-lateness` (default 200 ms) behind
-the video. An EOS on either pad flushes what is held, so a silent metadata pad
-never stalls the video.
+the video unless a held frame can still take it. An EOS on either pad flushes
+what is held, so a silent metadata pad never stalls the video.
+
+### relationmeta2onvifmeta and onvifmetadataextractor
+
+The sending half, after gst's elements of the same names.
+`relationmeta2onvifmeta` writes each frame's `AnalyticsMeta` as one
+`tt:MetadataStream` document (`write_metadata_document`) and attaches it as
+`OnvifDocumentMeta`, an empty `tt:Frame` when the frame has no analytics. A
+detection becomes a `tt:Object` with a `tt:BoundingBox` and `tt:CenterOfGravity`
+in the normalized frame system, so no `tt:Transformation`, with y up as the
+Analytics Specification has it. gst's reader and writer treat that system as y
+down, so gst draws g2g's boxes upside down and g2g reads gst's upside down. The
+`ObjectId` is the detection's tracking id, else its node index in the frame, and
+the class is a `tt:Type` with its `Likelihood`. The element maps PTS to wall clock
+through a `PtsWallClock` fixed by its first frame, attaches that instant as
+`WallClockMeta`, which survives an encoder, and writes `UtcTime` one 90 kHz tick
+later with nine fractional digits, since a receiver rebuilds the picture's time
+from a 90 kHz RTP timestamp and a window that starts exactly there can lose it to
+rounding. `onvifmetadataextractor name=e` sends the video on from `e.src` and
+the document from `e.meta_src` as `Caps::OnvifMetadata`, a gap for a frame with
+none, and `remove-metadata` strips the document from the video.
 
 ## Zero-copy NVDEC to CUDA to GPU display
 
