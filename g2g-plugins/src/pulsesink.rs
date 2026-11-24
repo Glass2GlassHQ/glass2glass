@@ -62,24 +62,24 @@ use crate::audiooutput::{
 use crate::pulsepcm::{pulse_map, pulse_spec, FORMATS};
 use g2g_core::pcm_caps_any_rate_and_channels;
 
-/// Target server-side buffer, in playout time. Bounds it the way `AlsaSink`
+/// Default server-side buffer (`buffer-time`), in playout time. Bounds it the way `AlsaSink`
 /// bounds its ALSA ring: pulse's default target is a couple of seconds, so a
 /// source that runs faster than real time queues the whole stream without
 /// `pa_simple_write` ever blocking, which both defeats the pacing this sink
 /// relies on and pins the reported latency at the full backlog, leaving the
 /// playout clock with no frames played to observe.
-const TARGET_BUFFER: MicroSeconds = MicroSeconds(200_000);
+const DEFAULT_BUFFER_US: u32 = 200_000;
 /// Smallest chunk the server asks for, so it refills in 20 ms steps rather than
 /// one 200 ms gulp.
 const MIN_REQUEST: MicroSeconds = MicroSeconds(20_000);
 
 /// Buffering attributes for the playback stream. `u32::MAX` is pulse's "server
 /// default" sentinel; `fragsize` is record-only, so it stays default.
-fn buffer_attr(spec: &Spec) -> BufferAttr {
+fn buffer_attr(spec: &Spec, buffer_us: u32) -> BufferAttr {
     let bytes = |t| u32::try_from(spec.usec_to_bytes(t)).unwrap_or(u32::MAX);
     BufferAttr {
         maxlength: u32::MAX,
-        tlength: bytes(TARGET_BUFFER),
+        tlength: bytes(MicroSeconds(u64::from(buffer_us))),
         prebuf: u32::MAX,
         minreq: bytes(MIN_REQUEST),
         fragsize: u32::MAX,
@@ -97,6 +97,7 @@ const ELEMENT_NAME: &str = "PulseSink";
 /// ```
 pub struct PulseSink {
     app_name: String,
+    buffer_us: u32,
     output: OutputDevice,
     /// Bounded, non-blocking link to the device thread. The executor is
     /// cooperative, so neither the hand-off nor the end-of-stream drain may
@@ -111,6 +112,7 @@ impl core::fmt::Debug for PulseSink {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("PulseSink")
             .field("app_name", &self.app_name)
+            .field("buffer_us", &self.buffer_us)
             .field("output", &self.output)
             .field("caps", &self.caps)
             .field("bytes_written", &self.bytes_written.load(Ordering::Relaxed))
@@ -134,6 +136,7 @@ impl PulseSink {
     pub fn with_app_name(name: impl Into<String>) -> Self {
         Self {
             app_name: name.into(),
+            buffer_us: DEFAULT_BUFFER_US,
             output: OutputDevice::new("device", ""),
             link: PlayoutLink::new(G2gError::Hardware(HardwareError::PulseAudio(-1))),
             caps: None,
@@ -191,6 +194,7 @@ impl AsyncElement for PulseSink {
 
         let written = Arc::clone(&self.bytes_written);
         let app_name = self.app_name.clone();
+        let buffer_us = self.buffer_us;
         // disciplined even when not offered, skew slaving reads it
         let clock = self.playout.clock();
         self.playout.configure(absolute_caps)?;
@@ -211,7 +215,7 @@ impl AsyncElement for PulseSink {
             absolute_caps,
             &mut self.output,
             fallback,
-            move |device| open_stream(&app_name, device, &spec),
+            move |device| open_stream(&app_name, device, &spec, buffer_us),
             move |simple, rx, gate| {
                 play(simple, &spec, rx, gate, &written, &clock, &mut clock_offset)
             },
@@ -266,6 +270,12 @@ impl AsyncElement for PulseSink {
                 "PulseAudio sink to play to (empty = the server default)",
             )
             .with_default(""),
+            PropertySpec::new(
+                "buffer-time",
+                PropKind::Uint,
+                "server-side buffer span in microseconds, which playback fills before it starts",
+            )
+            .with_default("200000"),
             crate::audioskew::PROVIDE_CLOCK_PROPERTY,
             crate::audioskew::SLAVE_METHOD_PROPERTY,
             crate::audioskew::DRIFT_TOLERANCE_PROPERTY,
@@ -293,6 +303,11 @@ impl AsyncElement for PulseSink {
                 self.app_name = value.as_str().ok_or(PropError::Type)?.into();
                 Ok(())
             }
+            "buffer-time" => {
+                let microseconds = value.as_uint().ok_or(PropError::Type)?;
+                self.buffer_us = u32::try_from(microseconds).map_err(|_| PropError::Value)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -309,6 +324,7 @@ impl AsyncElement for PulseSink {
         }
         match name {
             "client-name" => Some(PropValue::Str(self.app_name.clone())),
+            "buffer-time" => Some(PropValue::Uint(u64::from(self.buffer_us))),
             _ => None,
         }
     }
@@ -358,9 +374,14 @@ impl PadTemplates for PulseSink {
 // Worker thread: blocking libpulse simple write
 // =================================================================
 
-fn open_stream(app_name: &str, device: &str, spec: &Spec) -> Result<Simple, G2gError> {
+fn open_stream(
+    app_name: &str,
+    device: &str,
+    spec: &Spec,
+    buffer_us: u32,
+) -> Result<Simple, G2gError> {
     let map = pulse_map(spec.channels);
-    let attr = buffer_attr(spec);
+    let attr = buffer_attr(spec, buffer_us);
     Simple::new(
         None,     // default server
         app_name, // application name
@@ -522,10 +543,11 @@ mod tests {
             channels: 2,
             rate: 48_000,
         };
-        let attr = buffer_attr(&spec);
+        let attr = buffer_attr(&spec, DEFAULT_BUFFER_US);
         // 200 ms of 48 kHz stereo s16 = 9600 frames * 4 bytes, and 20 ms of it
         // per request: the default (~2 s) would never block the writer.
         assert_eq!(attr.tlength, 200 * 48 * 4);
+        assert_eq!(buffer_attr(&spec, 40_000).tlength, 40 * 48 * 4);
         assert_eq!(attr.minreq, 20 * 48 * 4);
         // server defaults for the rest (fragsize is record-only).
         assert_eq!(

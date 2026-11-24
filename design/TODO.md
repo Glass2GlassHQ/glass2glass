@@ -32,8 +32,8 @@ Highest leverage first:
 
 The plan is [remote.md](remote.md).
 
-- Opus audio from the host's default capture device, on a short queue that
-  does not hold the picture.
+- Opus audio on the Windows host (`wasapisrc loopback=true`) and client
+  (`wasapisink`).
 - Encode with `d3d11convert ! nvenc` on a Windows host with an NVIDIA GPU,
   falling back to `mfh264enc`, and rebuild the host graph after `AccessLost`.
 - The macOS client, then `display-index` on `screencapturesrc` and a macOS

@@ -62,13 +62,13 @@ const CLIENT_USAGE: &str =
     "  g2g-desktop client --host HOST --cert-hash SHA256 --token TOKEN [--port 8080] [--inputs true]
                      [--transport auto|quic|websocket] [--trace FILE]";
 #[cfg(target_os = "linux")]
-const PLATFORM_CLIENT_USAGE: &str = " [--keyboard-grab true]";
+const PLATFORM_CLIENT_USAGE: &str = " [--keyboard-grab true] [--audio true]";
 #[cfg(target_os = "windows")]
 const PLATFORM_CLIENT_USAGE: &str = "";
 #[cfg(target_os = "linux")]
 const PLATFORM_HOST_USAGE: &str =
     "\n                   [--run COMMAND [--size 1920x1080] [--render-node /dev/dri/renderD128]
-                    | --x11-display :0]";
+                    | --x11-display :0] [--audio true]";
 #[cfg(target_os = "windows")]
 const PLATFORM_HOST_USAGE: &str =
     "\n                   [--monitor-index -1] [--quality-vs-speed 0-100]";
@@ -86,13 +86,13 @@ const HOST_FLAGS: [&str; 7] = [
     "trace",
 ];
 #[cfg(target_os = "linux")]
-const PLATFORM_HOST_FLAGS: [&str; 4] = ["run", "size", "render-node", "x11-display"];
+const PLATFORM_HOST_FLAGS: [&str; 5] = ["run", "size", "render-node", "x11-display", "audio"];
 #[cfg(target_os = "windows")]
 const PLATFORM_HOST_FLAGS: [&str; 2] = ["monitor-index", "quality-vs-speed"];
 #[cfg(target_os = "windows")]
 const PRIMARY_MONITOR: i32 = -1;
 #[cfg(target_os = "linux")]
-const PLATFORM_CLIENT_FLAGS: [&str; 1] = ["keyboard-grab"];
+const PLATFORM_CLIENT_FLAGS: [&str; 2] = ["keyboard-grab", "audio"];
 #[cfg(target_os = "windows")]
 const PLATFORM_CLIENT_FLAGS: [&str; 0] = [];
 const CLIENT_FLAGS: [&str; 7] = [
@@ -498,6 +498,16 @@ async fn host_one(
     host_monitor(listener, &settings, &capture, trace).await;
 }
 
+// a --run app plays through the host's own audio server, which carries every other app too
+#[cfg(target_os = "linux")]
+fn host_audio(flags: &Flags, capture: &CaptureSettings) -> Result<bool, Box<dyn Error>> {
+    match (capture.headless.is_some(), optional(flags, "audio")?) {
+        (true, Some(true)) => Err("--run sends no audio".into()),
+        (true, _) => Ok(false),
+        (false, audio) => Ok(audio.unwrap_or(true)),
+    }
+}
+
 async fn host(flags: Flags) -> Result<(), Box<dyn Error>> {
     let port = parsed(&flags, "port", DEFAULT_PORT)?;
     let capture = CaptureSettings {
@@ -514,6 +524,10 @@ async fn host(flags: Flags) -> Result<(), Box<dyn Error>> {
     let settings = HostSettings {
         token: required(&flags, "token")?,
         bitrate: parsed(&flags, "bitrate", DEFAULT_BITRATE)?,
+        #[cfg(target_os = "linux")]
+        audio: host_audio(&flags, &capture)?,
+        #[cfg(target_os = "windows")]
+        audio: false,
         send_window: optional(&flags, "send-window")?,
         video_mode: optional(&flags, "video-mode")?,
         #[cfg(target_os = "windows")]
@@ -570,6 +584,10 @@ async fn client(flags: Flags) -> Result<(), Box<dyn Error>> {
         token: required(&flags, "token")?,
         cert_hash: required(&flags, "cert-hash")?,
         inputs: parsed(&flags, "inputs", true)?,
+        #[cfg(target_os = "linux")]
+        audio: parsed(&flags, "audio", true)?,
+        #[cfg(target_os = "windows")]
+        audio: false,
         transport: match flags.get("transport").map(String::as_str) {
             None | Some("auto") => ClientTransport::Auto,
             Some("quic") => ClientTransport::Quic,

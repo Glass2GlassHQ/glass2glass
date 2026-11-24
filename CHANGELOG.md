@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2576: Send the Linux host's desktop audio to the Linux `g2g-desktop` client as Opus, and add `buffer-time` to `pulsesink`.
 - M2575: Add `open_track` to `remotewtsink` and `remotewtsrc`, a second packet stream on the same connection.
 - M2574: Split each power of two in `LatencyHistogram` into 16 buckets, so percentiles resolve to within 1/16.
 - M2573: Keep the capture stamp through the encoders and print glass-to-glass latency when `g2g-desktop client` exits.

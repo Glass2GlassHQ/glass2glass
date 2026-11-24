@@ -119,14 +119,13 @@ LAN.
 
 ## Host graphs
 
-The host sends video, and audio once slice 6 adds it, through `remotewtsink`
-in listening mode. A second display is a second track on the same connection.
+The host sends video through `remotewtsink` in listening mode, and Opus audio
+on the sink's track (`open_track`). A second display is a second track on the same connection.
 
 Linux, NVIDIA, the fast path once `cudaupload` accepts the capture format:
 
 ```
 pipewirevideosrc portal=true io-mode=mmap ! videoconvert ! cudaupload ! nvenc
-pulsesrc ! audioconvert ! opusenc
 ```
 
 Linux without CUDA:
@@ -137,6 +136,16 @@ pipewirevideosrc portal=true ! videoconvert ! ffmpegenc
 
 or `ffmpegenc` with the VA-API backend when `io-mode=dmabuf` yields a buffer
 that backend accepts. If it does not, the software line is the one that ships.
+
+The Linux host sends what the desktop plays, the monitor of the default output,
+unless `--audio false`:
+
+```
+pulsesrc device=@DEFAULT_MONITOR@ ! audioconvert ! opusenc frame-size=10 audio-type=restricted-lowdelay
+```
+
+`--run` sends no audio, since its app plays through the host's audio server
+along with every other app.
 
 The Linux host reads `portal-restore-token` from
 `$XDG_STATE_HOME/g2g-desktop/portal-restore-token` before each connection and
@@ -212,8 +221,11 @@ The client dials with `remotewtsrc` and sends no media. Receive side:
 
 ```
 h264parse ! <decoder> ! wgpusink sync=false present-mode=mailbox
-opusdec ! audioconvert ! autoaudiosink
+opusdec ! audioconvert ! pulsesink buffer-time=40000
 ```
+
+`pulsesink` starts playing once 40 ms of audio is queued. Each audio graph runs
+on its own thread and runtime, so audio work never delays a video frame.
 
 The decoder is `nvdec`, `mfdecode`, `vtdecode`, or `ffmpegdec`, chosen by the
 same auto-plug `decodebin` uses. `software-decode=true` forces `ffmpegdec`.

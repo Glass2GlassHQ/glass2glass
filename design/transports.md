@@ -600,6 +600,10 @@ the GPU), and the sink. Later data channel messages are read as client packets
 and sent to the caller's event channel, and a malformed packet is logged and
 dropped.
 
+With audio on, `HostListener::bind` opens a track on the sink, and the session
+runs the audio graph into it on its own thread. A track frame that finds the
+queue full is dropped, so the audio delay stays bounded after a stall.
+
 `host::inject` builds the platform `Injector` through the caller's constructor
 once the capture size is known, and a new one whenever the size changes. Events that arrive before the first size are
 logged and dropped.
@@ -615,7 +619,9 @@ auto choice is slice threading, which holds no pictures. With `inputs` on, the w
 `InputRouter` and out as packets on the data channel. Keys map from evdev codes
 to HID usages on device 0, a pointer position goes out as an absolute position
 on display 0, and losing keyboard focus releases the keys and buttons still
-held.
+held. With audio on, the client opens a track on the source and plays it on its
+own thread, so the audio graph waits for the host's audio caps without holding
+up the video.
 
 `g2g-desktop host` makes a self-signed certificate at start, prints its
 SHA-256, and serves one client at a time on `--port`. `--send-window` and

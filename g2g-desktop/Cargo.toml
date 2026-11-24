@@ -44,7 +44,7 @@ tokio = { version = "1", features = ["sync"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13"
 # cargo merges this optional entry only on linux, once a g2g-plugins feature in session turns it on
-g2g-plugins = { workspace = true, optional = true, features = ["ffmpeg", "portal", "dmabuf-cuda", "nvenc", "x11"] }
+g2g-plugins = { workspace = true, optional = true, features = ["ffmpeg", "portal", "dmabuf-cuda", "nvenc", "x11", "pulse-src", "pulse-sink", "opus"] }
 g2g-wayland-display = { path = "../g2g-wayland-display", optional = true, features = ["display"] }
 x11rb = { version = "0.14", optional = true, features = ["xtest"] }
 

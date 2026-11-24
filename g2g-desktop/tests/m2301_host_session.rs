@@ -113,6 +113,7 @@ async fn client_sees_host_video_cursor_and_clipboard_and_host_receives_client_in
     let settings = HostSettings {
         token: TOKEN.into(),
         bitrate: BITRATE,
+        audio: false,
         send_window: None,
         video_mode: None,
     };
@@ -264,6 +265,7 @@ fn settings() -> HostSettings {
     HostSettings {
         token: TOKEN.into(),
         bitrate: BITRATE,
+        audio: false,
         send_window: None,
         video_mode: None,
     }

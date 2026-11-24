@@ -20,7 +20,9 @@ use g2g_plugins::wgpupresent::WgpuPresentSink;
 use g2g_plugins::windowinput::WindowInput;
 use tokio::sync::{mpsc, watch};
 
+use crate::audio;
 use crate::hid::{usage_from_scancode, ScancodeSet};
+use crate::lineargraph::linear_graph;
 use crate::packet::{
     CursorImage, Event, EventKind, PacketReader, PacketWriter, Side, POINTER_BUTTONS,
 };
@@ -53,6 +55,7 @@ pub struct ClientSettings {
     pub token: String,
     pub cert_hash: String,
     pub inputs: bool,
+    pub audio: bool,
     pub transport: ClientTransport,
     #[cfg(target_os = "linux")]
     pub keyboard_grab: bool,
@@ -262,20 +265,11 @@ fn client_graph(
     sink: WgpuPresentSink,
 ) -> Result<Graph<GraphNode>, ClientError> {
     let decode = parse_chain(&default_registry(), DECODE).map_err(ClientError::Launch)?;
-    let mut graph = Graph::new();
-    let mut previous = graph.add_source(GraphNodeRef::source(source));
-    for element in decode {
-        let node = graph.add_transform(GraphNodeRef::Element(element));
-        graph
-            .link(previous, node)
-            .expect("transforms have one input and one output pad");
-        previous = node;
-    }
-    let display = graph.add_sink(GraphNodeRef::element(sink));
-    graph
-        .link(previous, display)
-        .expect("the display sink has one input pad");
-    Ok(graph)
+    Ok(linear_graph(
+        GraphNodeRef::source(source),
+        decode.into_iter().map(GraphNodeRef::Element),
+        GraphNodeRef::element(sink),
+    ))
 }
 
 pub async fn run_client(
@@ -299,6 +293,7 @@ pub async fn run_client(
         ClientTransport::WebSocket => RemoteWtSrc::new(unbound).with_caller(websocket, hash),
     };
     let data_channel = source.open_data_channel();
+    let audio_track = settings.audio.then(|| source.open_track());
     data_channel
         .outgoing
         .send(settings.token.as_bytes().to_vec())
@@ -332,6 +327,9 @@ pub async fn run_client(
     let mut run = RunBuilder::new(graph, &clock, LINK_CAPACITY).with_observer(observer);
     if let Some(trace) = trace {
         run = run.with_visit_recorder(trace);
+    }
+    if let Some(track) = audio_track {
+        audio::play(track);
     }
     let (run, (), (), ()) = tokio::join!(run.run(), forward, copies, follow);
     run.map_err(ClientError::Session)

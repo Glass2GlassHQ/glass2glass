@@ -23,10 +23,13 @@ use g2g_plugins::datachannel::DataChannelEnds;
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::remotewtio::SelfSignedCertificate;
 use g2g_plugins::remotewtsink::RemoteWtSink;
+use g2g_plugins::remotewttrack::RemoteWtTrackSink;
 use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, watch};
 
+use crate::audio;
 use crate::injection::{InjectError, InjectEvents, ScreenSize};
+use crate::lineargraph::linear_graph;
 use crate::packet::{CursorImage, Event, PacketError, PacketReader, PacketWriter, Side};
 
 const HOST_CATEGORY: &str = "g2g-desktop-host";
@@ -42,6 +45,7 @@ const LINK_CAPACITY: usize = 2;
 pub struct HostSettings {
     pub token: String,
     pub bitrate: u32,
+    pub audio: bool,
     pub send_window: Option<u64>,
     pub video_mode: Option<String>,
     #[cfg(target_os = "windows")]
@@ -96,6 +100,7 @@ pub fn check_token_len(token: &str) -> Result<(), HostError> {
 pub struct HostListener {
     sink: RemoteWtSink,
     channel: DataChannelEnds,
+    audio_track: Option<RemoteWtTrackSink>,
     address: SocketAddr,
 }
 
@@ -122,10 +127,12 @@ impl HostListener {
                 .map_err(HostError::VideoMode)?;
         }
         let channel = sink.open_data_channel();
+        let audio_track = settings.audio.then(|| sink.open_track());
         let address = sink.listen().map_err(HostError::Session)?;
         Ok(Self {
             sink,
             channel,
+            audio_track,
             address,
         })
     }
@@ -284,23 +291,15 @@ fn host_graph(
     let encode = parse_chain(&default_registry(), &encoder.launch_chain(settings))
         .map_err(HostError::Launch)?;
     let mut capture = capture.into_iter();
-    let mut graph = Graph::new();
-    let mut previous = graph.add_source(capture.next().expect("capture starts with a source"));
+    let source = capture.next().expect("capture starts with a source");
     let transforms = capture
         .chain([GraphNodeRef::element(CaptureSize { sizes })])
         .chain(encode.into_iter().map(GraphNodeRef::Element));
-    for transform in transforms {
-        let node = graph.add_transform(transform);
-        graph
-            .link(previous, node)
-            .expect("transforms have one input and one output pad");
-        previous = node;
-    }
-    let network = graph.add_sink(GraphNodeRef::element(sink));
-    graph
-        .link(previous, network)
-        .expect("the network sink has one input pad");
-    Ok(graph)
+    Ok(linear_graph(
+        source,
+        transforms,
+        GraphNodeRef::element(sink),
+    ))
 }
 
 pub struct HostCapture {
@@ -400,6 +399,7 @@ pub async fn run_session(
     let HostListener {
         mut sink,
         mut channel,
+        audio_track,
         ..
     } = listener;
     sink.connect().await.map_err(HostError::Session)?;
@@ -420,6 +420,9 @@ pub async fn run_session(
         |shape: &Option<CursorShape>| Some(cursor_image(shape.as_ref()).map(Event::Cursor));
     let clipboard_events =
         |text: &Option<String>| text.clone().map(|text| Ok(Event::Clipboard(text)));
+    if let Some(track) = audio_track {
+        audio::send(track);
+    }
     let (run, (), (), ()) = tokio::join!(
         run.run(),
         forward_input(channel.incoming, events),
