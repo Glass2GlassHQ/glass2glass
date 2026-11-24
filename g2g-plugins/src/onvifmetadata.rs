@@ -58,7 +58,7 @@ use g2g_core::meta::{
 };
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError,
-    MemoryDomain, MultiInputElement, MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate,
+    LatencyReport, MemoryDomain, MultiInputElement, MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate,
     PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
@@ -1179,6 +1179,10 @@ impl MultiInputElement for OnvifMetadataCombiner {
 
     fn output_follows_input(&self) -> Option<usize> {
         Some(Self::VIDEO)
+    }
+
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::buffered(self.latency_ns, None)
     }
 
     /// Named request pads: `video` -> the video pad, anything text-shaped ->

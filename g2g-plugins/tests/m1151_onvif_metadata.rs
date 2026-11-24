@@ -781,6 +781,15 @@ async fn the_wall_clock_takes_over_once_the_video_gets_its_first_sender_report()
     assert_eq!(ids_per_frame(&frames), want);
 }
 
+#[test]
+fn the_combiner_reports_its_hold_as_latency() {
+    let mut combiner = combiner();
+    combiner
+        .set_property("latency", PropValue::Uint(2 * FRAME_NS))
+        .expect("latency is a declared property");
+    assert_eq!(combiner.latency().min_ns, 2 * FRAME_NS);
+}
+
 #[tokio::test]
 async fn a_video_frame_with_no_metadata_goes_out_within_latency() {
     let mut combiner = combiner();
