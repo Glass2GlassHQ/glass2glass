@@ -40,7 +40,7 @@ features = [
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 g2g-plugins = { workspace = true, features = ["std"] }
-smithay-client-toolkit = "0.21"
+smithay-client-toolkit = { version = "0.21", default-features = false }
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 
 [lints]

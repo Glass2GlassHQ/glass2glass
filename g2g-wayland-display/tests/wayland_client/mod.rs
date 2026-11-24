@@ -8,16 +8,14 @@ use std::time::Duration;
 
 use g2g_core::PipelineClock;
 use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState};
+use smithay_client_toolkit::dispatch2::Dispatch2;
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
 use smithay_client_toolkit::reexports::client::globals::registry_queue_init;
 use smithay_client_toolkit::reexports::client::protocol::{
     wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface,
 };
-use smithay_client_toolkit::reexports::client::{Connection, QueueHandle};
+use smithay_client_toolkit::reexports::client::{Connection, QueueHandle, WEnum};
 use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
-use smithay_client_toolkit::seat::keyboard::{
-    KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers,
-};
 use smithay_client_toolkit::seat::pointer::{PointerEvent, PointerEventKind, PointerHandler};
 use smithay_client_toolkit::seat::{Capability, SeatHandler, SeatState};
 use smithay_client_toolkit::shell::xdg::window::{
@@ -252,11 +250,7 @@ impl SeatHandler for Client {
         capability: Capability,
     ) {
         if capability == Capability::Keyboard && self.keyboard.is_none() {
-            self.keyboard = Some(
-                self.seat_state
-                    .get_keyboard(qh, &seat, None)
-                    .expect("keyboard"),
-            );
+            self.keyboard = Some(seat.get_keyboard(qh, KeyboardEvents));
         }
         if capability == Capability::Pointer && self.pointer.is_none() {
             self.pointer = Some(self.seat_state.get_pointer(qh, &seat).expect("pointer"));
@@ -273,73 +267,26 @@ impl SeatHandler for Client {
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
 }
 
-impl KeyboardHandler for Client {
-    fn enter(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
+struct KeyboardEvents;
+
+impl Dispatch2<wl_keyboard::WlKeyboard, Client> for KeyboardEvents {
+    fn event(
+        &self,
+        client: &mut Client,
         _: &wl_keyboard::WlKeyboard,
-        _: &wl_surface::WlSurface,
-        _: u32,
-        _: &[u32],
-        _: &[Keysym],
-    ) {
-        let _ = self.events.send(ClientEvent::KeyboardEnter);
-    }
-    fn leave(
-        &mut self,
+        event: wl_keyboard::Event,
         _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &wl_keyboard::WlKeyboard,
-        _: &wl_surface::WlSurface,
-        _: u32,
+        _: &QueueHandle<Client>,
     ) {
-    }
-    fn press_key(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &wl_keyboard::WlKeyboard,
-        _: u32,
-        event: KeyEvent,
-    ) {
-        let _ = self.events.send(ClientEvent::Key {
-            code: event.raw_code,
-            pressed: true,
-        });
-    }
-    fn repeat_key(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &wl_keyboard::WlKeyboard,
-        _: u32,
-        _: KeyEvent,
-    ) {
-    }
-    fn release_key(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &wl_keyboard::WlKeyboard,
-        _: u32,
-        event: KeyEvent,
-    ) {
-        let _ = self.events.send(ClientEvent::Key {
-            code: event.raw_code,
-            pressed: false,
-        });
-    }
-    fn update_modifiers(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &wl_keyboard::WlKeyboard,
-        _: u32,
-        _: Modifiers,
-        _: RawModifiers,
-        _: u32,
-    ) {
+        let event = match event {
+            wl_keyboard::Event::Enter { .. } => ClientEvent::KeyboardEnter,
+            wl_keyboard::Event::Key { key, state, .. } => ClientEvent::Key {
+                code: key,
+                pressed: state == WEnum::Value(wl_keyboard::KeyState::Pressed),
+            },
+            _ => return,
+        };
+        let _ = client.events.send(event);
     }
 }
 
