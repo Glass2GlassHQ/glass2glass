@@ -584,7 +584,11 @@ button still down, because the host holds a key until its key-up arrives.
 ### Host session
 
 `host::HostListener::bind` binds a listening `remotewtsink` on a UDP address
-with `congestion-control=low-latency` (BBR) and opens its data channel.
+with `congestion-control=low-latency` (BBR) and opens its data channel. The
+host binds again for each connection through `HostListener::bind_when_free`,
+which waits up to 3 s for the port, since quinn keeps a closed connection's UDP
+socket open while the connection drains. A client interrupted with Ctrl-C keeps
+its runtime going for 100 ms so quinn sends the connection close.
 `host::run_session` accepts one client on it and reads the first data channel
 message as the token, with a 10 second limit, and compares it in constant time
 (`subtle`). A bad token returns `BadToken` and closes the connection, so the

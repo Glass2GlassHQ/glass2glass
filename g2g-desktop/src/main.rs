@@ -55,6 +55,7 @@ const PLATFORM_HOST_USAGE: &str =
 const PLATFORM_HOST_USAGE: &str =
     "\n                   [--monitor-index -1] [--quality-vs-speed 0-100]";
 const DEFAULT_PORT: u16 = 8080;
+const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_millis(100);
 const DEFAULT_FPS: u32 = 60;
 const DEFAULT_BITRATE: u32 = 4_000_000;
 const HOST_FLAGS: [&str; 7] = [
@@ -328,7 +329,7 @@ async fn serve_headless_sessions(
     trace_path: Option<&Path>,
 ) -> Result<Infallible, Box<dyn Error>> {
     loop {
-        let listener = HostListener::bind(address, certificate.clone(), settings)?;
+        let listener = HostListener::bind_when_free(address, certificate.clone(), settings).await?;
         let trace = open_trace(trace_path)?;
         let input = display.input_sender();
         let host_capture = HostCapture {
@@ -479,7 +480,8 @@ async fn host(flags: Flags) -> Result<(), Box<dyn Error>> {
         .await;
     }
     loop {
-        let listener = HostListener::bind(address, certificate.clone(), &settings)?;
+        let listener =
+            HostListener::bind_when_free(address, certificate.clone(), &settings).await?;
         host_one(
             listener,
             settings.clone(),
@@ -519,6 +521,10 @@ async fn client(flags: Flags) -> Result<(), Box<dyn Error>> {
             None
         }
     };
+    if session.is_none() {
+        // quinn sends the close of a dropped connection from a driver task, which runs only while the runtime does
+        tokio::time::sleep(CLOSE_GRACE).await;
+    }
     match &session {
         Some(Ok(stats)) => eprintln!("{}", stats.report()),
         None => {

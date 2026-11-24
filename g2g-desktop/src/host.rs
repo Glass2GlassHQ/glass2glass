@@ -32,6 +32,9 @@ use crate::packet::{CursorImage, Event, PacketError, PacketReader, PacketWriter,
 const HOST_CATEGORY: &str = "g2g-desktop-host";
 const TOKEN_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_TOKEN_LEN: usize = 256;
+// quinn keeps a closed connection's UDP socket open while the connection drains
+const PORT_FREE_TIMEOUT: Duration = Duration::from_secs(3);
+const PORT_POLL_INTERVAL: Duration = Duration::from_millis(20);
 // glass-to-glass latency grows with link depth
 const LINK_CAPACITY: usize = 2;
 
@@ -50,6 +53,7 @@ pub enum HostError {
     TokenLength(usize),
     SendWindow(PropError),
     VideoMode(PropError),
+    Port(std::io::Error),
     TokenTimeout,
     BadToken,
     HungUp,
@@ -65,6 +69,7 @@ impl fmt::Display for HostError {
             }
             HostError::SendWindow(e) => write!(f, "send window: {e:?}"),
             HostError::VideoMode(e) => write!(f, "video mode: {e:?}"),
+            HostError::Port(e) => write!(f, "port: {e}"),
             HostError::TokenTimeout => write!(
                 f,
                 "client sent no token within {} seconds",
@@ -123,6 +128,30 @@ impl HostListener {
             channel,
             address,
         })
+    }
+
+    pub async fn bind_when_free(
+        address: SocketAddr,
+        certificate: SelfSignedCertificate,
+        settings: &HostSettings,
+    ) -> Result<Self, HostError> {
+        let deadline = tokio::time::Instant::now() + PORT_FREE_TIMEOUT;
+        loop {
+            let probe = std::net::UdpSocket::bind(address);
+            match probe {
+                Ok(probe) => {
+                    drop(probe);
+                    return Self::bind(address, certificate, settings);
+                }
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::AddrInUse
+                        && tokio::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(PORT_POLL_INTERVAL).await;
+                }
+                Err(error) => return Err(HostError::Port(error)),
+            }
+        }
     }
 
     pub fn local_addr(&self) -> SocketAddr {

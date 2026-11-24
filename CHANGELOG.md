@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2563: Close the `g2g-desktop` client's connection on Ctrl-C, and let the host listen again once a closed connection drains.
 - M2562: Test that an X11 app's drag drops into a Wayland window in `waylanddisplaysrc`.
 - M2561: Keep X11 menus and tooltips above the window a press raises in `waylanddisplaysrc`.
 - M2560: End a QUIC `remotewt` session 5 s after its peer goes silent, with a keep-alive every second.

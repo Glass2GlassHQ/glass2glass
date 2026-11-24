@@ -201,23 +201,26 @@ async fn client_sees_host_video_and_cursor_and_host_receives_client_input() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_wrong_token_closes_the_connection_before_any_video() {
-    let settings = HostSettings {
-        token: TOKEN.into(),
-        bitrate: BITRATE,
-        send_window: None,
-        video_mode: None,
-    };
-    let (listener, cert_hash) = host_listener(&settings);
+struct RejectedSession {
+    host_result: Result<g2g_core::runtime::RunStats, HostError>,
+    client_failed: bool,
+    frames: u64,
+    size: Option<ScreenSize>,
+}
+
+async fn run_with_wrong_token(
+    listener: HostListener,
+    cert_hash: &str,
+    settings: &HostSettings,
+) -> RejectedSession {
     let source = format!("videotestsrc num-buffers={FRAMES} width={WIDTH} height={HEIGHT}");
-    let (mut client, _input) = client_source(&listener, &cert_hash, "wrong token");
+    let (mut client, _input) = client_source(&listener, cert_hash, "wrong token");
     let (event_sender, _host_events) = mpsc::unbounded_channel();
     let (size_sender, sizes) = watch::channel(None);
     let host = run_session(
         listener,
         capture(&source),
-        &settings,
+        settings,
         event_sender,
         size_sender,
         None,
@@ -233,8 +236,42 @@ async fn a_wrong_token_closes_the_connection_before_any_video() {
         tokio::time::timeout(RUN_TIMEOUT, async { tokio::join!(host, client_run) })
             .await
             .expect("the host closes the connection");
-    assert!(matches!(host_result, Err(HostError::BadToken)));
-    assert!(client_result.is_err());
-    assert_eq!(frames.load(Ordering::Relaxed), 0);
-    assert_eq!(*sizes.borrow(), None);
+    let size = *sizes.borrow();
+    RejectedSession {
+        host_result,
+        client_failed: client_result.is_err(),
+        frames: frames.load(Ordering::Relaxed),
+        size,
+    }
+}
+
+fn settings() -> HostSettings {
+    HostSettings {
+        token: TOKEN.into(),
+        bitrate: BITRATE,
+        send_window: None,
+        video_mode: None,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wrong_token_closes_the_connection_before_any_video() {
+    let settings = settings();
+    let (listener, cert_hash) = host_listener(&settings);
+    let session = run_with_wrong_token(listener, &cert_hash, &settings).await;
+    assert!(matches!(session.host_result, Err(HostError::BadToken)));
+    assert!(session.client_failed);
+    assert_eq!(session.frames, 0);
+    assert_eq!(session.size, None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_host_listens_on_its_port_again_right_after_a_closed_connection() {
+    let settings = settings();
+    let (listener, cert_hash) = host_listener(&settings);
+    let address = listener.local_addr();
+    run_with_wrong_token(listener, &cert_hash, &settings).await;
+    HostListener::bind_when_free(address, generate_certificate().unwrap(), &settings)
+        .await
+        .expect("the host binds its port again once the closed connection drains");
 }
