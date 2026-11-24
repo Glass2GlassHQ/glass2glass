@@ -164,6 +164,20 @@ The dma-bufs reach `vah264enc` with no copy and `nvenc` after one device copy.
 Client input goes into the compositor through `WaylandDisplaySrc::input_sender`
 rather than uinput.
 
+With `--x11-display NAME` the Linux host captures that X display, for an
+unattended X11 session where the portal dialog has nobody to answer it:
+
+```
+ximagesrc display-name=NAME show-pointer=false ! video/x-raw,framerate=FPS/1 ! videoconvert ! ffmpegenc
+```
+
+`XImageSrc::cursor_shapes` sends the XFixes pointer image beside the picture,
+and client input goes to `XTestInjector`, which fakes it through the XTEST
+extension on the root window. Keys take the evdev code plus 8, buttons and wheel
+notches take the core button numbers (wheel up, down, left, right are 4 to 7),
+and a keyboard removal releases every key it pressed. `--run` and
+`--x11-display` are exclusive.
+
 Windows, every frame on the GPU from capture to the encoder:
 
 ```
@@ -294,6 +308,7 @@ Host flags, all of them real properties the process applies:
 | `--bitrate` | bits per second, passed to the encoder | 4000000 |
 | `--audio` | capture and send audio | true |
 | `--video-mode` | `stream`, `stream-per-frame` or `datagrams` | `stream` |
+| `--x11-display` | capture this X display and inject through XTest, Linux | none |
 | `--congestion-control` | `low-latency` (BBR), `throughput` or `default` (Cubic) | `low-latency` |
 
 Client flags:

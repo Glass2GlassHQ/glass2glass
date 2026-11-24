@@ -77,12 +77,12 @@ fn build_tablet(screen: ScreenSize) -> io::Result<VirtualDevice> {
 }
 
 #[derive(Debug, Default)]
-struct WheelRemainder {
-    vertical: i32,
-    horizontal: i32,
+pub(crate) struct WheelRemainder {
+    pub(crate) vertical: i32,
+    pub(crate) horizontal: i32,
 }
 
-fn whole_notches(remainder: &mut i32, hi_res: i32) -> i32 {
+pub(crate) fn whole_notches(remainder: &mut i32, hi_res: i32) -> i32 {
     *remainder += hi_res;
     let notches = *remainder / HI_RES_UNITS_PER_NOTCH;
     *remainder -= notches * HI_RES_UNITS_PER_NOTCH;

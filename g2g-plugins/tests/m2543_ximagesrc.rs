@@ -9,10 +9,11 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use g2g_core::frame::Frame;
-use g2g_core::runtime::{parse_launch, run_graph};
+use g2g_core::runtime::{parse_launch, run_graph, GraphNode};
 use g2g_core::PipelineClock;
 use g2g_plugins::appsink::{register_appsink_pull, AppSinkPull};
 use g2g_plugins::registry::default_registry;
+use g2g_plugins::ximagesrc::XImageSrc;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
     AtomEnum, ChangeWindowAttributesAux, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux,
@@ -360,5 +361,46 @@ async fn a_resized_window_is_captured_at_its_new_size() {
     tokio::select! {
         result = run_graph(graph, &ZeroClock, 2) => panic!("the graph ended first: {result:?}"),
         resized = tokio::time::timeout(TIMEOUT, checks) => resized.expect("a frame has the new size"),
+    }
+}
+
+#[tokio::test]
+async fn the_pointer_image_is_published_beside_the_picture() {
+    let server = Xvfb::start();
+    let _window = TestWindow::map(&server.display);
+    let mut source = XImageSrc::new().with_display_name(server.display.clone());
+    let mut shapes = source.cursor_shapes();
+    let mut graph = g2g_core::Graph::new();
+    let source_node = graph.add_source(GraphNode::source(source));
+    let sink_node = graph.add_sink(GraphNode::element(
+        g2g_plugins::appsink::AppSink::new().with_channel("m2568_cursor"),
+    ));
+    graph.link(source_node, sink_node).expect("links");
+    let _pull = register_appsink_pull("m2568_cursor");
+    let published = async {
+        let shape = shapes
+            .wait_for(Option::is_some)
+            .await
+            .expect("the source publishes")
+            .clone()
+            .expect("waited for a shape");
+        assert!(shape.width > 0 && shape.height > 0);
+        assert_eq!(
+            shape.rgba.len(),
+            (shape.width * shape.height) as usize * BYTES_PER_PIXEL
+        );
+        assert!(
+            shape
+                .rgba
+                .as_chunks::<BYTES_PER_PIXEL>()
+                .0
+                .iter()
+                .any(|pixel| pixel[3] > 0),
+            "the X server's default pointer has visible pixels"
+        );
+    };
+    tokio::select! {
+        result = run_graph(graph, &ZeroClock, 2) => panic!("the graph ended first: {result:?}"),
+        shown = tokio::time::timeout(TIMEOUT, published) => shown.expect("the pointer is published"),
     }
 }

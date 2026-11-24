@@ -32,6 +32,7 @@ use g2g_core::{
     PixelAspect, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
+use crate::cursorshape::{straight_rgba_from_premultiplied_bgra, CursorShape};
 use crate::desktopcapture::{run_desktop_capture, DesktopCaptureSettings, DesktopGrabber};
 use crate::videosizeandrate::{VideoSizeAndRate, MAX_REQUESTED_FPS, REQUESTED_DIMENSION};
 
@@ -346,6 +347,8 @@ struct XGrabber {
     image: SharedImage,
     damage: Option<u32>,
     pointer: Option<PointerOverlay>,
+    cursor_shapes: Option<tokio::sync::watch::Sender<Option<CursorShape>>>,
+    cursor_published: bool,
     captured_once: bool,
     resized: Option<Caps>,
 }
@@ -383,13 +386,14 @@ impl Debug for XGrabber {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct GrabSettings {
     target: CaptureTarget,
     framerate_q16: u32,
     area: CaptureArea,
     show_pointer: bool,
     use_damage: bool,
+    cursor_shapes: Option<tokio::sync::watch::Sender<Option<CursorShape>>>,
 }
 
 impl XGrabber {
@@ -414,7 +418,8 @@ impl XGrabber {
             .map_err(|error| x11_failure("watching the window size", error))?
             .check()
             .map_err(|error| x11_failure("watching the window size", error))?;
-        let extensions_needed = settings.use_damage || settings.show_pointer;
+        let track_cursor = settings.show_pointer || settings.cursor_shapes.is_some();
+        let extensions_needed = settings.use_damage || track_cursor;
         if extensions_needed {
             let (major, minor) = XFIXES_VERSION;
             connection
@@ -427,20 +432,17 @@ impl XGrabber {
             true => Some(watch_damage(&connection, area.window)?),
             false => None,
         };
-        let pointer = match settings.show_pointer {
-            true => {
-                connection
-                    .xfixes_select_cursor_input(area.window, CursorNotifyMask::DISPLAY_CURSOR)
-                    .map_err(|error| x11_failure("watching the cursor", error))?
-                    .check()
-                    .map_err(|error| x11_failure("watching the cursor", error))?;
-                Some(PointerOverlay {
-                    cursor: None,
-                    position: None,
-                })
-            }
-            false => None,
-        };
+        if track_cursor {
+            connection
+                .xfixes_select_cursor_input(area.window, CursorNotifyMask::DISPLAY_CURSOR)
+                .map_err(|error| x11_failure("watching the cursor", error))?
+                .check()
+                .map_err(|error| x11_failure("watching the cursor", error))?;
+        }
+        let pointer = settings.show_pointer.then_some(PointerOverlay {
+            cursor: None,
+            position: None,
+        });
         Ok(Self {
             connection,
             target: settings.target,
@@ -450,9 +452,33 @@ impl XGrabber {
             image,
             damage,
             pointer,
+            cursor_shapes: settings.cursor_shapes,
+            cursor_published: false,
             captured_once: false,
             resized: None,
         })
+    }
+
+    fn publish_cursor(&mut self) -> Result<(), G2gError> {
+        let Some(shapes) = &self.cursor_shapes else {
+            return Ok(());
+        };
+        let image = self.cursor_image()?;
+        let shape = CursorShape {
+            width: u32::try_from(image.width).map_err(|_| G2gError::CapsMismatch)?,
+            height: u32::try_from(image.pixels.len() / image.width)
+                .map_err(|_| G2gError::CapsMismatch)?,
+            hotspot_x: image.hot_x,
+            hotspot_y: image.hot_y,
+            rgba: image
+                .pixels
+                .iter()
+                .flat_map(|argb| straight_rgba_from_premultiplied_bgra(argb.to_le_bytes()))
+                .collect(),
+        };
+        shapes.send_replace(Some(shape));
+        self.cursor_published = true;
+        Ok(())
     }
 
     fn follow_resize(&mut self) -> Result<(), G2gError> {
@@ -559,6 +585,9 @@ impl DesktopGrabber for XGrabber {
         if reconfigured {
             self.follow_resize()?;
         }
+        if cursor_changed || !self.cursor_published {
+            self.publish_cursor()?;
+        }
         let mut changed =
             !self.captured_once || self.damage.is_none() || damaged || self.resized.is_some();
         if let (Some(damage), true) = (self.damage, damaged) {
@@ -636,6 +665,7 @@ pub struct XImageSrc {
     frame_limit: u64,
     configured: bool,
     clock_sync: Option<ClockSync>,
+    cursor_shapes: Option<tokio::sync::watch::Sender<Option<CursorShape>>>,
 }
 
 impl Default for XImageSrc {
@@ -656,7 +686,15 @@ impl XImageSrc {
             frame_limit: u64::MAX,
             configured: false,
             clock_sync: None,
+            cursor_shapes: None,
         }
+    }
+
+    // the XFixes pointer image beside the picture, set show-pointer=false to keep it out of the picture too
+    pub fn cursor_shapes(&mut self) -> tokio::sync::watch::Receiver<Option<CursorShape>> {
+        let (sender, receiver) = tokio::sync::watch::channel(None);
+        self.cursor_shapes = Some(sender);
+        receiver
     }
 
     pub fn with_display_name(mut self, display_name: impl Into<String>) -> Self {
@@ -908,6 +946,7 @@ impl SourceLoop for XImageSrc {
                 area,
                 show_pointer: self.show_pointer,
                 use_damage: self.use_damage,
+                cursor_shapes: self.cursor_shapes.clone(),
             };
             let settings = DesktopCaptureSettings {
                 thread_name: "g2g-ximagesrc",

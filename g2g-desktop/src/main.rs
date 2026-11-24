@@ -12,9 +12,15 @@ use std::process::ExitCode;
 use std::str::FromStr;
 use std::sync::Arc;
 
+#[cfg(target_os = "linux")]
+use g2g_core::element::DynAsyncElement;
 use g2g_core::runtime::Observer;
+#[cfg(target_os = "linux")]
+use g2g_core::runtime::{parse_element, ParseError, SourceLoop};
 use g2g_core::runtime::{GraphNodeRef, VisitRecorder};
 use g2g_core::G2gError;
+#[cfg(target_os = "linux")]
+use g2g_core::PropValue;
 use g2g_desktop::client::{run_client, ClientError, ClientSettings, ClientTransport};
 use g2g_desktop::host::{
     check_token_len, inject, run_session, HostCapture, HostEncoder, HostListener, HostSettings,
@@ -26,14 +32,20 @@ use g2g_desktop::sendinput::Injector;
 use g2g_desktop::uinput::Injector;
 #[cfg(target_os = "linux")]
 use g2g_desktop::waylanddisplayinput::WaylandDisplayInjector;
+#[cfg(target_os = "linux")]
+use g2g_desktop::xtest::XTestInjector;
 #[cfg(target_os = "windows")]
 use g2g_plugins::d3d11screencapturesrc::{monitor_bounds, D3D11ScreenCaptureSrc};
 use g2g_plugins::perfetto_trace::PerfettoTrace;
 #[cfg(target_os = "linux")]
 use g2g_plugins::pipewirevideosrc::PipeWireVideoSrc;
+#[cfg(target_os = "linux")]
+use g2g_plugins::registry::default_registry;
 use g2g_plugins::remotewtio::{generate_certificate, SelfSignedCertificate};
 #[cfg(target_os = "linux")]
 use g2g_plugins::screencastportal::{PortalCursorMode, PortalSourceTypes};
+#[cfg(target_os = "linux")]
+use g2g_plugins::ximagesrc::XImageSrc;
 #[cfg(target_os = "linux")]
 use g2g_wayland_display::waylanddisplaysrc::{
     render_node_driver, DisplayNames, WaylandDisplay, WaylandDisplaySettings, WaylandDisplaySrc,
@@ -54,7 +66,8 @@ const PLATFORM_CLIENT_USAGE: &str = " [--keyboard-grab true]";
 const PLATFORM_CLIENT_USAGE: &str = "";
 #[cfg(target_os = "linux")]
 const PLATFORM_HOST_USAGE: &str =
-    "\n                   [--run COMMAND [--size 1920x1080] [--render-node /dev/dri/renderD128]]";
+    "\n                   [--run COMMAND [--size 1920x1080] [--render-node /dev/dri/renderD128]
+                    | --x11-display :0]";
 #[cfg(target_os = "windows")]
 const PLATFORM_HOST_USAGE: &str =
     "\n                   [--monitor-index -1] [--quality-vs-speed 0-100]";
@@ -72,7 +85,7 @@ const HOST_FLAGS: [&str; 7] = [
     "trace",
 ];
 #[cfg(target_os = "linux")]
-const PLATFORM_HOST_FLAGS: [&str; 3] = ["run", "size", "render-node"];
+const PLATFORM_HOST_FLAGS: [&str; 4] = ["run", "size", "render-node", "x11-display"];
 #[cfg(target_os = "windows")]
 const PLATFORM_HOST_FLAGS: [&str; 2] = ["monitor-index", "quality-vs-speed"];
 #[cfg(target_os = "windows")]
@@ -169,6 +182,9 @@ struct HeadlessSettings {
 
 #[cfg(target_os = "linux")]
 fn headless_settings(flags: &Flags) -> Result<Option<HeadlessSettings>, Box<dyn Error>> {
+    if flags.contains_key("run") && flags.contains_key("x11-display") {
+        return Err("--run and --x11-display each pick what the host captures".into());
+    }
     let Some(command) = flags.get("run") else {
         if let Some(flag) = ["size", "render-node"]
             .iter()
@@ -195,6 +211,8 @@ struct CaptureSettings {
     portal_restore_token_path: PathBuf,
     #[cfg(target_os = "linux")]
     headless: Option<HeadlessSettings>,
+    #[cfg(target_os = "linux")]
+    x11_display: Option<String>,
     #[cfg(target_os = "windows")]
     monitor_index: i32,
 }
@@ -297,6 +315,38 @@ async fn host_portal(
     if let Err(e) = saved {
         eprintln!("g2g-desktop host: saving the portal restore token: {e}");
     }
+}
+
+// ximagesrc takes its rate from a downstream caps filter, as gst's does
+#[cfg(target_os = "linux")]
+fn x11_rate_filter(fps: u32) -> Result<Box<dyn DynAsyncElement>, ParseError> {
+    parse_element(
+        &default_registry(),
+        &format!("capsfilter caps=video/x-raw,framerate={fps}/1"),
+    )
+}
+
+#[cfg(target_os = "linux")]
+async fn host_x11(
+    listener: HostListener,
+    settings: &HostSettings,
+    display: &str,
+    fps: u32,
+    trace: Option<Arc<PerfettoTrace>>,
+) {
+    let mut source = XImageSrc::new().with_display_name(display);
+    let cursor_shapes = source.cursor_shapes();
+    SourceLoop::set_property(&mut source, "show-pointer", PropValue::Bool(false))
+        .expect("show-pointer is an ximagesrc property");
+    let rate = x11_rate_filter(fps).expect("host checked the rate filter before listening");
+    let host_capture = HostCapture {
+        nodes: vec![GraphNodeRef::source(source), GraphNodeRef::Element(rate)],
+        encoder: HostEncoder::Software,
+        cursor_shapes: Some(cursor_shapes),
+        clipboard_texts: None,
+    };
+    let open_injector = |screen| XTestInjector::new(display, screen);
+    serve(listener, settings, host_capture, open_injector, trace).await;
 }
 
 #[cfg(target_os = "linux")]
@@ -439,7 +489,10 @@ async fn host_one(
         }
     };
     #[cfg(target_os = "linux")]
-    host_portal(listener, &settings, &capture, trace).await;
+    match &capture.x11_display {
+        Some(display) => host_x11(listener, &settings, display, capture.fps, trace).await,
+        None => host_portal(listener, &settings, &capture, trace).await,
+    }
     #[cfg(target_os = "windows")]
     host_monitor(listener, &settings, &capture, trace).await;
 }
@@ -452,6 +505,8 @@ async fn host(flags: Flags) -> Result<(), Box<dyn Error>> {
         portal_restore_token_path: portal_restore_token_path()?,
         #[cfg(target_os = "linux")]
         headless: headless_settings(&flags)?,
+        #[cfg(target_os = "linux")]
+        x11_display: flags.get("x11-display").cloned(),
         #[cfg(target_os = "windows")]
         monitor_index: parsed(&flags, "monitor-index", PRIMARY_MONITOR)?,
     };
@@ -464,6 +519,10 @@ async fn host(flags: Flags) -> Result<(), Box<dyn Error>> {
         quality_vs_speed: optional(&flags, "quality-vs-speed")?,
     };
     check_token_len(&settings.token)?;
+    #[cfg(target_os = "linux")]
+    if capture.x11_display.is_some() {
+        x11_rate_filter(capture.fps).map_err(|e| format!("--fps {}: {e}", capture.fps))?;
+    }
     #[cfg(target_os = "linux")]
     std::fs::create_dir_all(
         capture

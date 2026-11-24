@@ -15,3 +15,13 @@ pub struct CursorShape {
     // straight alpha, `width * CURSOR_BYTES_PER_PIXEL` bytes per row
     pub rgba: Vec<u8>,
 }
+
+// wl_shm, xcursor and xfixes cursor pixels are little-endian argb with premultiplied alpha
+pub fn straight_rgba_from_premultiplied_bgra(pixel: [u8; 4]) -> [u8; 4] {
+    let [blue, green, red, alpha] = pixel;
+    if alpha == 0 {
+        return [0; 4];
+    }
+    let straight = |channel: u8| (u32::from(channel) * 255 / u32::from(alpha)).min(255) as u8;
+    [straight(red), straight(green), straight(blue), alpha]
+}

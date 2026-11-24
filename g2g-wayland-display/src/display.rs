@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 use g2g_core::log::Target;
 use g2g_core::memory::OwnedDmaBuf;
 use g2g_core::{G2gError, HardwareError};
-use g2g_plugins::cursorshape::{CursorShape, CURSOR_BYTES_PER_PIXEL};
+use g2g_plugins::cursorshape::{
+    straight_rgba_from_premultiplied_bgra, CursorShape, CURSOR_BYTES_PER_PIXEL,
+};
 use g2g_plugins::datachannel::MAX_MESSAGE_SIZE;
 use g2g_plugins::windowinput::{
     WindowInput, CLIPBOARD_TEXT_MIME_TYPES, WHEEL_PIXELS_PER_NOTCH, WHEEL_UNITS_PER_NOTCH,
@@ -806,16 +808,6 @@ impl core::fmt::Display for CursorError {
     }
 }
 
-// wl_shm and xcursor pixels are little-endian argb with premultiplied alpha
-fn straight_rgba(bgra_premultiplied: [u8; 4]) -> [u8; 4] {
-    let [blue, green, red, alpha] = bgra_premultiplied;
-    if alpha == 0 {
-        return [0; 4];
-    }
-    let straight = |channel: u8| (u32::from(channel) * 255 / u32::from(alpha)).min(255) as u8;
-    [straight(red), straight(green), straight(blue), alpha]
-}
-
 fn named_cursor(
     theme: &CursorTheme,
     size: u32,
@@ -842,7 +834,7 @@ fn named_cursor(
             .as_chunks::<CURSOR_BYTES_PER_PIXEL>()
             .0
             .iter()
-            .flat_map(|pixel| straight_rgba(*pixel))
+            .flat_map(|pixel| straight_rgba_from_premultiplied_bgra(*pixel))
             .collect(),
     })
 }
@@ -890,7 +882,7 @@ fn surface_cursor(surface: &WlSurface) -> Result<Option<CursorShape>, CursorErro
             .flat_map(|row| row[..row_bytes].as_chunks::<CURSOR_BYTES_PER_PIXEL>().0)
             .flat_map(|&[blue, green, red, alpha]| {
                 let alpha = if opaque { u8::MAX } else { alpha };
-                straight_rgba([blue, green, red, alpha])
+                straight_rgba_from_premultiplied_bgra([blue, green, red, alpha])
             })
             .collect::<Vec<u8>>();
         Ok((data.width, data.height, rgba))

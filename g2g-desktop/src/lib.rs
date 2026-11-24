@@ -16,3 +16,5 @@ pub mod sendinput;
 pub mod uinput;
 #[cfg(all(target_os = "linux", feature = "session"))]
 pub mod waylanddisplayinput;
+#[cfg(all(target_os = "linux", feature = "session"))]
+pub mod xtest;
