@@ -294,7 +294,10 @@ converts to straight alpha. The picture itself has no pointer drawn in it.
 
 With `xwayland=true` the run also starts Xwayland (the binary must be on `PATH`)
 and smithay's X11 window manager, and publishes the X display (`:N`) beside the
-Wayland socket once the window manager runs. A managed X11 window is mapped
+Wayland socket once the window manager runs. `N` is the lowest display with
+neither a `/tmp/.X{N}-lock` file nor a `/tmp/.X11-unix/X{N}` socket, since Xvfb
+listens without a lock file and smithay deletes the socket of a display whose
+lock it takes. A managed X11 window is mapped
 fullscreen at the output size and takes keyboard focus, which the window manager
 passes on as X input focus. Override-redirect windows (menus, tooltips) keep the
 position they set and stay above every managed window. A Wayland drag over an X11 window reaches it as XDND, since

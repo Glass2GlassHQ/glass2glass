@@ -19,7 +19,7 @@ use g2g_core::metrics::LatencyHistogram;
 use g2g_core::runtime::GraphNode;
 use g2g_core::runtime::Observer;
 #[cfg(target_os = "linux")]
-use g2g_core::runtime::{parse_element, ParseError, SourceLoop};
+use g2g_core::runtime::{parse_chain, parse_element, ParseError, SourceLoop};
 use g2g_core::runtime::{GraphNodeRef, VisitRecorder};
 use g2g_core::G2gError;
 #[cfg(target_os = "linux")]
@@ -63,7 +63,8 @@ const HOST_USAGE: &str =
                    [--send-window BYTES] [--video-mode stream|stream-per-frame|datagrams]
                    [--trace FILE]";
 #[cfg(target_os = "linux")]
-const GAMESTREAM_USAGE: &str = "  g2g-desktop host --protocol gamestream --x11-display :0
+const GAMESTREAM_USAGE: &str = "  g2g-desktop host --protocol gamestream
+                   [--x11-display :0 | --run COMMAND [--size 1920x1080] [--render-node PATH]]
   g2g-desktop pin PIN";
 #[cfg(target_os = "windows")]
 const GAMESTREAM_USAGE: &str = "  g2g-desktop host --protocol gamestream
@@ -293,6 +294,14 @@ async fn serve<I: InjectEvents>(
 }
 
 #[cfg(target_os = "linux")]
+fn read_portal_restore_token(path: &Path) -> std::io::Result<String> {
+    match std::fs::read_to_string(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        read => read,
+    }
+}
+
+#[cfg(target_os = "linux")]
 async fn host_portal(
     listener: HostListener,
     settings: &HostSettings,
@@ -300,9 +309,8 @@ async fn host_portal(
     trace: Option<Arc<PerfettoTrace>>,
 ) {
     let path = &capture.portal_restore_token_path;
-    let token = match std::fs::read_to_string(path) {
+    let token = match read_portal_restore_token(path) {
         Ok(token) => token,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => {
             eprintln!("g2g-desktop host: {}: {e}", path.display());
             return;
@@ -377,6 +385,23 @@ fn headless_encoder(render_node: &str) -> std::io::Result<HostEncoder> {
 }
 
 #[cfg(target_os = "linux")]
+fn headless_display_settings(fps: u32, headless: &HeadlessSettings) -> WaylandDisplaySettings {
+    let mut display_settings = WaylandDisplaySettings {
+        framerate_q16: fps << 16,
+        xwayland: true,
+        ..WaylandDisplaySettings::default()
+    };
+    if let Some(size) = headless.size {
+        display_settings.width = size.width;
+        display_settings.height = size.height;
+    }
+    if let Some(render_node) = &headless.render_node {
+        display_settings.render_node = render_node.clone();
+    }
+    display_settings
+}
+
+#[cfg(target_os = "linux")]
 fn launch_app(names: &DisplayNames, command: &str) -> std::io::Result<tokio::process::Child> {
     let x11_display = names
         .x11_display
@@ -389,6 +414,23 @@ fn launch_app(names: &DisplayNames, command: &str) -> std::io::Result<tokio::pro
         .env("DISPLAY", x11_display)
         .kill_on_drop(true)
         .spawn()
+}
+
+#[cfg(target_os = "linux")]
+async fn run_app_while_serving(
+    display: &WaylandDisplay,
+    command: &str,
+    served: impl std::future::Future<Output = Result<(), Box<dyn Error>>>,
+) -> Result<(), Box<dyn Error>> {
+    let mut app = launch_app(display.names(), command).map_err(|e| format!("--run: {e}"))?;
+    let status = tokio::select! {
+        status = app.wait() => status.map_err(|e| format!("--run: {e}"))?,
+        served = served => return served,
+    };
+    if !status.success() {
+        return Err(format!("--run exited with {status}").into());
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -423,25 +465,12 @@ async fn host_headless(
     headless: &HeadlessSettings,
     trace_path: Option<&Path>,
 ) -> Result<(), Box<dyn Error>> {
-    let mut display_settings = WaylandDisplaySettings {
-        framerate_q16: fps << 16,
-        xwayland: true,
-        ..WaylandDisplaySettings::default()
-    };
-    if let Some(size) = headless.size {
-        display_settings.width = size.width;
-        display_settings.height = size.height;
-    }
-    if let Some(render_node) = &headless.render_node {
-        display_settings.render_node = render_node.clone();
-    }
+    let display_settings = headless_display_settings(fps, headless);
     let encoder = headless_encoder(&display_settings.render_node)
         .map_err(|e| format!("{}: {e}", display_settings.render_node))?;
     let display = WaylandDisplay::start(display_settings)
         .await
         .map_err(|e| format!("starting the headless display: {e:?}"))?;
-    let mut app =
-        launch_app(display.names(), &headless.command).map_err(|e| format!("--run: {e}"))?;
     let sessions = serve_headless_sessions(
         address,
         certificate,
@@ -450,14 +479,10 @@ async fn host_headless(
         &encoder,
         trace_path,
     );
-    let status = tokio::select! {
-        status = app.wait() => status.map_err(|e| format!("--run: {e}"))?,
-        served = sessions => match served? {},
-    };
-    if !status.success() {
-        return Err(format!("--run exited with {status}").into());
-    }
-    Ok(())
+    run_app_while_serving(&display, &headless.command, async {
+        match sessions.await? {}
+    })
+    .await
 }
 
 #[cfg(target_os = "windows")]
@@ -520,7 +545,7 @@ fn host_audio(flags: &Flags, capture: &CaptureSettings) -> Result<bool, Box<dyn 
 }
 
 #[cfg(all(target_os = "linux", feature = "gamestream"))]
-fn gamestream_capture(display: &str, fps: u32) -> Result<Vec<GraphNode>, String> {
+fn gamestream_x11_capture(display: &str, fps: u32) -> Result<Vec<GraphNode>, String> {
     let rate = x11_rate_filter(fps).map_err(|e| e.to_string())?;
     let convert = parse_element(&default_registry(), "videoconvert").map_err(|e| e.to_string())?;
     Ok(vec![
@@ -531,17 +556,97 @@ fn gamestream_capture(display: &str, fps: u32) -> Result<Vec<GraphNode>, String>
 }
 
 #[cfg(all(target_os = "linux", feature = "gamestream"))]
+fn damage_rate_cap(fps: u32) -> String {
+    // the portal and the headless display send frames only when the picture changes
+    format!("videorate drop-only=true ! video/x-raw,framerate={fps}/1")
+}
+
+#[cfg(all(target_os = "linux", feature = "gamestream"))]
+fn gamestream_portal_capture(fps: u32, token_path: &Path) -> Result<Vec<GraphNode>, String> {
+    let token = read_portal_restore_token(token_path)
+        .map_err(|e| format!("{}: {e}", token_path.display()))?;
+    let source = PipeWireVideoSrc::new()
+        .with_portal(PortalSourceTypes::Monitor)
+        .with_portal_cursor_mode(PortalCursorMode::Embedded)
+        .with_portal_restore_token(token)
+        .with_fps(fps);
+    let tokens = source.portal_restore_tokens();
+    let path = token_path.to_owned();
+    tokio::task::spawn_local(async move {
+        if let Err(e) = save_portal_restore_tokens(tokens, &path).await {
+            eprintln!("g2g-desktop host: saving the portal restore token: {e}");
+        }
+    });
+    let convert = parse_chain(
+        &default_registry(),
+        &format!("{} ! videoconvert", damage_rate_cap(fps)),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(std::iter::once(GraphNodeRef::source(source))
+        .chain(convert.into_iter().map(GraphNodeRef::Element))
+        .collect())
+}
+
+#[cfg(all(target_os = "linux", feature = "gamestream"))]
+fn gamestream_display_capture(
+    display: &WaylandDisplay,
+    fps: u32,
+) -> Result<Vec<GraphNode>, String> {
+    let upload = parse_chain(
+        &default_registry(),
+        &format!("dmabuftocuda ! {}", damage_rate_cap(fps)),
+    )
+    .map_err(|e| e.to_string())?;
+    let source = GraphNodeRef::source(WaylandDisplaySrc::on_display(display));
+    Ok(std::iter::once(source)
+        .chain(upload.into_iter().map(GraphNodeRef::Element))
+        .collect())
+}
+
+// moonlight asks for 60 fps unless its user picks another rate
+#[cfg(all(target_os = "linux", feature = "gamestream"))]
+const GAMESTREAM_DISPLAY_FPS: u32 = 60;
+
+#[cfg(all(target_os = "linux", feature = "gamestream"))]
+async fn gamestream_headless(headless: &HeadlessSettings) -> Result<(), Box<dyn Error>> {
+    let display_settings = headless_display_settings(GAMESTREAM_DISPLAY_FPS, headless);
+    let render_node = display_settings.render_node.clone();
+    let driver =
+        render_node_driver(Path::new(&render_node)).map_err(|e| format!("{render_node}: {e}"))?;
+    if driver != "nvidia" {
+        return Err(format!(
+            "--protocol gamestream encodes with nvenc, and {render_node} runs on {driver}: pass an NVIDIA render node with --render-node"
+        )
+        .into());
+    }
+    let display = WaylandDisplay::start(display_settings)
+        .await
+        .map_err(|e| format!("starting the headless display: {e:?}"))?;
+    let captured = display.clone();
+    let capture = Box::new(move |fps| gamestream_display_capture(&captured, fps));
+    run_app_while_serving(&display, &headless.command, async {
+        Ok(g2g_desktop::gamestream::serve(capture).await?)
+    })
+    .await
+}
+
+#[cfg(all(target_os = "linux", feature = "gamestream"))]
 async fn gamestream_host(flags: &Flags) -> Result<(), Box<dyn Error>> {
-    if let Some(flag) = flags
-        .keys()
-        .find(|flag| !["protocol", "x11-display"].contains(&flag.as_str()))
-    {
+    if let Some(flag) = flags.keys().find(|flag| {
+        !["protocol", "x11-display", "run", "size", "render-node"].contains(&flag.as_str())
+    }) {
         return Err(format!("--protocol gamestream takes no --{flag}").into());
     }
-    let Some(display) = flags.get("x11-display").cloned() else {
-        return Err("--protocol gamestream captures an X display: pass --x11-display".into());
+    if let Some(headless) = headless_settings(flags)? {
+        return gamestream_headless(&headless).await;
+    }
+    let capture: g2g_desktop::gamestream::CaptureFactory = match flags.get("x11-display").cloned() {
+        Some(display) => Box::new(move |fps| gamestream_x11_capture(&display, fps)),
+        None => {
+            let token_path = portal_restore_token_path()?;
+            Box::new(move |fps| gamestream_portal_capture(fps, &token_path))
+        }
     };
-    let capture = Box::new(move |fps| gamestream_capture(&display, fps));
     Ok(g2g_desktop::gamestream::serve(capture).await?)
 }
 

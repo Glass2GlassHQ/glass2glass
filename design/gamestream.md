@@ -2,9 +2,10 @@
 
 Plan for `g2g-desktop host --protocol gamestream`, a host that stock Moonlight
 clients pair with and stream from, the way they use Sunshine. Discovery,
-pairing, the app list and encrypted H.264 or HEVC video from an X display, at
-the size the client asks for, run today. Nothing else in this file is built
-unless it names an element that already exists. When a slice ships, delete it
+pairing, the app list and encrypted H.264 or HEVC video from an X display, the
+desktop portal or a `--run` headless display, at the size the client asks for,
+run today. Nothing else in this file is built unless it names an element that
+already exists. When a slice ships, delete it
 here and from [TODO.md](TODO.md), and write the shipped behavior into the track
 that owns it.
 
@@ -48,10 +49,16 @@ video UDP 47998, control UDP 47999, audio UDP 48000.
 ## Host graphs
 
 ```
-<capture> ! dmabuftocuda ! cudascale ! video/x-raw,width=W,height=H ! nvenc ! moonlightvideopay ! udpsink
+ximagesrc ! video/x-raw,framerate=F ! videoconvert ! cudaupload ! cudascale ! video/x-raw,width=W,height=H ! nvenc ! moonlightvideopay ! udpsink
 pulsesrc device=@DEFAULT_MONITOR@ ! audioconvert ! opusenc frame-size=5 bitrate-type=cbr audio-type=restricted-lowdelay ! moonlightaudiopay ! udpsink
 ```
 
+The portal capture replaces `ximagesrc` and its caps filter with
+`pipewirevideosrc ! videorate drop-only=true ! video/x-raw,framerate=F`, with
+the pointer drawn into the picture. `--run` captures with `waylanddisplaysrc !
+dmabuftocuda ! videorate drop-only=true ! video/x-raw,framerate=F`. Both
+sources send a frame only when the picture changes, and a `videorate` that
+repeats frames holds each one until the next change.
 Windows replaces the video front with
 `d3d11screencapturesrc ! d3d11convert ! video/x-raw,width=W,height=H ! mfh265enc`
 and the audio source with `wasapisrc loopback=true`. The session builds both
@@ -109,11 +116,9 @@ In `g2g-desktop`, module `gamestream`.
 
 ## Order
 
-1. Video from the portal and `--run` captures. `--protocol gamestream` takes
-   only `--x11-display` today.
-2. Audio: `moonlightaudiopay` and CBR Opus in 5 ms frames.
-3. Input: keyboard through the virtual-key table, mouse and scroll.
-4. The Windows host.
+1. Audio: `moonlightaudiopay` and CBR Opus in 5 ms frames.
+2. Input: keyboard through the virtual-key table, mouse and scroll.
+3. The Windows host.
 
 After those: reference frame invalidation, gamepad, HDR, surround, and `--run`
 applications as `/applist` entries.

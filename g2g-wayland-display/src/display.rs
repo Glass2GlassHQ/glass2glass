@@ -223,10 +223,21 @@ pub(crate) fn run_display(
     Ok(())
 }
 
+fn free_x11_display() -> Option<u32> {
+    // Xvfb listens without a lock file
+    (0..33).find(|number| {
+        !std::path::Path::new(&format!("/tmp/.X{number}-lock")).exists()
+            && !std::path::Path::new(&format!("/tmp/.X11-unix/X{number}")).exists()
+    })
+}
+
 fn spawn_xwayland(state: &mut DisplayState) -> Result<(), G2gError> {
+    // smithay deletes the socket of a display whose lock file is missing before it binds its own
+    let display = free_x11_display()
+        .ok_or_else(|| hardware_error("starting Xwayland", "every X display is taken"))?;
     let (xwayland, client) = XWayland::spawn(
         &state.display_handle,
-        None,
+        display,
         std::iter::empty::<(String, String)>(),
         std::iter::empty::<String>(),
         true,

@@ -9,9 +9,9 @@
 //! source rarely matches.
 //!
 //! Format-agnostic: it never touches pixels, only forwards, drops, or
-//! repeats the System-memory frame, so it preserves the pixel format and
-//! geometry and replaces only the framerate. CPU-only, `no_std` baseline,
-//! no feature gate.
+//! repeats the frame in the memory it arrived in, so it preserves the pixel
+//! format, geometry and memory domain and replaces only the framerate.
+//! `no_std` baseline, no feature gate.
 //!
 //! The cadence follows GStreamer's `videorate`: hold the previous frame,
 //! and on each new frame emit the held frame for every output slot whose
@@ -20,6 +20,11 @@
 //! downscale with one frame of latency, and re-stamps output PTS onto the
 //! exact target grid. The drop/duplicate decision is the pure `emit_slots`
 //! helper so it is host-testable without the runner.
+//!
+//! With `drop-only`, as in GStreamer, no frame is held or repeated: a frame
+//! that reaches the next slot of the output grid passes at once with its own
+//! timestamps, and any other frame is dropped, so a live source gains no
+//! latency.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -75,6 +80,7 @@ pub struct VideoRate {
     configured: bool,
     last_caps: Option<Caps>,
     emitted: u64,
+    drop_only: bool,
 }
 
 impl VideoRate {
@@ -97,6 +103,7 @@ impl VideoRate {
             configured: false,
             last_caps: None,
             emitted: 0,
+            drop_only: false,
         }
     }
 
@@ -114,6 +121,7 @@ impl VideoRate {
             configured: false,
             last_caps: None,
             emitted: 0,
+            drop_only: false,
         }
     }
 
@@ -212,6 +220,19 @@ fn emit_slots(prev_pts: u64, cur_pts: u64, next_pts: u64, dt_ns: u64) -> (Vec<u6
     (slots, next)
 }
 
+// capture jitter moves frames by less than a quarter of an output period
+const DROP_ONLY_TOLERANCE_DIVISOR: u64 = 4;
+
+// the next output slot after a frame at `pts_ns` passes, or None when it lands before `next_pts` and is dropped
+fn drop_only_next_slot(pts_ns: u64, next_pts: u64, dt_ns: u64) -> Option<u64> {
+    let reached = pts_ns.saturating_add(dt_ns / DROP_ONLY_TOLERANCE_DIVISOR);
+    if reached < next_pts {
+        return None;
+    }
+    let slots_passed = (reached - next_pts) / dt_ns + 1;
+    Some(next_pts.saturating_add(slots_passed.saturating_mul(dt_ns)))
+}
+
 impl AsyncElement for VideoRate {
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
@@ -226,10 +247,8 @@ impl AsyncElement for VideoRate {
     where
         Self: 'a;
 
-    /// Reads host memory, so it takes system frames only. The allocation
-    /// cascade turns that into a download demand on a GPU producer.
-    fn input_domains(&self) -> g2g_core::memory::DomainSet {
-        g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
+    fn output_domain_follows_input(&self) -> bool {
+        true
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
@@ -327,10 +346,22 @@ impl AsyncElement for VideoRate {
                         return Err(G2gError::NotConfigured);
                     }
                     let (format, w, h) = self.input.ok_or(G2gError::NotConfigured)?;
-                    frame
-                        .domain
-                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     let cur_pts = frame.timing.pts_ns;
+                    if self.drop_only {
+                        let next = self.next_pts.unwrap_or(cur_pts);
+                        let Some(after) = drop_only_next_slot(cur_pts, next, self.dt_ns) else {
+                            return Ok(());
+                        };
+                        self.next_pts = Some(after);
+                        if let Some(caps) = self.caps_to_emit(format, w, h) {
+                            out.push(PipelinePacket::CapsChanged(caps)).await?;
+                        }
+                        let sequence = self.emitted;
+                        self.emitted += 1;
+                        out.push(PipelinePacket::DataFrame(Frame { sequence, ..frame }))
+                            .await?;
+                        return Ok(());
+                    }
                     let mut cur_domain = frame.domain;
                     cur_domain.make_shareable();
 
@@ -429,6 +460,10 @@ impl AsyncElement for VideoRate {
                 self.set_rate_q16(rate_q16);
                 Ok(())
             }
+            "drop-only" => {
+                self.drop_only = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -441,17 +476,26 @@ impl AsyncElement for VideoRate {
                 let (num, den) = framerate_q16_to_fraction(self.rate_q16);
                 Some(PropValue::Fraction(num as i32, den as i32))
             }
+            "drop-only" => Some(PropValue::Bool(self.drop_only)),
             _ => None,
         }
     }
 }
 
 /// `VideoRate`'s settable properties.
-static VIDEORATE_PROPS: &[PropertySpec] = &[PropertySpec::new(
-    "framerate",
-    PropKind::Fraction,
-    "target output frames per second (e.g. 10/1)",
-)];
+static VIDEORATE_PROPS: &[PropertySpec] = &[
+    PropertySpec::new(
+        "framerate",
+        PropKind::Fraction,
+        "target output frames per second (e.g. 10/1)",
+    ),
+    PropertySpec::new(
+        "drop-only",
+        PropKind::Bool,
+        "Only drop frames, no duplicates are produced",
+    )
+    .with_default("false"),
+];
 
 #[cfg(test)]
 mod tests {
@@ -539,6 +583,106 @@ mod tests {
             .collect();
         assert_eq!(repeats.len(), 2, "the first input fills two 60 fps slots");
         assert_eq!(repeats[0], repeats[1], "the repeat is a deep copy");
+    }
+
+    #[test]
+    fn drop_only_passes_each_frame_on_arrival_and_halves_60_fps() {
+        let caps = Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
+            width: Dim::Fixed(1),
+            height: Dim::Fixed(1),
+            framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
+        };
+        let mut rate = VideoRate::new(30.0);
+        rate.set_property("drop-only", PropValue::Bool(true))
+            .unwrap();
+        rate.configure_pipeline(&caps).unwrap();
+        let mut sink = crate::testutil::CollectSink::default();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        // every third frame arrives a millisecond early
+        let early_ns = 1_000_000;
+        let mut passed_on_arrival = Vec::new();
+        for k in 0..12u64 {
+            let mut frame = crate::testutil::frame(vec![0u8; 4]);
+            frame.timing.pts_ns = (k * DT_60).saturating_sub(if k % 3 == 2 { early_ns } else { 0 });
+            let before = sink.packets.len();
+            runtime
+                .block_on(rate.process(PipelinePacket::DataFrame(frame), &mut sink))
+                .unwrap();
+            let arrived = sink.packets[before..]
+                .iter()
+                .any(|packet| matches!(packet, PipelinePacket::DataFrame(_)));
+            if arrived {
+                passed_on_arrival.push(k);
+            }
+        }
+        assert_eq!(passed_on_arrival, [0, 2, 4, 6, 8, 10]);
+    }
+
+    #[test]
+    fn a_cuda_frame_repeats_as_the_same_cuda_buffer() {
+        #[derive(Debug)]
+        struct DeviceMemory;
+        impl g2g_core::memory::CudaKeepAlive for DeviceMemory {}
+        const SIDE: u32 = 2;
+        const LUMA_POINTER: u64 = 0x1000;
+        let caps = Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Fixed(SIDE),
+            height: Dim::Fixed(SIDE),
+            framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
+        };
+        let mut rate = VideoRate::new(60.0);
+        rate.configure_pipeline(&caps).unwrap();
+        let mut sink = crate::testutil::CollectSink::default();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        for k in 0..2u64 {
+            let buffer = g2g_core::memory::OwnedCudaBuffer::new(
+                LUMA_POINTER * (k + 1),
+                0,
+                SIDE,
+                SIDE,
+                SIDE,
+                SIDE,
+                0,
+                0,
+                alloc::sync::Arc::new(DeviceMemory),
+            );
+            let frame = Frame {
+                domain: MemoryDomain::Cuda(buffer),
+                timing: FrameTiming {
+                    pts_ns: k * STEP_30,
+                    ..FrameTiming::default()
+                },
+                sequence: k,
+                meta: Default::default(),
+            };
+            runtime
+                .block_on(rate.process(PipelinePacket::DataFrame(frame), &mut sink))
+                .unwrap();
+        }
+        let repeats: Vec<u64> = sink
+            .packets
+            .iter()
+            .filter_map(|packet| match packet {
+                PipelinePacket::DataFrame(Frame {
+                    domain: MemoryDomain::Cuda(buffer),
+                    ..
+                }) => Some(buffer.luma_ptr),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(repeats, [LUMA_POINTER, LUMA_POINTER]);
     }
 
     #[test]

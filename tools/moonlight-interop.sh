@@ -5,9 +5,11 @@
 
 # Pair the Moonlight flatpak with `g2g-desktop host --protocol gamestream`, list its apps and
 # stream the desktop for a few seconds. Moonlight runs on its own Xvfb display, which the host
-# also captures, so nothing opens on the desktop.
+# also captures, or with CAPTURE=run the host captures its own headless display, so nothing
+# opens on the desktop. CAPTURE=portal captures the desktop session through the ScreenCast
+# portal, whose share dialog a user approves on the desktop.
 #
-# Prerequisites: Xvfb, and Moonlight from Flathub:
+# Prerequisites: Xvfb, glxgears for CAPTURE=run, and Moonlight from Flathub:
 #   flatpak install --user flathub com.moonlight_stream.Moonlight
 #
 # Usage: tools/moonlight-interop.sh <g2g-desktop binary built with --features gamestream>
@@ -18,7 +20,7 @@ BIN=$1
 OUT=${OUT:-$HOME/tmp/moonlight-interop}
 PIN=4721
 CODEC=${CODEC:-H.264}
-STREAM_SECONDS=8
+STREAM_SECONDS=${STREAM_SECONDS:-8}
 # each run starts unpaired: fresh config directories for Moonlight and the host
 rm -rf "$OUT"
 mkdir -p "$OUT/moonlight-config" "$OUT/host-config"
@@ -39,7 +41,17 @@ read -r DISPLAY_NUMBER <&4
 export DISPLAY=":$DISPLAY_NUMBER"
 unset WAYLAND_DISPLAY
 
-XDG_CONFIG_HOME="$OUT/host-config" "$BIN" host --protocol gamestream --x11-display "$DISPLAY" \
+case ${CAPTURE:-x11} in
+x11) capture=(--x11-display "$DISPLAY") ;;
+run)
+    for node in /dev/dri/renderD*; do
+        [ "$(basename "$(readlink -f "/sys/class/drm/${node##*/}/device/driver")")" = nvidia ] && break
+    done
+    capture=(--run glxgears --render-node "$node")
+    ;;
+portal) capture=() ;;
+esac
+XDG_CONFIG_HOME="$OUT/host-config" "$BIN" host --protocol gamestream "${capture[@]}" \
     >"$OUT/host.log" 2>&1 &
 HOST=$!
 trap 'stop_moonlight "(pair|quit|stream)"; kill $HOST $XVFB 2>/dev/null || true' EXIT
