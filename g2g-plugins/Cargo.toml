@@ -1167,6 +1167,9 @@ windows = { version = "0.62", optional = true, features = [
     "Win32_Security",
     # d3d11screencapturesrc reads monitor geometry in physical pixels
     "Win32_UI_HiDpi",
+    # wgpupresentsink's window syncs the clipboard
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
 ] }
 # wgpu-hal's D3D12 backend, for the raw device and queue the D3D12 decoder shares
 # with wgpu (d3d12-decode).

@@ -308,14 +308,17 @@ Alt+Tab reach the host, and a click takes the grab again after Escape. A
 compositor without the protocol still gets the Escape and click handling. Escape releases the grab locally and is not
 forwarded.
 
-Clipboard: each side watches its clipboard and sends type 9 when the text
-changes and the other side did not just set it. A payload over the 64 KiB
+Clipboard: each side watches its clipboard and sends type 9, UTF-8 text with
+LF line endings, when the text changes and the other side did not just set it. A payload over the 64 KiB
 message cap is dropped. The `--run` host sends what `WaylandDisplay::clipboard_texts`
 publishes and hands received text to `WaylandDisplay::set_clipboard`. The Linux
 client passes `WgpuPresentSink::sync_clipboard` the host's texts, which its
 window sets as the selection once it has a keyboard serial, and forwards each
-selection the desktop sends the focused window. Both sides remember the last
-text that crossed, so neither echoes it.
+selection the desktop sends the focused window. The Windows client sets the
+host's text as `CF_UNICODETEXT` at once, and reads the clipboard on
+`WM_CLIPBOARDUPDATE` and on `WM_SETFOCUS` while its window has focus, turning
+LF into CRLF on the way in and back on the way out. Both sides
+remember the last text that crossed, so neither echoes it.
 
 Text: type 10 carries UTF-8 text to type on the host. Moonlight sends it for
 its paste shortcut, Ctrl+Alt+Shift+V. On Windows each UTF-16 unit goes to

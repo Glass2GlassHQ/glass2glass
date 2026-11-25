@@ -87,11 +87,11 @@ pub(crate) struct WorkerChannels<Receiver> {
     pub(crate) input: Option<tokio::sync::mpsc::UnboundedSender<crate::windowinput::WindowInput>>,
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub(crate) cursor_shapes: Option<CursorShapes>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub(crate) clipboard: Option<ClipboardLink>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[derive(Debug, Clone)]
 pub(crate) struct ClipboardLink {
     // texts the window's selection takes

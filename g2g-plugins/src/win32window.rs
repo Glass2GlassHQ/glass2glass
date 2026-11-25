@@ -20,7 +20,7 @@ use crate::cursorshape::{CursorShape, CURSOR_BYTES_PER_PIXEL};
 use crate::windowinput::{PointerButton, WindowInput};
 #[cfg(feature = "wgpu-present")]
 use crate::windowworker::{
-    PresentReports, WindowParams, WindowRenderer, WorkerChannels, WorkerCmd,
+    ClipboardLink, PresentReports, WindowParams, WindowRenderer, WorkerChannels, WorkerCmd,
 };
 
 /// Drain pending window messages so the window stays responsive. False once
@@ -45,6 +45,7 @@ pub(crate) fn pump_messages() -> bool {
 enum WindowMessage {
     Input(WindowInput),
     PointerAt { x: i32, y: i32 },
+    ClipboardChanged,
 }
 
 #[cfg(feature = "wgpu-present")]
@@ -196,6 +197,187 @@ fn follow_host_cursor(hwnd: HWND, shape: Option<&CursorShape>, log_tag: &'static
 }
 
 #[cfg(feature = "wgpu-present")]
+#[derive(Debug)]
+struct ClipboardAccess;
+
+#[cfg(feature = "wgpu-present")]
+impl ClipboardAccess {
+    fn open(hwnd: HWND) -> windows::core::Result<Self> {
+        // SAFETY: the window is live, and Drop closes the clipboard again.
+        unsafe { windows::Win32::System::DataExchange::OpenClipboard(Some(hwnd))? };
+        Ok(Self)
+    }
+}
+
+#[cfg(feature = "wgpu-present")]
+impl Drop for ClipboardAccess {
+    fn drop(&mut self) {
+        // SAFETY: `open` opened the clipboard on this thread.
+        unsafe {
+            let _ = windows::Win32::System::DataExchange::CloseClipboard();
+        }
+    }
+}
+
+#[cfg(feature = "wgpu-present")]
+fn lf_line_endings(text: &str) -> alloc::string::String {
+    text.replace("\r\n", "\n")
+}
+
+#[cfg(feature = "wgpu-present")]
+fn write_clipboard_text(_access: &ClipboardAccess, text: &str) -> windows::core::Result<()> {
+    use windows::Win32::Foundation::{GlobalFree, HANDLE};
+    use windows::Win32::System::DataExchange::{EmptyClipboard, SetClipboardData};
+    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    use windows::Win32::System::Ole::CF_UNICODETEXT;
+
+    // windows text ends lines with CRLF
+    let windows_text = text.replace('\n', "\r\n");
+    let wide: alloc::vec::Vec<u16> = windows_text
+        .encode_utf16()
+        .chain(core::iter::once(0))
+        .collect();
+    // SAFETY: the caller holds the clipboard open.
+    unsafe { EmptyClipboard()? };
+    // SAFETY: plain allocation of the text's UTF-16 units.
+    let memory = unsafe { GlobalAlloc(GMEM_MOVEABLE, core::mem::size_of_val(wide.as_slice()))? };
+    // SAFETY: `memory` is a live moveable block.
+    let target = unsafe { GlobalLock(memory) }.cast::<u16>();
+    if target.is_null() {
+        let error = windows::core::Error::from_thread();
+        // SAFETY: nothing else holds the block.
+        unsafe {
+            let _ = GlobalFree(Some(memory));
+        }
+        return Err(error);
+    }
+    // SAFETY: the block holds `wide.len()` units, and is unlocked before the clipboard takes it.
+    unsafe {
+        core::ptr::copy_nonoverlapping(wide.as_ptr(), target, wide.len());
+        // win32 reports GlobalUnlock as failed once the lock count reaches zero
+        let _ = GlobalUnlock(memory);
+    }
+    // SAFETY: the clipboard is open, and SetClipboardData takes the block only when it succeeds.
+    if let Err(e) = unsafe { SetClipboardData(CF_UNICODETEXT.0.into(), Some(HANDLE(memory.0))) } {
+        // SAFETY: the clipboard did not take the block.
+        unsafe {
+            let _ = GlobalFree(Some(memory));
+        }
+        return Err(e);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "wgpu-present")]
+fn read_clipboard_text(
+    _access: &ClipboardAccess,
+) -> windows::core::Result<Option<alloc::string::String>> {
+    use windows::Win32::Foundation::HGLOBAL;
+    use windows::Win32::System::DataExchange::{GetClipboardData, IsClipboardFormatAvailable};
+    use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+    use windows::Win32::System::Ole::CF_UNICODETEXT;
+
+    // SAFETY: a plain query.
+    if unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT.0.into()) }.is_err() {
+        return Ok(None);
+    }
+    // SAFETY: the caller holds the clipboard open, and the clipboard keeps the handle.
+    let memory = HGLOBAL(unsafe { GetClipboardData(CF_UNICODETEXT.0.into())? }.0);
+    // SAFETY: `memory` is the clipboard's live block.
+    let units = unsafe { GlobalSize(memory) } / core::mem::size_of::<u16>();
+    // SAFETY: as above.
+    let source = unsafe { GlobalLock(memory) }.cast::<u16>().cast_const();
+    if source.is_null() {
+        return Err(windows::core::Error::from_thread());
+    }
+    // SAFETY: the locked block holds `units` UTF-16 units.
+    let wide = unsafe { core::slice::from_raw_parts(source, units) };
+    // clipboard text ends at its first NUL, and the block can be larger than the text
+    let end = wide.iter().position(|&unit| unit == 0).unwrap_or(units);
+    let text = lf_line_endings(&alloc::string::String::from_utf16_lossy(&wide[..end]));
+    // SAFETY: `source` was locked above and `wide` is not used after this.
+    unsafe {
+        let _ = GlobalUnlock(memory);
+    }
+    Ok(Some(text))
+}
+
+#[cfg(feature = "wgpu-present")]
+#[derive(Debug)]
+struct WindowClipboard {
+    link: ClipboardLink,
+    // the text last set or read in either direction, so neither side echoes it back
+    synced: Option<alloc::string::String>,
+    // host text the clipboard has not taken yet
+    unwritten: Option<alloc::string::String>,
+    // the clipboard changed while the window had focus
+    unread: bool,
+    focused: bool,
+}
+
+#[cfg(feature = "wgpu-present")]
+impl WindowClipboard {
+    fn listen(hwnd: HWND, link: ClipboardLink) -> windows::core::Result<Self> {
+        // SAFETY: the window is live, and win32 drops the listener when it is destroyed.
+        unsafe { windows::Win32::System::DataExchange::AddClipboardFormatListener(hwnd)? };
+        Ok(Self {
+            link,
+            synced: None,
+            unwritten: None,
+            unread: false,
+            focused: false,
+        })
+    }
+
+    fn note(&mut self, message: &WindowMessage) {
+        match message {
+            WindowMessage::Input(WindowInput::Focus(focused)) => {
+                self.focused = *focused;
+                self.unread |= *focused;
+            }
+            WindowMessage::ClipboardChanged => self.unread |= self.focused,
+            _ => {}
+        }
+    }
+
+    fn sync(&mut self, hwnd: HWND, log_tag: &'static str) {
+        if self.link.remote_texts.has_changed().unwrap_or(false) {
+            self.unwritten = self
+                .link
+                .remote_texts
+                .borrow_and_update()
+                .as_deref()
+                .map(lf_line_endings);
+        }
+        if self.unwritten.is_none() && !self.unread {
+            return;
+        }
+        // win32 lets one window open the clipboard at a time, and the next loop tries again
+        let Ok(access) = ClipboardAccess::open(hwnd) else {
+            return;
+        };
+        let log = g2g_core::log::Target::category(log_tag);
+        if let Some(text) = self.unwritten.take() {
+            match write_clipboard_text(&access, &text) {
+                Ok(()) => self.synced = Some(text),
+                Err(e) => g2g_core::g2g_warn!(log, "cannot set the clipboard: {e}"),
+            }
+        }
+        if !core::mem::take(&mut self.unread) {
+            return;
+        }
+        match read_clipboard_text(&access) {
+            Ok(Some(text)) if self.synced.as_ref() != Some(&text) => {
+                self.synced = Some(text.clone());
+                let _ = self.link.local_texts.send(text);
+            }
+            Ok(_) => {}
+            Err(e) => g2g_core::g2g_warn!(log, "cannot read the clipboard: {e}"),
+        }
+    }
+}
+
+#[cfg(feature = "wgpu-present")]
 fn low_word(value: usize) -> i32 {
     i32::from(value as u16 as i16)
 }
@@ -208,10 +390,10 @@ fn high_word(value: usize) -> i32 {
 #[cfg(feature = "wgpu-present")]
 fn window_message(msg: u32, wp: WPARAM, lp: LPARAM) -> Option<WindowMessage> {
     use windows::Win32::UI::WindowsAndMessaging::{
-        KF_EXTENDED, KF_REPEAT, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP,
-        WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
-        WM_RBUTTONUP, WM_SETFOCUS, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
-        XBUTTON1,
+        KF_EXTENDED, KF_REPEAT, WM_CLIPBOARDUPDATE, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS,
+        WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
+        WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_SYSKEYDOWN, WM_SYSKEYUP,
+        WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1,
     };
     // the windows scancode set marks an extended key with an E0 prefix byte
     const EXTENDED_PREFIX: u32 = 0xE000;
@@ -260,6 +442,7 @@ fn window_message(msg: u32, wp: WPARAM, lp: LPARAM) -> Option<WindowMessage> {
             dy: 0,
         })),
         WM_SETFOCUS => Some(WindowMessage::Input(WindowInput::Focus(true))),
+        WM_CLIPBOARDUPDATE => Some(WindowMessage::ClipboardChanged),
         WM_KILLFOCUS => Some(WindowMessage::Input(WindowInput::Focus(false))),
         _ => None,
     }
@@ -435,6 +618,10 @@ fn present_loop<R: WindowRenderer>(
     channels.ready.notify();
     let mut input = channels.input;
     let mut cursor_shapes = channels.cursor_shapes;
+    let mut clipboard = channels
+        .clipboard
+        .map(|link| WindowClipboard::listen(hwnd, link))
+        .transpose()?;
     loop {
         if let Some(shapes) = &mut cursor_shapes {
             match shapes.has_changed() {
@@ -451,12 +638,17 @@ fn present_loop<R: WindowRenderer>(
             return Ok(());
         }
         let messages = WINDOW_MESSAGES.with_borrow_mut(core::mem::take);
+        if let Some(clipboard) = &mut clipboard {
+            messages.iter().for_each(|message| clipboard.note(message));
+            clipboard.sync(hwnd, params.log_tag);
+        }
         if let Some(sender) = &input {
             let window_inputs = messages.into_iter().filter_map(|message| match message {
                 WindowMessage::Input(window_input) => Some(window_input),
                 WindowMessage::PointerAt { x, y } => renderer
                     .picture_point(f64::from(x), f64::from(y))
                     .map(|(x, y)| WindowInput::Pointer { x, y }),
+                WindowMessage::ClipboardChanged => None,
             });
             for window_input in window_inputs {
                 if sender.send(window_input).is_err() {

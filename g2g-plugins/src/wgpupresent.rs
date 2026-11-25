@@ -68,7 +68,7 @@ use crate::waylandwindow::run_window;
 use crate::wgpusink::WgpuSink;
 #[cfg(target_os = "windows")]
 use crate::win32window::run_window;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use crate::windowworker::ClipboardLink;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 use crate::windowworker::CursorShapes;
@@ -141,7 +141,7 @@ pub struct WgpuPresentSink {
     input: Option<tokio::sync::mpsc::UnboundedSender<crate::windowinput::WindowInput>>,
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     cursor_shapes: Option<CursorShapes>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     clipboard: Option<ClipboardLink>,
     #[cfg(target_os = "linux")]
     keyboard_grab: bool,
@@ -203,7 +203,7 @@ impl WgpuPresentSink {
             input: None,
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             cursor_shapes: None,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             clipboard: None,
             #[cfg(target_os = "linux")]
             keyboard_grab: false,
@@ -231,7 +231,7 @@ impl WgpuPresentSink {
     }
 
     // the window's selection takes each remote text, and the receiver yields text the user copies while the window has focus
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub fn sync_clipboard(
         &mut self,
         remote_texts: tokio::sync::watch::Receiver<Option<String>>,
@@ -385,7 +385,7 @@ impl WgpuPresentSink {
         let input = self.input.clone();
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         let cursor_shapes = self.cursor_shapes.clone();
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         let clipboard = self.clipboard.clone();
         let (window_width, window_height) =
             self.window_size(self.width, self.height, self.pixel_aspect);
@@ -418,7 +418,7 @@ impl WgpuPresentSink {
                     input,
                     #[cfg(any(target_os = "linux", target_os = "windows"))]
                     cursor_shapes,
-                    #[cfg(target_os = "linux")]
+                    #[cfg(any(target_os = "linux", target_os = "windows"))]
                     clipboard,
                 };
                 #[cfg(target_os = "linux")]

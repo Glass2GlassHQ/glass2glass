@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2599: The Windows remote desktop client syncs the clipboard.
 - M2598: The Windows remote desktop client shows the host's cursor.
 - M2597: The remote desktop's audio track plays through a jitter buffer instead of dropping bursts.
 - M2596: The Windows remote desktop host and client send and play audio.

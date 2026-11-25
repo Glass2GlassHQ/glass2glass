@@ -36,7 +36,7 @@ The plan is [remote.md](remote.md).
   falling back to `mfh264enc`, and rebuild the host graph after `AccessLost`.
 - The macOS client, then `display-index` on `screencapturesrc` and a macOS
   host through `vtencode`.
-- Clipboard and grab on the Windows client.
+- Keyboard grab on the Windows client.
 - Route the remote desktop host's gamepad events to `UinputGamepads` and
   `ViGEmGamepads`, and a Windows service that injects on the secure desktop.
 - A Chrome client on the same signaling and the same data channel.

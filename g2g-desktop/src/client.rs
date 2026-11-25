@@ -259,7 +259,6 @@ fn grab_keyboard(sink: WgpuPresentSink, _settings: &ClientSettings) -> WgpuPrese
     sink
 }
 
-#[cfg(target_os = "linux")]
 fn sync_clipboard(sink: &mut WgpuPresentSink, inputs: bool) -> Option<ClipboardSync> {
     if !inputs {
         return None;
@@ -270,11 +269,6 @@ fn sync_clipboard(sink: &mut WgpuPresentSink, inputs: bool) -> Option<ClipboardS
         host_texts,
         local_copies,
     })
-}
-
-#[cfg(not(target_os = "linux"))]
-fn sync_clipboard(_sink: &mut WgpuPresentSink, _inputs: bool) -> Option<ClipboardSync> {
-    None
 }
 
 fn client_graph(
