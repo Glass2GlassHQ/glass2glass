@@ -15,11 +15,13 @@ use std::sync::Arc;
 #[cfg(target_os = "linux")]
 use g2g_core::element::DynAsyncElement;
 use g2g_core::metrics::LatencyHistogram;
+#[cfg(all(target_os = "linux", feature = "gamestream"))]
+use g2g_core::runtime::parse_chain;
 #[cfg(feature = "gamestream")]
 use g2g_core::runtime::GraphNode;
 use g2g_core::runtime::Observer;
 #[cfg(target_os = "linux")]
-use g2g_core::runtime::{parse_chain, parse_element, ParseError, SourceLoop};
+use g2g_core::runtime::{parse_element, ParseError, SourceLoop};
 use g2g_core::runtime::{GraphNodeRef, VisitRecorder};
 use g2g_core::G2gError;
 #[cfg(target_os = "linux")]

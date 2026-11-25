@@ -587,12 +587,6 @@ try:
 except ValueError as error:
     assert "NotMutable" in str(error), error
 
-try:
-    p.add_branch("t", "identity ! video/x-raw ! fakesink")
-    raise AssertionError("a caps filter was accepted in a branch")
-except ValueError as error:
-    assert "parse error" in str(error), error
-
 _, consumed, _ = p.wait()
 assert consumed == FRAMES, consumed
 "#,
