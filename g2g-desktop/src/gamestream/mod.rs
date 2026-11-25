@@ -449,7 +449,9 @@ async fn answer<S: AsyncRead + AsyncWrite + Unpin>(
     stream: &mut S,
     connection: Connection<'_>,
 ) -> io::Result<()> {
-    let request = read_request(stream).await?;
+    let Some(request) = read_request(stream).await? else {
+        return Ok(());
+    };
     let reply = host.route(request, connection).await;
     write_reply(stream, reply).await
 }

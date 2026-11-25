@@ -24,11 +24,17 @@ fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.to_string())
 }
 
-pub(crate) async fn read_request<S: AsyncRead + Unpin>(stream: &mut S) -> io::Result<Request> {
+pub(crate) async fn read_request<S: AsyncRead + Unpin>(
+    stream: &mut S,
+) -> io::Result<Option<Request>> {
     let mut buffer = Vec::with_capacity(READ_CHUNK);
     let mut chunk = [0u8; READ_CHUNK];
     let (method, target, head_length, body_length) = loop {
         let read = stream.read(&mut chunk).await?;
+        // moonlight connects without a request to read its local interface and MTU
+        if read == 0 && buffer.is_empty() {
+            return Ok(None);
+        }
         if read == 0 {
             return Err(io::ErrorKind::UnexpectedEof.into());
         }
@@ -71,14 +77,14 @@ pub(crate) async fn read_request<S: AsyncRead + Unpin>(stream: &mut S) -> io::Re
     }
     body.truncate(body_length);
     let (path, query) = target.split_once('?').unwrap_or((target.as_str(), ""));
-    Ok(Request {
+    Ok(Some(Request {
         method,
         path: path.to_string(),
         query: form_urlencoded::parse(query.as_bytes())
             .into_owned()
             .collect(),
         body,
-    })
+    }))
 }
 
 #[derive(Debug)]
@@ -171,7 +177,10 @@ mod tests {
     #[tokio::test]
     async fn a_request_reads_its_query_and_body() {
         let wire = b"POST /submit-pin?uniqueid=ab%20c HTTP/1.1\r\nHost: x\r\nContent-Length: 8\r\n\r\npin=1234";
-        let request = read_request(&mut &wire[..]).await.expect("parsed");
+        let request = read_request(&mut &wire[..])
+            .await
+            .expect("parsed")
+            .expect("a request");
         assert_eq!(request.method, "POST");
         assert_eq!(request.path, "/submit-pin");
         assert_eq!(
@@ -191,5 +200,11 @@ mod tests {
             BODY_LIMIT + 1
         );
         assert!(read_request(&mut large.as_bytes()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_connection_without_bytes_is_no_request_and_a_cut_head_fails() {
+        assert!(read_request(&mut &b""[..]).await.expect("closed").is_none());
+        assert!(read_request(&mut &b"GET / HTTP/1.1\r\n"[..]).await.is_err());
     }
 }
