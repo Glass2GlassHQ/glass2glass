@@ -15,6 +15,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 #[cfg(feature = "wgpu-present")]
+use crate::cursorshape::{CursorShape, CURSOR_BYTES_PER_PIXEL};
+#[cfg(feature = "wgpu-present")]
 use crate::windowinput::{PointerButton, WindowInput};
 #[cfg(feature = "wgpu-present")]
 use crate::windowworker::{
@@ -50,6 +52,147 @@ std::thread_local! {
     // win32 runs wndproc on the thread that created the window, the present worker
     static WINDOW_MESSAGES: core::cell::RefCell<alloc::vec::Vec<WindowMessage>> =
         const { core::cell::RefCell::new(alloc::vec::Vec::new()) };
+}
+
+#[cfg(feature = "wgpu-present")]
+#[derive(Debug)]
+struct OwnedCursor(windows::Win32::UI::WindowsAndMessaging::HCURSOR);
+
+#[cfg(feature = "wgpu-present")]
+impl Drop for OwnedCursor {
+    fn drop(&mut self) {
+        // SAFETY: the handle came from CreateIconIndirect and nothing else destroys it.
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::DestroyCursor(self.0);
+        }
+    }
+}
+
+#[cfg(feature = "wgpu-present")]
+#[derive(Debug)]
+enum HostCursor {
+    Hidden,
+    Shape(OwnedCursor),
+}
+
+#[cfg(feature = "wgpu-present")]
+std::thread_local! {
+    // win32 asks wndproc for the client area's cursor on every pointer move
+    static HOST_CURSOR: core::cell::RefCell<Option<HostCursor>> =
+        const { core::cell::RefCell::new(None) };
+}
+
+#[cfg(feature = "wgpu-present")]
+fn create_cursor(shape: &CursorShape) -> windows::core::Result<OwnedCursor> {
+    use windows::Win32::Graphics::Gdi::{
+        CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+        DIB_RGB_COLORS,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, HCURSOR, ICONINFO};
+
+    let (width, height) = (shape.width as i32, shape.height as i32);
+    let header = BITMAPINFOHEADER {
+        biSize: core::mem::size_of::<BITMAPINFOHEADER>() as u32,
+        biWidth: width,
+        // gdi reads a negative height as rows stored top down
+        biHeight: -height,
+        biPlanes: 1,
+        biBitCount: 32,
+        biCompression: BI_RGB.0,
+        ..Default::default()
+    };
+    let info = BITMAPINFO {
+        bmiHeader: header,
+        ..Default::default()
+    };
+    let mut bits: *mut core::ffi::c_void = core::ptr::null_mut();
+    // SAFETY: `info` describes a 32-bit top-down bitmap, and CreateDIBSection points `bits` at its pixels.
+    let color = unsafe { CreateDIBSection(None, &info, DIB_RGB_COLORS, &mut bits, None, 0)? };
+    let pixel_bytes = shape.width as usize * shape.height as usize * CURSOR_BYTES_PER_PIXEL;
+    // SAFETY: the section holds width * height pixels of CURSOR_BYTES_PER_PIXEL bytes.
+    let pixels = unsafe { core::slice::from_raw_parts_mut(bits.cast::<u8>(), pixel_bytes) };
+    let (pixels, _) = pixels.as_chunks_mut::<CURSOR_BYTES_PER_PIXEL>();
+    let (rgba, _) = shape.rgba.as_chunks::<CURSOR_BYTES_PER_PIXEL>();
+    for (bgra, [red, green, blue, alpha]) in pixels.iter_mut().zip(rgba) {
+        *bgra = [*blue, *green, *red, *alpha];
+    }
+    // win32 rows of a one-bit bitmap are padded to two bytes, and an all-zero mask leaves the colour's alpha in charge
+    let mask_row_bytes = (shape.width as usize).div_ceil(16) * 2;
+    let mask_bits = alloc::vec![0u8; mask_row_bytes * shape.height as usize];
+    // SAFETY: `mask_bits` holds one padded row per line of the bitmap.
+    let mask = unsafe { CreateBitmap(width, height, 1, 1, Some(mask_bits.as_ptr().cast())) };
+    let icon_info = ICONINFO {
+        fIcon: false.into(),
+        xHotspot: shape.hotspot_x as u32,
+        yHotspot: shape.hotspot_y as u32,
+        hbmMask: mask,
+        hbmColor: color,
+    };
+    // SAFETY: both bitmaps are live, and CreateIconIndirect copies them.
+    let cursor = unsafe { CreateIconIndirect(&icon_info) };
+    // SAFETY: the bitmaps were created above and are not used after this.
+    unsafe {
+        let _ = DeleteObject(color.into());
+        let _ = DeleteObject(mask.into());
+    }
+    Ok(OwnedCursor(HCURSOR(cursor?.0)))
+}
+
+#[cfg(feature = "wgpu-present")]
+fn show_host_cursor() {
+    use windows::Win32::UI::WindowsAndMessaging::SetCursor;
+    HOST_CURSOR.with_borrow(|cursor| {
+        let Some(cursor) = cursor else {
+            return;
+        };
+        let handle = match cursor {
+            HostCursor::Hidden => None,
+            HostCursor::Shape(shape) => Some(shape.0),
+        };
+        // SAFETY: the handle stays alive while HOST_CURSOR holds it.
+        unsafe { SetCursor(handle) };
+    });
+}
+
+#[cfg(feature = "wgpu-present")]
+fn pointer_in_client_area(hwnd: HWND) -> bool {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::ScreenToClient;
+    use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, WindowFromPoint};
+    let mut point = POINT::default();
+    // SAFETY: `point` is a valid local.
+    if unsafe { GetCursorPos(&mut point) }.is_err() {
+        return false;
+    }
+    // SAFETY: plain queries on a live window.
+    unsafe {
+        if WindowFromPoint(point) != hwnd || !ScreenToClient(hwnd, &mut point).as_bool() {
+            return false;
+        }
+    }
+    let Ok((width, height)) = client_size(hwnd) else {
+        return false;
+    };
+    (0..width as i32).contains(&point.x) && (0..height as i32).contains(&point.y)
+}
+
+#[cfg(feature = "wgpu-present")]
+fn follow_host_cursor(hwnd: HWND, shape: Option<&CursorShape>, log_tag: &'static str) {
+    let cursor = match shape.map(create_cursor).transpose() {
+        Ok(cursor) => cursor.map_or(HostCursor::Hidden, HostCursor::Shape),
+        Err(e) => {
+            g2g_core::g2g_warn!(
+                g2g_core::log::Target::category(log_tag),
+                "cannot make the host's cursor: {e}"
+            );
+            return;
+        }
+    };
+    HOST_CURSOR.set(Some(cursor));
+    // win32 sets the client area's cursor only on the next pointer move
+    if pointer_in_client_area(hwnd) {
+        show_host_cursor();
+    }
 }
 
 #[cfg(feature = "wgpu-present")]
@@ -126,6 +269,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     #[cfg(feature = "wgpu-present")]
     if let Some(message) = window_message(msg, wp, lp) {
         WINDOW_MESSAGES.with_borrow_mut(|messages| messages.push(message));
+    }
+    #[cfg(feature = "wgpu-present")]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{HTCLIENT, WM_SETCURSOR};
+        if msg == WM_SETCURSOR
+            && low_word(lp.0 as usize) == HTCLIENT as i32
+            && HOST_CURSOR.with_borrow(Option::is_some)
+        {
+            show_host_cursor();
+            // win32 keeps the class cursor unless WM_SETCURSOR returns TRUE
+            return LRESULT(1);
+        }
     }
     // win32 sends WM_DESTROY when the user closes the window
     if msg == WM_DESTROY {
@@ -279,7 +434,18 @@ fn present_loop<R: WindowRenderer>(
     };
     channels.ready.notify();
     let mut input = channels.input;
+    let mut cursor_shapes = channels.cursor_shapes;
     loop {
+        if let Some(shapes) = &mut cursor_shapes {
+            match shapes.has_changed() {
+                Ok(true) => {
+                    let shape = shapes.borrow_and_update().clone();
+                    follow_host_cursor(hwnd, shape.as_ref(), params.log_tag);
+                }
+                Ok(false) => {}
+                Err(_) => cursor_shapes = None,
+            }
+        }
         if !pump_messages() {
             channels.window_closed.store(true, Ordering::Release);
             return Ok(());

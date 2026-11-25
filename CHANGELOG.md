@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2598: The Windows remote desktop client shows the host's cursor.
 - M2597: The remote desktop's audio track plays through a jitter buffer instead of dropping bursts.
 - M2596: The Windows remote desktop host and client send and play audio.
 - M2595: The Moonlight host sends game rumble back to the client's controller.

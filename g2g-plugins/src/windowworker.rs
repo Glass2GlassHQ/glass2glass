@@ -85,7 +85,7 @@ pub(crate) struct WorkerChannels<Receiver> {
     pub(crate) window_closed: Arc<AtomicBool>,
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub(crate) input: Option<tokio::sync::mpsc::UnboundedSender<crate::windowinput::WindowInput>>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub(crate) cursor_shapes: Option<CursorShapes>,
     #[cfg(target_os = "linux")]
     pub(crate) clipboard: Option<ClipboardLink>,
@@ -100,7 +100,7 @@ pub(crate) struct ClipboardLink {
     pub(crate) local_texts: tokio::sync::mpsc::UnboundedSender<String>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 pub(crate) type CursorShapes =
     tokio::sync::watch::Receiver<Option<crate::cursorshape::CursorShape>>;
 

@@ -298,7 +298,10 @@ publishes it on `cursor_shapes()`. Windows inverts the screen under some pixels
 of monochrome and masked-color pointers, and those pixels arrive black. The
 Wayland client sets the bitmap as its window's pointer cursor through
 `WgpuPresentSink::with_cursor_shapes`, so the pointer moves at the
-compositor's rate with no video delay. Grab is pointer lock on the web client
+compositor's rate with no video delay. The Windows client makes a cursor from
+each shape with `CreateIconIndirect`, answers `WM_SETCURSOR` in the client area
+with it, and sets it at once when the pointer is already over the window, since
+Windows asks for the cursor again only on the next pointer move. Grab is pointer lock on the web client
 and a window grab on the native client. On Linux the window holds a
 `zwp_keyboard_shortcuts_inhibitor_v1` while it has keyboard focus, so Super and
 Alt+Tab reach the host, and a click takes the grab again after Escape. A

@@ -68,11 +68,13 @@ use crate::waylandwindow::run_window;
 use crate::wgpusink::WgpuSink;
 #[cfg(target_os = "windows")]
 use crate::win32window::run_window;
+#[cfg(target_os = "linux")]
+use crate::windowworker::ClipboardLink;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use crate::windowworker::CursorShapes;
 use crate::windowworker::{
     present_on_worker, worker_gone, WindowParams, WindowRenderer, WorkerChannels, WorkerCmd,
 };
-#[cfg(target_os = "linux")]
-use crate::windowworker::{ClipboardLink, CursorShapes};
 use crate::worker_ready::Handshake;
 use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::log::{short_type_name, LogName, LogSource, Target};
@@ -137,7 +139,7 @@ pub struct WgpuPresentSink {
     window_closed: Arc<AtomicBool>,
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     input: Option<tokio::sync::mpsc::UnboundedSender<crate::windowinput::WindowInput>>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     cursor_shapes: Option<CursorShapes>,
     #[cfg(target_os = "linux")]
     clipboard: Option<ClipboardLink>,
@@ -199,7 +201,7 @@ impl WgpuPresentSink {
             window_closed: Arc::default(),
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             input: None,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             cursor_shapes: None,
             #[cfg(target_os = "linux")]
             clipboard: None,
@@ -222,7 +224,7 @@ impl WgpuPresentSink {
     }
 
     // the window's pointer shows each shape, and None hides it
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub fn with_cursor_shapes(mut self, shapes: CursorShapes) -> Self {
         self.cursor_shapes = Some(shapes);
         self
@@ -381,7 +383,7 @@ impl WgpuPresentSink {
         let present_mode = self.present_mode;
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         let input = self.input.clone();
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         let cursor_shapes = self.cursor_shapes.clone();
         #[cfg(target_os = "linux")]
         let clipboard = self.clipboard.clone();
@@ -414,7 +416,7 @@ impl WgpuPresentSink {
                     window_closed,
                     #[cfg(any(target_os = "linux", target_os = "windows"))]
                     input,
-                    #[cfg(target_os = "linux")]
+                    #[cfg(any(target_os = "linux", target_os = "windows"))]
                     cursor_shapes,
                     #[cfg(target_os = "linux")]
                     clipboard,

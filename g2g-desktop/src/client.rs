@@ -212,7 +212,6 @@ pub async fn follow_host_events(
     }
 }
 
-#[cfg(target_os = "linux")]
 fn show_host_cursor(
     sink: WgpuPresentSink,
     inputs: bool,
@@ -222,14 +221,6 @@ fn show_host_cursor(
     }
     let (sender, shapes) = watch::channel(None);
     (Some(sender), sink.with_cursor_shapes(shapes))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn show_host_cursor(
-    sink: WgpuPresentSink,
-    _inputs: bool,
-) -> (Option<watch::Sender<Option<CursorShape>>>, WgpuPresentSink) {
-    (None, sink)
 }
 
 async fn forward_local_clipboard(
