@@ -22,7 +22,7 @@ use g2g_core::{
     PropError, PropKind, PropValue, PropertySpec, Rate, Reconfigure, VideoCodec,
 };
 
-use super::fec::{CauchyParity, MAX_SHARDS};
+use super::fec::{ParityMatrix, MAX_SHARDS};
 use crate::textencoding::hex_decode;
 
 const RTP_HEADER_BYTES: usize = 12;
@@ -138,7 +138,7 @@ pub(crate) struct VideoPacketizer {
     sealer: Option<GcmSealer>,
     frame_number: u32,
     sequence_number: u32,
-    parity_encoders: BTreeMap<(usize, usize), CauchyParity>,
+    parity_encoders: BTreeMap<(usize, usize), ParityMatrix>,
 }
 
 impl VideoPacketizer {
@@ -265,7 +265,7 @@ impl VideoPacketizer {
                 .parity_encoders
                 .entry((data_shards, parity.shards))
                 .or_insert_with(|| {
-                    CauchyParity::new(data_shards, parity.shards)
+                    ParityMatrix::cauchy(data_shards, parity.shards)
                         .expect("block_parity keeps the block within MAX_SHARDS")
                 });
             let (data, parity_datagrams) = datagrams.split_at_mut(data_shards);
@@ -664,7 +664,7 @@ mod tests {
         let parity = (data * percentage).div_ceil(100);
         assert_eq!((data, parity), (10, 2));
         let (data_packets, parity_packets) = packets.split_at(data);
-        let encoder = CauchyParity::new(data, parity).unwrap();
+        let encoder = ParityMatrix::cauchy(data, parity).unwrap();
         let mut expected = alloc::vec![alloc::vec![0u8; data_packets[0].len()]; parity];
         encoder.encode(data_packets, &mut expected);
         for (sent, computed) in parity_packets.iter().zip(&expected) {

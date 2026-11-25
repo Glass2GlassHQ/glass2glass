@@ -19,9 +19,9 @@ const LINK_CAPACITY: usize = 2;
 
 // pulse names the default output's monitor source @DEFAULT_MONITOR@
 #[cfg(target_os = "linux")]
-const CAPTURE: &str = "pulsesrc device=@DEFAULT_MONITOR@";
+pub(crate) const CAPTURE: &str = "pulsesrc device=@DEFAULT_MONITOR@";
 #[cfg(target_os = "windows")]
-const CAPTURE: &str = "wasapisrc loopback=true";
+pub(crate) const CAPTURE: &str = "wasapisrc loopback=true";
 const ENCODE: &str = "audioconvert ! opusenc frame-size=10 audio-type=restricted-lowdelay";
 const DECODE: &str = "opusdec ! audioconvert";
 // pulsesink starts playing once buffer-time of audio is queued

@@ -334,6 +334,17 @@ impl Host {
         let Some(key) = key else {
             return Reply::xml_error(400, "launch needs a 16-byte hexadecimal rikey");
         };
+        // moonlight prints rikeyid as a signed int, which the IV counter reads as unsigned
+        let key_id = query.get("rikeyid").and_then(|id| {
+            id.parse::<i32>()
+                .map(|id| id as u32)
+                .or_else(|_| id.parse::<u32>())
+                .ok()
+        });
+        let Some(key_id) = key_id else {
+            return Reply::xml_error(400, "launch needs a 32-bit rikeyid");
+        };
+        let key = stream::SessionKey { key, key_id };
         self.end_session().await;
         let sockets = match stream::bind().await {
             Ok(sockets) => sockets,

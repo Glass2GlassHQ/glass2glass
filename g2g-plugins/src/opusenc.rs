@@ -140,6 +140,45 @@ impl OpusFrameSize {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum OpusBitrateType {
+    Cbr,
+    Vbr,
+    // libopus's own default, as in gst opusenc
+    #[default]
+    ConstrainedVbr,
+}
+
+impl OpusBitrateType {
+    const fn property_value(self) -> &'static str {
+        match self {
+            OpusBitrateType::Cbr => "cbr",
+            OpusBitrateType::Vbr => "vbr",
+            OpusBitrateType::ConstrainedVbr => "constrained-vbr",
+        }
+    }
+
+    fn from_property_value(value: &str) -> Option<Self> {
+        Some(match value {
+            "cbr" => OpusBitrateType::Cbr,
+            "vbr" => OpusBitrateType::Vbr,
+            "constrained-vbr" => OpusBitrateType::ConstrainedVbr,
+            _ => return None,
+        })
+    }
+
+    fn apply(self, enc: &mut Encoder) -> Result<(), G2gError> {
+        enc.set(
+            ffi::OPUS_SET_VBR_REQUEST,
+            c_int::from(self != OpusBitrateType::Cbr),
+        )?;
+        enc.set(
+            ffi::OPUS_SET_VBR_CONSTRAINT_REQUEST,
+            c_int::from(self == OpusBitrateType::ConstrainedVbr),
+        )
+    }
+}
+
 /// What libopus optimizes the encode for (`OPUS_SET_APPLICATION`), carrying
 /// GStreamer `opusenc`'s `audio-type` nicks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -299,6 +338,7 @@ pub struct OpusEnc {
     /// What libopus optimizes for, applied at encoder construction only
     /// (`OPUS_SET_APPLICATION` is not a live ctl on a running encoder).
     audio_type: OpusAudioType,
+    bitrate_type: OpusBitrateType,
     /// Code a redundant (LBRR) copy of each frame into the next packet, so a
     /// decoder that lost one packet can rebuild it (see [`crate::opusdec`]).
     inband_fec: bool,
@@ -362,6 +402,7 @@ impl OpusEnc {
             frame_size: OpusFrameSize::default(),
             complexity: DEFAULT_COMPLEXITY,
             audio_type: OpusAudioType::Generic,
+            bitrate_type: OpusBitrateType::default(),
             inband_fec: false,
             packet_loss_perc: 0,
             applied_bps: None,
@@ -677,6 +718,7 @@ impl AsyncElement for OpusEnc {
             self.bitrate.unwrap_or(ffi::OPUS_AUTO),
         )?;
         enc.set(ffi::OPUS_SET_COMPLEXITY_REQUEST, i32::from(self.complexity))?;
+        self.bitrate_type.apply(&mut enc)?;
         enc.set(ffi::OPUS_SET_INBAND_FEC_REQUEST, i32::from(self.inband_fec))?;
         enc.set(
             ffi::OPUS_SET_PACKET_LOSS_PERC_REQUEST,
@@ -728,6 +770,9 @@ impl AsyncElement for OpusEnc {
             )
             .with_default("generic")
             .with_enum_values("generic | voice | restricted-lowdelay"),
+            PropertySpec::new("bitrate-type", PropKind::Str, "bitrate type")
+                .with_default("constrained-vbr")
+                .with_enum_values("cbr | vbr | constrained-vbr"),
             PropertySpec::new(
                 "inband-fec",
                 PropKind::Bool,
@@ -782,6 +827,16 @@ impl AsyncElement for OpusEnc {
                     OpusAudioType::from_property_value(value).ok_or(PropError::Value)?;
                 Ok(())
             }
+            // OPUS_SET_VBR and OPUS_SET_VBR_CONSTRAINT are live ctls
+            "bitrate-type" => {
+                let value = value.as_str().ok_or(PropError::Type)?;
+                self.bitrate_type =
+                    OpusBitrateType::from_property_value(value).ok_or(PropError::Value)?;
+                if let Some(enc) = self.enc.as_mut() {
+                    self.bitrate_type.apply(enc).map_err(|_| PropError::Value)?;
+                }
+                Ok(())
+            }
             // Both FEC ctls are live, like complexity: a running encoder starts
             // (or stops) coding the redundant copy without a rebuild.
             "inband-fec" => {
@@ -819,6 +874,7 @@ impl AsyncElement for OpusEnc {
             "frame-size" => Some(PropValue::Uint(self.frame_size.property_value())),
             "complexity" => Some(PropValue::Uint(self.complexity() as u64)),
             "audio-type" => Some(PropValue::Str(self.audio_type.property_value().into())),
+            "bitrate-type" => Some(PropValue::Str(self.bitrate_type.property_value().into())),
             "inband-fec" => Some(PropValue::Bool(self.inband_fec())),
             "packet-loss-percentage" => Some(PropValue::Uint(self.packet_loss_percentage() as u64)),
             _ => None,

@@ -29,8 +29,9 @@ mkdir -p "$OUT/moonlight-config" "$OUT/host-config"
 stop_moonlight() {
     pkill -f "^moonlight $1 127\.0\.0\.1" || true
 }
+# SDL's dummy audio driver decodes Moonlight's audio without playing it back into the captured output
 moonlight() {
-    flatpak run --nosocket=wayland --socket=x11 --env=QT_QPA_PLATFORM=xcb \
+    flatpak run --nosocket=wayland --socket=x11 --env=QT_QPA_PLATFORM=xcb --env=SDL_AUDIODRIVER=dummy \
         --filesystem="$OUT" --command=sh com.moonlight_stream.Moonlight \
         -c 'XDG_CONFIG_HOME="$0" exec moonlight "$@"' "$OUT/moonlight-config" "$@"
 }
@@ -114,4 +115,9 @@ if [ -z "$decoded" ] || grep -q 'avcodec_send_packet() failed' "$OUT/stream.log"
     echo "moonlight-interop: Moonlight did not decode the stream, see $OUT/stream.log" >&2
     exit 1
 fi
-echo "moonlight-interop: Moonlight decoded $CODEC at $decoded fps"
+if ! grep -q 'Received first audio packet' "$OUT/stream.log" ||
+    grep -q 'Failed to decrypt audio packet' "$OUT/stream.log"; then
+    echo "moonlight-interop: Moonlight did not decrypt the audio, see $OUT/stream.log" >&2
+    exit 1
+fi
+echo "moonlight-interop: Moonlight decoded $CODEC at $decoded fps and decrypted the audio"

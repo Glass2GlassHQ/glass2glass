@@ -19,6 +19,7 @@ const ENCRYPT_AUDIO: u32 = 0x4;
 const HEVC_MARKER: &str = "sprop-parameter-sets=AAAAAU";
 const BITSTREAM_FORMAT_H264: u32 = 0;
 const BITSTREAM_FORMAT_HEVC: u32 = 1;
+const STEREO_CHANNELS: u32 = 2;
 
 #[derive(Debug)]
 pub(crate) struct RtspRequest {
@@ -190,6 +191,8 @@ pub(crate) struct StreamSettings {
     // moonlight sends 0, the host's choice, only when its decoder handles any count
     pub(crate) reference_frames: u32,
     pub(crate) encrypt_video: bool,
+    pub(crate) audio_packet_duration_ms: u32,
+    pub(crate) encrypt_audio: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,6 +200,7 @@ pub(crate) enum AnnounceError {
     Missing(&'static str),
     Unparsable(&'static str),
     UnsupportedCodec(u32),
+    UnsupportedChannels(u32),
 }
 
 impl std::fmt::Display for AnnounceError {
@@ -206,6 +210,12 @@ impl std::fmt::Display for AnnounceError {
             Self::Unparsable(name) => write!(f, "ANNOUNCE has a bad {name}"),
             Self::UnsupportedCodec(format) => {
                 write!(f, "ANNOUNCE asks for bitstream format {format}")
+            }
+            Self::UnsupportedChannels(channels) => {
+                write!(
+                    f,
+                    "ANNOUNCE asks for {channels} audio channels, and the host sends stereo"
+                )
             }
         }
     }
@@ -231,6 +241,10 @@ pub(crate) fn parse_announce(body: &[u8]) -> Result<StreamSettings, AnnounceErro
         BITSTREAM_FORMAT_HEVC => VideoCodec::Hevc,
         other => return Err(AnnounceError::UnsupportedCodec(other)),
     };
+    match number("x-nv-audio.surround.numChannels")? {
+        STEREO_CHANNELS => {}
+        channels => return Err(AnnounceError::UnsupportedChannels(channels)),
+    }
     let encryption = match attributes.get("x-ss-general.encryptionEnabled") {
         Some(flags) => flags
             .parse::<u32>()
@@ -247,6 +261,8 @@ pub(crate) fn parse_announce(body: &[u8]) -> Result<StreamSettings, AnnounceErro
         minimum_fec_packets: number("x-nv-vqos[0].fec.minRequiredFecPackets")?,
         reference_frames: number("x-nv-video[0].maxNumReferenceFrames")?,
         encrypt_video: encryption & ENCRYPT_VIDEO != 0,
+        audio_packet_duration_ms: number("x-nv-aqos.packetDuration")?,
+        encrypt_audio: encryption & ENCRYPT_AUDIO != 0,
     })
 }
 
@@ -284,7 +300,7 @@ mod tests {
     #[test]
     fn an_announce_gives_the_stream_settings() {
         let sdp = "v=0\r\n\
-            a=x-ss-general.encryptionEnabled:3\r\n\
+            a=x-ss-general.encryptionEnabled:7\r\n\
             a=x-nv-video[0].clientViewportWd:1280 \r\n\
             a=x-nv-video[0].clientViewportHt:720 \r\n\
             a=x-nv-video[0].maxFPS:60 \r\n\
@@ -292,7 +308,9 @@ mod tests {
             a=x-ml-video.configuredBitrateKbps:20000 \r\n\
             a=x-nv-vqos[0].fec.minRequiredFecPackets:2 \r\n\
             a=x-nv-vqos[0].bitStreamFormat:1 \r\n\
-            a=x-nv-video[0].maxNumReferenceFrames:1 \r\n";
+            a=x-nv-video[0].maxNumReferenceFrames:1 \r\n\
+            a=x-nv-aqos.packetDuration:5 \r\n\
+            a=x-nv-audio.surround.numChannels:2 \r\n";
         assert_eq!(
             parse_announce(sdp.as_bytes()),
             Ok(StreamSettings {
@@ -305,11 +323,18 @@ mod tests {
                 minimum_fec_packets: 2,
                 reference_frames: 1,
                 encrypt_video: true,
+                audio_packet_duration_ms: 5,
+                encrypt_audio: true,
             })
         );
         assert_eq!(
             parse_announce(b"a=x-nv-vqos[0].bitStreamFormat:2\r\n"),
             Err(AnnounceError::UnsupportedCodec(2))
+        );
+        let surround = sdp.replace("numChannels:2", "numChannels:6");
+        assert_eq!(
+            parse_announce(surround.as_bytes()),
+            Err(AnnounceError::UnsupportedChannels(6))
         );
     }
 }

@@ -3230,6 +3230,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "srtpenc" => "srtp";
         "srtpdec" => "srtp";
         "moonlightvideopay" => "gamestream";
+        "moonlightaudiopay" => "gamestream";
         "dtlssrtpenc" => "dtls-srtp";
         "dtlssrtpdec" => "dtls-srtp";
         "tcpserversrc" => "tcp";
@@ -3685,14 +3686,20 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(LaunchFactory::of::<UdpSink>("udpsink", || {
         Box::new(UdpSink::new("127.0.0.1:5004".parse().unwrap()))
     }));
-    // RFC 7714 packet protection (M1098): both build keyless and refuse to
-    // configure until `key=` supplies one.
     #[cfg(feature = "gamestream")]
     reg.register_launch(LaunchFactory::of::<
         crate::moonlight::videopay::MoonlightVideoPay,
     >("moonlightvideopay", || {
         Box::new(crate::moonlight::videopay::MoonlightVideoPay::default())
     }));
+    #[cfg(feature = "gamestream")]
+    reg.register_launch(LaunchFactory::of::<
+        crate::moonlight::audiopay::MoonlightAudioPay,
+    >("moonlightaudiopay", || {
+        Box::new(crate::moonlight::audiopay::MoonlightAudioPay::default())
+    }));
+    // RFC 7714 packet protection (M1098): both build keyless and refuse to
+    // configure until `key=` supplies one.
     #[cfg(feature = "srtp")]
     reg.register_launch(LaunchFactory::of::<SrtpEnc>("srtpenc", || {
         Box::new(SrtpEnc::default())

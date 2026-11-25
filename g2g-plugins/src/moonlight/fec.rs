@@ -64,13 +64,28 @@ impl core::fmt::Display for ShardCountError {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct CauchyParity {
+pub(crate) struct ParityMatrix {
     data_shards: usize,
     coefficients: Vec<u8>,
 }
 
-impl CauchyParity {
-    pub(crate) fn new(data_shards: usize, parity_shards: usize) -> Result<Self, ShardCountError> {
+// moonlight's audio decoder copies these rows into nanors in place of the matrix nanors builds
+const MOONLIGHT_AUDIO_ROWS: [[u8; MOONLIGHT_AUDIO_DATA_SHARDS]; 2] =
+    [[0x77, 0x40, 0x38, 0x0e], [0xc7, 0xa7, 0x0d, 0x6c]];
+pub(crate) const MOONLIGHT_AUDIO_DATA_SHARDS: usize = 4;
+
+impl ParityMatrix {
+    pub(crate) fn moonlight_audio() -> Self {
+        Self {
+            data_shards: MOONLIGHT_AUDIO_DATA_SHARDS,
+            coefficients: MOONLIGHT_AUDIO_ROWS.concat(),
+        }
+    }
+
+    pub(crate) fn cauchy(
+        data_shards: usize,
+        parity_shards: usize,
+    ) -> Result<Self, ShardCountError> {
         if data_shards == 0 || parity_shards == 0 || data_shards + parity_shards > MAX_SHARDS {
             return Err(ShardCountError {
                 data: data_shards,
@@ -145,7 +160,7 @@ mod tests {
         for (data_shards, parity_shards) in LAYOUTS {
             let data: Vec<Vec<u8>> = (0..data_shards).map(data_shard).collect();
             let mut parity = alloc::vec![alloc::vec![0xaau8; SHARD_BYTES]; parity_shards];
-            CauchyParity::new(data_shards, parity_shards)
+            ParityMatrix::cauchy(data_shards, parity_shards)
                 .expect("layout fits")
                 .encode(&data, &mut parity);
             for (index, shard) in parity.iter().enumerate() {
@@ -164,10 +179,19 @@ mod tests {
     }
 
     #[test]
+    fn audio_parity_matches_nanors_with_moonlights_matrix() {
+        let expected: &[u8] = include_bytes!("testdata/nanors-audio-parity.bin");
+        let data: Vec<Vec<u8>> = (0..MOONLIGHT_AUDIO_DATA_SHARDS).map(data_shard).collect();
+        let mut parity = alloc::vec![alloc::vec![0xaau8; SHARD_BYTES]; 2];
+        ParityMatrix::moonlight_audio().encode(&data, &mut parity);
+        assert_eq!(parity.concat(), expected);
+    }
+
+    #[test]
     fn layouts_past_the_decoder_limit_are_refused() {
-        assert!(CauchyParity::new(0, 1).is_err());
-        assert!(CauchyParity::new(1, 0).is_err());
-        assert!(CauchyParity::new(250, 6).is_err());
-        assert!(CauchyParity::new(250, 5).is_ok());
+        assert!(ParityMatrix::cauchy(0, 1).is_err());
+        assert!(ParityMatrix::cauchy(1, 0).is_err());
+        assert!(ParityMatrix::cauchy(250, 6).is_err());
+        assert!(ParityMatrix::cauchy(250, 5).is_ok());
     }
 }

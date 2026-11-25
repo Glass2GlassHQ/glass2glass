@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2584: Stream encrypted Opus audio to Moonlight with `moonlightaudiopay`, and `opusenc` takes `bitrate-type`.
 - M2583: The Moonlight host captures the portal and `--run` displays, and `videorate` passes GPU memory and takes `drop-only`.
 - M2582: `d3d11convert` resizes to the size a downstream caps filter sets, so the Windows Moonlight host streams at the size the client asks for.
 - M2581: `cudascale` resizes NV12 and RGBA frames in CUDA memory, so the Moonlight host on Linux streams at the size the client asks for, and `parse_chain` accepts caps between elements.

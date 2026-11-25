@@ -381,3 +381,28 @@ async fn complexity_changes_the_encoded_bytestream() {
         "complexity 0 and 10 must not encode to identical bytes"
     );
 }
+
+#[tokio::test]
+async fn cbr_packets_all_have_one_size_and_vbr_packets_do_not() {
+    let channels = 2;
+    let frame_size = OpusFrameSize::from_property_value(5).expect("5 ms is an Opus frame size");
+    let pcm = tone_pcm(channels, frame_size.samples() * 40);
+    let mut sizes = Vec::new();
+    for bitrate_type in ["cbr", "vbr"] {
+        let mut enc = OpusEnc::new()
+            .with_bitrate(96_000)
+            .with_frame_size(frame_size);
+        enc.set_property("bitrate-type", PropValue::Str(bitrate_type.into()))
+            .unwrap();
+        enc.configure_pipeline(&pcm_caps(channels)).unwrap();
+        let mut sink = CaptureSink::default();
+        enc.process(PipelinePacket::DataFrame(pcm_frame(pcm.clone())), &mut sink)
+            .await
+            .unwrap();
+        let mut lengths: Vec<usize> = sink.packets.iter().map(|(data, _)| data.len()).collect();
+        lengths.dedup();
+        sizes.push(lengths.len());
+    }
+    assert_eq!(sizes[0], 1, "cbr");
+    assert!(sizes[1] > 1, "vbr");
+}

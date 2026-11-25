@@ -2,9 +2,9 @@
 
 Plan for `g2g-desktop host --protocol gamestream`, a host that stock Moonlight
 clients pair with and stream from, the way they use Sunshine. Discovery,
-pairing, the app list and encrypted H.264 or HEVC video from an X display, the
+pairing, the app list, encrypted H.264 or HEVC video from an X display, the
 desktop portal or a `--run` headless display, at the size the client asks for,
-run today. Nothing else in this file is built unless it names an element that
+and encrypted stereo Opus audio from the default output run today. Nothing else in this file is built unless it names an element that
 already exists. When a slice ships, delete it
 here and from [TODO.md](TODO.md), and write the shipped behavior into the track
 that owns it.
@@ -106,8 +106,12 @@ In `g2g-desktop`, module `gamestream`.
   `DESCRIBE` lists the HEVC marker and the encryption flags, and requests video
   and audio encryption.
 - `SETUP` returns no ping payload, so Moonlight sends the 4-byte `PING`. The
-  video port takes the address of the first `PING` from the client that
-  launched the session.
+  video and audio ports each take the address of the first `PING` from the
+  client that launched the session. A failed audio graph is logged and video
+  keeps streaming.
+- `ANNOUNCE` sets the audio packet duration (5 or 10 ms) and the audio
+  encryption bit, and a request for more than two channels is refused. Opus
+  runs at 96 kbit/s CBR.
 - Control: ENet with AES-GCM on every message. An IDR request (0x0302) goes to
   `moonlightvideopay`. Input (0x0206) becomes an `Event` for the existing
   injectors, with keys mapped through a new Windows virtual-key to HID usage
@@ -116,9 +120,8 @@ In `g2g-desktop`, module `gamestream`.
 
 ## Order
 
-1. Audio: `moonlightaudiopay` and CBR Opus in 5 ms frames.
-2. Input: keyboard through the virtual-key table, mouse and scroll.
-3. The Windows host.
+1. Input: keyboard through the virtual-key table, mouse and scroll.
+2. The Windows host.
 
 After those: reference frame invalidation, gamepad, HDR, surround, and `--run`
 applications as `/applist` entries.
@@ -130,7 +133,9 @@ applications as `/applist` entries.
 - `tools/moonlight-interop.sh` runs the Moonlight flatpak under Xvfb against the
   host, each side with a fresh config directory: it pairs with `--pin`, enters
   the PIN through `g2g-desktop pin`, lists the apps, streams the Xvfb display
-  for 8 seconds and checks that Moonlight's video stats report decoded frames.
+  for 8 seconds and checks that Moonlight's video stats report decoded frames
+  and that its audio stream received packets and decrypted every one. Moonlight
+  runs with SDL's dummy audio driver, so nothing plays aloud.
   `CODEC=HEVC` picks the codec. It runs before each push of this work and puts
   no window on the desktop.
 

@@ -7,9 +7,12 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::pin;
 
-use g2g_core::runtime::{parse_chain, GraphNode, GraphNodeRef, ParseError, RunBuilder};
+use g2g_core::runtime::{
+    parse_chain, parse_source, GraphNode, GraphNodeRef, ParseError, RunBuilder,
+};
 use g2g_core::{AsyncElement, G2gError, PropValue};
 use g2g_plugins::clock::WallClock;
+use g2g_plugins::moonlight::audiopay::MoonlightAudioPay;
 use g2g_plugins::moonlight::videopay::MoonlightVideoPay;
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::udpsink::UdpSink;
@@ -18,14 +21,31 @@ use tokio::sync::{oneshot, Notify};
 
 use super::control;
 use super::rtsp::StreamSettings;
+use crate::audio::CAPTURE as AUDIO_CAPTURE;
 use crate::host::LINK_CAPACITY;
 use crate::lineargraph::linear_graph;
 
 pub(crate) const VIDEO_PORT: u16 = 47998;
 pub(crate) const AUDIO_PORT: u16 = 48000;
-// moonlight's legacy video ping, which it sends when SETUP returns no ping payload
-const VIDEO_PING: &[u8] = b"PING";
+// moonlight's legacy video and audio ping, which it sends when SETUP returns no ping payload
+const LEGACY_PING: &[u8] = b"PING";
 const FEC_PERCENTAGE: u32 = 20;
+// moonlight decodes stereo Opus at this rate, the one moonshine sends
+const AUDIO_BITRATE: u32 = 96_000;
+
+#[derive(Clone, Copy)]
+pub(crate) struct SessionKey {
+    pub(crate) key: [u8; 16],
+    pub(crate) key_id: u32,
+}
+
+impl fmt::Debug for SessionKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SessionKey")
+            .field("key_id", &self.key_id)
+            .finish_non_exhaustive()
+    }
+}
 
 pub type CaptureFactory = Box<dyn Fn(u32) -> Result<Vec<GraphNode>, String>>;
 
@@ -36,6 +56,7 @@ pub(crate) enum StreamError {
     NotPlayed,
     Capture(String),
     Encoder(ParseError),
+    Audio(ParseError),
     Property(&'static str),
     Graph(G2gError),
 }
@@ -48,6 +69,7 @@ impl fmt::Display for StreamError {
             Self::NotPlayed => f.write_str("the session ended before RTSP PLAY"),
             Self::Capture(e) => write!(f, "capture: {e}"),
             Self::Encoder(e) => write!(f, "encoder: {e}"),
+            Self::Audio(e) => write!(f, "audio: {e}"),
             Self::Property(name) => write!(f, "the stream refused {name}"),
             Self::Graph(e) => write!(f, "{e:?}"),
         }
@@ -57,12 +79,14 @@ impl fmt::Display for StreamError {
 pub(crate) struct SessionSockets {
     control: tokio_enet::Host,
     video: UdpSocket,
+    audio: UdpSocket,
 }
 
 impl fmt::Debug for SessionSockets {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SessionSockets")
             .field("video", &self.video)
+            .field("audio", &self.audio)
             .finish_non_exhaustive()
     }
 }
@@ -73,6 +97,9 @@ pub(crate) async fn bind() -> Result<SessionSockets, StreamError> {
         video: UdpSocket::bind((Ipv4Addr::UNSPECIFIED, VIDEO_PORT))
             .await
             .map_err(StreamError::Io)?,
+        audio: UdpSocket::bind((Ipv4Addr::UNSPECIFIED, AUDIO_PORT))
+            .await
+            .map_err(StreamError::Io)?,
     })
 }
 
@@ -80,7 +107,7 @@ async fn wait_for_ping(socket: &UdpSocket, client: IpAddr) -> io::Result<SocketA
     let mut buffer = [0u8; 64];
     loop {
         let (length, from) = socket.recv_from(&mut buffer).await?;
-        if from.ip() == client && &buffer[..length] == VIDEO_PING {
+        if from.ip() == client && &buffer[..length] == LEGACY_PING {
             return Ok(from);
         }
     }
@@ -170,11 +197,69 @@ async fn send_video(
     ));
     let clock = WallClock::new();
     eprintln!(
-        "g2g-desktop host: streaming {:?} at {} fps to {client}, video encryption {}",
+        "g2g-desktop host: streaming {:?} at {} fps to {client}, video encryption {}, audio encryption {}",
         settings.codec,
         settings.frames_per_second,
-        if settings.encrypt_video { "on" } else { "off" }
+        if settings.encrypt_video { "on" } else { "off" },
+        if settings.encrypt_audio { "on" } else { "off" }
     );
+    RunBuilder::new(graph, &clock, LINK_CAPACITY)
+        .run()
+        .await
+        .map(|_| ())
+        .map_err(StreamError::Graph)
+}
+
+fn audio_payloader(
+    settings: &StreamSettings,
+    key: SessionKey,
+) -> Result<MoonlightAudioPay, StreamError> {
+    let mut pay = MoonlightAudioPay::default();
+    let properties = [
+        (
+            "packet-duration",
+            PropValue::Uint(u64::from(settings.audio_packet_duration_ms)),
+        ),
+        ("encrypt", PropValue::Bool(settings.encrypt_audio)),
+        ("key", PropValue::Str(hex::encode(key.key))),
+        ("key-id", PropValue::Uint(u64::from(key.key_id))),
+    ];
+    for (name, value) in properties {
+        pay.set_property(name, value)
+            .map_err(|_| StreamError::Property(name))?;
+    }
+    Ok(pay)
+}
+
+async fn send_audio(
+    settings: &StreamSettings,
+    client: SocketAddr,
+    key: SessionKey,
+) -> Result<(), StreamError> {
+    let registry = default_registry();
+    let source = parse_source(&registry, AUDIO_CAPTURE).map_err(StreamError::Audio)?;
+    let encoder = parse_chain(
+        &registry,
+        &format!(
+            "audioconvert ! opusenc frame-size={} bitrate={AUDIO_BITRATE} bitrate-type=cbr \
+             audio-type=restricted-lowdelay",
+            settings.audio_packet_duration_ms
+        ),
+    )
+    .map_err(StreamError::Audio)?;
+    let mut sink = UdpSink::new(client);
+    sink.set_property("bind-port", PropValue::Uint(u64::from(AUDIO_PORT)))
+        .map_err(|_| StreamError::Property("bind-port"))?;
+    let transforms = encoder
+        .into_iter()
+        .map(GraphNodeRef::Element)
+        .chain([GraphNodeRef::element(audio_payloader(settings, key)?)]);
+    let graph = linear_graph(
+        GraphNodeRef::Source(source),
+        transforms,
+        GraphNodeRef::element(sink),
+    );
+    let clock = WallClock::new();
     RunBuilder::new(graph, &clock, LINK_CAPACITY)
         .run()
         .await
@@ -185,7 +270,7 @@ async fn send_video(
 pub(crate) async fn run(
     sockets: SessionSockets,
     client: IpAddr,
-    key: [u8; 16],
+    key: SessionKey,
     play: oneshot::Receiver<StreamSettings>,
     stop: &Notify,
     capture: &CaptureFactory,
@@ -193,22 +278,40 @@ pub(crate) async fn run(
     let SessionSockets {
         control,
         video: video_socket,
+        audio: audio_socket,
     } = sockets;
     let settings = tokio::select! {
         played = play => played.map_err(|_| StreamError::NotPlayed)?,
         () = stop.notified() => return Ok(()),
     };
-    let pay = payloader(&settings, &key)?;
+    let pay = payloader(&settings, &key.key)?;
     let keyframe_requests = pay.keyframe_requests();
+    let audio = async {
+        let sent = match wait_for_ping(&audio_socket, client).await {
+            Ok(destination) => {
+                // udpsink binds the audio port itself
+                drop(audio_socket);
+                send_audio(&settings, destination, key).await
+            }
+            Err(e) => Err(StreamError::Io(e)),
+        };
+        if let Err(e) = sent {
+            eprintln!("g2g-desktop host: Moonlight audio stopped: {e}");
+        }
+        std::future::pending::<()>().await
+    };
     let video = pin!(async {
         let destination = wait_for_ping(&video_socket, client)
             .await
             .map_err(StreamError::Io)?;
         // udpsink binds the video port itself
         drop(video_socket);
-        send_video(&settings, destination, capture, pay).await
+        tokio::select! {
+            sent = send_video(&settings, destination, capture, pay) => sent,
+            () = audio => unreachable!("the audio future never completes"),
+        }
     });
-    let mut control = pin!(control::run(control, &key, keyframe_requests, stop));
+    let mut control = pin!(control::run(control, &key.key, keyframe_requests, stop));
     tokio::select! {
         sent = video => {
             stop.notify_one();
