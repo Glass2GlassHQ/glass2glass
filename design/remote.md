@@ -226,8 +226,8 @@ opusdec ! audioconvert ! pulsesink buffer-time=40000
 
 `pulsesink` starts playing once 40 ms of audio is queued. The client's audio
 graph runs beside the video graph on the same runtime. The host's runs on its
-own thread: on the video graph's runtime it adds 13 ms to every video frame, for
-a reason not yet found.
+own thread: on the video graph's runtime it adds 1 ms p50 and 3 ms p99 to each
+video frame.
 
 The decoder is `nvdec`, `mfdecode`, `vtdecode`, or `ffmpegdec`, chosen by the
 same auto-plug `decodebin` uses. `software-decode=true` forces `ffmpegdec`.
