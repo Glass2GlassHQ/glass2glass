@@ -30,7 +30,7 @@ use crate::abortondrop::AbortOnDrop;
 use crate::datachannel::{DataChannelTransportEnds, MAX_MESSAGE_SIZE};
 use crate::remotewire::map_wire;
 use crate::remotewtio::{wt_err, SharedDataChannel};
-use crate::remotewttrack::{deliver_track_packet, SharedTrackOutgoing};
+use crate::remotewttrack::{deliver_track_packet, SharedTrackOutgoing, TrackArrival};
 
 pub(crate) const WEBSOCKET_SCHEME: &str = "wss";
 
@@ -126,7 +126,7 @@ impl WsLink {
         websocket: TlsWebSocket<S>,
         data_channel: Option<&SharedDataChannel>,
         track_outgoing: Option<&SharedTrackOutgoing>,
-        track_incoming: Option<&mpsc::Sender<PipelinePacket>>,
+        track_incoming: Option<&mpsc::Sender<TrackArrival>>,
     ) -> Self
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -278,7 +278,7 @@ async fn read_socket<S>(
     mut socket: futures_util::stream::SplitStream<TlsWebSocket<S>>,
     video: mpsc::Sender<Vec<u8>>,
     messages: Option<mpsc::UnboundedSender<Vec<u8>>>,
-    track: Option<mpsc::Sender<PipelinePacket>>,
+    track: Option<mpsc::Sender<TrackArrival>>,
     keyframe_requested: Arc<AtomicBool>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,

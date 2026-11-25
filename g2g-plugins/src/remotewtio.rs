@@ -76,7 +76,9 @@ use crate::abortondrop::AbortOnDrop;
 use crate::datachannel::{DataChannelTransportEnds, MAX_MESSAGE_SIZE};
 use crate::remotewire::{send_frame_bytes, send_framed, FramedRead};
 use crate::remotewtfec::{shard_frame, PathCounts, PathLoss, ShardAssembly};
-use crate::remotewttrack::{deliver_track_packet, SharedTrackOutgoing, MAIN_STREAM, TRACK_STREAM};
+use crate::remotewttrack::{
+    deliver_track_packet, SharedTrackOutgoing, TrackArrival, MAIN_STREAM, TRACK_STREAM,
+};
 use crate::remotewtvideo::{NextPacket, PacketOrder, PacketReorder, VideoMode, KEYFRAME_REQUEST};
 use crate::remotewtws::{TlsWebSocket, WsLink, WEBSOCKET_SCHEME};
 use crate::textencoding::{hex_decode, hex_encode};
@@ -609,7 +611,7 @@ fn send_track(session: &Session, outgoing: SharedTrackOutgoing) -> AbortOnDrop {
 // web-transport-quinn returns a WebTransport stream once its header arrives, so streams are accepted in arrival order, not open order
 pub(crate) async fn accept_main_stream(
     session: &Session,
-    track: Option<mpsc::Sender<PipelinePacket>>,
+    track: Option<mpsc::Sender<TrackArrival>>,
 ) -> Result<(SendStream, RecvStream, AbortOnDrop), G2gError> {
     let (main_found, main_stream) = oneshot::channel();
     let session = session.clone();
@@ -653,7 +655,7 @@ pub(crate) async fn accept_main_stream(
     Ok((tx, rx, task))
 }
 
-async fn receive_track(mut rx: RecvStream, track: mpsc::Sender<PipelinePacket>) {
+async fn receive_track(mut rx: RecvStream, track: mpsc::Sender<TrackArrival>) {
     let mut reader = FramedRead::default();
     while let Ok(Some(packet)) = reader.recv(&mut rx).await {
         if deliver_track_packet(&track, packet).await.is_err() {

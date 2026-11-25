@@ -3,10 +3,11 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use g2g_core::log::Target;
+use g2g_core::runtime::SourceLoop;
 use g2g_core::runtime::{
     parse_chain, parse_element, parse_source, GraphNode, GraphNodeRef, ParseError, RunBuilder,
 };
-use g2g_core::Graph;
+use g2g_core::{Graph, PropValue};
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::remotewttrack::{RemoteWtTrackSink, RemoteWtTrackSrc};
@@ -24,6 +25,8 @@ pub(crate) const CAPTURE: &str = "pulsesrc device=@DEFAULT_MONITOR@";
 pub(crate) const CAPTURE: &str = "wasapisrc loopback=true";
 const ENCODE: &str = "audioconvert ! opusenc frame-size=10 audio-type=restricted-lowdelay";
 const DECODE: &str = "opusdec ! audioconvert";
+// frames later than this behind the fastest recent one are dropped
+const JITTER_LATENCY_MS: u64 = 60;
 // pulsesink starts playing once buffer-time of audio is queued
 #[cfg(target_os = "linux")]
 const PLAYBACK: &str = "pulsesink buffer-time=40000";
@@ -41,7 +44,10 @@ fn send_graph(track: RemoteWtTrackSink) -> Result<Graph<GraphNode>, ParseError> 
     ))
 }
 
-fn play_graph(track: RemoteWtTrackSrc) -> Result<Graph<GraphNode>, ParseError> {
+fn play_graph(mut track: RemoteWtTrackSrc) -> Result<Graph<GraphNode>, ParseError> {
+    track
+        .set_property("latency", PropValue::Uint(JITTER_LATENCY_MS))
+        .expect("the track source takes a latency in milliseconds");
     let registry = default_registry();
     let decode = parse_chain(&registry, DECODE)?;
     let playback = parse_element(&registry, PLAYBACK)?;

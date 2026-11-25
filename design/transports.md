@@ -857,10 +857,17 @@ packet never waits behind a video frame. Every bidirectional stream the sender
 opens starts with one kind byte, 0 for the main stream and 1 for the track,
 since web-transport-quinn accepts streams in the order their headers arrive. A
 track data frame that finds the track's queue full is dropped, at the sender (4
-packets) and at the receiver (2 packets), and caps and `Eos` wait for room. A
-track is for audio: a stall followed by a burst costs a gap instead of a delay
-that never drains. `RemoteWtTrackSrc` discovers its caps from the track's first
-packet and ends on the track's `Eos` or when the connection closes.
+packets) and at the receiver (256 packets), and caps and `Eos` wait for room.
+`RemoteWtTrackSrc` holds each frame in a jitter buffer until its pts plus the
+smallest arrival-minus-pts of the last 2 s plus `latency` (milliseconds,
+default 200 as in gst `rtpjitterbuffer`), so frames that a stall bunches up
+play out at the sender's spacing. A frame that arrives after that time, or is
+still waiting more than 20 ms past it because the reader stalled, is dropped,
+so a stall longer than `latency` costs a gap instead of a delay that never
+drains. Taking the smallest offset over a sliding window lets the release time
+follow drift between the two clocks, and new caps restart it for a sender
+whose pts start over. `RemoteWtTrackSrc` discovers its caps from the track's
+first packet and ends on the track's `Eos` or when the connection closes.
 
 A network that blocks UDP gets a WebSocket fallback. `RemoteWtSink
 mode=listener` also binds TCP on the same port number and accepts a WebSocket

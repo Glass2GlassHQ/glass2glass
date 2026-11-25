@@ -59,7 +59,7 @@ use crate::remotewtio::{
     VideoSettings, WtStream, CERTIFICATE_PROP, CONGESTION_PROP, PRIVATE_KEY_PROP,
 };
 use crate::remotewtsink::CERT_HASHES_PROP;
-use crate::remotewttrack::{track_source, RemoteWtTrackSrc};
+use crate::remotewttrack::{track_source, RemoteWtTrackSrc, TrackArrival};
 use crate::remotewtvideo::VideoMode;
 use crate::remotewtws::WsLink;
 
@@ -141,7 +141,7 @@ pub struct WtTransport {
     congestion: String,
     frame_timeout_ms: u64,
     data_channel: Option<SharedDataChannel>,
-    track: Option<mpsc::Sender<PipelinePacket>>,
+    track: Option<mpsc::Sender<TrackArrival>>,
     listened: bool,
 }
 
@@ -168,7 +168,7 @@ pub struct WtListener {
     kind: ListenerKind,
     frame_timeout_ms: u64,
     data_channel: Option<SharedDataChannel>,
-    track: Option<mpsc::Sender<PipelinePacket>>,
+    track: Option<mpsc::Sender<TrackArrival>>,
 }
 
 #[derive(Debug)]

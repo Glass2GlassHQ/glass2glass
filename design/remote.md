@@ -226,8 +226,12 @@ opusdec ! audioconvert ! wasapisink                      # Windows
 ```
 
 `pulsesink` starts playing once 40 ms of audio is queued. The audio track
-drops frames that arrive in a burst after a network stall, so a weak Wi-Fi
-link cuts gaps into the sound rather than adding delay. The client's audio
+source runs a 60 ms jitter buffer, so a frame may arrive up to 60 ms after the
+fastest recent one and still play. Between a Linux host and client this costs
+80 ms over loopback (120 ms from the tone to the recording, against 40 ms
+without it), and under 20 ms ± 30 ms of netem jitter a 4 s tone plays with no
+gap, where it had 26 before. A stall longer than 60 ms, which a weak Wi-Fi
+link causes, still cuts a gap. The client's audio
 graph runs beside the video graph on the same runtime. The host's runs on its
 own thread: on the video graph's runtime it adds 1 ms p50 and 3 ms p99 to each
 video frame.
