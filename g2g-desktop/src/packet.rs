@@ -39,9 +39,10 @@ pub enum EventKind {
     Rumble = 7,
     Cursor = 8,
     Clipboard = 9,
+    Text = 10,
 }
 
-const EVENT_KINDS: [EventKind; 9] = [
+const EVENT_KINDS: [EventKind; 10] = [
     EventKind::Key,
     EventKind::Button,
     EventKind::Move,
@@ -51,6 +52,7 @@ const EVENT_KINDS: [EventKind; 9] = [
     EventKind::Rumble,
     EventKind::Cursor,
     EventKind::Clipboard,
+    EventKind::Text,
 ];
 
 impl EventKind {
@@ -73,7 +75,7 @@ impl EventKind {
             EventKind::Position => Some(9),
             EventKind::Gamepad => Some(17),
             EventKind::Rumble => Some(7),
-            EventKind::Cursor | EventKind::Clipboard => None,
+            EventKind::Cursor | EventKind::Clipboard | EventKind::Text => None,
         }
     }
 }
@@ -176,6 +178,7 @@ pub enum Event {
     },
     Cursor(CursorImage),
     Clipboard(String),
+    Text(String),
     DeviceRemoved {
         kind: RemovableDevice,
         device: u8,
@@ -200,6 +203,7 @@ impl Event {
             Event::Rumble { .. } => EventKind::Rumble,
             Event::Cursor(_) => EventKind::Cursor,
             Event::Clipboard(_) => EventKind::Clipboard,
+            Event::Text(_) => EventKind::Text,
             Event::DeviceRemoved {
                 kind: RemovableDevice::Keyboard,
                 ..
@@ -278,7 +282,7 @@ impl fmt::Display for PacketError {
                 "{width}x{height} cursor has {rgba_len} RGBA bytes, expected {}",
                 usize::from(*width) * usize::from(*height) * RGBA_BYTES_PER_PIXEL
             ),
-            PacketError::InvalidUtf8 => write!(f, "clipboard payload is not UTF-8"),
+            PacketError::InvalidUtf8 => write!(f, "text payload is not UTF-8"),
             PacketError::TooLarge { len } => write!(
                 f,
                 "a {len} byte packet exceeds the {MAX_MESSAGE_SIZE} byte data-channel message"
@@ -373,7 +377,9 @@ impl PacketWriter {
                 payload.extend_from_slice(&cursor.hotspot_y.to_le_bytes());
                 payload.extend_from_slice(&cursor.rgba);
             }
-            Event::Clipboard(text) => payload.extend_from_slice(text.as_bytes()),
+            Event::Clipboard(text) | Event::Text(text) => {
+                payload.extend_from_slice(text.as_bytes())
+            }
             Event::DeviceRemoved { device, .. } => {
                 flags |= DEVICE_REMOVED;
                 payload.push(*device);
@@ -460,6 +466,10 @@ fn check_payload_len(kind: EventKind, expected: usize, actual: usize) -> Result<
     Ok(())
 }
 
+fn utf8(bytes: &[u8]) -> Result<String, PacketError> {
+    String::from_utf8(bytes.to_vec()).map_err(|_| PacketError::InvalidUtf8)
+}
+
 fn decode_event(kind: EventKind, flags: u8, payload: &[u8]) -> Result<Event, PacketError> {
     let mut fields = Fields {
         bytes: payload,
@@ -541,9 +551,8 @@ fn decode_event(kind: EventKind, flags: u8, payload: &[u8]) -> Result<Event, Pac
                 fields.rest().to_vec(),
             )?)
         }
-        EventKind::Clipboard => Event::Clipboard(
-            String::from_utf8(fields.rest().to_vec()).map_err(|_| PacketError::InvalidUtf8)?,
-        ),
+        EventKind::Clipboard => Event::Clipboard(utf8(fields.rest())?),
+        EventKind::Text => Event::Text(utf8(fields.rest())?),
     };
     Ok(event)
 }

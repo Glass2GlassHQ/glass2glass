@@ -5,7 +5,9 @@
 use std::fmt;
 use std::io;
 
-use crate::hid::UnknownUsage;
+use keycode::{KeyMap, KeyMappingCode};
+
+use crate::hid::{us_layout_key, UnknownUsage};
 use crate::packet::{Event, EventKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +31,7 @@ pub enum InjectError {
         monitor_height: u32,
     },
     NotInjected(EventKind),
+    NoUsLayoutKey(String),
     Refused(io::Error),
     Device(io::Error),
 }
@@ -52,6 +55,9 @@ impl fmt::Display for InjectError {
                 captured.width, captured.height
             ),
             InjectError::NotInjected(kind) => write!(f, "{kind:?} events are not injected"),
+            InjectError::NoUsLayoutKey(text) => {
+                write!(f, "no US keyboard key types {text:?}")
+            }
             InjectError::Refused(e) => write!(f, "the OS refused the event: {e}"),
             InjectError::Device(e) => write!(f, "input device: {e}"),
         }
@@ -83,6 +89,34 @@ pub fn check_position(x: i32, y: i32, display: u8, screen: ScreenSize) -> Result
     let inside = |value: i32, extent: u16| (0..i32::from(extent)).contains(&value);
     if !inside(x, screen.width) || !inside(y, screen.height) {
         return Err(InjectError::OutsideScreen { x, y });
+    }
+    Ok(())
+}
+
+pub fn type_us_layout(injector: &mut impl InjectEvents, text: &str) -> Result<(), InjectError> {
+    let shift = KeyMap::from(KeyMappingCode::ShiftLeft).usb;
+    let key = |usage, down| Event::Key {
+        device: 0,
+        usage,
+        down,
+    };
+    let mut untyped = String::new();
+    for character in text.chars() {
+        let Some(typed) = us_layout_key(character) else {
+            untyped.push(character);
+            continue;
+        };
+        if typed.shifted {
+            injector.inject(&key(shift, true))?;
+        }
+        injector.inject(&key(typed.usage, true))?;
+        injector.inject(&key(typed.usage, false))?;
+        if typed.shifted {
+            injector.inject(&key(shift, false))?;
+        }
+    }
+    if !untyped.is_empty() {
+        return Err(InjectError::NoUsLayoutKey(untyped));
     }
     Ok(())
 }

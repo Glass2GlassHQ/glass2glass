@@ -8,12 +8,12 @@ use std::mem::size_of;
 
 use g2g_plugins::d3d11screencapturesrc::{with_physical_pixels, MonitorBounds};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
-    KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL,
-    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
-    MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK,
-    MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, MOUSE_EVENT_FLAGS,
-    VIRTUAL_KEY,
+    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, KEYEVENTF_UNICODE,
+    MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+    MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
+    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN,
+    MOUSEEVENTF_XUP, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
@@ -106,11 +106,7 @@ fn mouse(dx: i32, dy: i32, data: i32, flags: MOUSE_EVENT_FLAGS) -> INPUT {
     }
 }
 
-fn key(scancode: u16, down: bool) -> INPUT {
-    let mut flags = KEYEVENTF_SCANCODE;
-    if scancode & PREFIX_MASK == EXTENDED_PREFIX {
-        flags |= KEYEVENTF_EXTENDEDKEY;
-    }
+fn keyboard(scan: u16, mut flags: KEYBD_EVENT_FLAGS, down: bool) -> INPUT {
     if !down {
         flags |= KEYEVENTF_KEYUP;
     }
@@ -119,13 +115,21 @@ fn key(scancode: u16, down: bool) -> INPUT {
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT {
                 wVk: VIRTUAL_KEY(0),
-                wScan: scancode & SCANCODE_MASK,
+                wScan: scan,
                 dwFlags: flags,
                 time: 0,
                 dwExtraInfo: 0,
             },
         },
     }
+}
+
+fn key(scancode: u16, down: bool) -> INPUT {
+    let mut flags = KEYEVENTF_SCANCODE;
+    if scancode & PREFIX_MASK == EXTENDED_PREFIX {
+        flags |= KEYEVENTF_EXTENDEDKEY;
+    }
+    keyboard(scancode & SCANCODE_MASK, flags, down)
 }
 
 fn send(inputs: &[INPUT]) -> Result<(), InjectError> {
@@ -218,6 +222,16 @@ impl InjectEvents for Injector {
                     .map(|scancode| key(scancode, false))
                     .collect();
                 send(&releases)?;
+            }
+            // windows KEYEVENTF_UNICODE events carry one UTF-16 code unit each
+            Event::Text(ref text) => {
+                let inputs: Vec<INPUT> = text
+                    .encode_utf16()
+                    .flat_map(|unit| {
+                        [true, false].map(|down| keyboard(unit, KEYEVENTF_UNICODE, down))
+                    })
+                    .collect();
+                send(&inputs)?;
             }
             _ => return Err(InjectError::NotInjected(event.kind())),
         }

@@ -16,7 +16,7 @@ use x11rb::protocol::xtest::ConnectionExt as _;
 use x11rb::rust_connection::RustConnection;
 
 use crate::hid::evdev_from_usage;
-use crate::injection::{check_position, InjectError, InjectEvents, ScreenSize};
+use crate::injection::{check_position, type_us_layout, InjectError, InjectEvents, ScreenSize};
 use crate::packet::{Event, RemovableDevice, POINTER_BUTTONS};
 use crate::uinput::{whole_notches, WheelRemainder};
 
@@ -154,6 +154,7 @@ impl XTestInjector {
                 }
                 Ok(())
             }
+            Event::Text(ref text) => type_us_layout(self, text),
             _ => Err(InjectError::NotInjected(event.kind())),
         }
     }

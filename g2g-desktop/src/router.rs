@@ -43,6 +43,7 @@ fn is_user_input(kind: EventKind) -> bool {
             | EventKind::Position
             | EventKind::Wheel
             | EventKind::Gamepad
+            | EventKind::Text
     )
 }
 

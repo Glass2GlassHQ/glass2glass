@@ -18,6 +18,7 @@ const MOUSE_BUTTON_DOWN: u32 = 0x08;
 const MOUSE_BUTTON_UP: u32 = 0x09;
 const SCROLL_VERTICAL: u32 = 0x0A;
 const SCROLL_HORIZONTAL: u32 = 0x5500_0001;
+const UTF8_TEXT: u32 = 0x17;
 
 const LENGTH_BYTES: usize = 4;
 const MAGIC_BYTES: usize = 4;
@@ -166,11 +167,12 @@ pub(crate) enum InputError {
     UnknownButton(u8),
     NoCaptureSize,
     EmptyReferenceSize,
+    NotUtf8,
 }
 
 impl InputError {
     pub(crate) fn is_malformed(self) -> bool {
-        matches!(self, Self::Truncated | Self::LengthMismatch)
+        matches!(self, Self::Truncated | Self::LengthMismatch | Self::NotUtf8)
     }
 }
 
@@ -186,6 +188,7 @@ impl fmt::Display for InputError {
                 f.write_str("absolute position before the capture size is known")
             }
             Self::EmptyReferenceSize => f.write_str("absolute position with a zero reference size"),
+            Self::NotUtf8 => f.write_str("text input is not UTF-8"),
         }
     }
 }
@@ -285,6 +288,9 @@ pub(crate) fn input_event(body: &[u8], screen: Option<ScreenSize>) -> Result<Eve
             dx: i32::from(be_i16(payload, 0)?),
             dy: 0,
         }),
+        UTF8_TEXT => String::from_utf8(payload.to_vec())
+            .map(Event::Text)
+            .map_err(|_| InputError::NotUtf8),
         other => Err(InputError::Unsupported(other)),
     }
 }
@@ -406,6 +412,18 @@ mod tests {
         assert_eq!(
             input_event(&message(MOUSE_MOVE_ABSOLUTE, &absolute), None),
             Err(InputError::NoCaptureSize)
+        );
+    }
+
+    #[test]
+    fn utf8_text_becomes_a_text_event() {
+        assert_eq!(
+            input_event(&message(UTF8_TEXT, "caf\u{e9}".as_bytes()), None),
+            Ok(Event::Text("caf\u{e9}".to_string()))
+        );
+        assert_eq!(
+            input_event(&message(UTF8_TEXT, &[0xff]), None),
+            Err(InputError::NotUtf8)
         );
     }
 

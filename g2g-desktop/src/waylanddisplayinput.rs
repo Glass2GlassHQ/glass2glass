@@ -8,7 +8,7 @@ use g2g_plugins::windowinput::WindowInput;
 use g2g_wayland_display::waylanddisplaysrc::{InputSender, WaylandDisplay};
 
 use crate::hid::evdev_from_usage;
-use crate::injection::{check_position, InjectError, InjectEvents, ScreenSize};
+use crate::injection::{check_position, type_us_layout, InjectError, InjectEvents, ScreenSize};
 use crate::packet::{Event, RemovableDevice, POINTER_BUTTONS};
 
 #[derive(Debug)]
@@ -83,6 +83,7 @@ impl InjectEvents for WaylandDisplayInjector {
         }
         let input = match *event {
             Event::Move { dx, dy } => moved_pointer(self.pointer, dx, dy, self.screen),
+            Event::Text(ref text) => return type_us_layout(self, text),
             _ => window_input(event, self.screen)?,
         };
         if let WindowInput::Pointer { x, y } = input {

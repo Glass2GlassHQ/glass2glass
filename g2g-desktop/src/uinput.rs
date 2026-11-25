@@ -14,7 +14,7 @@ use evdev::{
 };
 
 use crate::hid::evdev_from_usage;
-use crate::injection::{check_position, InjectError, InjectEvents, ScreenSize};
+use crate::injection::{check_position, type_us_layout, InjectError, InjectEvents, ScreenSize};
 use crate::packet::{Event, RemovableDevice};
 
 pub const KEYBOARD_NAME_PREFIX: &str = "g2g-desktop keyboard";
@@ -172,6 +172,7 @@ impl InjectEvents for Injector {
             } => {
                 self.keyboards.remove(&device);
             }
+            Event::Text(ref text) => return type_us_layout(self, text),
             _ => return Err(InjectError::NotInjected(event.kind())),
         }
         Ok(())

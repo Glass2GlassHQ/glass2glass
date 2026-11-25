@@ -6,11 +6,11 @@
 # Pair the Moonlight flatpak with `g2g-desktop host --protocol gamestream`, list its apps and
 # stream the desktop for a few seconds. Moonlight runs on its own Xvfb display, which the host
 # also captures, or with CAPTURE=run the host captures its own headless display, so nothing
-# opens on the desktop. CAPTURE=run also types and clicks into Moonlight's window and checks
-# that tools/moonlight-input-probe.py on the headless display received them. CAPTURE=portal captures the desktop session through the ScreenCast
+# opens on the desktop. CAPTURE=run also types, clicks and pastes text into Moonlight's window and
+# checks that tools/moonlight-input-probe.py on the headless display received them. CAPTURE=portal captures the desktop session through the ScreenCast
 # portal, whose share dialog a user approves on the desktop.
 #
-# Prerequisites: Xvfb, xdotool and Python GTK 4 for CAPTURE=run, and Moonlight from Flathub:
+# Prerequisites: Xvfb, xdotool, Python GTK 4 and tkinter for CAPTURE=run, and Moonlight from Flathub:
 #   flatpak install --user flathub com.moonlight_stream.Moonlight
 #
 # Usage: tools/moonlight-interop.sh <g2g-desktop binary built with --features gamestream>
@@ -21,6 +21,7 @@ BIN=$1
 TOOLS=$(cd "$(dirname "$0")" && pwd)
 OUT=${OUT:-$HOME/tmp/moonlight-interop}
 PIN=4721
+PASTED_TEXT='Hi!'
 CODEC=${CODEC:-H.264}
 STREAM_SECONDS=${STREAM_SECONDS:-8}
 # each run starts unpaired: fresh config directories for Moonlight and the host
@@ -100,7 +101,20 @@ if [ "${CAPTURE:-x11}" = run ]; then
     xdotool windowfocus --sync "$window"
     # moonlight keeps the first click, which captures the mouse
     xdotool mousemove --window "$window" 300 200 click 1 sleep 1 click 1 sleep 1 click 8 sleep 1 key a
+    # moonlight sends its clipboard as a text event on Ctrl+Alt+Shift+V
+    python3 - "$PASTED_TEXT" <<'PYTHON' &
+import sys
+import tkinter
+root = tkinter.Tk()
+root.withdraw()
+root.clipboard_append(sys.argv[1])
+root.mainloop()
+PYTHON
+    CLIPBOARD=$!
     sleep 1
+    xdotool key ctrl+alt+shift+v
+    sleep 1
+    kill "$CLIPBOARD"
 fi
 # moonlight writes its streaming log only once the session ends, so the host ends it
 moonlight quit 127.0.0.1 >"$OUT/quit.log" 2>&1 &
@@ -130,7 +144,8 @@ if ! grep -q 'Received first audio packet' "$OUT/stream.log" ||
     exit 1
 fi
 if [ "${CAPTURE:-x11}" = run ] && ! { grep -qx 'key a' "$OUT/input.log" && grep -qx 'button 1' "$OUT/input.log" &&
-    grep -qx 'button 8' "$OUT/input.log"; }; then
+    grep -qx 'button 8' "$OUT/input.log" && grep -qx 'key H' "$OUT/input.log" &&
+    grep -qx 'key i' "$OUT/input.log" && grep -qx 'key exclam' "$OUT/input.log"; }; then
     echo "moonlight-interop: the headless display did not get Moonlight's input, see $OUT/input.log" >&2
     exit 1
 fi

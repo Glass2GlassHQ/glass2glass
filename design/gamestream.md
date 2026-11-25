@@ -122,7 +122,7 @@ In `g2g-desktop`, module `gamestream`.
   compositor for `--run` and `SendInput` on Windows. Keys map through a
   Windows virtual-key to HID usage table. Absolute pointer positions scale from
   the size Moonlight sends to the captured size. Mouse buttons 4 and 5 become
-  the back and forward buttons. Touch, pen, text and gamepads are dropped. Keys still held when the control stream ends are
+  the back and forward buttons. Text (0x17) becomes `Event::Text`. Touch, pen and gamepads are dropped. Keys still held when the control stream ends are
   released. The host ends a session with 0x0109 carrying 0x80030023, and ends it
   itself after 10 s without a control message.
 

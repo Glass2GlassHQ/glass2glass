@@ -459,6 +459,7 @@ pub async fn inject<I: InjectEvents>(
                 match injector.inject(&event) {
                     Ok(()) => {}
                     Err(InjectError::Device(e)) => return Err(InjectError::Device(e)),
+                    Err(e @ InjectError::NoUsLayoutKey(_)) => g2g_core::g2g_debug!(log, "{e}"),
                     Err(e) => g2g_core::g2g_warn!(log, "did not inject {:?}: {e}", event.kind()),
                 }
             }

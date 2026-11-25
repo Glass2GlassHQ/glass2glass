@@ -59,6 +59,7 @@ fn every_event() -> Vec<Event> {
         },
         Event::Cursor(cursor(3, 2)),
         Event::Clipboard("snow \u{2603}".to_string()),
+        Event::Text("caf\u{e9}!".to_string()),
         Event::DeviceRemoved {
             kind: RemovableDevice::Gamepad,
             device: 3,

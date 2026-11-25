@@ -48,7 +48,7 @@ The plan is [remote.md](remote.md).
 
 The plan is [gamestream.md](gamestream.md).
 
-- Inject Moonlight's touch, pen and text input.
+- Inject Moonlight's touch and pen input.
 
 ## Embeddable player (`g2g-player`)
 

@@ -304,6 +304,12 @@ window sets as the selection once it has a keyboard serial, and forwards each
 selection the desktop sends the focused window. Both sides remember the last
 text that crossed, so neither echoes it.
 
+Text: type 10 carries UTF-8 text to type on the host. Moonlight sends it for
+its paste shortcut, Ctrl+Alt+Shift+V. On Windows each UTF-16 unit goes to
+`SendInput` as a `KEYEVENTF_UNICODE` key press. On Linux each character becomes
+the US layout key for it, with shift where needed, and characters with no US
+key are logged at debug level.
+
 ## Windows service
 
 The service process is installed separately, runs as SYSTEM, and accepts
