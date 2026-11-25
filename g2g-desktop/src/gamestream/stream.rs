@@ -72,6 +72,7 @@ pub(crate) enum StreamError {
     Audio(ParseError),
     Property(&'static str),
     Graph(G2gError),
+    AudioThreadPanicked,
 }
 
 impl fmt::Display for StreamError {
@@ -85,6 +86,7 @@ impl fmt::Display for StreamError {
             Self::Audio(e) => write!(f, "audio: {e}"),
             Self::Property(name) => write!(f, "the stream refused {name}"),
             Self::Graph(e) => write!(f, "{e:?}"),
+            Self::AudioThreadPanicked => f.write_str("the audio thread panicked"),
         }
     }
 }
@@ -282,6 +284,35 @@ async fn send_audio(
         .map_err(StreamError::Graph)
 }
 
+// audio on the video graph's thread stops draining the capture while a video element blocks
+async fn send_audio_on_own_thread(
+    settings: StreamSettings,
+    client: SocketAddr,
+    key: SessionKey,
+) -> Result<(), StreamError> {
+    let (_stop, stopped) = oneshot::channel::<()>();
+    let (finished, sent) = oneshot::channel();
+    std::thread::Builder::new()
+        .name("g2g-desktop-gamestream-audio".into())
+        .spawn(move || {
+            let sent = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(StreamError::Io)
+                .and_then(|runtime| {
+                    runtime.block_on(async {
+                        tokio::select! {
+                            sent = send_audio(&settings, client, key) => sent,
+                            _ = stopped => Ok(()),
+                        }
+                    })
+                });
+            drop(finished.send(sent));
+        })
+        .map_err(StreamError::Io)?;
+    sent.await.map_err(|_| StreamError::AudioThreadPanicked)?
+}
+
 pub(crate) async fn run(
     sockets: SessionSockets,
     client: IpAddr,
@@ -312,7 +343,7 @@ pub(crate) async fn run(
             Ok(destination) => {
                 // udpsink binds the audio port itself
                 drop(audio_socket);
-                send_audio(&settings, destination, key).await
+                send_audio_on_own_thread(settings, destination, key).await
             }
             Err(e) => Err(StreamError::Io(e)),
         };
