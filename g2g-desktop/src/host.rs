@@ -28,7 +28,7 @@ use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, watch};
 
 use crate::audio;
-use crate::injection::{InjectError, InjectEvents, ScreenSize};
+use crate::injection::{GamepadRumble, InjectError, InjectEvents, ScreenSize};
 use crate::lineargraph::linear_graph;
 use crate::packet::{CursorImage, Event, PacketError, PacketReader, PacketWriter, Side};
 
@@ -436,11 +436,22 @@ pub async fn inject<I: InjectEvents>(
     mut events: mpsc::UnboundedReceiver<Event>,
     mut sizes: watch::Receiver<Option<ScreenSize>>,
     open_injector: impl Fn(ScreenSize) -> Result<I, InjectError>,
+    rumbled: &mpsc::UnboundedSender<GamepadRumble>,
 ) -> Result<(), InjectError> {
     let log = Target::category(HOST_CATEGORY);
     let mut injector: Option<I> = None;
     loop {
+        let rumble = core::future::poll_fn(|cx| match injector.as_mut() {
+            Some(injector) => injector.poll_rumble(cx),
+            None => core::task::Poll::Pending,
+        });
         tokio::select! {
+            rumble = rumble => match rumble {
+                // rumbles after the session ends are dropped
+                Ok(rumble) => drop(rumbled.send(rumble)),
+                Err(InjectError::Device(e)) => return Err(InjectError::Device(e)),
+                Err(e) => g2g_core::g2g_warn!(log, "dropped a rumble: {e}"),
+            },
             changed = sizes.changed() => {
                 if changed.is_err() {
                     return Ok(());

@@ -6,10 +6,12 @@ use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::io;
 use std::rc::Rc;
+use std::task::{Context, Poll};
 
-use vigem_client::{Client, TargetId, XButtons, XGamepad, Xbox360Wired};
+use tokio::sync::mpsc;
+use vigem_client::{Client, TargetId, XButtons, XGamepad, XNotification, Xbox360Wired};
 
-use crate::injection::{InjectError, InjectEvents};
+use crate::injection::{GamepadRumble, InjectError, InjectEvents, MotorLevels};
 use crate::packet::{Event, GamepadAxes, RemovableDevice};
 
 fn report(buttons: u32, axes: GamepadAxes) -> Result<XGamepad, InjectError> {
@@ -27,18 +29,56 @@ fn report(buttons: u32, axes: GamepadAxes) -> Result<XGamepad, InjectError> {
     })
 }
 
-fn plug_in(client: &Rc<Client>) -> Result<Xbox360Wired<Rc<Client>>, vigem_client::Error> {
+// xinput motor bytes reach the full u16 range when the byte is repeated
+fn motors(notification: XNotification) -> MotorLevels {
+    let level = |byte| u16::from_le_bytes([byte, byte]);
+    MotorLevels {
+        low_frequency: level(notification.large_motor),
+        high_frequency: level(notification.small_motor),
+    }
+}
+
+fn plug_in(
+    client: &Rc<Client>,
+    device: u8,
+    rumbled: mpsc::UnboundedSender<GamepadRumble>,
+) -> Result<Xbox360Wired<Rc<Client>>, vigem_client::Error> {
     let mut pad = Xbox360Wired::new(Rc::clone(client), TargetId::XBOX360_WIRED);
     pad.plugin()?;
     pad.wait_ready()?;
+    // vigem_client ends the notification thread when the pad is unplugged
+    drop(
+        pad.request_notification()?
+            .spawn_thread(move |_, notification| {
+                // rumbles after the session ends are dropped
+                let _ = rumbled.send(GamepadRumble {
+                    device,
+                    motors: motors(notification),
+                });
+            }),
+    );
     Ok(pad)
 }
 
-#[derive(Default)]
 pub struct ViGEmGamepads {
     client: Option<Rc<Client>>,
     pads: BTreeMap<u8, Xbox360Wired<Rc<Client>>>,
     unavailable: bool,
+    rumbled: mpsc::UnboundedSender<GamepadRumble>,
+    rumbles: mpsc::UnboundedReceiver<GamepadRumble>,
+}
+
+impl Default for ViGEmGamepads {
+    fn default() -> Self {
+        let (rumbled, rumbles) = mpsc::unbounded_channel();
+        Self {
+            client: None,
+            pads: BTreeMap::new(),
+            unavailable: false,
+            rumbled,
+            rumbles,
+        }
+    }
 }
 
 impl std::fmt::Debug for ViGEmGamepads {
@@ -58,7 +98,7 @@ impl ViGEmGamepads {
         };
         match self.pads.entry(device) {
             Entry::Occupied(pad) => Ok(pad.into_mut()),
-            Entry::Vacant(slot) => Ok(slot.insert(plug_in(client)?)),
+            Entry::Vacant(slot) => Ok(slot.insert(plug_in(client, device, self.rumbled.clone())?)),
         }
     }
 }
@@ -94,5 +134,11 @@ impl InjectEvents for ViGEmGamepads {
             _ => return Err(InjectError::NotInjected(event.kind())),
         }
         Ok(())
+    }
+
+    fn poll_rumble(&mut self, cx: &mut Context<'_>) -> Poll<Result<GamepadRumble, InjectError>> {
+        self.rumbles
+            .poll_recv(cx)
+            .map(|rumble| Ok(rumble.expect("ViGEmGamepads holds a sender")))
     }
 }

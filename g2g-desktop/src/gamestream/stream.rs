@@ -373,7 +373,10 @@ pub(crate) async fn run(
             () = audio => unreachable!("the audio future never completes"),
         }
     });
-    let mut control = pin!(control::run(control, &key.key, recovery, input, stop));
+    let (rumbled, rumbles) = mpsc::unbounded_channel();
+    let mut control = pin!(control::run(
+        control, &key.key, recovery, input, rumbles, stop
+    ));
     let session = async {
         tokio::select! {
             sent = video => {
@@ -386,7 +389,12 @@ pub(crate) async fn run(
     };
     let (ended, injected) = tokio::join!(
         session,
-        inject(event_receiver, size_receiver, &desktop.open_injector)
+        inject(
+            event_receiver,
+            size_receiver,
+            &desktop.open_injector,
+            &rumbled
+        )
     );
     if let Err(e) = injected {
         eprintln!("g2g-desktop host: Moonlight input stopped: {e}");

@@ -15,7 +15,7 @@ use tokio_enet::{Event, Host, HostConfig, Packet, PacketMode, PeerId};
 
 use super::input::input_event;
 use super::LOG_CATEGORY;
-use crate::injection::ScreenSize;
+use crate::injection::{GamepadRumble, ScreenSize};
 use crate::packet::{self, RemovableDevice};
 
 pub(crate) const CONTROL_PORT: u16 = 47999;
@@ -27,6 +27,7 @@ const MESSAGE_START_B: u16 = 0x0307;
 const MESSAGE_REQUEST_IDR: u16 = 0x0302;
 const MESSAGE_INVALIDATE_REFERENCES: u16 = 0x0301;
 const MESSAGE_INPUT: u16 = 0x0206;
+const MESSAGE_RUMBLE: u16 = 0x010b;
 // moonlight closes the stream without an error dialog for this reason
 const TERMINATION_GRACEFUL: u32 = 0x8003_0023;
 const SILENCE_LIMIT: Duration = Duration::from_secs(10);
@@ -193,11 +194,21 @@ fn invalidate_references(body: &[u8], recovery: &RecoveryRequests) {
     }
 }
 
+// moonlight's body: four unused bytes, then little-endian controller number, low and high frequency motor levels
+fn rumble_body(rumble: GamepadRumble) -> [u8; 10] {
+    let mut body = [0; 10];
+    body[4..6].copy_from_slice(&u16::from(rumble.device).to_le_bytes());
+    body[6..8].copy_from_slice(&rumble.motors.low_frequency.to_le_bytes());
+    body[8..].copy_from_slice(&rumble.motors.high_frequency.to_le_bytes());
+    body
+}
+
 pub(crate) async fn run(
     mut host: Host,
     key: &[u8; 16],
     recovery: Arc<RecoveryRequests>,
     input: InputRoute,
+    mut rumbles: mpsc::UnboundedReceiver<GamepadRumble>,
     stop: &Notify,
 ) -> Result<(), tokio_enet::Error> {
     let mut cipher = ControlCipher::new(key);
@@ -206,6 +217,14 @@ pub(crate) async fn run(
     loop {
         let event = tokio::select! {
             event = host.service(deadline.saturating_duration_since(Instant::now())) => event?,
+            Some(rumble) = rumbles.recv() => {
+                g2g_core::g2g_debug!(Target::category(LOG_CATEGORY), "{rumble:?}");
+                if let Some(peer) = peer.and_then(|peer| host.peer_mut(peer)) {
+                    let message = cipher.seal(MESSAGE_RUMBLE, &rumble_body(rumble));
+                    peer.send(0, Packet::new(&message, PacketMode::ReliableSequenced))?;
+                }
+                continue;
+            }
             () = stop.notified() => break,
         };
         match event {
@@ -358,6 +377,21 @@ mod tests {
             received.try_recv(),
             Ok(packet::Event::Key { down: true, .. })
         ));
+    }
+
+    #[test]
+    fn a_rumble_carries_the_controller_and_both_motor_levels() {
+        let rumble = GamepadRumble {
+            device: 2,
+            motors: crate::injection::MotorLevels {
+                low_frequency: 0x1234,
+                high_frequency: 0xabcd,
+            },
+        };
+        assert_eq!(
+            rumble_body(rumble),
+            [0, 0, 0, 0, 2, 0, 0x34, 0x12, 0xcd, 0xab]
+        );
     }
 
     #[test]

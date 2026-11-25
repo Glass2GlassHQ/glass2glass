@@ -6,8 +6,8 @@ discovery, pairing, the app list with launched `--app` commands, encrypted
 H.264 or HEVC video from an X display, the desktop portal, a `--run` headless
 display or the Windows desktop at the size the client asks for, reference
 invalidation on Linux, encrypted stereo, 5.1 or 7.1 Opus audio from the
-default output, and keyboard, mouse, scroll, text, touch, pen and gamepad
-input. Open work is under "Moonlight host" in [TODO.md](TODO.md).
+default output, keyboard, mouse, scroll, text, touch, pen and gamepad input,
+and gamepad rumble back to the client. Open work is under "Moonlight host" in [TODO.md](TODO.md).
 
 ## Decisions
 
@@ -158,7 +158,19 @@ In `g2g-desktop`, module `gamestream`.
   xpad driver's codes and ranges and the Y axes inverted. A host that cannot
   open `/dev/uinput` warns once and drops gamepads. On Windows each controller
   becomes an Xbox 360 pad on ViGEmBus through the `vigem-client` crate, and a
-  host without ViGEmBus installed warns once and drops gamepads. Keys still held when the control stream ends are
+  host without ViGEmBus installed warns once and drops gamepads.
+- Rumble: the uinput pad declares `FF_RUMBLE` with 16 effects, the count the
+  xpad driver holds. The host answers each effect upload and erase, plays an
+  effect from its delay for its length times the play count (length 0 plays
+  until stopped), and adds the magnitudes of effects that play at once, as
+  the kernel's memoryless force feedback does. The strong motor is the
+  low-frequency one. ViGEm reports XInput motor bytes through
+  `vigem-client`'s notification thread, and each byte is repeated to fill a
+  u16. When the motor levels change the host sends 0x010b: four zero bytes,
+  then the controller number, the low and the high frequency level, each a
+  little-endian u16. 0x010b has no duration, so a stop is a message with both
+  levels at 0.
+- Keys still held when the control stream ends are
   released. The host ends a session with 0x0109 carrying 0x80030023, and ends it
   itself after 10 s without a control message.
 
@@ -189,7 +201,9 @@ In `g2g-desktop`, module `gamestream`.
   no missing reference. It runs before each push of this work and puts
   no window on the desktop.
 - A uinput test creates the Xbox 360 pad, grabs it, injects buttons, a stick,
-  a trigger and the dpad, and reads the pad's state back. Moonlight on Xvfb
+  a trigger and the dpad, and reads the pad's state back. Another uploads a
+  rumble effect to the pad through evdev as a game does, plays and stops it,
+  and checks that the host reads both motor levels and then zero. Moonlight on Xvfb
   has no gamepad, so no interop run sends one. A Windows test plugs a pad into
   ViGEmBus, or checks that a host without ViGEmBus reports it once. Neither
   the Windows laptop nor japan has ViGEmBus installed.

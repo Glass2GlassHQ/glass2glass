@@ -4,15 +4,21 @@
 
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::io;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use std::time::Duration;
 
-use evdev::uinput::VirtualDevice;
+use evdev::uinput::{VirtualDevice, VirtualEventStream};
 use evdev::{
-    AbsInfo, AbsoluteAxisCode, AbsoluteAxisEvent, AttributeSet, BusType, InputEvent, InputId,
-    KeyCode, KeyEvent, UinputAbsSetup,
+    AbsInfo, AbsoluteAxisCode, AbsoluteAxisEvent, AttributeSet, BusType, EventSummary,
+    FFEffectCode, FFEffectKind, FFReplay, InputEvent, InputId, KeyCode, KeyEvent, UInputCode,
+    UinputAbsSetup,
 };
+use tokio::time::{Instant, Sleep};
 
-use crate::injection::{InjectError, InjectEvents};
+use crate::injection::{GamepadRumble, InjectError, InjectEvents, MotorLevels};
 use crate::packet::{
     Event, GamepadAxes, RemovableDevice, GAMEPAD_A, GAMEPAD_B, GAMEPAD_BACK, GAMEPAD_DPAD_DOWN,
     GAMEPAD_DPAD_LEFT, GAMEPAD_DPAD_RIGHT, GAMEPAD_DPAD_UP, GAMEPAD_GUIDE, GAMEPAD_LEFT_SHOULDER,
@@ -25,6 +31,8 @@ pub const GAMEPAD_NAME: &str = "g2g-desktop Xbox 360 pad";
 const XBOX_360_VENDOR: u16 = 0x045e;
 const XBOX_360_PRODUCT: u16 = 0x028e;
 const XBOX_360_VERSION: u16 = 0x0110;
+// the linux xpad driver holds this many force feedback effects per pad
+const RUMBLE_EFFECTS: u32 = 16;
 
 // the linux xpad driver reports X and Y with the codes evdev names north and west
 const BUTTON_KEYS: [(u32, KeyCode); 11] = [
@@ -68,11 +76,163 @@ fn build_gamepad() -> io::Result<VirtualDevice> {
             XBOX_360_PRODUCT,
             XBOX_360_VERSION,
         ))
-        .with_keys(&keys)?;
+        .with_keys(&keys)?
+        .with_ff(&AttributeSet::from_iter([FFEffectCode::FF_RUMBLE]))?
+        .with_ff_effects_max(RUMBLE_EFFECTS);
     for setup in axis_setups() {
         builder = builder.with_absolute_axis(&setup)?;
     }
     builder.build()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RumbleEffect {
+    motors: MotorLevels,
+    replay: FFReplay,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PlayingEffect {
+    starts: Instant,
+    ends: Option<Instant>,
+}
+
+impl PlayingEffect {
+    fn is_on(&self, now: Instant) -> bool {
+        self.starts <= now && self.ends.is_none_or(|ends| now < ends)
+    }
+}
+
+#[derive(Debug, Default)]
+struct RumbleEffects {
+    uploaded: BTreeMap<i16, RumbleEffect>,
+    playing: BTreeMap<i16, PlayingEffect>,
+}
+
+impl RumbleEffects {
+    fn upload(&mut self, id: i16, effect: RumbleEffect) {
+        self.uploaded.insert(id, effect);
+    }
+
+    fn erase(&mut self, id: i16) {
+        self.uploaded.remove(&id);
+        self.playing.remove(&id);
+    }
+
+    // linux plays an effect `count` times in a row and stops it with a count of zero
+    fn play(&mut self, id: i16, count: i32, now: Instant) {
+        if count == 0 {
+            self.playing.remove(&id);
+            return;
+        }
+        let replay = self.uploaded[&id].replay;
+        let starts = now + Duration::from_millis(u64::from(replay.delay));
+        // linux plays an effect of length zero until it is stopped
+        let ends = (replay.length != 0).then(|| {
+            starts + Duration::from_millis(u64::from(replay.length)) * count.unsigned_abs()
+        });
+        self.playing.insert(id, PlayingEffect { starts, ends });
+    }
+
+    // linux adds the magnitudes of rumble effects that play at once
+    fn motors(&self, now: Instant) -> MotorLevels {
+        self.playing
+            .iter()
+            .filter(|(_, playing)| playing.is_on(now))
+            .map(|(id, _)| self.uploaded[id].motors)
+            .fold(MotorLevels::default(), |sum, motors| MotorLevels {
+                low_frequency: sum.low_frequency.saturating_add(motors.low_frequency),
+                high_frequency: sum.high_frequency.saturating_add(motors.high_frequency),
+            })
+    }
+
+    fn next_change(&self, now: Instant) -> Option<Instant> {
+        self.playing
+            .values()
+            .flat_map(|playing| [Some(playing.starts), playing.ends])
+            .flatten()
+            .filter(|&at| at > now)
+            .min()
+    }
+}
+
+struct Pad {
+    device: VirtualEventStream,
+    effects: RumbleEffects,
+    sent: MotorLevels,
+    next_change: Pin<Box<Sleep>>,
+}
+
+impl std::fmt::Debug for Pad {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pad")
+            .field("effects", &self.effects)
+            .field("sent", &self.sent)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Pad {
+    fn new() -> io::Result<Self> {
+        Ok(Self {
+            device: build_gamepad()?.into_event_stream()?,
+            effects: RumbleEffects::default(),
+            sent: MotorLevels::default(),
+            next_change: Box::pin(tokio::time::sleep(Duration::ZERO)),
+        })
+    }
+
+    fn handle(&mut self, event: InputEvent) -> io::Result<()> {
+        match event.destructure() {
+            EventSummary::UInput(upload, UInputCode::UI_FF_UPLOAD, _) => {
+                let upload = self.device.device_mut().process_ff_upload(upload)?;
+                let effect = upload.effect();
+                let FFEffectKind::Rumble {
+                    strong_magnitude,
+                    weak_magnitude,
+                } = effect.kind
+                else {
+                    unreachable!("linux uploads only the FF_RUMBLE effects the pad declares");
+                };
+                let motors = MotorLevels {
+                    low_frequency: strong_magnitude,
+                    high_frequency: weak_magnitude,
+                };
+                let replay = effect.replay;
+                self.effects
+                    .upload(upload.effect_id(), RumbleEffect { motors, replay });
+            }
+            EventSummary::UInput(erase, UInputCode::UI_FF_ERASE, _) => {
+                let erase = self.device.device_mut().process_ff_erase(erase)?;
+                // linux effect ids are below RUMBLE_EFFECTS
+                self.effects.erase(erase.effect_id() as i16);
+            }
+            EventSummary::ForceFeedback(_, effect, count) => {
+                self.effects.play(effect.0 as i16, count, Instant::now());
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn poll_rumble(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<MotorLevels>> {
+        while let Poll::Ready(event) = self.device.poll_event(cx) {
+            self.handle(event?)?;
+        }
+        let now = Instant::now();
+        if let Some(at) = self.effects.next_change(now) {
+            self.next_change.as_mut().reset(at);
+            if self.next_change.as_mut().poll(cx).is_ready() {
+                cx.waker().wake_by_ref();
+            }
+        }
+        let motors = self.effects.motors(now);
+        if motors == self.sent {
+            return Poll::Pending;
+        }
+        self.sent = motors;
+        Poll::Ready(Ok(motors))
+    }
 }
 
 fn pressed_toward(buttons: u32, negative: u32, positive: u32) -> i32 {
@@ -106,7 +266,7 @@ fn state_events(buttons: u32, axes: GamepadAxes) -> Vec<InputEvent> {
 
 #[derive(Debug, Default)]
 pub struct UinputGamepads {
-    pads: BTreeMap<u8, VirtualDevice>,
+    pads: BTreeMap<u8, Pad>,
     unavailable: bool,
 }
 
@@ -124,7 +284,7 @@ impl InjectEvents for UinputGamepads {
                 }
                 let pad = match self.pads.entry(*device) {
                     Entry::Occupied(pad) => pad.into_mut(),
-                    Entry::Vacant(slot) => match build_gamepad() {
+                    Entry::Vacant(slot) => match Pad::new() {
                         Ok(pad) => slot.insert(pad),
                         Err(e) => {
                             self.unavailable = true;
@@ -132,7 +292,9 @@ impl InjectEvents for UinputGamepads {
                         }
                     },
                 };
-                pad.emit(&state_events(*buttons, *axes))
+                pad.device
+                    .device_mut()
+                    .emit(&state_events(*buttons, *axes))
                     .map_err(InjectError::Refused)?;
             }
             Event::DeviceRemoved {
@@ -144,5 +306,69 @@ impl InjectEvents for UinputGamepads {
             _ => return Err(InjectError::NotInjected(event.kind())),
         }
         Ok(())
+    }
+
+    fn poll_rumble(&mut self, cx: &mut Context<'_>) -> Poll<Result<GamepadRumble, InjectError>> {
+        for (device, pad) in &mut self.pads {
+            if let Poll::Ready(motors) = pad.poll_rumble(cx) {
+                let motors = motors.map_err(InjectError::Device)?;
+                return Poll::Ready(Ok(GamepadRumble {
+                    device: *device,
+                    motors,
+                }));
+            }
+        }
+        Poll::Pending
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn effect(low_frequency: u16, high_frequency: u16, delay: u16, length: u16) -> RumbleEffect {
+        RumbleEffect {
+            motors: MotorLevels {
+                low_frequency,
+                high_frequency,
+            },
+            replay: FFReplay { length, delay },
+        }
+    }
+
+    #[test]
+    fn playing_effects_add_up_within_their_replay_times() {
+        let now = Instant::now();
+        let at = |milliseconds| now + Duration::from_millis(milliseconds);
+        let levels = |low_frequency, high_frequency| MotorLevels {
+            low_frequency,
+            high_frequency,
+        };
+        let mut effects = RumbleEffects::default();
+        effects.upload(0, effect(0x9000, 0x1000, 0, 100));
+        effects.upload(1, effect(0x9000, 0x2000, 50, 0));
+        effects.play(0, 2, now);
+        effects.play(1, 1, now);
+
+        assert_eq!(effects.motors(now), levels(0x9000, 0x1000));
+        assert_eq!(effects.next_change(now), Some(at(50)));
+        assert_eq!(effects.motors(at(50)), levels(u16::MAX, 0x3000));
+        assert_eq!(
+            effects.next_change(at(50)),
+            Some(at(200)),
+            "two plays of 100 ms"
+        );
+        assert_eq!(effects.motors(at(200)), levels(0x9000, 0x2000));
+        assert_eq!(
+            effects.next_change(at(200)),
+            None,
+            "length zero plays until stopped"
+        );
+
+        effects.play(1, 0, at(300));
+        assert_eq!(effects.motors(at(300)), MotorLevels::default());
+        effects.play(0, 1, at(300));
+        effects.erase(0);
+        assert_eq!(effects.motors(at(300)), MotorLevels::default());
     }
 }

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2595: The Moonlight host sends game rumble back to the client's controller.
 - M2594: The Windows Moonlight host injects gamepads through ViGEmBus when it is installed.
 - M2593: The Moonlight host injects gamepads on Linux through a virtual Xbox 360 pad.
 - M2592: The Moonlight host streams 5.1 and 7.1 audio, and `opusenc` encodes up to eight channels.

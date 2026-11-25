@@ -4,6 +4,7 @@
 
 use std::fmt;
 use std::io;
+use std::task::{Context, Poll};
 
 use keycode::{KeyMap, KeyMappingCode};
 
@@ -88,13 +89,33 @@ impl From<io::Error> for InjectError {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MotorLevels {
+    pub low_frequency: u16,
+    pub high_frequency: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GamepadRumble {
+    pub device: u8,
+    pub motors: MotorLevels,
+}
+
 pub trait InjectEvents {
     fn inject(&mut self, event: &Event) -> Result<(), InjectError>;
+
+    fn poll_rumble(&mut self, _cx: &mut Context<'_>) -> Poll<Result<GamepadRumble, InjectError>> {
+        Poll::Pending
+    }
 }
 
 impl<I: InjectEvents + ?Sized> InjectEvents for Box<I> {
     fn inject(&mut self, event: &Event) -> Result<(), InjectError> {
         (**self).inject(event)
+    }
+
+    fn poll_rumble(&mut self, cx: &mut Context<'_>) -> Poll<Result<GamepadRumble, InjectError>> {
+        (**self).poll_rumble(cx)
     }
 }
 
@@ -114,6 +135,10 @@ impl<D: InjectEvents, G: InjectEvents> InjectEvents for WithGamepads<D, G> {
             } => self.gamepads.inject(event),
             _ => self.desktop.inject(event),
         }
+    }
+
+    fn poll_rumble(&mut self, cx: &mut Context<'_>) -> Poll<Result<GamepadRumble, InjectError>> {
+        self.gamepads.poll_rumble(cx)
     }
 }
 

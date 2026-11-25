@@ -84,14 +84,15 @@ x509-parser = { version = "0.18", optional = true }
 tokio-enet = { version = "0.1.1", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-evdev = "0.13"
+evdev = { version = "0.13", features = ["tokio"] }
+tokio = { version = "1", features = ["net", "time"] }
 # cargo merges this optional entry only on linux, once a g2g-plugins feature in session turns it on
 g2g-plugins = { workspace = true, optional = true, features = ["ffmpeg", "portal", "dmabuf-cuda", "nvenc", "x11", "pulse-src", "pulse-sink", "opus"] }
 g2g-wayland-display = { path = "../g2g-wayland-display", optional = true, features = ["display"] }
 x11rb = { version = "0.14", optional = true, features = ["xtest"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-vigem-client = { version = "0.1.4", optional = true }
+vigem-client = { version = "0.1.4", optional = true, features = ["unstable_xtarget_notification"] }
 windows = { version = "0.62", optional = true, features = [
     "Win32_Foundation",
     "Win32_UI_Controls",

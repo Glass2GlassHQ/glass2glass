@@ -48,12 +48,10 @@ The plan is [remote.md](remote.md).
 
 The design is [gamestream.md](gamestream.md).
 
-- Send rumble back to Moonlight (control message 0x010b) from the uinput and
-  ViGEm pads' force feedback.
 - HDR: a 10-bit PQ capture source (FP16 `d3d11screencapturesrc` or a KMS
   source on Linux), HEVC Main10 encode, and Moonlight's HDR mode message.
 - Run a real Moonlight controller through the host on Linux and Windows, the
-  Windows one with ViGEmBus installed.
+  Windows one with ViGEmBus installed, and feel a game's rumble on it.
 
 ## Embeddable player (`g2g-player`)
 

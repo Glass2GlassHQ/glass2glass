@@ -286,6 +286,8 @@ async fn serve<I: InjectEvents>(
 ) {
     let (events, event_receiver) = mpsc::unbounded_channel();
     let (sizes, size_receiver) = watch::channel(None);
+    // remotewt injectors have no gamepads
+    let (rumbled, _) = mpsc::unbounded_channel();
     let (session, injected) = tokio::join!(
         run_session(
             listener,
@@ -295,7 +297,7 @@ async fn serve<I: InjectEvents>(
             sizes,
             trace.clone().map(|trace| trace as Arc<dyn VisitRecorder>),
         ),
-        inject(event_receiver, size_receiver, open_injector),
+        inject(event_receiver, size_receiver, open_injector, &rumbled),
     );
     match session {
         Ok(stats) => eprintln!("{}", stats.report()),
