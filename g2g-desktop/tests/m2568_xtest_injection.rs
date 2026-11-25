@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 
 use g2g_desktop::injection::{InjectEvents, ScreenSize};
-use g2g_desktop::packet::{Event, RemovableDevice};
+use g2g_desktop::packet::{Event, RemovableDevice, TouchPhase};
 use g2g_desktop::xtest::XTestInjector;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
@@ -110,6 +110,7 @@ enum Seen {
     KeyPress(u8),
     KeyRelease(u8),
     ButtonPress(u8),
+    ButtonRelease(u8),
 }
 
 fn next_seen(connection: &RustConnection) -> Seen {
@@ -119,6 +120,7 @@ fn next_seen(connection: &RustConnection) -> Seen {
             XEvent::KeyPress(key) => Seen::KeyPress(key.detail),
             XEvent::KeyRelease(key) => Seen::KeyRelease(key.detail),
             XEvent::ButtonPress(button) => Seen::ButtonPress(button.detail),
+            XEvent::ButtonRelease(button) => Seen::ButtonRelease(button.detail),
             _ => continue,
         };
         return seen;
@@ -170,4 +172,49 @@ fn protocol_events_reach_the_focused_x11_window_through_xtest() {
         injector.inject(&event).expect("injects");
         assert_eq!(next_seen(&connection), expected, "after {event:?}");
     }
+}
+
+#[test]
+fn the_first_touch_contact_drives_the_x11_pointer() {
+    const CONTACT: u32 = 7;
+    const SECOND_CONTACT: u32 = 8;
+    let server = Xvfb::start();
+    let (connection, _window) = focused_screen_window(&server.display);
+    let mut injector = XTestInjector::new(&server.display, SCREEN).expect("opens XTest");
+    let touch = |contact, phase| Event::Touch { contact, phase };
+    injector
+        .inject(&touch(
+            CONTACT,
+            TouchPhase::Down {
+                x: 30,
+                y: 40,
+                display: 0,
+            },
+        ))
+        .expect("injects");
+    assert_eq!(next_seen(&connection), Seen::Motion(30, 40));
+    assert_eq!(next_seen(&connection), Seen::ButtonPress(X_LEFT_BUTTON));
+    for event in [
+        touch(
+            SECOND_CONTACT,
+            TouchPhase::Down {
+                x: 50,
+                y: 50,
+                display: 0,
+            },
+        ),
+        touch(
+            CONTACT,
+            TouchPhase::Move {
+                x: 60,
+                y: 70,
+                display: 0,
+            },
+        ),
+        touch(CONTACT, TouchPhase::Up),
+    ] {
+        injector.inject(&event).expect("injects");
+    }
+    assert_eq!(next_seen(&connection), Seen::Motion(60, 70));
+    assert_eq!(next_seen(&connection), Seen::ButtonRelease(X_LEFT_BUTTON));
 }

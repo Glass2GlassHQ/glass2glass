@@ -4,7 +4,7 @@
 
 use g2g_desktop::packet::{
     CursorImage, Event, EventKind, GamepadAxes, PacketError, PacketReader, PacketWriter,
-    RemovableDevice, Side,
+    RemovableDevice, Side, TouchPhase,
 };
 use g2g_desktop::router::{InputRouter, Origin, Routed};
 use tokio::sync::mpsc::error::TryRecvError;
@@ -60,6 +60,22 @@ fn every_event() -> Vec<Event> {
         Event::Cursor(cursor(3, 2)),
         Event::Clipboard("snow \u{2603}".to_string()),
         Event::Text("caf\u{e9}!".to_string()),
+        Event::Touch {
+            contact: u32::MAX,
+            phase: TouchPhase::Down {
+                x: 1919,
+                y: -1,
+                display: 1,
+            },
+        },
+        Event::Touch {
+            contact: 2,
+            phase: TouchPhase::Cancel,
+        },
+        Event::DeviceRemoved {
+            kind: RemovableDevice::Touchscreen,
+            device: 0,
+        },
         Event::DeviceRemoved {
             kind: RemovableDevice::Gamepad,
             device: 3,

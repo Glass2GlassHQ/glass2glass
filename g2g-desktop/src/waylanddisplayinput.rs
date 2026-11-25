@@ -9,7 +9,7 @@ use g2g_wayland_display::waylanddisplaysrc::{InputSender, WaylandDisplay};
 
 use crate::hid::evdev_from_usage;
 use crate::injection::{check_position, type_us_layout, InjectError, InjectEvents, ScreenSize};
-use crate::packet::{Event, RemovableDevice, POINTER_BUTTONS};
+use crate::packet::{Event, RemovableDevice, TouchPhase, POINTER_BUTTONS};
 
 #[derive(Debug)]
 pub struct WaylandDisplayInjector {
@@ -41,6 +41,20 @@ fn moved_pointer(pointer: (u32, u32), dx: i32, dy: i32, screen: ScreenSize) -> W
     }
 }
 
+fn screen_point(
+    x: i32,
+    y: i32,
+    display: u8,
+    screen: ScreenSize,
+) -> Result<(u32, u32), InjectError> {
+    check_position(x, y, display, screen)?;
+    let outside = || InjectError::OutsideScreen { x, y };
+    Ok((
+        u32::try_from(x).map_err(|_| outside())?,
+        u32::try_from(y).map_err(|_| outside())?,
+    ))
+}
+
 fn window_input(event: &Event, screen: ScreenSize) -> Result<WindowInput, InjectError> {
     let input = match *event {
         Event::Key { usage, down, .. } => WindowInput::Key {
@@ -54,13 +68,31 @@ fn window_input(event: &Event, screen: ScreenSize) -> Result<WindowInput, Inject
             down,
         },
         Event::Position { x, y, display } => {
-            check_position(x, y, display, screen)?;
-            let outside = || InjectError::OutsideScreen { x, y };
-            WindowInput::Pointer {
-                x: u32::try_from(x).map_err(|_| outside())?,
-                y: u32::try_from(y).map_err(|_| outside())?,
-            }
+            let (x, y) = screen_point(x, y, display, screen)?;
+            WindowInput::Pointer { x, y }
         }
+        Event::Touch {
+            contact,
+            phase: TouchPhase::Down { x, y, display },
+        } => {
+            let (x, y) = screen_point(x, y, display, screen)?;
+            WindowInput::TouchDown { contact, x, y }
+        }
+        Event::Touch {
+            contact,
+            phase: TouchPhase::Move { x, y, display },
+        } => {
+            let (x, y) = screen_point(x, y, display, screen)?;
+            WindowInput::TouchMove { contact, x, y }
+        }
+        Event::Touch {
+            contact,
+            phase: TouchPhase::Up | TouchPhase::Cancel,
+        } => WindowInput::TouchUp { contact },
+        Event::DeviceRemoved {
+            kind: RemovableDevice::Touchscreen,
+            ..
+        } => WindowInput::TouchCancelAll,
         Event::Wheel { dx, dy } => WindowInput::Wheel { dx, dy },
         // the compositor releases held keys and buttons on focus loss
         Event::DeviceRemoved {
@@ -161,6 +193,42 @@ mod tests {
             ),
             Err(InjectError::OutsideScreen { .. })
         ));
+    }
+
+    #[test]
+    fn touches_become_the_compositor_touches() {
+        let touch = |phase| Event::Touch { contact: 4, phase };
+        assert_eq!(
+            window_input(
+                &touch(TouchPhase::Down {
+                    x: 10,
+                    y: 20,
+                    display: 0
+                }),
+                SCREEN
+            )
+            .expect("maps"),
+            WindowInput::TouchDown {
+                contact: 4,
+                x: 10,
+                y: 20
+            }
+        );
+        assert_eq!(
+            window_input(&touch(TouchPhase::Cancel), SCREEN).expect("maps"),
+            WindowInput::TouchUp { contact: 4 }
+        );
+        assert_eq!(
+            window_input(
+                &Event::DeviceRemoved {
+                    kind: RemovableDevice::Touchscreen,
+                    device: 0
+                },
+                SCREEN
+            )
+            .expect("maps"),
+            WindowInput::TouchCancelAll
+        );
     }
 
     #[test]

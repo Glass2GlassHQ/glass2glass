@@ -5,8 +5,8 @@ clients pair with and stream from, the way they use Sunshine. Discovery,
 pairing, the app list, encrypted H.264 or HEVC video from an X display, the
 desktop portal, a `--run` headless display or the Windows desktop, at the size
 the client asks for,
-encrypted stereo Opus audio from the default output, and keyboard, mouse and
-scroll input run today. Nothing else in this file is built unless it names an element that
+encrypted stereo Opus audio from the default output, and keyboard, mouse,
+scroll, text, touch and pen input run today. Nothing else in this file is built unless it names an element that
 already exists. When a slice ships, delete it
 here and from [TODO.md](TODO.md), and write the shipped behavior into the track
 that owns it.
@@ -122,7 +122,14 @@ In `g2g-desktop`, module `gamestream`.
   compositor for `--run` and `SendInput` on Windows. Keys map through a
   Windows virtual-key to HID usage table. Absolute pointer positions scale from
   the size Moonlight sends to the captured size. Mouse buttons 4 and 5 become
-  the back and forward buttons. Text (0x17) becomes `Event::Text`. Touch, pen and gamepads are dropped. Keys still held when the control stream ends are
+  the back and forward buttons. Text (0x17) becomes `Event::Text`. DESCRIBE
+  sets feature flag 0x01, so Moonlight sends touch (0x55000002) and pen
+  (0x55000003), and both become `Event::Touch` contacts with positions scaled
+  from fractions of the video to the capture. The pen is one more contact, and
+  hover events are dropped. uinput injects through a multitouch touchscreen,
+  the `--run` compositor through `wl_touch`, `SendInput` through a synthetic
+  touch pointer device, and XTest moves the pointer and holds the left button
+  with the first contact. Gamepads are dropped. Keys still held when the control stream ends are
   released. The host ends a session with 0x0109 carrying 0x80030023, and ends it
   itself after 10 s without a control message.
 
@@ -143,12 +150,19 @@ as `/applist` entries.
   runs with SDL's dummy audio driver, so nothing plays aloud.
   `CODEC=HEVC` picks the codec. With `CAPTURE=run` the headless display runs
   `tools/moonlight-input-probe.py`, xdotool clicks and types into Moonlight's
-  window, and the script checks that the probe received a left click, a back
-  click and the key. It runs before each push of this work and puts
+  window, pastes text with Moonlight's Ctrl+Alt+Shift+V, and the script checks
+  that the probe received a left click, a back click, the key and the pasted
+  text. Moonlight on Xvfb has no touch source, so touch is tested by injecting
+  `Event::Touch` into each Linux injector. It runs before each push of this work and puts
   no window on the desktop.
 - The Windows host is checked by hand: the Moonlight flatpak on Linux streams
   over the LAN from a Windows host started in the logged-in session, and the
   host log at `g2g-desktop-gamestream:debug` lists the input it injected.
+  Windows cancels a synthetic touch contact that is not injected again within
+  about a second, so `SendInput` repeats the held contacts every 50 ms. A
+  window logging the mouse events Windows makes from touch showed a press, a
+  drag and a release for a contact held 1.5 s with the repeat, and a cancelled
+  tap without it.
 
 ## References
 

@@ -32,6 +32,8 @@ pub enum InjectError {
     },
     NotInjected(EventKind),
     NoUsLayoutKey(String),
+    NoFreeTouchSlot,
+    UnknownContact(u32),
     Refused(io::Error),
     Device(io::Error),
 }
@@ -55,6 +57,12 @@ impl fmt::Display for InjectError {
                 captured.width, captured.height
             ),
             InjectError::NotInjected(kind) => write!(f, "{kind:?} events are not injected"),
+            InjectError::NoFreeTouchSlot => {
+                write!(f, "all {TOUCH_SLOTS} touch contacts are down")
+            }
+            InjectError::UnknownContact(contact) => {
+                write!(f, "touch contact {contact} is not down")
+            }
             InjectError::NoUsLayoutKey(text) => {
                 write!(f, "no US keyboard key types {text:?}")
             }
@@ -91,6 +99,51 @@ pub fn check_position(x: i32, y: i32, display: u8, screen: ScreenSize) -> Result
         return Err(InjectError::OutsideScreen { x, y });
     }
     Ok(())
+}
+
+pub const TOUCH_SLOTS: usize = 10;
+
+#[derive(Debug, Default)]
+pub struct TouchSlots([Option<u32>; TOUCH_SLOTS]);
+
+impl TouchSlots {
+    pub fn press(&mut self, contact: u32) -> Result<usize, InjectError> {
+        let slot = match self.find(contact) {
+            Ok(slot) => slot,
+            Err(_) => self
+                .0
+                .iter()
+                .position(Option::is_none)
+                .ok_or(InjectError::NoFreeTouchSlot)?,
+        };
+        self.0[slot] = Some(contact);
+        Ok(slot)
+    }
+
+    pub fn find(&self, contact: u32) -> Result<usize, InjectError> {
+        self.0
+            .iter()
+            .position(|held| *held == Some(contact))
+            .ok_or(InjectError::UnknownContact(contact))
+    }
+
+    pub fn lift(&mut self, contact: u32) -> Result<usize, InjectError> {
+        let slot = self.find(contact)?;
+        self.0[slot] = None;
+        Ok(slot)
+    }
+
+    pub fn lift_all(&mut self) -> Vec<usize> {
+        let held = (0..TOUCH_SLOTS)
+            .filter(|&slot| self.0[slot].is_some())
+            .collect();
+        self.0 = [None; TOUCH_SLOTS];
+        held
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.iter().all(Option::is_none)
+    }
 }
 
 pub fn type_us_layout(injector: &mut impl InjectEvents, text: &str) -> Result<(), InjectError> {

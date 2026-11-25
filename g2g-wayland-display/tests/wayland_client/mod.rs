@@ -30,7 +30,7 @@ use smithay_client_toolkit::reexports::client::protocol::wl_data_device::WlDataD
 use smithay_client_toolkit::reexports::client::protocol::wl_data_device_manager::DndAction;
 use smithay_client_toolkit::reexports::client::protocol::wl_data_source::WlDataSource;
 use smithay_client_toolkit::reexports::client::protocol::{
-    wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface,
+    wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface, wl_touch,
 };
 use smithay_client_toolkit::reexports::client::{Connection, Proxy, QueueHandle, WEnum};
 use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
@@ -87,6 +87,10 @@ pub(crate) enum ClientEvent {
     DropAccepted,
     Dropped(String),
     Clipboard(String),
+    TouchDown { id: i32, x: f64, y: f64 },
+    TouchMotion { id: i32, x: f64, y: f64 },
+    TouchUp { id: i32 },
+    TouchCancel,
 }
 
 struct Client {
@@ -105,6 +109,7 @@ struct Client {
     drawn: bool,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     pointer: Option<wl_pointer::WlPointer>,
+    touch: Option<wl_touch::WlTouch>,
     events: mpsc::UnboundedSender<ClientEvent>,
 }
 
@@ -387,6 +392,7 @@ fn run_client(socket: PathBuf, events: mpsc::UnboundedSender<ClientEvent>) {
         drawn: false,
         keyboard: None,
         pointer: None,
+        touch: None,
         events,
     };
     // the dispatch fails once the display closes the connection at the end of the test
@@ -476,6 +482,9 @@ impl SeatHandler for Client {
             self.pointer = Some(self.seat_state.get_pointer(qh, &seat).expect("pointer"));
             self.data_device = Some(self.data_device_manager.get_data_device(qh, &seat));
         }
+        if capability == Capability::Touch && self.touch.is_none() {
+            self.touch = Some(seat.get_touch(qh, TouchEvents));
+        }
     }
     fn remove_capability(
         &mut self,
@@ -510,6 +519,28 @@ impl Dispatch2<wl_keyboard::WlKeyboard, Client> for KeyboardEvents {
                 }
                 ClientEvent::Key { code: key, pressed }
             }
+            _ => return,
+        };
+        let _ = client.events.send(event);
+    }
+}
+
+struct TouchEvents;
+
+impl Dispatch2<wl_touch::WlTouch, Client> for TouchEvents {
+    fn event(
+        &self,
+        client: &mut Client,
+        _: &wl_touch::WlTouch,
+        event: wl_touch::Event,
+        _: &Connection,
+        _: &QueueHandle<Client>,
+    ) {
+        let event = match event {
+            wl_touch::Event::Down { id, x, y, .. } => ClientEvent::TouchDown { id, x, y },
+            wl_touch::Event::Motion { id, x, y, .. } => ClientEvent::TouchMotion { id, x, y },
+            wl_touch::Event::Up { id, .. } => ClientEvent::TouchUp { id },
+            wl_touch::Event::Cancel => ClientEvent::TouchCancel,
             _ => return,
         };
         let _ = client.events.send(event);

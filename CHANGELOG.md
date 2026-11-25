@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2589: The Moonlight host injects touch and pen input.
 - M2588: The Moonlight host types the text Moonlight pastes.
 - M2587: Remote desktop and Moonlight hosts inject the back and forward mouse buttons.
 - M2586: The Moonlight host runs on Windows with audio, and `wasapisrc` loopback keeps capturing while the output is silent.

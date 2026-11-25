@@ -210,11 +210,14 @@ pub(crate) async fn run(
             None => {}
         }
     }
-    // keys held when Moonlight leaves stay pressed on the host
-    drop(input.events.send(packet::Event::DeviceRemoved {
-        kind: RemovableDevice::Keyboard,
-        device: 0,
-    }));
+    // keys and touches held when Moonlight leaves stay down on the host
+    for kind in [RemovableDevice::Keyboard, RemovableDevice::Touchscreen] {
+        drop(
+            input
+                .events
+                .send(packet::Event::DeviceRemoved { kind, device: 0 }),
+        );
+    }
     let Some(peer) = peer.and_then(|peer| host.peer_mut(peer)) else {
         return Ok(());
     };

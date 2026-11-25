@@ -48,8 +48,6 @@ The plan is [remote.md](remote.md).
 
 The plan is [gamestream.md](gamestream.md).
 
-- Inject Moonlight's touch and pen input.
-
 ## Embeddable player (`g2g-player`)
 
 - Take GPU frames in `playervideosink` once decoders open on the host's device.

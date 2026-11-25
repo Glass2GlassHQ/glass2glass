@@ -49,6 +49,7 @@ use smithay::input::pointer::{
     GesturePinchUpdateEvent, GestureSwipeBeginEvent, GestureSwipeEndEvent, GestureSwipeUpdateEvent,
     MotionEvent, PointerTarget, RelativeMotionEvent,
 };
+use smithay::input::touch::{DownEvent, MotionEvent as TouchMotionEvent, TouchHandle, UpEvent};
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::channel::{Channel, Event as ChannelEvent};
@@ -757,6 +758,7 @@ struct DisplayState {
     damaged: bool,
     last_frame: Option<(Instant, Picture)>,
     held_buttons: Vec<u32>,
+    touch_contacts: Vec<(u32, Point<f64, Logical>)>,
     drag_icon: Option<DragIcon>,
     cursor_status: CursorImageStatus,
     cursor_theme: CursorTheme,
@@ -1008,6 +1010,7 @@ impl DisplayState {
         )
         .map_err(|error| hardware_error("loading the keymap", error))?;
         seat.add_pointer();
+        seat.add_touch();
 
         let pixel_size = (
             i32::try_from(size.width).map_err(|_| G2gError::CapsMismatch)?,
@@ -1101,6 +1104,7 @@ impl DisplayState {
             damaged: true,
             last_frame: None,
             held_buttons: Vec::new(),
+            touch_contacts: Vec::new(),
             drag_icon: None,
             cursor_status: CursorImageStatus::default_named(),
             cursor_theme: CursorTheme::load(&cursor_theme_name),
@@ -1408,11 +1412,22 @@ impl DisplayState {
         }
     }
 
-    fn focus_window_under_pointer(&mut self, serial: Serial) {
-        let pointer = self.seat.get_pointer().expect("the seat has a pointer");
+    fn touch_focus_under(
+        &self,
+        location: Point<f64, Logical>,
+    ) -> Option<(WlSurface, Point<f64, Logical>)> {
+        let (focus, surface_location) = self.surface_under(location)?;
+        Some((focus.wl_surface()?.into_owned(), surface_location))
+    }
+
+    fn touchscreen(&self) -> TouchHandle<Self> {
+        self.seat.get_touch().expect("the seat has a touchscreen")
+    }
+
+    fn focus_window_under(&mut self, location: Point<f64, Logical>, serial: Serial) {
         let Some(window) = self
             .space
-            .element_under(pointer.current_location())
+            .element_under(location)
             .map(|(window, _)| window.clone())
         else {
             return;
@@ -1460,7 +1475,7 @@ impl DisplayState {
                 let serial = SERIAL_COUNTER.next_serial();
                 let pointer = self.seat.get_pointer().expect("the seat has a pointer");
                 if down && !pointer.is_grabbed() {
-                    self.focus_window_under_pointer(serial);
+                    self.focus_window_under(pointer.current_location(), serial);
                 }
                 let state = if down {
                     ButtonState::Pressed
@@ -1488,6 +1503,51 @@ impl DisplayState {
             }
             WindowInput::Focus(true) => {}
             WindowInput::Focus(false) => self.release_held_input(time),
+            WindowInput::TouchDown { contact, x, y } => {
+                let location = Point::from((f64::from(x), f64::from(y)));
+                let serial = SERIAL_COUNTER.next_serial();
+                self.focus_window_under(location, serial);
+                let focus = self.touch_focus_under(location);
+                let touch = self.touchscreen();
+                let down = DownEvent {
+                    slot: Some(contact).into(),
+                    location,
+                    serial,
+                    time,
+                };
+                touch.down(self, focus, &down);
+                touch.frame(self);
+                self.touch_contacts.push((contact, location));
+            }
+            WindowInput::TouchMove { contact, x, y } => {
+                let location = Point::from((f64::from(x), f64::from(y)));
+                let focus = self.touch_focus_under(location);
+                let touch = self.touchscreen();
+                let motion = TouchMotionEvent {
+                    slot: Some(contact).into(),
+                    location,
+                    time,
+                };
+                touch.motion(self, focus, &motion);
+                touch.frame(self);
+                for (held, held_location) in &mut self.touch_contacts {
+                    if *held == contact {
+                        *held_location = location;
+                    }
+                }
+            }
+            WindowInput::TouchUp { contact } => {
+                let touch = self.touchscreen();
+                let up = UpEvent {
+                    slot: Some(contact).into(),
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time,
+                };
+                touch.up(self, &up);
+                touch.frame(self);
+                self.touch_contacts.retain(|(held, _)| *held != contact);
+            }
+            WindowInput::TouchCancelAll => self.cancel_touches(time),
         }
     }
 
@@ -1519,6 +1579,23 @@ impl DisplayState {
             },
         );
         pointer.frame(self);
+    }
+
+    fn cancel_touches(&mut self, time: InputTime) {
+        let Some((contact, location)) = self.touch_contacts.first().copied() else {
+            return;
+        };
+        self.touch_contacts.clear();
+        // smithay sends wl_touch.cancel only in place of the frame that ends a down, motion or up
+        let touch = self.touchscreen();
+        let focus = self.touch_focus_under(location);
+        let motion = TouchMotionEvent {
+            slot: Some(contact).into(),
+            location,
+            time,
+        };
+        touch.motion(self, focus, &motion);
+        touch.cancel(self);
     }
 
     fn release_held_input(&mut self, time: InputTime) {

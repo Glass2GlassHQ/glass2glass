@@ -310,6 +310,12 @@ its paste shortcut, Ctrl+Alt+Shift+V. On Windows each UTF-16 unit goes to
 the US layout key for it, with shift where needed, and characters with no US
 key are logged at debug level.
 
+Touch: type 11 carries one contact, an id the sender picks, a phase (down,
+move, up or cancel) and, for down and move, a position like absolute position.
+Type 11 with the device-removed flag lifts every contact. uinput injects
+through a multitouch touchscreen with ten slots, and the `--run` display
+through its compositor's `wl_touch`.
+
 ## Windows service
 
 The service process is installed separately, runs as SYSTEM, and accepts

@@ -40,9 +40,10 @@ pub enum EventKind {
     Cursor = 8,
     Clipboard = 9,
     Text = 10,
+    Touch = 11,
 }
 
-const EVENT_KINDS: [EventKind; 10] = [
+const EVENT_KINDS: [EventKind; 11] = [
     EventKind::Key,
     EventKind::Button,
     EventKind::Move,
@@ -53,6 +54,7 @@ const EVENT_KINDS: [EventKind; 10] = [
     EventKind::Cursor,
     EventKind::Clipboard,
     EventKind::Text,
+    EventKind::Touch,
 ];
 
 impl EventKind {
@@ -75,6 +77,7 @@ impl EventKind {
             EventKind::Position => Some(9),
             EventKind::Gamepad => Some(17),
             EventKind::Rumble => Some(7),
+            EventKind::Touch => Some(14),
             EventKind::Cursor | EventKind::Clipboard | EventKind::Text => None,
         }
     }
@@ -89,6 +92,19 @@ pub struct GamepadAxes {
     pub left_trigger: i16,
     pub right_trigger: i16,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TouchPhase {
+    Down { x: i32, y: i32, display: u8 },
+    Move { x: i32, y: i32, display: u8 },
+    Up,
+    Cancel,
+}
+
+const TOUCH_DOWN: u8 = 1;
+const TOUCH_MOVE: u8 = 2;
+const TOUCH_UP: u8 = 3;
+const TOUCH_CANCEL: u8 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CursorImage {
@@ -179,6 +195,10 @@ pub enum Event {
     Cursor(CursorImage),
     Clipboard(String),
     Text(String),
+    Touch {
+        contact: u32,
+        phase: TouchPhase,
+    },
     DeviceRemoved {
         kind: RemovableDevice,
         device: u8,
@@ -189,6 +209,7 @@ pub enum Event {
 pub enum RemovableDevice {
     Keyboard,
     Gamepad,
+    Touchscreen,
 }
 
 impl Event {
@@ -204,6 +225,7 @@ impl Event {
             Event::Cursor(_) => EventKind::Cursor,
             Event::Clipboard(_) => EventKind::Clipboard,
             Event::Text(_) => EventKind::Text,
+            Event::Touch { .. } => EventKind::Touch,
             Event::DeviceRemoved {
                 kind: RemovableDevice::Keyboard,
                 ..
@@ -212,6 +234,10 @@ impl Event {
                 kind: RemovableDevice::Gamepad,
                 ..
             } => EventKind::Gamepad,
+            Event::DeviceRemoved {
+                kind: RemovableDevice::Touchscreen,
+                ..
+            } => EventKind::Touch,
         }
     }
 }
@@ -234,6 +260,7 @@ pub enum PacketError {
         actual: usize,
     },
     InvalidBool(u8),
+    InvalidTouchPhase(u8),
     CursorSize {
         width: u16,
         height: u16,
@@ -273,6 +300,7 @@ impl fmt::Display for PacketError {
                 actual,
             } => write!(f, "{kind:?} payload is {actual} bytes, expected {expected}"),
             PacketError::InvalidBool(byte) => write!(f, "pressed byte is {byte}, not 0 or 1"),
+            PacketError::InvalidTouchPhase(byte) => write!(f, "touch phase {byte} is unknown"),
             PacketError::CursorSize {
                 width,
                 height,
@@ -380,6 +408,19 @@ impl PacketWriter {
             Event::Clipboard(text) | Event::Text(text) => {
                 payload.extend_from_slice(text.as_bytes())
             }
+            Event::Touch { contact, phase } => {
+                let (wire_phase, x, y, display) = match *phase {
+                    TouchPhase::Down { x, y, display } => (TOUCH_DOWN, x, y, display),
+                    TouchPhase::Move { x, y, display } => (TOUCH_MOVE, x, y, display),
+                    TouchPhase::Up => (TOUCH_UP, 0, 0, 0),
+                    TouchPhase::Cancel => (TOUCH_CANCEL, 0, 0, 0),
+                };
+                payload.extend_from_slice(&contact.to_le_bytes());
+                payload.push(wire_phase);
+                payload.extend_from_slice(&x.to_le_bytes());
+                payload.extend_from_slice(&y.to_le_bytes());
+                payload.push(display);
+            }
             Event::DeviceRemoved { device, .. } => {
                 flags |= DEVICE_REMOVED;
                 payload.push(*device);
@@ -479,6 +520,7 @@ fn decode_event(kind: EventKind, flags: u8, payload: &[u8]) -> Result<Event, Pac
         let removed = match kind {
             EventKind::Key => RemovableDevice::Keyboard,
             EventKind::Gamepad => RemovableDevice::Gamepad,
+            EventKind::Touch => RemovableDevice::Touchscreen,
             _ => return Err(PacketError::UnknownFlags(flags)),
         };
         check_payload_len(kind, 1, payload.len())?;
@@ -553,6 +595,19 @@ fn decode_event(kind: EventKind, flags: u8, payload: &[u8]) -> Result<Event, Pac
         }
         EventKind::Clipboard => Event::Clipboard(utf8(fields.rest())?),
         EventKind::Text => Event::Text(utf8(fields.rest())?),
+        EventKind::Touch => {
+            let contact = fields.u32();
+            let wire_phase = fields.u8();
+            let (x, y, display) = (fields.i32(), fields.i32(), fields.u8());
+            let phase = match wire_phase {
+                TOUCH_DOWN => TouchPhase::Down { x, y, display },
+                TOUCH_MOVE => TouchPhase::Move { x, y, display },
+                TOUCH_UP => TouchPhase::Up,
+                TOUCH_CANCEL => TouchPhase::Cancel,
+                other => return Err(PacketError::InvalidTouchPhase(other)),
+            };
+            Event::Touch { contact, phase }
+        }
     };
     Ok(event)
 }

@@ -131,11 +131,13 @@ impl RtspReply {
     }
 
     pub(crate) fn description() -> Self {
+        // moonlight sends touch and pen events only to hosts that set this sunshine feature flag
+        const PEN_TOUCH_EVENTS: u32 = 0x01;
         let supported = ENCRYPT_CONTROL | ENCRYPT_VIDEO | ENCRYPT_AUDIO;
         let requested = ENCRYPT_VIDEO | ENCRYPT_AUDIO;
         Self {
             body: format!(
-                "a=x-ss-general.featureFlags:0\r\n\
+                "a=x-ss-general.featureFlags:{PEN_TOUCH_EVENTS}\r\n\
                  a=x-ss-general.encryptionSupported:{supported}\r\n\
                  a=x-ss-general.encryptionRequested:{requested}\r\n\
                  {HEVC_MARKER}\r\n"
@@ -295,6 +297,12 @@ mod tests {
         );
         let request = read_request(&mut wire.as_bytes()).await.expect("parsed");
         assert_eq!(request.body, body.as_bytes());
+    }
+
+    #[test]
+    fn the_description_asks_moonlight_for_touch_and_pen() {
+        let body = RtspReply::description().body;
+        assert!(body.contains("a=x-ss-general.featureFlags:1\r\n"), "{body}");
     }
 
     #[test]

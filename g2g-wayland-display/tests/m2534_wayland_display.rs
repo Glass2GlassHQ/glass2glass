@@ -523,6 +523,75 @@ async fn a_shared_display_keeps_its_client_across_runs_and_releases_held_keys() 
 }
 
 #[tokio::test]
+async fn touches_reach_the_client_under_them() {
+    const CONTACT: u32 = 3;
+    const SECOND_CONTACT: u32 = 4;
+    const DOWN: (u32, u32) = (30, 40);
+    const MOVED: (u32, u32) = (50, 60);
+    let display = start_software_display().await;
+    let input = display.input_sender();
+    let mut display_names = WaylandDisplaySrc::on_display(&display).display_names();
+    let stride = WIDTH as usize * BYTES_PER_PIXEL;
+    let frames = register_appsink_pull("m2534_touch");
+    let mut events = connect_client(&mut display_names).await;
+    client_globals(&mut events).await;
+    let checks = async {
+        assert!(
+            wait_for_picture(&frames, |picture| shows_client(picture, stride)).await,
+            "a frame shows the client's window"
+        );
+        for event in [
+            WindowInput::TouchDown {
+                contact: CONTACT,
+                x: DOWN.0,
+                y: DOWN.1,
+            },
+            WindowInput::TouchMove {
+                contact: CONTACT,
+                x: MOVED.0,
+                y: MOVED.1,
+            },
+            WindowInput::TouchUp { contact: CONTACT },
+            WindowInput::TouchDown {
+                contact: SECOND_CONTACT,
+                x: DOWN.0,
+                y: DOWN.1,
+            },
+            WindowInput::TouchCancelAll,
+        ] {
+            input.send(event).expect("the display takes input");
+        }
+        for expected in [
+            ClientEvent::TouchDown {
+                id: CONTACT as i32,
+                x: f64::from(DOWN.0),
+                y: f64::from(DOWN.1),
+            },
+            ClientEvent::TouchMotion {
+                id: CONTACT as i32,
+                x: f64::from(MOVED.0),
+                y: f64::from(MOVED.1),
+            },
+            ClientEvent::TouchUp { id: CONTACT as i32 },
+            ClientEvent::TouchDown {
+                id: SECOND_CONTACT as i32,
+                x: f64::from(DOWN.0),
+                y: f64::from(DOWN.1),
+            },
+            ClientEvent::TouchCancel,
+        ] {
+            wait_for_client_event(&mut events, &expected).await;
+        }
+    };
+    tokio::select! {
+        result = run_graph(session_graph(&display, "m2534_touch"), &ZeroClock, 2) => {
+            panic!("the run ended first: {result:?}")
+        }
+        () = checks => {}
+    }
+}
+
+#[tokio::test]
 async fn a_shared_display_publishes_the_cursor_its_client_sets() {
     let display = start_software_display().await;
     let input = display.input_sender();

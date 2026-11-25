@@ -8,7 +8,7 @@ use g2g_plugins::windowinput::PointerButton;
 use keycode::{KeyMap, KeyMappingCode};
 
 use crate::injection::ScreenSize;
-use crate::packet::{Event, POINTER_BUTTONS};
+use crate::packet::{Event, RemovableDevice, TouchPhase, POINTER_BUTTONS};
 
 const KEY_DOWN: u32 = 0x03;
 const KEY_UP: u32 = 0x04;
@@ -19,6 +19,17 @@ const MOUSE_BUTTON_UP: u32 = 0x09;
 const SCROLL_VERTICAL: u32 = 0x0A;
 const SCROLL_HORIZONTAL: u32 = 0x5500_0001;
 const UTF8_TEXT: u32 = 0x17;
+const TOUCH: u32 = 0x5500_0002;
+const PEN: u32 = 0x5500_0003;
+
+// moonlight's LI_TOUCH_EVENT_* values, shared by touch and pen
+const TOUCH_DOWN: u8 = 0x01;
+const TOUCH_UP: u8 = 0x02;
+const TOUCH_MOVE: u8 = 0x03;
+const TOUCH_CANCEL: u8 = 0x04;
+const TOUCH_CANCEL_ALL: u8 = 0x07;
+// moonlight pens have no pointer id, and wayland touch ids are signed
+const PEN_CONTACT: u32 = i32::MAX as u32;
 
 const LENGTH_BYTES: usize = 4;
 const MAGIC_BYTES: usize = 4;
@@ -168,11 +179,16 @@ pub(crate) enum InputError {
     NoCaptureSize,
     EmptyReferenceSize,
     NotUtf8,
+    UnsupportedTouch(u8),
+    NotFinite,
 }
 
 impl InputError {
     pub(crate) fn is_malformed(self) -> bool {
-        matches!(self, Self::Truncated | Self::LengthMismatch | Self::NotUtf8)
+        matches!(
+            self,
+            Self::Truncated | Self::LengthMismatch | Self::NotUtf8 | Self::NotFinite
+        )
     }
 }
 
@@ -189,6 +205,8 @@ impl fmt::Display for InputError {
             }
             Self::EmptyReferenceSize => f.write_str("absolute position with a zero reference size"),
             Self::NotUtf8 => f.write_str("text input is not UTF-8"),
+            Self::UnsupportedTouch(event) => write!(f, "touch event {event:#04x} is not injected"),
+            Self::NotFinite => f.write_str("touch position is not a finite number"),
         }
     }
 }
@@ -205,6 +223,13 @@ fn be_i16(payload: &[u8], offset: usize) -> Result<i16, InputError> {
         .get(offset..offset + 2)
         .ok_or(InputError::Truncated)?;
     Ok(i16::from_be_bytes([bytes[0], bytes[1]]))
+}
+
+fn le_u32(payload: &[u8], offset: usize) -> Result<u32, InputError> {
+    let bytes = payload
+        .get(offset..offset + 4)
+        .ok_or(InputError::Truncated)?;
+    Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
 fn byte(payload: &[u8], offset: usize) -> Result<u8, InputError> {
@@ -259,6 +284,54 @@ fn position(payload: &[u8], screen: Option<ScreenSize>) -> Result<Event, InputEr
     })
 }
 
+fn normalized(fraction: f32, captured: u16) -> Result<i32, InputError> {
+    if !fraction.is_finite() {
+        return Err(InputError::NotFinite);
+    }
+    // moonlight sends touch positions as fractions from 0 to 1 inclusive of the video's size
+    Ok((fraction * f32::from(captured.saturating_sub(1))) as i32)
+}
+
+struct ContactReport {
+    event: u8,
+    contact: u32,
+    x: f32,
+    y: f32,
+}
+
+fn touch_event(report: ContactReport, screen: Option<ScreenSize>) -> Result<Event, InputError> {
+    let ContactReport {
+        event,
+        contact,
+        x,
+        y,
+    } = report;
+    let position = || -> Result<(i32, i32), InputError> {
+        let screen = screen.ok_or(InputError::NoCaptureSize)?;
+        Ok((normalized(x, screen.width)?, normalized(y, screen.height)?))
+    };
+    let phase = match event {
+        TOUCH_DOWN => {
+            let (x, y) = position()?;
+            TouchPhase::Down { x, y, display: 0 }
+        }
+        TOUCH_MOVE => {
+            let (x, y) = position()?;
+            TouchPhase::Move { x, y, display: 0 }
+        }
+        TOUCH_UP => TouchPhase::Up,
+        TOUCH_CANCEL => TouchPhase::Cancel,
+        TOUCH_CANCEL_ALL => {
+            return Ok(Event::DeviceRemoved {
+                kind: RemovableDevice::Touchscreen,
+                device: 0,
+            })
+        }
+        other => return Err(InputError::UnsupportedTouch(other)),
+    };
+    Ok(Event::Touch { contact, phase })
+}
+
 pub(crate) fn input_event(body: &[u8], screen: Option<ScreenSize>) -> Result<Event, InputError> {
     let length = body.get(..LENGTH_BYTES).ok_or(InputError::Truncated)?;
     let length = u32::from_be_bytes([length[0], length[1], length[2], length[3]]) as usize;
@@ -288,6 +361,24 @@ pub(crate) fn input_event(body: &[u8], screen: Option<ScreenSize>) -> Result<Eve
             dx: i32::from(be_i16(payload, 0)?),
             dy: 0,
         }),
+        TOUCH => touch_event(
+            ContactReport {
+                event: byte(payload, 0)?,
+                contact: le_u32(payload, 4)?,
+                x: f32::from_bits(le_u32(payload, 8)?),
+                y: f32::from_bits(le_u32(payload, 12)?),
+            },
+            screen,
+        ),
+        PEN => touch_event(
+            ContactReport {
+                event: byte(payload, 0)?,
+                contact: PEN_CONTACT,
+                x: f32::from_bits(le_u32(payload, 4)?),
+                y: f32::from_bits(le_u32(payload, 8)?),
+            },
+            screen,
+        ),
         UTF8_TEXT => String::from_utf8(payload.to_vec())
             .map(Event::Text)
             .map_err(|_| InputError::NotUtf8),
@@ -424,6 +515,78 @@ mod tests {
         assert_eq!(
             input_event(&message(UTF8_TEXT, &[0xff]), None),
             Err(InputError::NotUtf8)
+        );
+    }
+
+    fn touch_payload(event: u8, contact: u32, x: f32, y: f32) -> Vec<u8> {
+        let mut payload = vec![event, 0, 0, 0];
+        payload.extend_from_slice(&contact.to_le_bytes());
+        payload.extend_from_slice(&x.to_le_bytes());
+        payload.extend_from_slice(&y.to_le_bytes());
+        payload.resize(28, 0);
+        payload
+    }
+
+    fn pen_payload(event: u8, x: f32, y: f32) -> Vec<u8> {
+        let mut payload = vec![event, 1, 0, 0];
+        payload.extend_from_slice(&x.to_le_bytes());
+        payload.extend_from_slice(&y.to_le_bytes());
+        payload.resize(28, 0);
+        payload
+    }
+
+    #[test]
+    fn touch_and_pen_become_touch_contacts_on_the_capture() {
+        let down = message(TOUCH, &touch_payload(TOUCH_DOWN, 9, 0.5, 1.0));
+        assert_eq!(
+            input_event(&down, Some(SCREEN)),
+            Ok(Event::Touch {
+                contact: 9,
+                phase: TouchPhase::Down {
+                    x: 959,
+                    y: 1079,
+                    display: 0
+                }
+            })
+        );
+        let up = message(TOUCH, &touch_payload(TOUCH_UP, 9, 0.5, 1.0));
+        assert_eq!(
+            input_event(&up, None),
+            Ok(Event::Touch {
+                contact: 9,
+                phase: TouchPhase::Up
+            })
+        );
+        let pen = message(PEN, &pen_payload(TOUCH_MOVE, 0.0, 0.5));
+        assert_eq!(
+            input_event(&pen, Some(SCREEN)),
+            Ok(Event::Touch {
+                contact: PEN_CONTACT,
+                phase: TouchPhase::Move {
+                    x: 0,
+                    y: 539,
+                    display: 0
+                }
+            })
+        );
+        let cancel_all = message(TOUCH, &touch_payload(TOUCH_CANCEL_ALL, 0, 0.0, 0.0));
+        assert_eq!(
+            input_event(&cancel_all, None),
+            Ok(Event::DeviceRemoved {
+                kind: RemovableDevice::Touchscreen,
+                device: 0
+            })
+        );
+        // moonlight's LI_TOUCH_EVENT_HOVER
+        let hover = message(PEN, &pen_payload(0x00, 0.5, 0.5));
+        assert_eq!(
+            input_event(&hover, Some(SCREEN)),
+            Err(InputError::UnsupportedTouch(0x00))
+        );
+        let not_finite = message(TOUCH, &touch_payload(TOUCH_DOWN, 9, f32::NAN, 0.5));
+        assert_eq!(
+            input_event(&not_finite, Some(SCREEN)),
+            Err(InputError::NotFinite)
         );
     }
 

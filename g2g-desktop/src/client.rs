@@ -24,7 +24,8 @@ use crate::audio;
 use crate::hid::{usage_from_scancode, ScancodeSet};
 use crate::lineargraph::linear_graph;
 use crate::packet::{
-    CursorImage, Event, EventKind, PacketReader, PacketWriter, Side, POINTER_BUTTONS,
+    CursorImage, Event, EventKind, PacketReader, PacketWriter, RemovableDevice, Side, TouchPhase,
+    POINTER_BUTTONS,
 };
 use crate::router::{InputRouter, Origin};
 
@@ -43,11 +44,12 @@ const WINDOW_SCANCODES: ScancodeSet = ScancodeSet::Evdev;
 const WINDOW_SCANCODES: ScancodeSet = ScancodeSet::Windows;
 const KEYBOARD_DEVICE: u8 = 0;
 const DISPLAY: u8 = 0;
-const FORWARDED_KINDS: [EventKind; 4] = [
+const FORWARDED_KINDS: [EventKind; 5] = [
     EventKind::Key,
     EventKind::Button,
     EventKind::Position,
     EventKind::Wheel,
+    EventKind::Touch,
 ];
 
 #[derive(Debug, Clone)]
@@ -109,6 +111,30 @@ fn event_from(input: WindowInput) -> Option<Event> {
             })
         }
         WindowInput::Wheel { dx, dy } => Some(Event::Wheel { dx, dy }),
+        WindowInput::TouchDown { contact, x, y } => Some(Event::Touch {
+            contact,
+            phase: TouchPhase::Down {
+                x: i32::try_from(x).ok()?,
+                y: i32::try_from(y).ok()?,
+                display: DISPLAY,
+            },
+        }),
+        WindowInput::TouchMove { contact, x, y } => Some(Event::Touch {
+            contact,
+            phase: TouchPhase::Move {
+                x: i32::try_from(x).ok()?,
+                y: i32::try_from(y).ok()?,
+                display: DISPLAY,
+            },
+        }),
+        WindowInput::TouchUp { contact } => Some(Event::Touch {
+            contact,
+            phase: TouchPhase::Up,
+        }),
+        WindowInput::TouchCancelAll => Some(Event::DeviceRemoved {
+            kind: RemovableDevice::Touchscreen,
+            device: 0,
+        }),
     }
 }
 

@@ -44,6 +44,7 @@ fn is_user_input(kind: EventKind) -> bool {
             | EventKind::Wheel
             | EventKind::Gamepad
             | EventKind::Text
+            | EventKind::Touch
     )
 }
 

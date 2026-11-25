@@ -56,4 +56,8 @@ pub enum WindowInput {
     Pointer { x: u32, y: u32 },
     Button { button: PointerButton, down: bool },
     Wheel { dx: i32, dy: i32 },
+    TouchDown { contact: u32, x: u32, y: u32 },
+    TouchMove { contact: u32, x: u32, y: u32 },
+    TouchUp { contact: u32 },
+    TouchCancelAll,
 }

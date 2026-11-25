@@ -17,7 +17,7 @@ use x11rb::rust_connection::RustConnection;
 
 use crate::hid::evdev_from_usage;
 use crate::injection::{check_position, type_us_layout, InjectError, InjectEvents, ScreenSize};
-use crate::packet::{Event, RemovableDevice, POINTER_BUTTONS};
+use crate::packet::{Event, RemovableDevice, TouchPhase, POINTER_BUTTONS};
 use crate::uinput::{whole_notches, WheelRemainder};
 
 // X keycodes are evdev codes offset by 8
@@ -51,6 +51,7 @@ pub struct XTestInjector {
     screen: ScreenSize,
     held_keys: BTreeSet<u8>,
     wheel: WheelRemainder,
+    pointer_contact: Option<u32>,
 }
 
 impl fmt::Debug for XTestInjector {
@@ -78,6 +79,7 @@ impl XTestInjector {
             screen,
             held_keys: BTreeSet::new(),
             wheel: WheelRemainder::default(),
+            pointer_contact: None,
         })
     }
 
@@ -94,6 +96,34 @@ impl XTestInjector {
             self.fake(BUTTON_RELEASE_EVENT, button, 0, 0)?;
         }
         Ok(())
+    }
+
+    fn move_pointer(&self, x: i32, y: i32, display: u8) -> Result<(), InjectError> {
+        check_position(x, y, display, self.screen)?;
+        let outside = || InjectError::OutsideScreen { x, y };
+        let x = i16::try_from(x).map_err(|_| outside())?;
+        let y = i16::try_from(y).map_err(|_| outside())?;
+        self.fake(MOTION_NOTIFY_EVENT, ABSOLUTE_MOTION, x, y)
+    }
+
+    fn touch_as_pointer(&mut self, contact: u32, phase: TouchPhase) -> Result<(), InjectError> {
+        let left = x_button(PointerButton::Left);
+        match phase {
+            TouchPhase::Down { x, y, display } if self.pointer_contact.is_none() => {
+                self.move_pointer(x, y, display)?;
+                self.pointer_contact = Some(contact);
+                self.fake(BUTTON_PRESS_EVENT, left, 0, 0)
+            }
+            TouchPhase::Move { x, y, display } if self.pointer_contact == Some(contact) => {
+                self.move_pointer(x, y, display)
+            }
+            TouchPhase::Up | TouchPhase::Cancel if self.pointer_contact == Some(contact) => {
+                self.pointer_contact = None;
+                self.fake(BUTTON_RELEASE_EVENT, left, 0, 0)
+            }
+            // X11 core input has a single pointer
+            _ => Ok(()),
+        }
     }
 
     fn inject_one(&mut self, event: &Event) -> Result<(), InjectError> {
@@ -126,13 +156,15 @@ impl XTestInjector {
                     |delta: i32| delta.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
                 self.fake(MOTION_NOTIFY_EVENT, RELATIVE_MOTION, clamp(dx), clamp(dy))
             }
-            Event::Position { x, y, display } => {
-                check_position(x, y, display, self.screen)?;
-                let outside = || InjectError::OutsideScreen { x, y };
-                let x = i16::try_from(x).map_err(|_| outside())?;
-                let y = i16::try_from(y).map_err(|_| outside())?;
-                self.fake(MOTION_NOTIFY_EVENT, ABSOLUTE_MOTION, x, y)
-            }
+            Event::Position { x, y, display } => self.move_pointer(x, y, display),
+            Event::Touch { contact, phase } => self.touch_as_pointer(contact, phase),
+            Event::DeviceRemoved {
+                kind: RemovableDevice::Touchscreen,
+                ..
+            } => match self.pointer_contact.take() {
+                Some(_) => self.fake(BUTTON_RELEASE_EVENT, x_button(PointerButton::Left), 0, 0),
+                None => Ok(()),
+            },
             Event::Wheel { dx, dy } => {
                 let vertical = whole_notches(&mut self.wheel.vertical, dy);
                 let horizontal = whole_notches(&mut self.wheel.horizontal, dx);
