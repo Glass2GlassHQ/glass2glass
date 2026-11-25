@@ -328,9 +328,7 @@ pub async fn run_client(
     if let Some(trace) = trace {
         run = run.with_visit_recorder(trace);
     }
-    if let Some(track) = audio_track {
-        audio::play(track);
-    }
-    let (run, (), (), ()) = tokio::join!(run.run(), forward, copies, follow);
+    let (run, (), (), (), ()) =
+        tokio::join!(run.run(), forward, copies, follow, audio::play(audio_track));
     run.map_err(ClientError::Session)
 }

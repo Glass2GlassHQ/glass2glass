@@ -52,7 +52,7 @@ fn play_graph(track: RemoteWtTrackSrc) -> Result<Graph<GraphNode>, ParseError> {
     ))
 }
 
-fn run(graph: Result<Graph<GraphNode>, ParseError>) {
+async fn run(graph: Result<Graph<GraphNode>, ParseError>) {
     let log = Target::category(AUDIO_CATEGORY);
     let graph = match graph {
         Ok(graph) => graph,
@@ -61,36 +61,33 @@ fn run(graph: Result<Graph<GraphNode>, ParseError>) {
             return;
         }
     };
-    let runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(e) => {
-            g2g_core::g2g_warn!(log, "audio runtime: {e}");
-            return;
-        }
-    };
     let clock = WallClock::new();
-    if let Err(e) = runtime.block_on(RunBuilder::new(graph, &clock, LINK_CAPACITY).run()) {
+    if let Err(e) = RunBuilder::new(graph, &clock, LINK_CAPACITY).run().await {
         g2g_core::g2g_warn!(log, "audio stopped: {e:?}");
     }
 }
 
-// the audio graph gets its own thread so a blocking audio call never delays a video frame
-fn spawn_audio(build: impl FnOnce() -> Result<Graph<GraphNode>, ParseError> + Send + 'static) {
+// TODO: on the video graph's runtime, host audio adds 13 ms to every video frame, cause not found
+pub(crate) fn send(track: RemoteWtTrackSink) {
+    let log = Target::category(AUDIO_CATEGORY);
     let spawned = std::thread::Builder::new()
         .name(AUDIO_CATEGORY.into())
-        .spawn(move || run(build()));
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            match runtime {
+                Ok(runtime) => runtime.block_on(run(send_graph(track))),
+                Err(e) => g2g_core::g2g_warn!(log, "audio runtime: {e}"),
+            }
+        });
     if let Err(e) = spawned {
-        g2g_core::g2g_warn!(Target::category(AUDIO_CATEGORY), "audio thread: {e}");
+        g2g_core::g2g_warn!(log, "audio thread: {e}");
     }
 }
 
-pub(crate) fn send(track: RemoteWtTrackSink) {
-    spawn_audio(move || send_graph(track));
-}
-
-pub(crate) fn play(track: RemoteWtTrackSrc) {
-    spawn_audio(move || play_graph(track));
+pub(crate) async fn play(track: Option<RemoteWtTrackSrc>) {
+    if let Some(track) = track {
+        run(play_graph(track)).await;
+    }
 }

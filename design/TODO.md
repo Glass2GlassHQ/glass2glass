@@ -34,6 +34,8 @@ The plan is [remote.md](remote.md).
 
 - Opus audio on the Windows host (`wasapisrc loopback=true`) and client
   (`wasapisink`).
+- Find why the host's audio graph on the video graph's runtime adds 13 ms to
+  every video frame, only while the client takes the audio, then run it there.
 - Encode with `d3d11convert ! nvenc` on a Windows host with an NVIDIA GPU,
   falling back to `mfh264enc`, and rebuild the host graph after `AccessLost`.
 - The macOS client, then `display-index` on `screencapturesrc` and a macOS
