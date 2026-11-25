@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
+mod apps;
 mod control;
 mod http;
 mod identity;
@@ -30,6 +31,8 @@ use tokio::sync::{oneshot, Notify};
 use tokio::task::{spawn_local, JoinHandle};
 use tokio_rustls::TlsAcceptor;
 
+use apps::{AppLauncher, DESKTOP_APP_ID};
+pub use apps::{AppStarter, LaunchableApp, ServedApps};
 use http::{read_request, write_reply, Reply, Request};
 use identity::{HostIdentity, PairedClients};
 use pairing::Pairings;
@@ -49,8 +52,6 @@ const GFE_VERSION: &str = "3.23.0.74";
 const CODEC_MODES: u32 = 0x101;
 // moonlight skips HEVC when this is 0
 const MAX_LUMA_PIXELS_HEVC: u64 = 1_869_449_984;
-const DESKTOP_APP_ID: u32 = 1;
-const DESKTOP_APP_TITLE: &str = "Desktop";
 const PIN_WAIT: Duration = Duration::from_secs(5 * 60);
 const PIN_DIGITS: usize = 4;
 const SALT_BYTES: usize = 16;
@@ -129,6 +130,7 @@ struct Host {
     paired: PairedClients,
     pairings: Pairings,
     desktop: ServedDesktop,
+    apps: AppLauncher,
     session: RefCell<Option<Session>>,
 }
 
@@ -151,12 +153,13 @@ struct Connection<'a> {
 }
 
 impl Host {
-    fn load(directory: &Path, desktop: ServedDesktop) -> Result<Self, GamestreamError> {
+    fn load(directory: &Path, mut desktop: ServedDesktop) -> Result<Self, GamestreamError> {
         Ok(Self {
             name: gethostname::gethostname().to_string_lossy().into_owned(),
             identity: HostIdentity::load_or_create(directory)?,
             paired: PairedClients::load(directory)?,
             pairings: Pairings::default(),
+            apps: AppLauncher::new(desktop.apps.take()),
             desktop,
             session: RefCell::new(None),
         })
@@ -181,14 +184,22 @@ impl Host {
             {
                 Reply::xml_error(401, "client is not paired")
             }
-            ("GET", "/applist", true) => app_list(),
+            ("GET", "/applist", true) => self.app_list(),
             ("GET", "/launch", true) => {
+                let launched = match request.query.get("appid").map(|id| id.parse::<u32>()) {
+                    Some(Ok(id)) => self.apps.launch(id).await,
+                    _ => return Reply::xml_error(400, "launch needs a numeric appid"),
+                };
+                if let Err(e) = launched {
+                    return Reply::xml_error(404, &e.to_string());
+                }
                 self.launch(&request.query, connection, "gamesession").await
             }
             // moonlight's /resume carries a fresh rikey
             ("GET", "/resume", true) => self.launch(&request.query, connection, "resume").await,
             ("GET", "/cancel", true) => {
                 self.end_session().await;
+                self.apps.quit().await;
                 Reply::xml("<cancel>1</cancel>")
             }
             ("POST", "/submit-pin", false) => self.submit_pin(&request.body, connection),
@@ -198,9 +209,10 @@ impl Host {
 
     fn server_info(&self, connection: Connection<'_>) -> Reply {
         let pair_status = u8::from(self.is_paired(connection));
-        let (current_game, state) = match self.session.borrow().is_some() {
-            true => (DESKTOP_APP_ID, "G2G_SERVER_BUSY"),
-            false => (0, "G2G_SERVER_FREE"),
+        let streaming = self.session.borrow().is_some().then_some(DESKTOP_APP_ID);
+        let (current_game, state) = match self.apps.running_id().or(streaming) {
+            Some(id) => (id, "G2G_SERVER_BUSY"),
+            None => (0, "G2G_SERVER_FREE"),
         };
         Reply::xml(&format!(
             "<hostname>{}</hostname><appversion>{APP_VERSION}</appversion>\
@@ -415,6 +427,20 @@ impl Host {
         }
     }
 
+    fn app_list(&self) -> Reply {
+        let entries: String = self
+            .apps
+            .listed()
+            .map(|(id, title)| {
+                format!(
+                    "<App><IsHdrSupported>0</IsHdrSupported><AppTitle>{}</AppTitle><ID>{id}</ID></App>",
+                    http::escape_xml(title)
+                )
+            })
+            .collect();
+        Reply::xml(&entries)
+    }
+
     fn submit_pin(&self, body: &[u8], connection: Connection<'_>) -> Reply {
         if !connection.peer.ip().is_loopback() {
             return Reply::text(403, "a PIN is accepted from this machine only");
@@ -435,13 +461,6 @@ impl Host {
             Err(e) => Reply::text(404, &e.to_string()),
         }
     }
-}
-
-fn app_list() -> Reply {
-    Reply::xml(&format!(
-        "<App><IsHdrSupported>0</IsHdrSupported><AppTitle>{DESKTOP_APP_TITLE}</AppTitle>\
-         <ID>{DESKTOP_APP_ID}</ID></App>"
-    ))
 }
 
 async fn answer<S: AsyncRead + AsyncWrite + Unpin>(

@@ -29,6 +29,8 @@ use g2g_core::PropValue;
 use g2g_desktop::client::{run_client, ClientError, ClientSettings, ClientTransport};
 #[cfg(feature = "gamestream")]
 use g2g_desktop::gamestream::ServedDesktop;
+#[cfg(all(target_os = "linux", feature = "gamestream"))]
+use g2g_desktop::gamestream::{LaunchableApp, ServedApps};
 use g2g_desktop::host::{
     check_token_len, inject, run_session, HostCapture, HostEncoder, HostListener, HostSettings,
 };
@@ -68,7 +70,8 @@ const HOST_USAGE: &str =
                    [--trace FILE]";
 #[cfg(target_os = "linux")]
 const GAMESTREAM_USAGE: &str = "  g2g-desktop host --protocol gamestream
-                   [--x11-display :0 | --run COMMAND [--size 1920x1080] [--render-node PATH]]
+                   [--x11-display :0 | --run COMMAND [--size 1920x1080] [--render-node PATH]
+                    [--app TITLE=COMMAND]...]
   g2g-desktop pin PIN";
 #[cfg(target_os = "windows")]
 const GAMESTREAM_USAGE: &str = "  g2g-desktop host --protocol gamestream
@@ -102,7 +105,8 @@ const HOST_FLAGS: [&str; 8] = [
     "trace",
 ];
 #[cfg(target_os = "linux")]
-const PLATFORM_HOST_FLAGS: [&str; 5] = ["run", "size", "render-node", "x11-display", "audio"];
+const PLATFORM_HOST_FLAGS: [&str; 6] =
+    ["run", "size", "render-node", "x11-display", "audio", "app"];
 #[cfg(target_os = "windows")]
 const PLATFORM_HOST_FLAGS: [&str; 2] = ["monitor-index", "quality-vs-speed"];
 #[cfg(target_os = "windows")]
@@ -121,7 +125,7 @@ const CLIENT_FLAGS: [&str; 7] = [
     "trace",
 ];
 
-type Flags = BTreeMap<String, String>;
+type Flags = BTreeMap<String, Vec<String>>;
 
 fn parse_flags(
     args: impl Iterator<Item = String>,
@@ -139,14 +143,18 @@ fn parse_flags(
         let value = args
             .next()
             .ok_or_else(|| format!("--{name} needs a value"))?;
-        flags.insert(name.to_string(), value);
+        flags.entry(name.to_string()).or_default().push(value);
     }
     Ok(flags)
 }
 
+// a flag given more than once takes its last value, unless its reader takes them all
+fn flag<'a>(flags: &'a Flags, name: &str) -> Option<&'a String> {
+    flags.get(name)?.last()
+}
+
 fn required(flags: &Flags, name: &str) -> Result<String, Box<dyn Error>> {
-    flags
-        .get(name)
+    flag(flags, name)
         .cloned()
         .ok_or_else(|| format!("--{name} is required").into())
 }
@@ -155,8 +163,7 @@ fn optional<T: FromStr>(flags: &Flags, name: &str) -> Result<Option<T>, Box<dyn 
 where
     T::Err: Error + 'static,
 {
-    flags
-        .get(name)
+    flag(flags, name)
         .map(|value| {
             value
                 .parse()
@@ -202,8 +209,8 @@ fn headless_settings(flags: &Flags) -> Result<Option<HeadlessSettings>, Box<dyn 
     if flags.contains_key("run") && flags.contains_key("x11-display") {
         return Err("--run and --x11-display each pick what the host captures".into());
     }
-    let Some(command) = flags.get("run") else {
-        if let Some(flag) = ["size", "render-node"]
+    let Some(command) = flag(flags, "run") else {
+        if let Some(flag) = ["size", "render-node", "app"]
             .iter()
             .find(|flag| flags.contains_key(**flag))
         {
@@ -213,11 +220,10 @@ fn headless_settings(flags: &Flags) -> Result<Option<HeadlessSettings>, Box<dyn 
     };
     Ok(Some(HeadlessSettings {
         command: command.clone(),
-        size: flags
-            .get("size")
+        size: flag(flags, "size")
             .map(|size| parse_display_size(size))
             .transpose()?,
-        render_node: flags.get("render-node").cloned(),
+        render_node: flag(flags, "render-node").cloned(),
     }))
 }
 
@@ -612,7 +618,30 @@ fn gamestream_display_capture(
 const GAMESTREAM_DISPLAY_FPS: u32 = 60;
 
 #[cfg(all(target_os = "linux", feature = "gamestream"))]
-async fn gamestream_headless(headless: &HeadlessSettings) -> Result<(), Box<dyn Error>> {
+fn launchable_apps(flags: &Flags) -> Result<Vec<LaunchableApp>, Box<dyn Error>> {
+    let mut apps: Vec<LaunchableApp> = Vec::new();
+    for value in flags.get("app").into_iter().flatten() {
+        let invalid = || format!("--app {value}: expected TITLE=COMMAND");
+        let (title, command) = value.split_once('=').ok_or_else(invalid)?;
+        if title.is_empty() || command.is_empty() {
+            return Err(invalid().into());
+        }
+        if title == "Desktop" || apps.iter().any(|app| app.title == title) {
+            return Err(format!("--app {value}: another app is titled {title}").into());
+        }
+        apps.push(LaunchableApp {
+            title: title.to_owned(),
+            command: command.to_owned(),
+        });
+    }
+    Ok(apps)
+}
+
+#[cfg(all(target_os = "linux", feature = "gamestream"))]
+async fn gamestream_headless(
+    headless: &HeadlessSettings,
+    apps: Vec<LaunchableApp>,
+) -> Result<(), Box<dyn Error>> {
     let display_settings = headless_display_settings(GAMESTREAM_DISPLAY_FPS, headless);
     let render_node = display_settings.render_node.clone();
     let driver =
@@ -628,10 +657,15 @@ async fn gamestream_headless(headless: &HeadlessSettings) -> Result<(), Box<dyn 
         .map_err(|e| format!("starting the headless display: {e:?}"))?;
     let captured = display.clone();
     let injected = display.clone();
+    let launched = display.clone();
     let desktop = ServedDesktop {
         capture: Box::new(move |fps| gamestream_display_capture(&captured, fps)),
         open_injector: Box::new(move |screen| {
             Ok(Box::new(WaylandDisplayInjector::new(screen, &injected)))
+        }),
+        apps: Some(ServedApps {
+            listed: apps,
+            start: Box::new(move |command| launch_app(launched.names(), command)),
         }),
     };
     run_app_while_serving(&display, &headless.command, async {
@@ -643,14 +677,22 @@ async fn gamestream_headless(headless: &HeadlessSettings) -> Result<(), Box<dyn 
 #[cfg(all(target_os = "linux", feature = "gamestream"))]
 async fn gamestream_host(flags: &Flags) -> Result<(), Box<dyn Error>> {
     if let Some(flag) = flags.keys().find(|flag| {
-        !["protocol", "x11-display", "run", "size", "render-node"].contains(&flag.as_str())
+        ![
+            "protocol",
+            "x11-display",
+            "run",
+            "size",
+            "render-node",
+            "app",
+        ]
+        .contains(&flag.as_str())
     }) {
         return Err(format!("--protocol gamestream takes no --{flag}").into());
     }
     if let Some(headless) = headless_settings(flags)? {
-        return gamestream_headless(&headless).await;
+        return gamestream_headless(&headless, launchable_apps(flags)?).await;
     }
-    let desktop = match flags.get("x11-display").cloned() {
+    let desktop = match flag(flags, "x11-display").cloned() {
         Some(display) => ServedDesktop {
             capture: Box::new({
                 let display = display.clone();
@@ -659,12 +701,14 @@ async fn gamestream_host(flags: &Flags) -> Result<(), Box<dyn Error>> {
             open_injector: Box::new(move |screen| {
                 Ok(Box::new(XTestInjector::new(&display, screen)?))
             }),
+            apps: None,
         },
         None => {
             let token_path = portal_restore_token_path()?;
             ServedDesktop {
                 capture: Box::new(move |fps| gamestream_portal_capture(fps, &token_path)),
                 open_injector: Box::new(|screen| Ok(Box::new(Injector::new(screen)?))),
+                apps: None,
             }
         }
     };
@@ -689,12 +733,13 @@ async fn gamestream_host(flags: &Flags) -> Result<(), Box<dyn Error>> {
     let desktop = ServedDesktop {
         capture: Box::new(gamestream_capture),
         open_injector: Box::new(move |screen| Ok(Box::new(Injector::new(screen, monitor)?))),
+        apps: None,
     };
     Ok(g2g_desktop::gamestream::serve(desktop).await?)
 }
 
 async fn host(flags: Flags) -> Result<(), Box<dyn Error>> {
-    match flags.get("protocol").map(String::as_str) {
+    match flag(&flags, "protocol").map(String::as_str) {
         None | Some("remotewt") => {}
         #[cfg(feature = "gamestream")]
         Some("gamestream") => return gamestream_host(&flags).await,
@@ -704,6 +749,10 @@ async fn host(flags: Flags) -> Result<(), Box<dyn Error>> {
         }
         Some(other) => return Err(format!("unknown --protocol {other}").into()),
     }
+    #[cfg(target_os = "linux")]
+    if flags.contains_key("app") {
+        return Err("--app needs --protocol gamestream".into());
+    }
     let port = parsed(&flags, "port", DEFAULT_PORT)?;
     let capture = CaptureSettings {
         fps: parsed(&flags, "fps", DEFAULT_FPS)?,
@@ -712,7 +761,7 @@ async fn host(flags: Flags) -> Result<(), Box<dyn Error>> {
         #[cfg(target_os = "linux")]
         headless: headless_settings(&flags)?,
         #[cfg(target_os = "linux")]
-        x11_display: flags.get("x11-display").cloned(),
+        x11_display: flag(&flags, "x11-display").cloned(),
         #[cfg(target_os = "windows")]
         monitor_index: parsed(&flags, "monitor-index", PRIMARY_MONITOR)?,
     };
@@ -740,7 +789,7 @@ async fn host(flags: Flags) -> Result<(), Box<dyn Error>> {
             .parent()
             .expect("the token path is joined onto a state directory"),
     )?;
-    let trace_path = flags.get("trace").map(PathBuf::from);
+    let trace_path = flag(&flags, "trace").map(PathBuf::from);
     let certificate = generate_certificate()?;
     let address = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
     eprintln!(
@@ -783,7 +832,7 @@ async fn client(flags: Flags) -> Result<(), Box<dyn Error>> {
         audio: parsed(&flags, "audio", true)?,
         #[cfg(target_os = "windows")]
         audio: false,
-        transport: match flags.get("transport").map(String::as_str) {
+        transport: match flag(&flags, "transport").map(String::as_str) {
             None | Some("auto") => ClientTransport::Auto,
             Some("quic") => ClientTransport::Quic,
             Some("websocket") => ClientTransport::WebSocket,
@@ -792,7 +841,7 @@ async fn client(flags: Flags) -> Result<(), Box<dyn Error>> {
         #[cfg(target_os = "linux")]
         keyboard_grab: parsed(&flags, "keyboard-grab", true)?,
     };
-    let trace = open_trace(flags.get("trace").map(Path::new))?;
+    let trace = open_trace(flag(&flags, "trace").map(Path::new))?;
     let observer = Observer::new();
     let glass_to_glass = Arc::new(LatencyHistogram::new());
     let session = tokio::select! {

@@ -7,7 +7,8 @@
 # stream the desktop for a few seconds. Moonlight runs on its own Xvfb display, which the host
 # also captures, or with CAPTURE=run the host captures its own headless display, so nothing
 # opens on the desktop. CAPTURE=run also types, clicks and pastes text into Moonlight's window and
-# checks that tools/moonlight-input-probe.py on the headless display received them. CAPTURE=portal captures the desktop session through the ScreenCast
+# checks that tools/moonlight-input-probe.py on the headless display received them. It streams a
+# second app from --app instead of the Desktop entry, and checks that Moonlight's quit stopped it. CAPTURE=portal captures the desktop session through the ScreenCast
 # portal, whose share dialog a user approves on the desktop.
 #
 # Prerequisites: Xvfb, xdotool, Python GTK 4 and tkinter for CAPTURE=run, and Moonlight from Flathub:
@@ -35,6 +36,8 @@ PIN=4721
 PASTED_TEXT='Hi!'
 CODEC=${CODEC:-H.264}
 STREAM_SECONDS=${STREAM_SECONDS:-8}
+LAUNCHED_APP=Sleeper
+STREAMED_APP=Desktop
 # each run starts unpaired: fresh config directories for Moonlight and the host
 rm -rf "$OUT"
 mkdir -p "$OUT/moonlight-config" "$OUT/host-config"
@@ -62,7 +65,9 @@ run)
     for node in /dev/dri/renderD*; do
         [ "$(basename "$(readlink -f "/sys/class/drm/${node##*/}/device/driver")")" = nvidia ] && break
     done
-    capture=(--run "python3 $TOOLS/moonlight-input-probe.py $OUT/input.log" --render-node "$node")
+    capture=(--run "python3 $TOOLS/moonlight-input-probe.py $OUT/input.log" --render-node "$node"
+        --app "$LAUNCHED_APP=echo \$\$ >$OUT/app.pid; exec sleep 600")
+    STREAMED_APP=$LAUNCHED_APP
     ;;
 portal) capture=() ;;
 esac
@@ -95,7 +100,8 @@ grep -q 'paired a Moonlight client' "$OUT/host.log"
 
 moonlight list 127.0.0.1 >"$OUT/list.log" 2>&1
 grep -qx 'Desktop' "$OUT/list.log"
-echo "moonlight-interop: paired and listed the Desktop app"
+grep -qx "$STREAMED_APP" "$OUT/list.log"
+echo "moonlight-interop: paired and listed the $STREAMED_APP app"
 if [ -n "${LOSS_PERCENT:-}" ]; then
     # every priority goes to the first band, so only the filter puts packets on the lossy third one
     tc qdisc add dev lo root handle 1: prio priomap 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
@@ -103,7 +109,7 @@ if [ -n "${LOSS_PERCENT:-}" ]; then
     tc filter add dev lo parent 1:0 protocol ip u32 match ip sport "$VIDEO_PORT" 0xffff flowid 1:3
 fi
 
-moonlight stream 127.0.0.1 Desktop --720 --fps 30 --video-codec "$CODEC" \
+moonlight stream 127.0.0.1 "$STREAMED_APP" --720 --fps 30 --video-codec "$CODEC" \
     --video-decoder software --display-mode windowed --no-quit-after >"$OUT/stream.log" 2>&1 &
 STREAM=$!
 # a fresh moonlight config spends about 40 seconds checking for gamepad mappings before it launches
@@ -164,6 +170,10 @@ if [ "${CAPTURE:-x11}" = run ] && ! { grep -qx 'key a' "$OUT/input.log" && grep 
     grep -qx 'button 8' "$OUT/input.log" && grep -qx 'key H' "$OUT/input.log" &&
     grep -qx 'key i' "$OUT/input.log" && grep -qx 'key exclam' "$OUT/input.log"; }; then
     echo "moonlight-interop: the headless display did not get Moonlight's input, see $OUT/input.log" >&2
+    exit 1
+fi
+if [ "$STREAMED_APP" = "$LAUNCHED_APP" ] && ! { [ -s "$OUT/app.pid" ] && ! kill -0 "$(cat "$OUT/app.pid")" 2>/dev/null; }; then
+    echo "moonlight-interop: $LAUNCHED_APP did not start, or Moonlight's quit did not stop it" >&2
     exit 1
 fi
 if [ -n "${LOSS_PERCENT:-}" ] && [ "$CODEC" = HEVC ] && ! {

@@ -54,6 +54,7 @@ pub type InjectorFactory = Box<dyn Fn(ScreenSize) -> Result<Box<dyn InjectEvents
 pub struct ServedDesktop {
     pub capture: CaptureFactory,
     pub open_injector: InjectorFactory,
+    pub apps: Option<super::ServedApps>,
 }
 
 impl fmt::Debug for ServedDesktop {

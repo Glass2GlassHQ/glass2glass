@@ -2,7 +2,7 @@
 
 Plan for `g2g-desktop host --protocol gamestream`, a host that stock Moonlight
 clients pair with and stream from, the way they use Sunshine. Discovery,
-pairing, the app list, encrypted H.264 or HEVC video from an X display, the
+pairing, the app list with launched `--app` commands, encrypted H.264 or HEVC video from an X display, the
 desktop portal, a `--run` headless display or the Windows desktop, at the size
 the client asks for,
 encrypted stereo Opus audio from the default output, and keyboard, mouse,
@@ -108,9 +108,15 @@ In `g2g-desktop`, module `gamestream`.
 - mDNS advertises `_nvstream._tcp` on the HTTP port with no TXT records.
 - Plain HTTP serves `/serverinfo`, `/pair` and `/submit-pin`.
 - HTTPS asks for a client certificate, accepts any certificate in the
-  handshake, then serves `/applist` (one "Desktop" entry) only when that
-  certificate is in the paired list. `/serverinfo` reports `PairStatus` 1 for
+  handshake, then serves `/applist` only when that certificate is in the
+  paired list. The list has a "Desktop" entry, and with `--run` one entry per
+  `--app TITLE=COMMAND`. `/serverinfo` reports `PairStatus` 1 for
   a paired certificate. `/launch`, `/resume` and `/cancel` come with video.
+  `/launch` of an `--app` entry runs its command with `sh -c` on the headless
+  display, after stopping another app the host started. The app keeps running
+  between sessions, so Moonlight can resume it, and `/cancel` (Moonlight's
+  quit) kills the process. `/serverinfo` reports the running app as
+  `currentgame`.
   The host serves no `/appasset`, and Moonlight shows its own box art.
 - Pairing hashes the salt and PIN with SHA-256 into an AES-128-ECB key, swaps
   challenges signed with RSA-SHA256 over each certificate's signature, and ends
@@ -149,7 +155,7 @@ In `g2g-desktop`, module `gamestream`.
 
 ## Order
 
-Gamepad, HDR, surround, and `--run` applications as `/applist` entries.
+Gamepad, HDR and surround.
 
 ## Tests
 
@@ -165,7 +171,8 @@ Gamepad, HDR, surround, and `--run` applications as `/applist` entries.
   `tools/moonlight-input-probe.py`, xdotool clicks and types into Moonlight's
   window, pastes text with Moonlight's Ctrl+Alt+Shift+V, and the script checks
   that the probe received a left click, a back click, the key and the pasted
-  text. Moonlight on Xvfb has no touch source, so touch is tested by injecting
+  text. It also streams an `--app` entry that records its process id, and
+  checks that Moonlight's quit killed that process. Moonlight on Xvfb has no touch source, so touch is tested by injecting
   `Event::Touch` into each Linux injector. `LOSS_PERCENT` runs the script in a
   network namespace of its own and drops that share of the host's video
   packets after pairing, and with `CODEC=HEVC` checks that Moonlight asked for
