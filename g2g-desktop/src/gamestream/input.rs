@@ -8,7 +8,7 @@ use g2g_plugins::windowinput::PointerButton;
 use keycode::{KeyMap, KeyMappingCode};
 
 use crate::injection::ScreenSize;
-use crate::packet::{Event, RemovableDevice, TouchPhase, POINTER_BUTTONS};
+use crate::packet::{Event, GamepadAxes, RemovableDevice, TouchPhase, POINTER_BUTTONS};
 
 const KEY_DOWN: u32 = 0x03;
 const KEY_UP: u32 = 0x04;
@@ -21,6 +21,7 @@ const SCROLL_HORIZONTAL: u32 = 0x5500_0001;
 const UTF8_TEXT: u32 = 0x17;
 const TOUCH: u32 = 0x5500_0002;
 const PEN: u32 = 0x5500_0003;
+const MULTI_CONTROLLER: u32 = 0x0C;
 
 // moonlight's LI_TOUCH_EVENT_* values, shared by touch and pen
 const TOUCH_DOWN: u8 = 0x01;
@@ -181,13 +182,18 @@ pub(crate) enum InputError {
     NotUtf8,
     UnsupportedTouch(u8),
     NotFinite,
+    UnknownController(u16),
 }
 
 impl InputError {
     pub(crate) fn is_malformed(self) -> bool {
         matches!(
             self,
-            Self::Truncated | Self::LengthMismatch | Self::NotUtf8 | Self::NotFinite
+            Self::Truncated
+                | Self::LengthMismatch
+                | Self::NotUtf8
+                | Self::NotFinite
+                | Self::UnknownController(_)
         )
     }
 }
@@ -207,6 +213,12 @@ impl fmt::Display for InputError {
             Self::NotUtf8 => f.write_str("text input is not UTF-8"),
             Self::UnsupportedTouch(event) => write!(f, "touch event {event:#04x} is not injected"),
             Self::NotFinite => f.write_str("touch position is not a finite number"),
+            Self::UnknownController(number) => {
+                write!(
+                    f,
+                    "controller {number} is past the sixteen Moonlight numbers"
+                )
+            }
         }
     }
 }
@@ -223,6 +235,13 @@ fn be_i16(payload: &[u8], offset: usize) -> Result<i16, InputError> {
         .get(offset..offset + 2)
         .ok_or(InputError::Truncated)?;
     Ok(i16::from_be_bytes([bytes[0], bytes[1]]))
+}
+
+fn le_u16(payload: &[u8], offset: usize) -> Result<u16, InputError> {
+    let bytes = payload
+        .get(offset..offset + 2)
+        .ok_or(InputError::Truncated)?;
+    Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
 }
 
 fn le_u32(payload: &[u8], offset: usize) -> Result<u32, InputError> {
@@ -297,6 +316,36 @@ struct ContactReport {
     contact: u32,
     x: f32,
     y: f32,
+}
+
+// moonlight's body: controller number, mask of connected controllers, the low button bits, the
+// two triggers, the four stick axes, and the high button bits, little-endian between fixed words
+fn gamepad(payload: &[u8]) -> Result<Event, InputError> {
+    let number = le_u16(payload, 2)?;
+    let connected = le_u16(payload, 4)?;
+    let bit = 1u16
+        .checked_shl(u32::from(number))
+        .ok_or(InputError::UnknownController(number))?;
+    let device = number as u8;
+    if connected & bit == 0 {
+        return Ok(Event::DeviceRemoved {
+            kind: RemovableDevice::Gamepad,
+            device,
+        });
+    }
+    let stick = |offset| le_u16(payload, offset).map(|value| value as i16);
+    Ok(Event::Gamepad {
+        device,
+        buttons: u32::from(le_u16(payload, 8)?) | u32::from(le_u16(payload, 22)?) << 16,
+        axes: GamepadAxes {
+            left_trigger: i16::from(byte(payload, 10)?),
+            right_trigger: i16::from(byte(payload, 11)?),
+            left_x: stick(12)?,
+            left_y: stick(14)?,
+            right_x: stick(16)?,
+            right_y: stick(18)?,
+        },
+    })
 }
 
 fn touch_event(report: ContactReport, screen: Option<ScreenSize>) -> Result<Event, InputError> {
@@ -379,6 +428,7 @@ pub(crate) fn input_event(body: &[u8], screen: Option<ScreenSize>) -> Result<Eve
             },
             screen,
         ),
+        MULTI_CONTROLLER => gamepad(payload),
         UTF8_TEXT => String::from_utf8(payload.to_vec())
             .map(Event::Text)
             .map_err(|_| InputError::NotUtf8),
@@ -432,6 +482,59 @@ mod tests {
         assert_eq!(
             input_event(&message(KEY_DOWN, &[0, 0xFF, 0x80, 0, 0, 0]), None),
             Err(InputError::UnknownKey(0xFF))
+        );
+    }
+
+    fn controller_report(number: u16, connected: u16, buttons: u32, axes: [i16; 4]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        // moonlight's fixed words around the fields are 0x1A, 0x14, 0x9C and 0x55
+        payload.extend_from_slice(&0x1Au16.to_le_bytes());
+        payload.extend_from_slice(&number.to_le_bytes());
+        payload.extend_from_slice(&connected.to_le_bytes());
+        payload.extend_from_slice(&0x14u16.to_le_bytes());
+        payload.extend_from_slice(&(buttons as u16).to_le_bytes());
+        payload.extend_from_slice(&[40, 255]);
+        for axis in axes {
+            payload.extend_from_slice(&axis.to_le_bytes());
+        }
+        payload.extend_from_slice(&0x9Cu16.to_le_bytes());
+        payload.extend_from_slice(&((buttons >> 16) as u16).to_le_bytes());
+        payload.extend_from_slice(&0x55u16.to_le_bytes());
+        message(MULTI_CONTROLLER, &payload)
+    }
+
+    #[test]
+    fn a_controller_report_becomes_a_gamepad_state_and_a_cleared_bit_removes_it() {
+        use crate::packet::{GAMEPAD_A, GAMEPAD_DPAD_LEFT};
+        // moonlight's paddle 1 sits past the sixteen bits of the first button word
+        const PADDLE_1: u32 = 0x1_0000;
+        let buttons = GAMEPAD_A | GAMEPAD_DPAD_LEFT | PADDLE_1;
+        let report = controller_report(2, 0b101, buttons, [-32768, 32767, 100, -100]);
+        assert_eq!(
+            input_event(&report, None),
+            Ok(Event::Gamepad {
+                device: 2,
+                buttons,
+                axes: GamepadAxes {
+                    left_x: -32768,
+                    left_y: 32767,
+                    right_x: 100,
+                    right_y: -100,
+                    left_trigger: 40,
+                    right_trigger: 255,
+                },
+            })
+        );
+        assert_eq!(
+            input_event(&controller_report(2, 0b001, 0, [0; 4]), None),
+            Ok(Event::DeviceRemoved {
+                kind: RemovableDevice::Gamepad,
+                device: 2,
+            })
+        );
+        assert_eq!(
+            input_event(&controller_report(16, 0xFFFF, 0, [0; 4]), None),
+            Err(InputError::UnknownController(16))
         );
     }
 

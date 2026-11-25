@@ -83,6 +83,23 @@ impl EventKind {
     }
 }
 
+// gamepad buttons take xinput's bits, which moonlight sends too
+pub const GAMEPAD_DPAD_UP: u32 = 0x0001;
+pub const GAMEPAD_DPAD_DOWN: u32 = 0x0002;
+pub const GAMEPAD_DPAD_LEFT: u32 = 0x0004;
+pub const GAMEPAD_DPAD_RIGHT: u32 = 0x0008;
+pub const GAMEPAD_START: u32 = 0x0010;
+pub const GAMEPAD_BACK: u32 = 0x0020;
+pub const GAMEPAD_LEFT_THUMB: u32 = 0x0040;
+pub const GAMEPAD_RIGHT_THUMB: u32 = 0x0080;
+pub const GAMEPAD_LEFT_SHOULDER: u32 = 0x0100;
+pub const GAMEPAD_RIGHT_SHOULDER: u32 = 0x0200;
+pub const GAMEPAD_GUIDE: u32 = 0x0400;
+pub const GAMEPAD_A: u32 = 0x1000;
+pub const GAMEPAD_B: u32 = 0x2000;
+pub const GAMEPAD_X: u32 = 0x4000;
+pub const GAMEPAD_Y: u32 = 0x8000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct GamepadAxes {
     pub left_x: i16,

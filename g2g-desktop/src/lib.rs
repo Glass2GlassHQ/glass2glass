@@ -23,6 +23,8 @@ pub mod router;
 pub mod sendinput;
 #[cfg(target_os = "linux")]
 pub mod uinput;
+#[cfg(target_os = "linux")]
+pub mod uinputgamepad;
 #[cfg(all(target_os = "linux", feature = "session"))]
 pub mod waylanddisplayinput;
 #[cfg(all(target_os = "linux", feature = "session"))]

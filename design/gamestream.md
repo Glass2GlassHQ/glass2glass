@@ -154,13 +154,19 @@ In `g2g-desktop`, module `gamestream`.
   hover events are dropped. uinput injects through a multitouch touchscreen,
   the `--run` compositor through `wl_touch`, `SendInput` through a synthetic
   touch pointer device, and XTest moves the pointer and holds the left button
-  with the first contact. Gamepads are dropped. Keys still held when the control stream ends are
+  with the first contact. A controller report (0x0C) becomes `Event::Gamepad`
+  with Moonlight's XInput button bits, and a report whose controller bit is
+  clear in the connected mask removes that pad. On Linux every capture injects
+  gamepads through one uinput Xbox 360 pad per controller number, with the
+  xpad driver's codes and ranges and the Y axes inverted. A host that cannot
+  open `/dev/uinput` warns once and drops gamepads. Windows drops them. Keys still held when the control stream ends are
   released. The host ends a session with 0x0109 carrying 0x80030023, and ends it
   itself after 10 s without a control message.
 
 ## Order
 
-Gamepad, HDR and surround.
+Windows gamepads through ViGEmBus when it is installed, rumble back to
+Moonlight, and HDR.
 
 ## Tests
 
@@ -188,6 +194,9 @@ Gamepad, HDR and surround.
   invalidated 14 times in 8 seconds, asked for no IDR, and its decoder logged
   no missing reference. It runs before each push of this work and puts
   no window on the desktop.
+- A uinput test creates the Xbox 360 pad, grabs it, injects buttons, a stick,
+  a trigger and the dpad, and reads the pad's state back. Moonlight on Xvfb
+  has no gamepad, so no interop run sends one.
 - `nvenc` encodes H.264 and HEVC with four references, invalidates two frames,
   and checks that the next frame decodes without them as a predicted frame.
 - The Windows host is checked by hand: the Moonlight flatpak on Linux streams

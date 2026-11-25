@@ -8,7 +8,7 @@ use std::io;
 use keycode::{KeyMap, KeyMappingCode};
 
 use crate::hid::{us_layout_key, UnknownUsage};
-use crate::packet::{Event, EventKind};
+use crate::packet::{Event, EventKind, RemovableDevice};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScreenSize {
@@ -36,6 +36,7 @@ pub enum InjectError {
     UnknownContact(u32),
     Refused(io::Error),
     Device(io::Error),
+    GamepadUnavailable(io::Error),
 }
 
 impl fmt::Display for InjectError {
@@ -68,6 +69,9 @@ impl fmt::Display for InjectError {
             }
             InjectError::Refused(e) => write!(f, "the OS refused the event: {e}"),
             InjectError::Device(e) => write!(f, "input device: {e}"),
+            InjectError::GamepadUnavailable(e) => {
+                write!(f, "no virtual gamepad, gamepads are dropped: {e}")
+            }
         }
     }
 }
@@ -87,6 +91,25 @@ pub trait InjectEvents {
 impl<I: InjectEvents + ?Sized> InjectEvents for Box<I> {
     fn inject(&mut self, event: &Event) -> Result<(), InjectError> {
         (**self).inject(event)
+    }
+}
+
+#[derive(Debug)]
+pub struct WithGamepads<D, G> {
+    pub desktop: D,
+    pub gamepads: G,
+}
+
+impl<D: InjectEvents, G: InjectEvents> InjectEvents for WithGamepads<D, G> {
+    fn inject(&mut self, event: &Event) -> Result<(), InjectError> {
+        match event {
+            Event::Gamepad { .. }
+            | Event::DeviceRemoved {
+                kind: RemovableDevice::Gamepad,
+                ..
+            } => self.gamepads.inject(event),
+            _ => self.desktop.inject(event),
+        }
     }
 }
 

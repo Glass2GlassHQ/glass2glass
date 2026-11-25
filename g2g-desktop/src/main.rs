@@ -34,11 +34,15 @@ use g2g_desktop::gamestream::{LaunchableApp, ServedApps};
 use g2g_desktop::host::{
     check_token_len, inject, run_session, HostCapture, HostEncoder, HostListener, HostSettings,
 };
+#[cfg(all(target_os = "linux", feature = "gamestream"))]
+use g2g_desktop::injection::WithGamepads;
 use g2g_desktop::injection::{InjectError, InjectEvents, ScreenSize};
 #[cfg(target_os = "windows")]
 use g2g_desktop::sendinput::Injector;
 #[cfg(target_os = "linux")]
 use g2g_desktop::uinput::Injector;
+#[cfg(all(target_os = "linux", feature = "gamestream"))]
+use g2g_desktop::uinputgamepad::UinputGamepads;
 #[cfg(target_os = "linux")]
 use g2g_desktop::waylanddisplayinput::WaylandDisplayInjector;
 #[cfg(target_os = "linux")]
@@ -661,7 +665,10 @@ async fn gamestream_headless(
     let desktop = ServedDesktop {
         capture: Box::new(move |fps| gamestream_display_capture(&captured, fps)),
         open_injector: Box::new(move |screen| {
-            Ok(Box::new(WaylandDisplayInjector::new(screen, &injected)))
+            Ok(Box::new(WithGamepads {
+                desktop: WaylandDisplayInjector::new(screen, &injected),
+                gamepads: UinputGamepads::default(),
+            }))
         }),
         apps: Some(ServedApps {
             listed: apps,
@@ -699,7 +706,10 @@ async fn gamestream_host(flags: &Flags) -> Result<(), Box<dyn Error>> {
                 move |fps| gamestream_x11_capture(&display, fps)
             }),
             open_injector: Box::new(move |screen| {
-                Ok(Box::new(XTestInjector::new(&display, screen)?))
+                Ok(Box::new(WithGamepads {
+                    desktop: XTestInjector::new(&display, screen)?,
+                    gamepads: UinputGamepads::default(),
+                }))
             }),
             apps: None,
         },
@@ -707,7 +717,12 @@ async fn gamestream_host(flags: &Flags) -> Result<(), Box<dyn Error>> {
             let token_path = portal_restore_token_path()?;
             ServedDesktop {
                 capture: Box::new(move |fps| gamestream_portal_capture(fps, &token_path)),
-                open_injector: Box::new(|screen| Ok(Box::new(Injector::new(screen)?))),
+                open_injector: Box::new(|screen| {
+                    Ok(Box::new(WithGamepads {
+                        desktop: Injector::new(screen)?,
+                        gamepads: UinputGamepads::default(),
+                    }))
+                }),
                 apps: None,
             }
         }
