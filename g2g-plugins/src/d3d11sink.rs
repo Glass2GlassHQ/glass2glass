@@ -588,7 +588,7 @@ fn init_gpu(
     // SAFETY: COM object creation on the worker thread, every object from `device`.
     unsafe {
         let context = device.GetImmediateContext().map_err(win_err)?;
-        let video = VideoProcessor::new(&device, &context, width, height).ok();
+        let video = VideoProcessor::new(&device, &context, (width, height), (width, height)).ok();
 
         let factory: IDXGIFactory2 = CreateDXGIFactory1().map_err(win_err)?;
         let desc = DXGI_SWAP_CHAIN_DESC1 {

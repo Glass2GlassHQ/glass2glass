@@ -189,7 +189,9 @@ duplicated texture for the next frame, which is why each frame gets its own.
 
 `D3D11Convert` (`d3d11convert`, `d3d11-convert`, Windows) converts those BGRA
 textures to NV12 with a D3D11 video processor on the texture's device, shared
-with `d3d11videosink` in `d3d11video.rs`. Output is a new NV12 texture per
+with `d3d11videosink` in `d3d11video.rs`. It keeps the input size unless a
+downstream caps filter sets another, which the video processor scales to
+during the same blit. Output is a new NV12 texture per
 frame, or tight system NV12 read back through a staging texture when the
 consumer takes only system memory. The matrix and range come from the output
 caps, BT.601 limited range when they are untagged, which is what

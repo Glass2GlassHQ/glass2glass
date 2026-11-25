@@ -48,8 +48,6 @@ The plan is [remote.md](remote.md).
 
 The plan is [gamestream.md](gamestream.md).
 
-- Scale Moonlight video to the size the client asks for on Windows: `width`
-  and `height` on `d3d11convert`.
 - Stream Moonlight video from the portal and `--run` captures.
 - Stream audio to Moonlight with `moonlightaudiopay` and CBR Opus.
 - Inject Moonlight's keyboard, mouse and scroll input.

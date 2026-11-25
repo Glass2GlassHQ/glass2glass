@@ -550,15 +550,7 @@ fn gamestream_capture(fps: u32) -> Result<Vec<GraphNode>, String> {
     let source = D3D11ScreenCaptureSrc::new()
         .with_monitor_index(PRIMARY_MONITOR)
         .with_fps(fps);
-    let convert = g2g_core::runtime::parse_element(
-        &g2g_plugins::registry::default_registry(),
-        "d3d11convert",
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(vec![
-        GraphNodeRef::source(source),
-        GraphNodeRef::Element(convert),
-    ])
+    Ok(vec![GraphNodeRef::source(source)])
 }
 
 #[cfg(all(target_os = "windows", feature = "gamestream"))]

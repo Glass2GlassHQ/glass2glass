@@ -30,13 +30,14 @@ use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, CapsTransform, ColorRange,
     Colorimetry, ConfigureOutcome, Dim, ElementMetadata, FieldTransform, G2gError, HardwareError,
     Interlace, MatrixCoefficients, MemoryDomain, OutputSink, OwnedD3D11Texture, PadTemplate,
-    PadTemplates, PipelinePacket, PixelAspect, Rate, RawVideoFormat, RawVideoShape,
+    PadTemplates, PipelinePacket, PixelAspect, Rate, RawVideoFormat,
 };
 
 use crate::d3d11texture::{texture_frame, texture_objects, texture_proposal, TextureOwner};
 use crate::d3d11video::VideoProcessor;
 use crate::mfcommon::mf_err;
 use crate::texturepool::take_from_pool;
+use crate::videoscale::input_size_or_any_size;
 
 const OUTPUT_DOMAINS: DomainSet =
     DomainSet::only(MemoryDomainKind::System).with(MemoryDomainKind::D3D11Texture);
@@ -65,6 +66,7 @@ pub struct D3D11Convert {
     configured: bool,
     out_domain: MemoryDomainKind,
     input: Option<InputStream>,
+    output_size: Option<(u32, u32)>,
     output_colorimetry: Colorimetry,
     last_caps: Option<Caps>,
     gpu: Option<ConvertGpu>,
@@ -94,14 +96,14 @@ fn output_color_space(colorimetry: Colorimetry) -> Result<DXGI_COLOR_SPACE_TYPE,
 
 fn create_texture(
     device: &ID3D11Device,
-    input: &InputStream,
+    (width, height): (u32, u32),
     usage: D3D11_USAGE,
     bind: D3D11_BIND_FLAG,
     cpu_access: u32,
 ) -> Result<ID3D11Texture2D, G2gError> {
     let desc = D3D11_TEXTURE2D_DESC {
-        Width: input.width,
-        Height: input.height,
+        Width: width,
+        Height: height,
         MipLevels: 1,
         ArraySize: 1,
         Format: DXGI_FORMAT_NV12,
@@ -124,11 +126,11 @@ fn create_texture(
     texture.ok_or(G2gError::Hardware(HardwareError::Other))
 }
 
-fn render_target(device: &ID3D11Device, input: &InputStream) -> Result<ID3D11Texture2D, G2gError> {
+fn render_target(device: &ID3D11Device, size: (u32, u32)) -> Result<ID3D11Texture2D, G2gError> {
     // a video processor output view needs a render target
     create_texture(
         device,
-        input,
+        size,
         D3D11_USAGE_DEFAULT,
         D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE,
         0,
@@ -141,6 +143,7 @@ impl D3D11Convert {
             configured: false,
             out_domain: MemoryDomainKind::System,
             input: None,
+            output_size: None,
             output_colorimetry: Colorimetry::UNKNOWN,
             last_caps: None,
             gpu: None,
@@ -149,6 +152,7 @@ impl D3D11Convert {
 
     fn gpu_for(&mut self, device: ID3D11Device) -> Result<&mut ConvertGpu, G2gError> {
         let input = self.input.as_ref().ok_or(G2gError::NotConfigured)?;
+        let output_size = self.output_size.ok_or(G2gError::NotConfigured)?;
         if let Some(gpu) = self.gpu.take().filter(|gpu| gpu.device == device) {
             return Ok(self.gpu.insert(gpu));
         }
@@ -160,7 +164,8 @@ impl D3D11Convert {
             let _ = multithread.SetMultithreadProtected(true);
             context
         };
-        let processor = VideoProcessor::new(&device, &context, input.width, input.height)?;
+        let processor =
+            VideoProcessor::new(&device, &context, (input.width, input.height), output_size)?;
         let output_space = output_color_space(self.output_colorimetry)?;
         // SAFETY: the processor and its context come from `device`.
         unsafe {
@@ -192,28 +197,30 @@ impl D3D11Convert {
             return Err(G2gError::CapsMismatch);
         }
         let out_domain = self.out_domain;
+        let output_size = self.output_size.ok_or(G2gError::NotConfigured)?;
+        let (width, height) = output_size;
         let gpu = self.gpu_for(device)?;
         if out_domain == MemoryDomainKind::D3D11Texture {
             let converted = take_from_pool(&mut gpu.pool, || {
-                render_target(&gpu.device, &input).map(TextureOwner)
+                render_target(&gpu.device, output_size).map(TextureOwner)
             })?;
             gpu.processor
                 .blt(&source, texture.subresource, &converted.0)?;
             return Ok(texture_frame(
                 &gpu.device,
                 converted,
-                input.width,
-                input.height,
+                width,
+                height,
                 DXGI_FORMAT_NV12,
             ));
         }
         let (converted, staging) = match &gpu.readback {
             Some(readback) => readback.clone(),
             None => {
-                let converted = render_target(&gpu.device, &input)?;
+                let converted = render_target(&gpu.device, output_size)?;
                 let staging = create_texture(
                     &gpu.device,
-                    &input,
+                    output_size,
                     D3D11_USAGE_STAGING,
                     D3D11_BIND_FLAG(0),
                     D3D11_CPU_ACCESS_READ.0 as u32,
@@ -223,8 +230,8 @@ impl D3D11Convert {
         };
         gpu.processor
             .blt(&source, texture.subresource, &converted)?;
-        let width = input.width as usize;
-        let rows = input.height as usize * 3 / 2;
+        let width = width as usize;
+        let rows = height as usize * 3 / 2;
         let mut image = vec![0u8; width * rows];
         // SAFETY: the staging texture is mapped for reading between Map and Unmap, and each row read
         // stays inside RowPitch * rows bytes of the mapping, the luma rows followed by the chroma rows.
@@ -248,10 +255,11 @@ impl D3D11Convert {
 
     fn output_caps(&self) -> Result<Caps, G2gError> {
         let input = self.input.as_ref().ok_or(G2gError::NotConfigured)?;
+        let (width, height) = self.output_size.ok_or(G2gError::NotConfigured)?;
         Ok(Caps::RawVideo {
             format: RawVideoFormat::Nv12,
-            width: Dim::Fixed(input.width),
-            height: Dim::Fixed(input.height),
+            width: Dim::Fixed(width),
+            height: Dim::Fixed(height),
             framerate: input.framerate.clone(),
             interlace: Interlace::Progressive,
             colorimetry: Colorimetry {
@@ -287,7 +295,7 @@ impl AsyncElement for D3D11Convert {
         ElementMetadata::new(
             "Direct3D11 colour converter",
             "Filter/Converter/Video/Hardware",
-            "Converts a BGRA D3D11 texture to NV12 on the GPU through a D3D11 video processor",
+            "Converts a BGRA D3D11 texture to NV12 and resizes it on the GPU through a D3D11 video processor",
             crate::AARON_BOXER,
         )
     }
@@ -322,9 +330,10 @@ impl AsyncElement for D3D11Convert {
         CapsConstraint::DerivedFields(CapsTransform::RawVideo {
             accept: vec![RawVideoFormat::Bgra8],
             produce: vec![RawVideoFormat::Nv12],
-            shapes: vec![
-                RawVideoShape::PASSTHROUGH.with_format(FieldTransform::Fixed(RawVideoFormat::Nv12))
-            ],
+            shapes: input_size_or_any_size()
+                .into_iter()
+                .map(|shape| shape.with_format(FieldTransform::Fixed(RawVideoFormat::Nv12)))
+                .collect(),
         })
     }
 
@@ -363,17 +372,25 @@ impl AsyncElement for D3D11Convert {
     fn configure_output(&mut self, output_caps: &Caps) -> Result<(), G2gError> {
         let Caps::RawVideo {
             format: RawVideoFormat::Nv12,
+            width: Dim::Fixed(width),
+            height: Dim::Fixed(height),
             colorimetry,
             ..
         } = output_caps
         else {
             return Err(G2gError::CapsMismatch);
         };
+        // nv12 textures need even dimensions
+        if width % 2 != 0 || height % 2 != 0 {
+            return Err(G2gError::CapsMismatch);
+        }
         output_color_space(*colorimetry)?;
-        if *colorimetry != self.output_colorimetry {
+        let output_size = Some((*width, *height));
+        if *colorimetry != self.output_colorimetry || output_size != self.output_size {
             self.gpu = None;
         }
         self.output_colorimetry = *colorimetry;
+        self.output_size = output_size;
         Ok(())
     }
 
@@ -446,7 +463,6 @@ pub(crate) mod tests {
 
     const WIDTH: u32 = 64;
     const HEIGHT: u32 = 32;
-    const BAR_WIDTH: usize = 8;
     // white, yellow, cyan, green, magenta, red, blue, black as BGRA
     const BARS: [[u8; 4]; 8] = [
         [255, 255, 255, 255],
@@ -481,10 +497,55 @@ pub(crate) mod tests {
         device
     }
 
-    fn colour_bars() -> Vec<u8> {
-        (0..HEIGHT as usize * WIDTH as usize)
-            .flat_map(|pixel| BARS[(pixel % WIDTH as usize) / BAR_WIDTH])
+    fn colour_bars(width: u32, height: u32) -> Vec<u8> {
+        let bar_width = width as usize / BARS.len();
+        (0..height as usize * width as usize)
+            .flat_map(|pixel| BARS[(pixel % width as usize) / bar_width])
             .collect()
+    }
+
+    fn convert_bars(output_width: u32, output_height: u32) -> Option<Vec<u8>> {
+        let Some(device) = video_device() else {
+            std::eprintln!("skipped: no D3D11 device with video support");
+            return None;
+        };
+        let frame = bgra_frame(&device, &colour_bars(WIDTH, HEIGHT));
+        let input = Caps::RawVideo {
+            format: RawVideoFormat::Bgra8,
+            width: Dim::Fixed(WIDTH),
+            height: Dim::Fixed(HEIGHT),
+            framerate: Rate::Fixed(30 << 16),
+            interlace: Interlace::Progressive,
+            colorimetry: Colorimetry::SRGB,
+            pixel_aspect: PixelAspect::SQUARE,
+        };
+        let output = Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Fixed(output_width),
+            height: Dim::Fixed(output_height),
+            framerate: Rate::Any,
+            interlace: Interlace::Any,
+            colorimetry: Colorimetry::UNKNOWN,
+            pixel_aspect: PixelAspect::Any,
+        };
+        let mut convert = D3D11Convert::new();
+        convert.configure_pipeline(&input).expect("bgra input");
+        convert.configure_output(&output).expect("nv12 output");
+        let MemoryDomain::System(converted) = convert.convert(&frame).expect("convert") else {
+            panic!("system output was negotiated");
+        };
+        Some(converted.as_slice().to_vec())
+    }
+
+    fn cpu_nv12(width: u32, height: u32) -> Box<[u8]> {
+        crate::videoconvert::convert(
+            &colour_bars(width, height),
+            RawVideoFormat::Bgra8,
+            RawVideoFormat::Nv12,
+            width as usize,
+            height as usize,
+            Colorimetry::UNKNOWN,
+        )
     }
 
     fn bgra_frame(device: &ID3D11Device, pixels: &[u8]) -> OwnedD3D11Texture {
@@ -529,46 +590,39 @@ pub(crate) mod tests {
 
     #[test]
     fn gpu_conversion_matches_videoconvert() {
-        let Some(device) = video_device() else {
-            std::eprintln!("skipped: no D3D11 device with video support");
+        let Some(converted) = convert_bars(WIDTH, HEIGHT) else {
             return;
         };
-        let pixels = colour_bars();
-        let frame = bgra_frame(&device, &pixels);
-        let input = Caps::RawVideo {
-            format: RawVideoFormat::Bgra8,
-            width: Dim::Fixed(WIDTH),
-            height: Dim::Fixed(HEIGHT),
-            framerate: Rate::Fixed(30 << 16),
-            interlace: Interlace::Progressive,
-            colorimetry: Colorimetry::SRGB,
-            pixel_aspect: PixelAspect::SQUARE,
-        };
-        let mut convert = D3D11Convert::new();
-        convert.configure_pipeline(&input).expect("bgra input");
-        convert
-            .configure_output(&any_geometry(RawVideoFormat::Nv12))
-            .expect("nv12 output");
-        let MemoryDomain::System(converted) = convert.convert(&frame).expect("convert") else {
-            panic!("system output was negotiated");
-        };
-        let expected = crate::videoconvert::convert(
-            &pixels,
-            RawVideoFormat::Bgra8,
-            RawVideoFormat::Nv12,
-            WIDTH as usize,
-            HEIGHT as usize,
-            Colorimetry::UNKNOWN,
-        );
-        assert_eq!(converted.as_slice().len(), expected.len());
+        let expected = cpu_nv12(WIDTH, HEIGHT);
+        assert_eq!(converted.len(), expected.len());
         let worst = converted
-            .as_slice()
             .iter()
             .zip(expected.iter())
             .map(|(gpu, cpu)| gpu.abs_diff(*cpu))
             .max()
             .expect("non-empty frame");
         assert!(worst <= TOLERANCE, "largest sample difference {worst}");
+    }
+
+    #[test]
+    fn a_smaller_output_size_halves_every_bar() {
+        let (width, height) = (WIDTH / 2, HEIGHT / 2);
+        let Some(scaled) = convert_bars(width, height) else {
+            return;
+        };
+        let expected = cpu_nv12(width, height);
+        assert_eq!(scaled.len(), expected.len());
+        // the scaler filter blends neighbouring bars, so only the middle columns of each bar are exact
+        let bar_width = width as usize / BARS.len();
+        let worst = scaled[..(width * height) as usize]
+            .iter()
+            .zip(expected.iter())
+            .enumerate()
+            .filter(|(index, _)| (1..bar_width - 1).contains(&(index % bar_width)))
+            .map(|(_, (gpu, cpu))| gpu.abs_diff(*cpu))
+            .max()
+            .expect("middle columns");
+        assert!(worst <= TOLERANCE, "largest luma difference {worst}");
     }
 
     #[test]

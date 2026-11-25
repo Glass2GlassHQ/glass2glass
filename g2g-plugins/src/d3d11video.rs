@@ -38,8 +38,8 @@ impl VideoProcessor {
     pub(crate) fn new(
         device: &ID3D11Device,
         context: &ID3D11DeviceContext,
-        width: u32,
-        height: u32,
+        (input_width, input_height): (u32, u32),
+        (output_width, output_height): (u32, u32),
     ) -> Result<Self, G2gError> {
         // SAFETY: COM object creation, every object from `device`.
         unsafe {
@@ -52,11 +52,11 @@ impl VideoProcessor {
             let content = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
                 InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
                 InputFrameRate: rate,
-                InputWidth: width,
-                InputHeight: height,
+                InputWidth: input_width,
+                InputHeight: input_height,
                 OutputFrameRate: rate,
-                OutputWidth: width,
-                OutputHeight: height,
+                OutputWidth: output_width,
+                OutputHeight: output_height,
                 Usage: D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
             };
             let vp_enum = video_device

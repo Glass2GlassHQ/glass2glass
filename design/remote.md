@@ -86,7 +86,7 @@ LAN, and a host off the LAN needs a forwarded UDP port.
 | Wayland screen | `pipewirevideosrc` `portal=true`, `portal-restore-token`, `portal-timeout`, `portal-cursor-mode=metadata` for `cursor_shapes()`. `io-mode=dmabuf` or `mmap`. |
 | macOS screen | `screencapturesrc`. `cv-output` keeps the IOSurface. It captures the first display until `display-index` exists. |
 | Windows screen | `d3d11screencapturesrc`, `monitor-index`, `fps`, BGRA in system memory or a D3D11 texture. |
-| Windows GPU colour convert | `d3d11convert`, BGRA D3D11 texture to NV12 on the video processor. |
+| Windows GPU colour convert | `d3d11convert`, BGRA D3D11 texture to NV12 on the video processor, resized to the size a downstream caps filter sets. |
 | NVIDIA encode | `nvenc`. CUDA NV12, or a D3D11 NV12 texture on Windows, in, Annex-B out, no B-frames, `gop-size=-1` by default, `force_keyframe()` latched and set on the first frame. |
 | Upload into CUDA | `cudaupload`, Linux and Windows. `dmabuftocuda` takes RGBA dma-bufs of any modifier on Linux. |
 | VA-API encode | `ffmpegenc` backend `h264_vaapi` / `hevc_vaapi`. |

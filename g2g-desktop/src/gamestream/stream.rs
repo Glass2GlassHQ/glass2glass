@@ -115,7 +115,9 @@ fn encoder_launch(settings: &StreamSettings) -> String {
         VideoCodec::Hevc => "mfh265enc",
     };
     format!(
-        "{element} hardware=true bitrate={}",
+        "d3d11convert ! video/x-raw,width={},height={} ! {element} hardware=true bitrate={}",
+        settings.width,
+        settings.height,
         encoder_bitrate(settings)
     )
 }

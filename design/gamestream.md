@@ -27,8 +27,8 @@ that owns it.
 6. Video, audio and control are encrypted from the first slice that carries
    them, all under the `rikey` that `/launch` delivers: AES-GCM per video
    packet, AES-CBC per audio packet, AES-GCM per control message.
-7. The stream has the size the client asks for. Linux scales with `cudascale`
-   before `nvenc`, Windows with `width` and `height` on `d3d11convert`.
+7. The stream has the size the client asks for, set by a caps filter after
+   `cudascale` on Linux and after `d3d11convert` on Windows.
 8. H.264 and HEVC come from `nvenc` on Linux and `mfh264enc`/`mfh265enc` on
    Windows. The software and VA-API encoders refuse `--protocol gamestream`.
 9. A PIN reaches the host on a localhost-only `POST /submit-pin`, and
@@ -53,10 +53,10 @@ pulsesrc device=@DEFAULT_MONITOR@ ! audioconvert ! opusenc frame-size=5 bitrate-
 ```
 
 Windows replaces the video front with
-`d3d11screencapturesrc ! d3d11convert width=W height=H ! mfh265enc` and the
-audio source with `wasapisrc loopback=true`. The session builds both graphs
-after RTSP `ANNOUNCE`, which carries the codec, size, frame rate, bitrate and
-packet size.
+`d3d11screencapturesrc ! d3d11convert ! video/x-raw,width=W,height=H ! mfh265enc`
+and the audio source with `wasapisrc loopback=true`. The session builds both
+graphs after RTSP `ANNOUNCE`, which carries the codec, size, frame rate,
+bitrate and packet size.
 
 ## Elements
 
@@ -74,7 +74,6 @@ In `g2g-plugins`, behind a `gamestream` feature unless noted.
   AES-CBC under an IV made from `key-id` plus the sequence number, and sends two
   parity packets after every four. Properties: `packet-duration`, `key`,
   `key-id`, `encrypt`.
-- `d3d11convert` gets `width` and `height`.
 - `opusenc` gets `bitrate-type` with gst's values `cbr`, `vbr` and
   `constrained-vbr`.
 
@@ -110,7 +109,8 @@ In `g2g-desktop`, module `gamestream`.
 
 ## Order
 
-1. The `d3d11convert` size, and video from the portal and `--run` captures. `--protocol gamestream` takes only `--x11-display` today.
+1. Video from the portal and `--run` captures. `--protocol gamestream` takes
+   only `--x11-display` today.
 2. Audio: `moonlightaudiopay` and CBR Opus in 5 ms frames.
 3. Input: keyboard through the virtual-key table, mouse and scroll.
 4. The Windows host.
