@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::io;
 
+use g2g_plugins::opusdec::ChannelMapping;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 const HEAD_LIMIT: usize = 16 * 1024;
@@ -24,7 +25,40 @@ const REFERENCE_INVALIDATION: &str = "a=x-nv-video[0].refPicInvalidation:1\r\n";
 const REFERENCE_INVALIDATION: &str = "";
 const BITSTREAM_FORMAT_H264: u32 = 0;
 const BITSTREAM_FORMAT_HEVC: u32 = 1;
-const STEREO_CHANNELS: u32 = 2;
+// sunshine's opus bitrates for stereo, 5.1 and 7.1
+const AUDIO_BITRATES: [AudioBitrate; 3] = [
+    AudioBitrate {
+        channels: 2,
+        bits_per_second: 96_000,
+    },
+    AudioBitrate {
+        channels: 6,
+        bits_per_second: 256_000,
+    },
+    AudioBitrate {
+        channels: 8,
+        bits_per_second: 450_000,
+    },
+];
+
+#[derive(Debug, Clone, Copy)]
+struct AudioBitrate {
+    channels: u8,
+    bits_per_second: u32,
+}
+
+// moonlight reads channels, streams, coupled streams and the mapping as one digit each, with lfe moved last
+fn surround_params(channels: u8) -> String {
+    let opus = ChannelMapping::default_for(channels).expect("opus maps up to eight channels");
+    let mut mapping = opus.table;
+    mapping[3..].rotate_left(1);
+    let digits: String = [channels, opus.streams, opus.coupled_streams]
+        .into_iter()
+        .chain(mapping)
+        .map(|digit| char::from(b'0' + digit))
+        .collect();
+    format!("a=fmtp:97 surround-params={digits}\r\n")
+}
 
 #[derive(Debug)]
 pub(crate) struct RtspRequest {
@@ -136,6 +170,11 @@ impl RtspReply {
     }
 
     pub(crate) fn description() -> Self {
+        let surround: String = AUDIO_BITRATES
+            .iter()
+            .filter(|bitrate| bitrate.channels > 2)
+            .map(|bitrate| surround_params(bitrate.channels))
+            .collect();
         // moonlight sends touch and pen events only to hosts that set this sunshine feature flag
         const PEN_TOUCH_EVENTS: u32 = 0x01;
         let supported = ENCRYPT_CONTROL | ENCRYPT_VIDEO | ENCRYPT_AUDIO;
@@ -146,6 +185,7 @@ impl RtspReply {
                  a=x-ss-general.encryptionSupported:{supported}\r\n\
                  a=x-ss-general.encryptionRequested:{requested}\r\n\
                  {REFERENCE_INVALIDATION}\
+                 {surround}\
                  {HEVC_MARKER}\r\n"
             ),
             ..Self::ok()
@@ -201,6 +241,8 @@ pub(crate) struct StreamSettings {
     pub(crate) encrypt_video: bool,
     pub(crate) audio_packet_duration_ms: u32,
     pub(crate) encrypt_audio: bool,
+    pub(crate) audio_channels: u8,
+    pub(crate) audio_bits_per_second: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,7 +264,7 @@ impl std::fmt::Display for AnnounceError {
             Self::UnsupportedChannels(channels) => {
                 write!(
                     f,
-                    "ANNOUNCE asks for {channels} audio channels, and the host sends stereo"
+                    "ANNOUNCE asks for {channels} audio channels, and the host sends stereo, 5.1 or 7.1"
                 )
             }
         }
@@ -249,10 +291,11 @@ pub(crate) fn parse_announce(body: &[u8]) -> Result<StreamSettings, AnnounceErro
         BITSTREAM_FORMAT_HEVC => VideoCodec::Hevc,
         other => return Err(AnnounceError::UnsupportedCodec(other)),
     };
-    match number("x-nv-audio.surround.numChannels")? {
-        STEREO_CHANNELS => {}
-        channels => return Err(AnnounceError::UnsupportedChannels(channels)),
-    }
+    let channels = number("x-nv-audio.surround.numChannels")?;
+    let audio = AUDIO_BITRATES
+        .into_iter()
+        .find(|bitrate| u32::from(bitrate.channels) == channels)
+        .ok_or(AnnounceError::UnsupportedChannels(channels))?;
     let encryption = match attributes.get("x-ss-general.encryptionEnabled") {
         Some(flags) => flags
             .parse::<u32>()
@@ -271,6 +314,8 @@ pub(crate) fn parse_announce(body: &[u8]) -> Result<StreamSettings, AnnounceErro
         encrypt_video: encryption & ENCRYPT_VIDEO != 0,
         audio_packet_duration_ms: number("x-nv-aqos.packetDuration")?,
         encrypt_audio: encryption & ENCRYPT_AUDIO != 0,
+        audio_channels: audio.channels,
+        audio_bits_per_second: audio.bits_per_second,
     })
 }
 
@@ -311,6 +356,16 @@ mod tests {
         assert!(body.contains("a=x-ss-general.featureFlags:1\r\n"), "{body}");
     }
 
+    #[test]
+    fn the_description_gives_moonlight_the_5_1_layout_opusenc_encodes() {
+        let body = RtspReply::description().body;
+        // the layout sunshine sends for 5.1, which libopus mapping family 1 produces too
+        assert!(
+            body.contains("a=fmtp:97 surround-params=642014235\r\n"),
+            "{body}"
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn the_description_offers_reference_invalidation_on_linux() {
@@ -349,16 +404,23 @@ mod tests {
                 encrypt_video: true,
                 audio_packet_duration_ms: 5,
                 encrypt_audio: true,
+                audio_channels: 2,
+                audio_bits_per_second: 96_000,
             })
         );
         assert_eq!(
             parse_announce(b"a=x-nv-vqos[0].bitStreamFormat:2\r\n"),
             Err(AnnounceError::UnsupportedCodec(2))
         );
-        let surround = sdp.replace("numChannels:2", "numChannels:6");
+        let surround = parse_announce(sdp.replace("numChannels:2", "numChannels:6").as_bytes());
         assert_eq!(
-            parse_announce(surround.as_bytes()),
-            Err(AnnounceError::UnsupportedChannels(6))
+            surround.map(|settings| (settings.audio_channels, settings.audio_bits_per_second)),
+            Ok((6, 256_000))
+        );
+        let quadraphonic = sdp.replace("numChannels:2", "numChannels:4");
+        assert_eq!(
+            parse_announce(quadraphonic.as_bytes()),
+            Err(AnnounceError::UnsupportedChannels(4))
         );
     }
 }

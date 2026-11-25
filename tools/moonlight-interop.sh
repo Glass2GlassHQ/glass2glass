@@ -15,7 +15,8 @@
 #   flatpak install --user flathub com.moonlight_stream.Moonlight
 #
 # Usage: tools/moonlight-interop.sh <g2g-desktop binary built with --features gamestream>
-# Logs go to $OUT, default ~/tmp/moonlight-interop. CODEC picks H.264 (default) or HEVC.
+# Logs go to $OUT, default ~/tmp/moonlight-interop. CODEC picks H.264 (default) or HEVC, and
+# AUDIO picks stereo (default), 5.1-surround or 7.1-surround.
 # LOSS_PERCENT drops that share of the host's video packets once pairing is done. The script then
 # runs in a network namespace of its own, and with HEVC checks that Moonlight recovered by
 # reference invalidation.
@@ -35,6 +36,7 @@ OUT=${OUT:-$HOME/tmp/moonlight-interop}
 PIN=4721
 PASTED_TEXT='Hi!'
 CODEC=${CODEC:-H.264}
+AUDIO=${AUDIO:-stereo}
 STREAM_SECONDS=${STREAM_SECONDS:-8}
 LAUNCHED_APP=Sleeper
 STREAMED_APP=Desktop
@@ -109,7 +111,7 @@ if [ -n "${LOSS_PERCENT:-}" ]; then
     tc filter add dev lo parent 1:0 protocol ip u32 match ip sport "$VIDEO_PORT" 0xffff flowid 1:3
 fi
 
-moonlight stream 127.0.0.1 "$STREAMED_APP" --720 --fps 30 --video-codec "$CODEC" \
+moonlight stream 127.0.0.1 "$STREAMED_APP" --720 --fps 30 --video-codec "$CODEC" --audio-config "$AUDIO" \
     --video-decoder software --display-mode windowed --no-quit-after >"$OUT/stream.log" 2>&1 &
 STREAM=$!
 # a fresh moonlight config spends about 40 seconds checking for gamepad mappings before it launches
@@ -183,4 +185,5 @@ if [ -n "${LOSS_PERCENT:-}" ] && [ "$CODEC" = HEVC ] && ! {
     echo "moonlight-interop: Moonlight did not invalidate references after a loss, see $OUT/stream.log" >&2
     exit 1
 fi
-echo "moonlight-interop: Moonlight decoded $CODEC at $decoded fps and decrypted the audio"
+channels=$(sed -n 's/.*Audio stream has \([0-9]*\) channels.*/\1/p' "$OUT/stream.log" | head -1)
+echo "moonlight-interop: Moonlight decoded $CODEC at $decoded fps and decrypted $channels audio channels"

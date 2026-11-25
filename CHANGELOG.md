@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2592: The Moonlight host streams 5.1 and 7.1 audio, and `opusenc` encodes up to eight channels.
 - M2591: The headless Moonlight host lists each `--app TITLE=COMMAND` and runs it on launch.
 - M2590: The Moonlight host invalidates lost reference frames instead of sending an IDR, through `nvenc`.
 - M2589: The Moonlight host injects touch and pen input.

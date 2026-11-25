@@ -99,15 +99,15 @@ const DEFAULT_PLC_CHUNK_SAMPLES: u64 = (OPUS_RATE_HZ as u64 * 20) / 1000;
 const MAPPING_FAMILY_OFFSET: usize = OPUS_HEAD_FIXED - 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ChannelMapping {
-    streams: u8,
-    coupled_streams: u8,
-    table: Vec<u8>,
-    layout: ChannelLayout,
+pub struct ChannelMapping {
+    pub streams: u8,
+    pub coupled_streams: u8,
+    pub table: Vec<u8>,
+    pub layout: ChannelLayout,
 }
 
 impl ChannelMapping {
-    fn default_for(channels: u8) -> Option<Self> {
+    pub fn default_for(channels: u8) -> Option<Self> {
         let family = if channels <= 2 {
             MAPPING_FAMILY_RTP
         } else {
@@ -156,7 +156,7 @@ impl ChannelMapping {
         })
     }
 
-    fn channels(&self) -> u8 {
+    pub fn channels(&self) -> u8 {
         self.table.len() as u8
     }
 }

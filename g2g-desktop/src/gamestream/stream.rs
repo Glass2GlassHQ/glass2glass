@@ -32,7 +32,6 @@ pub(crate) const AUDIO_PORT: u16 = 48000;
 const LEGACY_PING: &[u8] = b"PING";
 const FEC_PERCENTAGE: u32 = 20;
 // moonlight decodes stereo Opus at this rate, the one moonshine sends
-const AUDIO_BITRATE: u32 = 96_000;
 
 #[derive(Clone, Copy)]
 pub(crate) struct SessionKey {
@@ -266,9 +265,11 @@ async fn send_audio(
     let encoder = parse_chain(
         &registry,
         &format!(
-            "audioconvert ! opusenc frame-size={} bitrate={AUDIO_BITRATE} bitrate-type=cbr \
-             audio-type=restricted-lowdelay",
-            settings.audio_packet_duration_ms
+            "audioconvert ! audio/x-raw,channels={} ! opusenc frame-size={} bitrate={} \
+             bitrate-type=cbr audio-type=restricted-lowdelay",
+            settings.audio_channels,
+            settings.audio_packet_duration_ms,
+            settings.audio_bits_per_second
         ),
     )
     .map_err(StreamError::Audio)?;

@@ -187,13 +187,19 @@ const OUTPUT_CAPS: Caps = Caps::ByteStream {
     encoding: ByteStreamEncoding::Datagram,
 };
 
-fn input_caps() -> Caps {
-    Caps::Audio {
-        format: AudioFormat::Opus,
-        channels: 2,
-        sample_rate: OPUS_RATE_HZ,
-        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-    }
+// moonlight plays stereo, 5.1 and 7.1
+const MOONLIGHT_CHANNEL_COUNTS: [u8; 3] = [2, 6, 8];
+
+fn input_caps() -> Vec<Caps> {
+    MOONLIGHT_CHANNEL_COUNTS
+        .into_iter()
+        .map(|channels| Caps::Audio {
+            format: AudioFormat::Opus,
+            channels,
+            sample_rate: OPUS_RATE_HZ,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+        })
+        .collect()
 }
 
 #[derive(Debug)]
@@ -317,12 +323,15 @@ impl AsyncElement for MoonlightAudioPay {
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        upstream_caps.intersect(&input_caps())
+        input_caps()
+            .iter()
+            .find_map(|accepted| upstream_caps.intersect(accepted).ok())
+            .ok_or(G2gError::CapsMismatch)
     }
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::Mapping(Vec::from([(
-            CapsSet::one(input_caps()),
+            CapsSet::from_alternatives(input_caps()),
             CapsSet::one(OUTPUT_CAPS),
         )]))
     }
@@ -365,7 +374,7 @@ impl AsyncElement for MoonlightAudioPay {
 impl PadTemplates for MoonlightAudioPay {
     fn pad_templates() -> Vec<PadTemplate> {
         Vec::from([
-            PadTemplate::sink(CapsSet::one(input_caps())),
+            PadTemplate::sink(CapsSet::from_alternatives(input_caps())),
             PadTemplate::source(CapsSet::one(OUTPUT_CAPS)),
         ])
     }

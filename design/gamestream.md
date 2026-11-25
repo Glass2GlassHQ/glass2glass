@@ -5,7 +5,7 @@ clients pair with and stream from, the way they use Sunshine. Discovery,
 pairing, the app list with launched `--app` commands, encrypted H.264 or HEVC video from an X display, the
 desktop portal, a `--run` headless display or the Windows desktop, at the size
 the client asks for,
-encrypted stereo Opus audio from the default output, and keyboard, mouse,
+encrypted stereo, 5.1 or 7.1 Opus audio from the default output, and keyboard, mouse,
 scroll, text, touch and pen input, and reference invalidation on Linux run
 today. Nothing else in this file is built unless it names an element that
 already exists. When a slice ships, delete it
@@ -58,7 +58,7 @@ video UDP 47998, control UDP 47999, audio UDP 48000.
 
 ```
 ximagesrc ! video/x-raw,framerate=F ! videoconvert ! cudaupload ! cudascale ! video/x-raw,width=W,height=H ! nvenc ! moonlightvideopay ! udpsink
-pulsesrc device=@DEFAULT_MONITOR@ ! audioconvert ! opusenc frame-size=5 bitrate-type=cbr audio-type=restricted-lowdelay ! moonlightaudiopay ! udpsink
+pulsesrc device=@DEFAULT_MONITOR@ ! audioconvert ! audio/x-raw,channels=C ! opusenc frame-size=5 bitrate-type=cbr audio-type=restricted-lowdelay ! moonlightaudiopay ! udpsink
 ```
 
 The portal capture replaces `ximagesrc` and its caps filter with
@@ -132,9 +132,14 @@ In `g2g-desktop`, module `gamestream`.
   video and audio ports each take the address of the first `PING` from the
   client that launched the session. A failed audio graph is logged and video
   keeps streaming.
-- `ANNOUNCE` sets the audio packet duration (5 or 10 ms) and the audio
-  encryption bit, and a request for more than two channels is refused. Opus
-  runs at 96 kbit/s CBR.
+- `ANNOUNCE` sets the audio packet duration (5 or 10 ms), the audio
+  encryption bit and the channel count. Opus runs CBR at Sunshine's rates:
+  96 kbit/s for stereo, 256 kbit/s for 5.1 and 450 kbit/s for 7.1. `opusenc`
+  encodes 5.1 and 7.1 as mapping family 1 from the ffmpeg channel order, which
+  is the order Moonlight plays and the order `pulsesrc` captures in.
+  `DESCRIBE` lists that layout as the one `surround-params` per channel count,
+  so Moonlight never asks for its high-quality surround mode, which needs a
+  second layout.
 - Control: ENet with AES-GCM on every message. An IDR request (0x0302) and a
   reference invalidation (0x0301, the first and last lost frame numbers) go to
   `moonlightvideopay`. Input (0x0206) becomes an `Event` for the injector of
@@ -165,7 +170,10 @@ Gamepad, HDR and surround.
   host, each side with a fresh config directory: it pairs with `--pin`, enters
   the PIN through `g2g-desktop pin`, lists the apps, streams the Xvfb display
   for 8 seconds and checks that Moonlight's video stats report decoded frames
-  and that its audio stream received packets and decrypted every one. Moonlight
+  and that its audio stream received packets and decrypted every one.
+  `AUDIO=5.1-surround` and `AUDIO=7.1-surround` stream surround. A test in
+  `g2g-plugins` encodes a front-center tone through `opusenc` and checks that
+  `opusdec` puts it back on front center. Moonlight
   runs with SDL's dummy audio driver, so nothing plays aloud.
   `CODEC=HEVC` picks the codec. With `CAPTURE=run` the headless display runs
   `tools/moonlight-input-probe.py`, xdotool clicks and types into Moonlight's

@@ -14,7 +14,8 @@
 //! (default 20 ms = 960 samples/channel at 48 kHz). At EOS a partial tail is
 //! zero-padded to one full frame so no audio is lost.
 //!
-//! Scope (v1): 48 kHz mono/stereo S16LE. 48 kHz because Opus always *decodes* at
+//! Scope: 48 kHz, one to eight channels. Three to eight channels encode as
+//! mapping family 1 from the ffmpeg default channel order. 48 kHz because Opus always *decodes* at
 //! 48 kHz ([`crate::opusparse::OPUS_RATE_HZ`]), so the whole pipeline stays at
 //! that rate without a resample; other input rates need an upstream
 //! `AudioResample`. Bitrate, frame size, complexity, audio type and the in-band FEC pair
@@ -39,11 +40,11 @@ use core::ptr::NonNull;
 
 use opusic_sys as ffi;
 
+use crate::opusdec::ChannelMapping;
 use crate::opusparse::OPUS_RATE_HZ;
 
-/// Maximum Opus packet size for a 60 ms stereo frame; the libopus-recommended
-/// output scratch (`1275 * 3 + 7`).
-const MAX_PACKET: usize = 4_000;
+// libopus's recommended output size for one stream of a 60 ms frame
+const MAX_STREAM_PACKET: usize = 1275 * 3 + 7;
 
 /// Highest accepted value of the `complexity` property (libopus' maximum).
 const MAX_COMPLEXITY: u8 = 10;
@@ -224,21 +225,25 @@ impl OpusAudioType {
 }
 
 struct Encoder {
-    state: NonNull<ffi::OpusEncoder>,
+    state: NonNull<ffi::OpusMSEncoder>,
     channels: usize,
+    streams: usize,
 }
 
 // SAFETY: libopus encoder state has no thread affinity and is only reached through the element.
 unsafe impl Send for Encoder {}
 
 impl Encoder {
-    fn new(channels: u8, application: c_int) -> Result<Self, G2gError> {
+    fn new(mapping: &ChannelMapping, application: c_int) -> Result<Self, G2gError> {
         let mut error = 0;
-        // SAFETY: `error` is a valid out-pointer.
+        // SAFETY: `mapping.table` holds one entry per channel and `error` is a valid out-pointer.
         let state = unsafe {
-            ffi::opus_encoder_create(
+            ffi::opus_multistream_encoder_create(
                 OPUS_RATE_HZ as i32,
-                c_int::from(channels),
+                c_int::from(mapping.channels()),
+                c_int::from(mapping.streams),
+                c_int::from(mapping.coupled_streams),
+                mapping.table.as_ptr(),
                 application,
                 &mut error,
             )
@@ -246,15 +251,21 @@ impl Encoder {
         match NonNull::new(state) {
             Some(state) if error == ffi::OPUS_OK => Ok(Self {
                 state,
-                channels: usize::from(channels),
+                channels: usize::from(mapping.channels()),
+                streams: usize::from(mapping.streams),
             }),
             _ => Err(G2gError::CapsMismatch),
         }
     }
 
+    fn max_packet(&self) -> usize {
+        MAX_STREAM_PACKET * self.streams
+    }
+
     fn set(&mut self, request: c_int, value: i32) -> Result<(), G2gError> {
         // SAFETY: every SET request sent here takes one opus_int32 argument.
-        let status = unsafe { ffi::opus_encoder_ctl(self.state.as_ptr(), request, value) };
+        let status =
+            unsafe { ffi::opus_multistream_encoder_ctl(self.state.as_ptr(), request, value) };
         match status {
             ffi::OPUS_OK => Ok(()),
             _ => Err(G2gError::CapsMismatch),
@@ -264,8 +275,9 @@ impl Encoder {
     fn get(&self, request: c_int) -> Result<i32, G2gError> {
         let mut value: i32 = 0;
         // SAFETY: every GET request sent here writes one opus_int32 through the pointer.
-        let status =
-            unsafe { ffi::opus_encoder_ctl(self.state.as_ptr(), request, &mut value as *mut i32) };
+        let status = unsafe {
+            ffi::opus_multistream_encoder_ctl(self.state.as_ptr(), request, &mut value as *mut i32)
+        };
         match status {
             ffi::OPUS_OK => Ok(value),
             _ => Err(G2gError::CapsMismatch),
@@ -278,7 +290,7 @@ impl Encoder {
         let capacity = i32::try_from(out.len()).map_err(|_| G2gError::CapsMismatch)?;
         // SAFETY: `pcm` holds `frame_size` samples per channel and `out` is `capacity` bytes.
         let written = unsafe {
-            ffi::opus_encode(
+            ffi::opus_multistream_encode(
                 self.state.as_ptr(),
                 pcm.as_ptr(),
                 frame_size,
@@ -295,7 +307,7 @@ impl Encoder {
         let capacity = i32::try_from(out.len()).map_err(|_| G2gError::CapsMismatch)?;
         // SAFETY: `pcm` holds `frame_size` samples per channel and `out` is `capacity` bytes.
         let written = unsafe {
-            ffi::opus_encode_float(
+            ffi::opus_multistream_encode_float(
                 self.state.as_ptr(),
                 pcm.as_ptr(),
                 frame_size,
@@ -309,8 +321,8 @@ impl Encoder {
 
 impl Drop for Encoder {
     fn drop(&mut self) {
-        // SAFETY: the pointer came from `opus_encoder_create`, destroyed once here.
-        unsafe { ffi::opus_encoder_destroy(self.state.as_ptr()) }
+        // SAFETY: the pointer came from `opus_multistream_encoder_create`, destroyed once here.
+        unsafe { ffi::opus_multistream_encoder_destroy(self.state.as_ptr()) }
     }
 }
 
@@ -327,6 +339,7 @@ impl Drop for Encoder {
 /// ```
 pub struct OpusEnc {
     channels: u8,
+    channel_layout: g2g_core::ChannelLayout,
     // `None` lets libopus pick the bitrate
     bitrate: Option<i32>,
     /// Duration of the frames fed to libopus: it sets the accumulation size, the
@@ -391,13 +404,14 @@ impl Default for OpusEnc {
     }
 }
 
-// the single-stream libopus encoder takes mono or stereo
-const ENCODABLE_CHANNELS: [u8; 2] = [1, 2];
+// opus mapping families 0 and 1 cover one to eight channels
+const ENCODABLE_CHANNELS: core::ops::RangeInclusive<u8> = 1..=8;
 
 impl OpusEnc {
     pub fn new() -> Self {
         Self {
             channels: 0,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             bitrate: None,
             frame_size: OpusFrameSize::default(),
             complexity: DEFAULT_COMPLEXITY,
@@ -522,7 +536,7 @@ impl OpusEnc {
         [AudioFormat::PcmS16Le, AudioFormat::PcmF32Le]
             .into_iter()
             .flat_map(|format| {
-                ENCODABLE_CHANNELS.map(|channels| Caps::Audio {
+                ENCODABLE_CHANNELS.map(move |channels| Caps::Audio {
                     format,
                     channels,
                     sample_rate: OPUS_RATE_HZ,
@@ -532,19 +546,20 @@ impl OpusEnc {
             .collect()
     }
 
-    /// Whether `caps` is an encodable PCM shape: `(float input, channels)`.
-    fn pcm_shape(caps: &Caps) -> Option<(bool, u8)> {
-        match caps {
-            Caps::Audio {
-                format: format @ (AudioFormat::PcmS16Le | AudioFormat::PcmF32Le),
-                channels,
-                sample_rate,
-                ..
-            } if ENCODABLE_CHANNELS.contains(channels) && *sample_rate == OPUS_RATE_HZ => {
-                Some((*format == AudioFormat::PcmF32Le, *channels))
-            }
-            _ => None,
-        }
+    /// Whether `caps` is an encodable PCM shape: `(float input, channel mapping)`.
+    fn pcm_shape(caps: &Caps) -> Option<(bool, ChannelMapping)> {
+        let Caps::Audio {
+            format: format @ (AudioFormat::PcmS16Le | AudioFormat::PcmF32Le),
+            channels,
+            sample_rate: OPUS_RATE_HZ,
+            channel_layout,
+        } = caps
+        else {
+            return None;
+        };
+        let mapping = ChannelMapping::default_for(*channels)?;
+        let layout_matches = channel_layout.is_unspecified() || *channel_layout == mapping.layout;
+        layout_matches.then_some((*format == AudioFormat::PcmF32Le, mapping))
     }
 
     fn output_caps(&self) -> Caps {
@@ -552,7 +567,7 @@ impl OpusEnc {
             format: AudioFormat::Opus,
             channels: self.channels,
             sample_rate: OPUS_RATE_HZ,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+            channel_layout: self.channel_layout,
         }
     }
 
@@ -566,7 +581,7 @@ impl OpusEnc {
     /// the TOC of the packet carries whatever `frame_size` selected.
     fn encode_frame(&mut self, frame: &[i16]) -> Result<Vec<u8>, G2gError> {
         let enc = self.enc.as_mut().ok_or(G2gError::NotConfigured)?;
-        let mut out = alloc::vec![0u8; MAX_PACKET];
+        let mut out = alloc::vec![0u8; enc.max_packet()];
         let len = enc
             .encode(frame, &mut out)
             .map_err(|_| G2gError::CapsMismatch)?;
@@ -578,7 +593,7 @@ impl OpusEnc {
     /// `opus_encode_float`).
     fn encode_frame_f32(&mut self, frame: &[f32]) -> Result<Vec<u8>, G2gError> {
         let enc = self.enc.as_mut().ok_or(G2gError::NotConfigured)?;
-        let mut out = alloc::vec![0u8; MAX_PACKET];
+        let mut out = alloc::vec![0u8; enc.max_packet()];
         let len = enc
             .encode_float(frame, &mut out)
             .map_err(|_| G2gError::CapsMismatch)?;
@@ -699,20 +714,20 @@ impl AsyncElement for OpusEnc {
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match Self::pcm_shape(input) {
-            Some((_, channels)) => CapsSet::one(Caps::Audio {
+            Some((_, mapping)) => CapsSet::one(Caps::Audio {
                 format: AudioFormat::Opus,
-                channels,
+                channels: mapping.channels(),
                 sample_rate: OPUS_RATE_HZ,
-                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+                channel_layout: mapping.layout,
             }),
             None => CapsSet::from_alternatives(Vec::new()),
         }))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let (in_f32, channels) = Self::pcm_shape(absolute_caps).ok_or(G2gError::CapsMismatch)?;
+        let (in_f32, mapping) = Self::pcm_shape(absolute_caps).ok_or(G2gError::CapsMismatch)?;
         self.in_f32 = in_f32;
-        let mut enc = Encoder::new(channels, self.audio_type.application())?;
+        let mut enc = Encoder::new(&mapping, self.audio_type.application())?;
         enc.set(
             ffi::OPUS_SET_BITRATE_REQUEST,
             self.bitrate.unwrap_or(ffi::OPUS_AUTO),
@@ -725,7 +740,8 @@ impl AsyncElement for OpusEnc {
             i32::from(self.packet_loss_perc),
         )?;
         self.enc = Some(enc);
-        self.channels = channels;
+        self.channels = mapping.channels();
+        self.channel_layout = mapping.layout;
         self.buf.clear();
         self.buf_f32.clear();
         self.configured = true;

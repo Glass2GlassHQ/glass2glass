@@ -14,6 +14,7 @@ use g2g_core::{
     PipelinePacket,
 };
 use g2g_plugins::opusdec::OpusDec;
+use g2g_plugins::opusenc::OpusEnc;
 use g2g_plugins::opusparse::OPUS_RATE_HZ;
 use opusic_sys as ffi;
 
@@ -32,6 +33,16 @@ const MAX_PACKET_LEN: usize = 4000;
 const TONE_PERIOD_SAMPLES: f32 = 100.0;
 const TONE_AMPLITUDE: f32 = 12_000.0;
 
+fn center_tone(frame: usize, center: usize) -> Vec<i16> {
+    let mut pcm = vec![0i16; FRAME_SAMPLES * CHANNELS];
+    for i in 0..FRAME_SAMPLES {
+        let t = (frame * FRAME_SAMPLES + i) as f32;
+        pcm[i * CHANNELS + center] =
+            ((t * core::f32::consts::TAU / TONE_PERIOD_SAMPLES).sin() * TONE_AMPLITUDE) as i16;
+    }
+    pcm
+}
+
 fn encode_center_tone() -> Vec<Vec<u8>> {
     let mut error = 0;
     // SAFETY: the mapping has one entry per input channel and `error` is valid.
@@ -49,12 +60,7 @@ fn encode_center_tone() -> Vec<Vec<u8>> {
     assert!(!encoder.is_null() && error == ffi::OPUS_OK);
     let mut packets = Vec::new();
     for frame in 0..FRAMES {
-        let mut pcm = vec![0i16; FRAME_SAMPLES * CHANNELS];
-        for i in 0..FRAME_SAMPLES {
-            let t = (frame * FRAME_SAMPLES + i) as f32;
-            pcm[i * CHANNELS + VORBIS_CENTER] =
-                ((t * core::f32::consts::TAU / TONE_PERIOD_SAMPLES).sin() * TONE_AMPLITUDE) as i16;
-        }
+        let pcm = center_tone(frame, VORBIS_CENTER);
         let mut packet = vec![0u8; MAX_PACKET_LEN];
         // SAFETY: `pcm` holds one frame per channel, `packet` holds `MAX_PACKET_LEN` bytes.
         let len = unsafe {
@@ -99,7 +105,7 @@ fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
     ))
 }
 
-fn decode(head: Option<Vec<u8>>) -> (Vec<Caps>, Vec<i16>) {
+fn decode(packets: Vec<Vec<u8>>) -> (Vec<Caps>, Vec<i16>) {
     let mut decoder = OpusDec::new();
     decoder
         .configure_pipeline(&Caps::Audio {
@@ -113,9 +119,8 @@ fn decode(head: Option<Vec<u8>>) -> (Vec<Caps>, Vec<i16>) {
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
-    let packets = head
+    let packets = packets
         .into_iter()
-        .chain(encode_center_tone())
         .enumerate()
         .map(|(index, data)| frame(data, index as u64 * FRAME_NS));
     for packet in packets {
@@ -150,8 +155,8 @@ fn channel_energy(samples: &[i16], channel: usize) -> f64 {
         .sum()
 }
 
-fn assert_center_lands_on_front_center(head: Option<Vec<u8>>) {
-    let (caps, samples) = decode(head);
+fn assert_center_lands_on_front_center(packets: Vec<Vec<u8>>) {
+    let (caps, samples) = decode(packets);
     assert_eq!(
         caps,
         vec![Caps::Audio {
@@ -173,10 +178,55 @@ fn assert_center_lands_on_front_center(head: Option<Vec<u8>>) {
 
 #[test]
 fn an_opus_head_mapping_decodes_5_1_in_layout_order() {
-    assert_center_lands_on_front_center(Some(opus_head()));
+    let packets = std::iter::once(opus_head()).chain(encode_center_tone());
+    assert_center_lands_on_front_center(packets.collect());
 }
 
 #[test]
 fn a_headerless_stream_decodes_with_the_default_mapping() {
-    assert_center_lands_on_front_center(None);
+    assert_center_lands_on_front_center(encode_center_tone());
+}
+
+#[test]
+fn opusenc_encodes_5_1_from_layout_order() {
+    let mut encoder = OpusEnc::new();
+    encoder
+        .configure_pipeline(&Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: CHANNELS as u8,
+            sample_rate: OPUS_RATE_HZ,
+            channel_layout: ChannelLayout::UNSPECIFIED,
+        })
+        .unwrap();
+    let mut sink = CollectSink::default();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    for index in 0..FRAMES {
+        let pcm: Vec<u8> = center_tone(index, SURROUND_5_1_CENTER)
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect();
+        rt.block_on(encoder.process(frame(pcm, index as u64 * FRAME_NS), &mut sink))
+            .unwrap();
+    }
+    let mut packets = Vec::new();
+    for packet in sink.packets {
+        match packet {
+            PipelinePacket::CapsChanged(caps) => assert_eq!(
+                caps,
+                Caps::Audio {
+                    format: AudioFormat::Opus,
+                    channels: CHANNELS as u8,
+                    sample_rate: OPUS_RATE_HZ,
+                    channel_layout: ChannelLayout::SURROUND_5_1,
+                }
+            ),
+            PipelinePacket::DataFrame(f) => {
+                packets.push(f.domain.require_system_slice("test").unwrap().to_vec())
+            }
+            _ => {}
+        }
+    }
+    assert_center_lands_on_front_center(packets);
 }
