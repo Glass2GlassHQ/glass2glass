@@ -59,7 +59,6 @@ pub struct ClientSettings {
     pub inputs: bool,
     pub audio: bool,
     pub transport: ClientTransport,
-    #[cfg(target_os = "linux")]
     pub keyboard_grab: bool,
 }
 
@@ -246,16 +245,10 @@ struct ClipboardSync {
     local_copies: mpsc::UnboundedReceiver<String>,
 }
 
-#[cfg(target_os = "linux")]
 fn grab_keyboard(sink: WgpuPresentSink, settings: &ClientSettings) -> WgpuPresentSink {
     if settings.inputs && settings.keyboard_grab {
         return sink.with_keyboard_grab();
     }
-    sink
-}
-
-#[cfg(not(target_os = "linux"))]
-fn grab_keyboard(sink: WgpuPresentSink, _settings: &ClientSettings) -> WgpuPresentSink {
     sink
 }
 

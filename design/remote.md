@@ -273,7 +273,7 @@ stay shared and are tested without a desktop.
 | Edge | Capture | Inject |
 | :--- | :--- | :--- |
 | Linux | the client window's keyboard and pointer, with the desktop's shortcuts inhibited while grabbed | `/dev/uinput`, which Fedora creates as root-only `0600`, so the host needs a udev rule that gives the `input` group write access. |
-| Windows | the client window's key and mouse messages, plus Raw Input for grab | `SendInput` in the interactive session. The service injects when the interactive process cannot, which is the secure desktop. |
+| Windows | the client window's key and mouse messages, plus a low-level keyboard hook while grabbed | `SendInput` in the interactive session. The service injects when the interactive process cannot, which is the secure desktop. |
 | macOS | the client window | `CGEvent`, which needs the accessibility permission. Screen recording stays the permission `screencapturesrc` already needs. |
 
 Relative move is `EV_REL` on Linux and `MOUSEEVENTF_MOVE` on Windows. On the
@@ -305,7 +305,11 @@ Windows asks for the cursor again only on the next pointer move. Grab is pointer
 and a window grab on the native client. On Linux the window holds a
 `zwp_keyboard_shortcuts_inhibitor_v1` while it has keyboard focus, so Super and
 Alt+Tab reach the host, and a click takes the grab again after Escape. A
-compositor without the protocol still gets the Escape and click handling. Escape releases the grab locally and is not
+compositor without the protocol still gets the Escape and click handling. On Windows
+the window installs a `WH_KEYBOARD_LL` hook while it has focus, which takes
+every key before the shell does while the window is in front, so the Windows
+key and Alt+Tab reach the host. Injected keys pass the hook, so a host on the
+same machine does not loop back. Ctrl+Alt+Del stays local on both. Escape releases the grab locally and is not
 forwarded.
 
 Clipboard: each side watches its clipboard and sends type 9, UTF-8 text with

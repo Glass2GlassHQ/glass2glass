@@ -143,7 +143,7 @@ pub struct WgpuPresentSink {
     cursor_shapes: Option<CursorShapes>,
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     clipboard: Option<ClipboardLink>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     keyboard_grab: bool,
     latency: Arc<LatencyHistogram>,
     /// Why the worker could not bring its window up, sent once by the worker and
@@ -205,7 +205,7 @@ impl WgpuPresentSink {
             cursor_shapes: None,
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             clipboard: None,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             keyboard_grab: false,
             latency: Arc::new(LatencyHistogram::new()),
             startup_error: None,
@@ -245,7 +245,7 @@ impl WgpuPresentSink {
     }
 
     // the desktop's shortcuts reach input_events while the window is focused, Escape releases them and a click takes them again
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub fn with_keyboard_grab(mut self) -> Self {
         self.keyboard_grab = true;
         self
@@ -396,7 +396,7 @@ impl WgpuPresentSink {
             #[cfg(target_os = "linux")]
             app_id: self.app_id.clone(),
             fullscreen: self.fullscreen,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             keyboard_grab: self.keyboard_grab,
             log_tag: short_type_name::<Self>(),
         };

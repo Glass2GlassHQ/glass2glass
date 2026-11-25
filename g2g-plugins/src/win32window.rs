@@ -378,6 +378,153 @@ impl WindowClipboard {
 }
 
 #[cfg(feature = "wgpu-present")]
+#[derive(Debug)]
+struct HookedKeys {
+    window: HWND,
+    // the host repeats a held key itself
+    held: alloc::collections::BTreeSet<u32>,
+}
+
+#[cfg(feature = "wgpu-present")]
+std::thread_local! {
+    // win32 calls a low-level keyboard hook on the thread that installed it, the present worker
+    static HOOKED_KEYS: core::cell::RefCell<Option<HookedKeys>> =
+        const { core::cell::RefCell::new(None) };
+}
+
+#[cfg(feature = "wgpu-present")]
+fn grab_hooked_key(key: &windows::Win32::UI::WindowsAndMessaging::KBDLLHOOKSTRUCT) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, LLKHF_EXTENDED, LLKHF_INJECTED, LLKHF_UP,
+    };
+    // keys SendInput injects, such as a host on this machine, keep their usual path
+    if key.flags.contains(LLKHF_INJECTED) {
+        return false;
+    }
+    HOOKED_KEYS.with_borrow_mut(|hooked| {
+        let Some(hooked) = hooked else {
+            return false;
+        };
+        // SAFETY: a plain query.
+        if unsafe { GetForegroundWindow() } != hooked.window {
+            return false;
+        }
+        let down = !key.flags.contains(LLKHF_UP);
+        let scancode = windows_scancode(key.scanCode, key.flags.contains(LLKHF_EXTENDED));
+        let first_press = !down || hooked.held.insert(scancode);
+        if !down {
+            hooked.held.remove(&scancode);
+        }
+        if first_press {
+            let input = WindowInput::Key { scancode, down };
+            WINDOW_MESSAGES.with_borrow_mut(|messages| messages.push(WindowMessage::Input(input)));
+        }
+        true
+    })
+}
+
+#[cfg(feature = "wgpu-present")]
+unsafe extern "system" fn keyboard_hook(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    use windows::Win32::UI::WindowsAndMessaging::{CallNextHookEx, HC_ACTION, KBDLLHOOKSTRUCT};
+    if code == HC_ACTION as i32 {
+        // SAFETY: win32 passes a KBDLLHOOKSTRUCT with HC_ACTION.
+        let key = unsafe { &*(lp.0 as *const KBDLLHOOKSTRUCT) };
+        if grab_hooked_key(key) {
+            // win32 drops a key whose hook returns nonzero
+            return LRESULT(1);
+        }
+    }
+    // SAFETY: forwarded unchanged to the next hook.
+    unsafe { CallNextHookEx(None, code, wp, lp) }
+}
+
+#[cfg(feature = "wgpu-present")]
+#[derive(Debug)]
+struct KeyboardHook(windows::Win32::UI::WindowsAndMessaging::HHOOK);
+
+#[cfg(feature = "wgpu-present")]
+impl KeyboardHook {
+    fn install(hwnd: HWND) -> windows::core::Result<Self> {
+        use windows::Win32::UI::WindowsAndMessaging::{SetWindowsHookExW, WH_KEYBOARD_LL};
+        // SAFETY: a null module name is this executable.
+        let module = unsafe { GetModuleHandleW(None)? };
+        // SAFETY: `keyboard_hook` matches HOOKPROC, and Drop removes the hook.
+        let hook = unsafe {
+            SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), Some(module.into()), 0)?
+        };
+        HOOKED_KEYS.set(Some(HookedKeys {
+            window: hwnd,
+            held: alloc::collections::BTreeSet::new(),
+        }));
+        Ok(Self(hook))
+    }
+}
+
+#[cfg(feature = "wgpu-present")]
+impl Drop for KeyboardHook {
+    fn drop(&mut self) {
+        HOOKED_KEYS.set(None);
+        // SAFETY: the hook came from SetWindowsHookExW and nothing else removes it.
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx(self.0);
+        }
+    }
+}
+
+#[cfg(feature = "wgpu-present")]
+#[derive(Debug, Default)]
+struct KeyboardGrab {
+    hook: Option<KeyboardHook>,
+    // the Escape that released the grab, whose release must not reach the input either
+    escape_held: bool,
+}
+
+#[cfg(feature = "wgpu-present")]
+impl KeyboardGrab {
+    fn take(&mut self, hwnd: HWND, log_tag: &'static str) {
+        if self.hook.is_some() {
+            return;
+        }
+        match KeyboardHook::install(hwnd) {
+            Ok(hook) => self.hook = Some(hook),
+            Err(e) => g2g_core::g2g_warn!(
+                g2g_core::log::Target::category(log_tag),
+                "cannot hook the keyboard for the grab: {e}"
+            ),
+        }
+    }
+
+    fn forwards(&mut self, message: &WindowMessage, hwnd: HWND, log_tag: &'static str) -> bool {
+        let WindowMessage::Input(input) = message else {
+            return true;
+        };
+        match *input {
+            WindowInput::Focus(true) | WindowInput::Button { down: true, .. } => {
+                self.take(hwnd, log_tag);
+            }
+            WindowInput::Focus(false) => self.hook = None,
+            WindowInput::Key {
+                scancode: ESCAPE_SCANCODE,
+                down: true,
+            } if self.hook.is_some() => {
+                self.hook = None;
+                self.escape_held = true;
+                return false;
+            }
+            WindowInput::Key {
+                scancode: ESCAPE_SCANCODE,
+                down: false,
+            } if self.escape_held => {
+                self.escape_held = false;
+                return false;
+            }
+            _ => {}
+        }
+        true
+    }
+}
+
+#[cfg(feature = "wgpu-present")]
 fn low_word(value: usize) -> i32 {
     i32::from(value as u16 as i16)
 }
@@ -385,6 +532,20 @@ fn low_word(value: usize) -> i32 {
 #[cfg(feature = "wgpu-present")]
 fn high_word(value: usize) -> i32 {
     low_word(value >> 16)
+}
+
+// the windows scancode set marks an extended key with an E0 prefix byte
+#[cfg(feature = "wgpu-present")]
+const EXTENDED_PREFIX: u32 = 0xE000;
+#[cfg(feature = "wgpu-present")]
+const SCANCODE_MASK: u32 = 0xFF;
+#[cfg(feature = "wgpu-present")]
+const ESCAPE_SCANCODE: u32 = 0x01;
+
+#[cfg(feature = "wgpu-present")]
+fn windows_scancode(scancode: u32, extended: bool) -> u32 {
+    let prefix = if extended { EXTENDED_PREFIX } else { 0 };
+    prefix | (scancode & SCANCODE_MASK)
 }
 
 #[cfg(feature = "wgpu-present")]
@@ -395,9 +556,6 @@ fn window_message(msg: u32, wp: WPARAM, lp: LPARAM) -> Option<WindowMessage> {
         WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_SYSKEYDOWN, WM_SYSKEYUP,
         WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1,
     };
-    // the windows scancode set marks an extended key with an E0 prefix byte
-    const EXTENDED_PREFIX: u32 = 0xE000;
-    const SCANCODE_MASK: u32 = 0xFF;
     let button = |button, down| Some(WindowMessage::Input(WindowInput::Button { button, down }));
     match msg {
         WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP => {
@@ -407,12 +565,7 @@ fn window_message(msg: u32, wp: WPARAM, lp: LPARAM) -> Option<WindowMessage> {
             if down && key_flags & KF_REPEAT != 0 {
                 return None;
             }
-            let prefix = if key_flags & KF_EXTENDED != 0 {
-                EXTENDED_PREFIX
-            } else {
-                0
-            };
-            let scancode = prefix | (key_flags & SCANCODE_MASK);
+            let scancode = windows_scancode(key_flags, key_flags & KF_EXTENDED != 0);
             Some(WindowMessage::Input(WindowInput::Key { scancode, down }))
         }
         WM_MOUSEMOVE => Some(WindowMessage::PointerAt {
@@ -622,6 +775,7 @@ fn present_loop<R: WindowRenderer>(
         .clipboard
         .map(|link| WindowClipboard::listen(hwnd, link))
         .transpose()?;
+    let mut keyboard_grab = params.keyboard_grab.then(KeyboardGrab::default);
     loop {
         if let Some(shapes) = &mut cursor_shapes {
             match shapes.has_changed() {
@@ -637,7 +791,10 @@ fn present_loop<R: WindowRenderer>(
             channels.window_closed.store(true, Ordering::Release);
             return Ok(());
         }
-        let messages = WINDOW_MESSAGES.with_borrow_mut(core::mem::take);
+        let mut messages = WINDOW_MESSAGES.with_borrow_mut(core::mem::take);
+        if let Some(grab) = &mut keyboard_grab {
+            messages.retain(|message| grab.forwards(message, hwnd, params.log_tag));
+        }
         if let Some(clipboard) = &mut clipboard {
             messages.iter().for_each(|message| clipboard.note(message));
             clipboard.sync(hwnd, params.log_tag);

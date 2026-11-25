@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2601: The Windows remote desktop client grabs the keyboard.
 - M2600: X11 apps on the `--run` desktop can copy after a remote clipboard arrives.
 - M2599: The Windows remote desktop client syncs the clipboard.
 - M2598: The Windows remote desktop client shows the host's cursor.

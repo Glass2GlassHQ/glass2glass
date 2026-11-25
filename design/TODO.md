@@ -36,7 +36,6 @@ The plan is [remote.md](remote.md).
   falling back to `mfh264enc`, and rebuild the host graph after `AccessLost`.
 - The macOS client, then `display-index` on `screencapturesrc` and a macOS
   host through `vtencode`.
-- Keyboard grab on the Windows client.
 - Pin `g2g-wayland-display` back to upstream smithay once it flushes in
   `X11Wm::new_selection`, and drop the `boxerab/smithay` fork.
 - Route the remote desktop host's gamepad events to `UinputGamepads` and
