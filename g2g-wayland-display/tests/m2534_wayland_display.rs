@@ -993,13 +993,7 @@ fn run_x11_copier(display: String, text: &'static str) {
     }
 }
 
-fn x11_clipboard_text(display: String) -> String {
-    let (connection, screen_number) = x11rb::connect(Some(&display)).expect("connects to Xwayland");
-    let clipboard = intern(&connection, "CLIPBOARD");
-    let utf8_string = intern(&connection, "UTF8_STRING");
-    let pasted = intern(&connection, "G2G_PASTED");
-    let window = map_menu_window(&connection, screen_number, EventMask::NO_EVENT);
-    // the window manager takes the clipboard once the display offers the remote text
+fn wait_for_clipboard_owner(connection: &RustConnection, clipboard: Atom) {
     while connection
         .get_selection_owner(clipboard)
         .expect("sends the request")
@@ -1010,6 +1004,16 @@ fn x11_clipboard_text(display: String) -> String {
     {
         std::thread::sleep(SELECTION_POLL_INTERVAL);
     }
+}
+
+fn x11_clipboard_text(display: String) -> String {
+    let (connection, screen_number) = x11rb::connect(Some(&display)).expect("connects to Xwayland");
+    let clipboard = intern(&connection, "CLIPBOARD");
+    let utf8_string = intern(&connection, "UTF8_STRING");
+    let pasted = intern(&connection, "G2G_PASTED");
+    let window = map_menu_window(&connection, screen_number, EventMask::NO_EVENT);
+    // the window manager takes the clipboard once the display offers the remote text
+    wait_for_clipboard_owner(&connection, clipboard);
     connection
         .convert_selection(window, clipboard, utf8_string, pasted, x11rb::CURRENT_TIME)
         .expect("asks for the clipboard");
@@ -1060,4 +1064,32 @@ async fn a_remote_clipboard_reaches_x11_apps() {
     .expect("the X11 app reads the clipboard in time")
     .expect("the X11 app's thread finishes");
     assert_eq!(pasted, REMOTE_CLIPBOARD_TEXT);
+}
+
+const XWAYLAND_STARTUP_SETTLE: std::time::Duration = std::time::Duration::from_secs(1);
+
+#[tokio::test]
+async fn an_x11_copy_after_a_remote_clipboard_is_published() {
+    let display = start_xwayland_display().await;
+    // Xwayland's startup traffic sends the window manager's queued requests, which hides a missing flush
+    tokio::time::sleep(XWAYLAND_STARTUP_SETTLE).await;
+    display
+        .set_clipboard(String::from(REMOTE_CLIPBOARD_TEXT))
+        .expect("the display takes the clipboard");
+    let x11_display = x11_display_name(&display);
+    let owner_display = x11_display.clone();
+    // smithay's X11Wm::new_selection has to flush for this claim to reach Xwayland
+    tokio::time::timeout(
+        TIMEOUT,
+        tokio::task::spawn_blocking(move || {
+            let (connection, _) =
+                x11rb::connect(Some(&owner_display)).expect("connects to Xwayland");
+            wait_for_clipboard_owner(&connection, intern(&connection, "CLIPBOARD"));
+        }),
+    )
+    .await
+    .expect("the window manager takes the clipboard with no other X11 traffic")
+    .expect("the X11 app's thread finishes");
+    std::thread::spawn(move || run_x11_copier(x11_display, X11_CLIPBOARD_TEXT));
+    wait_for_clipboard(&display, X11_CLIPBOARD_TEXT).await;
 }
