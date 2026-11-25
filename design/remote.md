@@ -269,7 +269,9 @@ stay shared and are tested without a desktop.
 | Windows | the client window's key and mouse messages, plus Raw Input for grab | `SendInput` in the interactive session. The service injects when the interactive process cannot, which is the secure desktop. |
 | macOS | the client window | `CGEvent`, which needs the accessibility permission. Screen recording stays the permission `screencapturesrc` already needs. |
 
-Relative move is `EV_REL` on Linux and `MOUSEEVENTF_MOVE` on Windows.
+Relative move is `EV_REL` on Linux and `MOUSEEVENTF_MOVE` on Windows. On the
+`--run` display it moves the compositor's pointer from its last position and
+stops at the screen edge.
 Absolute position is the virtual desktop: `x` and `y` in pixels of
 `display`, origin at that display's top left. The host maps `display` through
 the same index the capture source uses.

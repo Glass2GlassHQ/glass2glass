@@ -6,10 +6,11 @@
 # Pair the Moonlight flatpak with `g2g-desktop host --protocol gamestream`, list its apps and
 # stream the desktop for a few seconds. Moonlight runs on its own Xvfb display, which the host
 # also captures, or with CAPTURE=run the host captures its own headless display, so nothing
-# opens on the desktop. CAPTURE=portal captures the desktop session through the ScreenCast
+# opens on the desktop. CAPTURE=run also types and clicks into Moonlight's window and checks
+# that tools/moonlight-input-probe.py on the headless display received them. CAPTURE=portal captures the desktop session through the ScreenCast
 # portal, whose share dialog a user approves on the desktop.
 #
-# Prerequisites: Xvfb, glxgears for CAPTURE=run, and Moonlight from Flathub:
+# Prerequisites: Xvfb, xdotool and Python GTK 4 for CAPTURE=run, and Moonlight from Flathub:
 #   flatpak install --user flathub com.moonlight_stream.Moonlight
 #
 # Usage: tools/moonlight-interop.sh <g2g-desktop binary built with --features gamestream>
@@ -17,6 +18,7 @@
 set -euo pipefail
 
 BIN=$1
+TOOLS=$(cd "$(dirname "$0")" && pwd)
 OUT=${OUT:-$HOME/tmp/moonlight-interop}
 PIN=4721
 CODEC=${CODEC:-H.264}
@@ -48,7 +50,7 @@ run)
     for node in /dev/dri/renderD*; do
         [ "$(basename "$(readlink -f "/sys/class/drm/${node##*/}/device/driver")")" = nvidia ] && break
     done
-    capture=(--run glxgears --render-node "$node")
+    capture=(--run "python3 $TOOLS/moonlight-input-probe.py $OUT/input.log" --render-node "$node")
     ;;
 portal) capture=() ;;
 esac
@@ -93,6 +95,13 @@ for _ in $(seq 240); do
 done
 grep -q 'Launch response' "$OUT/stream.log"
 sleep "$STREAM_SECONDS"
+if [ "${CAPTURE:-x11}" = run ]; then
+    window=$(xdotool search --sync --onlyvisible --classname moonlight | tail -1)
+    xdotool windowfocus --sync "$window"
+    # moonlight keeps the first click, which captures the mouse
+    xdotool mousemove --window "$window" 300 200 click 1 sleep 1 click 1 sleep 1 key a
+    sleep 1
+fi
 # moonlight writes its streaming log only once the session ends, so the host ends it
 moonlight quit 127.0.0.1 >"$OUT/quit.log" 2>&1 &
 QUIT=$!
@@ -118,6 +127,10 @@ fi
 if ! grep -q 'Received first audio packet' "$OUT/stream.log" ||
     grep -q 'Failed to decrypt audio packet' "$OUT/stream.log"; then
     echo "moonlight-interop: Moonlight did not decrypt the audio, see $OUT/stream.log" >&2
+    exit 1
+fi
+if [ "${CAPTURE:-x11}" = run ] && ! { grep -qx 'key a' "$OUT/input.log" && grep -qx 'button 1' "$OUT/input.log"; }; then
+    echo "moonlight-interop: the headless display did not get Moonlight's input, see $OUT/input.log" >&2
     exit 1
 fi
 echo "moonlight-interop: Moonlight decoded $CODEC at $decoded fps and decrypted the audio"

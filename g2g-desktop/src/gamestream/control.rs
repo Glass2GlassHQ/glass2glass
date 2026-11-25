@@ -9,11 +9,14 @@ use std::time::Duration;
 
 use g2g_core::log::Target;
 use ring::aead::{Aad, LessSafeKey, Nonce, Tag, UnboundKey, AES_128_GCM};
-use tokio::sync::Notify;
+use tokio::sync::{mpsc, watch, Notify};
 use tokio::time::Instant;
 use tokio_enet::{Event, Host, HostConfig, Packet, PacketMode, PeerId};
 
+use super::input::input_event;
 use super::LOG_CATEGORY;
+use crate::injection::ScreenSize;
+use crate::packet::{self, RemovableDevice};
 
 pub(crate) const CONTROL_PORT: u16 = 47999;
 // moonlight opens this many ENet channels
@@ -22,6 +25,7 @@ const MESSAGE_ENCRYPTED: u16 = 0x0001;
 const MESSAGE_TERMINATION: u16 = 0x0109;
 const MESSAGE_START_B: u16 = 0x0307;
 const MESSAGE_REQUEST_IDR: u16 = 0x0302;
+const MESSAGE_INPUT: u16 = 0x0206;
 // moonlight closes the stream without an error dialog for this reason
 const TERMINATION_GRACEFUL: u32 = 0x8003_0023;
 const SILENCE_LIMIT: Duration = Duration::from_secs(10);
@@ -115,7 +119,33 @@ impl ControlCipher {
     }
 }
 
-fn handle(cipher: &ControlCipher, message: &[u8], keyframe_requests: &AtomicBool) {
+#[derive(Debug)]
+pub(crate) struct InputRoute {
+    pub(crate) events: mpsc::UnboundedSender<packet::Event>,
+    pub(crate) sizes: watch::Receiver<Option<ScreenSize>>,
+}
+
+impl InputRoute {
+    fn route(&self, body: &[u8]) {
+        let log = Target::category(LOG_CATEGORY);
+        match input_event(body, *self.sizes.borrow()) {
+            // the injection task logs its own failure before it drops the receiver
+            Ok(event) => {
+                g2g_core::g2g_debug!(log, "input {event:?}");
+                drop(self.events.send(event));
+            }
+            Err(e) if e.is_malformed() => g2g_core::g2g_warn!(log, "dropped input: {e}"),
+            Err(e) => g2g_core::g2g_debug!(log, "dropped input: {e}"),
+        }
+    }
+}
+
+fn handle(
+    cipher: &ControlCipher,
+    message: &[u8],
+    keyframe_requests: &AtomicBool,
+    input: &InputRoute,
+) {
     let log = Target::category(LOG_CATEGORY);
     let opened = match message_type(message) {
         Some(MESSAGE_ENCRYPTED) => match cipher.open(message) {
@@ -136,6 +166,7 @@ fn handle(cipher: &ControlCipher, message: &[u8], keyframe_requests: &AtomicBool
             g2g_core::g2g_info!(log, "Moonlight asked for a keyframe");
             keyframe_requests.store(true, Ordering::Relaxed);
         }
+        Some(MESSAGE_INPUT) => input.route(&opened[HEADER_BYTES..]),
         Some(MESSAGE_START_B) => eprintln!("g2g-desktop host: Moonlight started the stream"),
         other => g2g_core::g2g_debug!(log, "control message {other:04x?}"),
     }
@@ -145,6 +176,7 @@ pub(crate) async fn run(
     mut host: Host,
     key: &[u8; 16],
     keyframe_requests: Arc<AtomicBool>,
+    input: InputRoute,
     stop: &Notify,
 ) -> Result<(), tokio_enet::Error> {
     let mut cipher = ControlCipher::new(key);
@@ -160,10 +192,13 @@ pub(crate) async fn run(
                 peer = Some(peer_id);
                 deadline = Instant::now() + SILENCE_LIMIT;
             }
-            Some(Event::Disconnect { .. }) => return Ok(()),
+            Some(Event::Disconnect { .. }) => {
+                peer = None;
+                break;
+            }
             Some(Event::Receive { packet, .. }) => {
                 deadline = Instant::now() + SILENCE_LIMIT;
-                handle(&cipher, packet.data(), &keyframe_requests);
+                handle(&cipher, packet.data(), &keyframe_requests, &input);
             }
             None if Instant::now() >= deadline => {
                 eprintln!(
@@ -175,6 +210,11 @@ pub(crate) async fn run(
             None => {}
         }
     }
+    // keys held when Moonlight leaves stay pressed on the host
+    drop(input.events.send(packet::Event::DeviceRemoved {
+        kind: RemovableDevice::Keyboard,
+        device: 0,
+    }));
     let Some(peer) = peer.and_then(|peer| host.peer_mut(peer)) else {
         return Ok(());
     };
@@ -189,12 +229,11 @@ mod tests {
 
     const KEY: [u8; 16] = [7; 16];
 
-    #[test]
-    fn a_client_idr_request_opens_and_raises_the_request() {
+    fn client_message(message_type: u16, body: &[u8]) -> Vec<u8> {
         let client = LessSafeKey::new(UnboundKey::new(&AES_128_GCM, &KEY).unwrap());
-        let mut plain = Vec::from(MESSAGE_REQUEST_IDR.to_le_bytes());
-        plain.extend_from_slice(&2u16.to_le_bytes());
-        plain.extend_from_slice(&[0, 0]);
+        let mut plain = Vec::from(message_type.to_le_bytes());
+        plain.extend_from_slice(&(body.len() as u16).to_le_bytes());
+        plain.extend_from_slice(body);
         let sequence = 5u32;
         let tag = client
             .seal_in_place_separate_tag(
@@ -209,10 +248,40 @@ mod tests {
         message.extend_from_slice(&sequence.to_le_bytes());
         message.extend_from_slice(tag.as_ref());
         message.extend_from_slice(&plain);
+        message
+    }
 
+    fn input_route() -> (InputRoute, mpsc::UnboundedReceiver<packet::Event>) {
+        let (events, received) = mpsc::unbounded_channel();
+        let (_, sizes) = watch::channel(None);
+        (InputRoute { events, sizes }, received)
+    }
+
+    #[test]
+    fn a_client_idr_request_opens_and_raises_the_request() {
         let requests = AtomicBool::new(false);
-        handle(&ControlCipher::new(&KEY), &message, &requests);
+        let (input, _) = input_route();
+        let message = client_message(MESSAGE_REQUEST_IDR, &[0, 0]);
+        handle(&ControlCipher::new(&KEY), &message, &requests, &input);
         assert!(requests.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_client_key_press_reaches_the_injector() {
+        // moonlight's input body: big-endian length, little-endian key down magic, flags, key code
+        let key_down = [0, 0, 0, 10, 3, 0, 0, 0, 0, b'A', 0x80, 0, 0, 0];
+        let (input, mut received) = input_route();
+        let message = client_message(MESSAGE_INPUT, &key_down);
+        handle(
+            &ControlCipher::new(&KEY),
+            &message,
+            &AtomicBool::new(false),
+            &input,
+        );
+        assert!(matches!(
+            received.try_recv(),
+            Ok(packet::Event::Key { down: true, .. })
+        ));
     }
 
     #[test]

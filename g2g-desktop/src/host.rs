@@ -183,8 +183,8 @@ fn screen_size(caps: &Caps) -> Result<ScreenSize, G2gError> {
 }
 
 #[derive(Debug)]
-struct CaptureSize {
-    sizes: watch::Sender<Option<ScreenSize>>,
+pub(crate) struct CaptureSize {
+    pub(crate) sizes: watch::Sender<Option<ScreenSize>>,
 }
 
 impl CaptureSize {

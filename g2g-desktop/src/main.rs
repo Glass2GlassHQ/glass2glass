@@ -27,6 +27,8 @@ use g2g_core::G2gError;
 #[cfg(target_os = "linux")]
 use g2g_core::PropValue;
 use g2g_desktop::client::{run_client, ClientError, ClientSettings, ClientTransport};
+#[cfg(feature = "gamestream")]
+use g2g_desktop::gamestream::ServedDesktop;
 use g2g_desktop::host::{
     check_token_len, inject, run_session, HostCapture, HostEncoder, HostListener, HostSettings,
 };
@@ -625,9 +627,15 @@ async fn gamestream_headless(headless: &HeadlessSettings) -> Result<(), Box<dyn 
         .await
         .map_err(|e| format!("starting the headless display: {e:?}"))?;
     let captured = display.clone();
-    let capture = Box::new(move |fps| gamestream_display_capture(&captured, fps));
+    let injected = display.clone();
+    let desktop = ServedDesktop {
+        capture: Box::new(move |fps| gamestream_display_capture(&captured, fps)),
+        open_injector: Box::new(move |screen| {
+            Ok(Box::new(WaylandDisplayInjector::new(screen, &injected)))
+        }),
+    };
     run_app_while_serving(&display, &headless.command, async {
-        Ok(g2g_desktop::gamestream::serve(capture).await?)
+        Ok(g2g_desktop::gamestream::serve(desktop).await?)
     })
     .await
 }
@@ -642,14 +650,25 @@ async fn gamestream_host(flags: &Flags) -> Result<(), Box<dyn Error>> {
     if let Some(headless) = headless_settings(flags)? {
         return gamestream_headless(&headless).await;
     }
-    let capture: g2g_desktop::gamestream::CaptureFactory = match flags.get("x11-display").cloned() {
-        Some(display) => Box::new(move |fps| gamestream_x11_capture(&display, fps)),
+    let desktop = match flags.get("x11-display").cloned() {
+        Some(display) => ServedDesktop {
+            capture: Box::new({
+                let display = display.clone();
+                move |fps| gamestream_x11_capture(&display, fps)
+            }),
+            open_injector: Box::new(move |screen| {
+                Ok(Box::new(XTestInjector::new(&display, screen)?))
+            }),
+        },
         None => {
             let token_path = portal_restore_token_path()?;
-            Box::new(move |fps| gamestream_portal_capture(fps, &token_path))
+            ServedDesktop {
+                capture: Box::new(move |fps| gamestream_portal_capture(fps, &token_path)),
+                open_injector: Box::new(|screen| Ok(Box::new(Injector::new(screen)?))),
+            }
         }
     };
-    Ok(g2g_desktop::gamestream::serve(capture).await?)
+    Ok(g2g_desktop::gamestream::serve(desktop).await?)
 }
 
 #[cfg(all(target_os = "windows", feature = "gamestream"))]
@@ -665,7 +684,13 @@ async fn gamestream_host(flags: &Flags) -> Result<(), Box<dyn Error>> {
     if let Some(flag) = flags.keys().find(|flag| flag.as_str() != "protocol") {
         return Err(format!("--protocol gamestream takes no --{flag}").into());
     }
-    Ok(g2g_desktop::gamestream::serve(Box::new(gamestream_capture)).await?)
+    let monitor =
+        monitor_bounds(PRIMARY_MONITOR).map_err(|e| format!("monitor {PRIMARY_MONITOR}: {e:?}"))?;
+    let desktop = ServedDesktop {
+        capture: Box::new(gamestream_capture),
+        open_injector: Box::new(move |screen| Ok(Box::new(Injector::new(screen, monitor)?))),
+    };
+    Ok(g2g_desktop::gamestream::serve(desktop).await?)
 }
 
 async fn host(flags: Flags) -> Result<(), Box<dyn Error>> {

@@ -5,6 +5,7 @@
 mod control;
 mod http;
 mod identity;
+mod input;
 mod pairing;
 mod rtsp;
 mod stream;
@@ -33,7 +34,7 @@ use http::{read_request, write_reply, Reply, Request};
 use identity::{HostIdentity, PairedClients};
 use pairing::Pairings;
 use rtsp::{RtspReply, RtspRequest, StreamSettings};
-pub use stream::CaptureFactory;
+pub use stream::{CaptureFactory, InjectorFactory, ServedDesktop};
 use stream::{AUDIO_PORT, VIDEO_PORT};
 
 pub const HTTP_PORT: u16 = 47989;
@@ -127,7 +128,7 @@ struct Host {
     identity: HostIdentity,
     paired: PairedClients,
     pairings: Pairings,
-    capture: CaptureFactory,
+    desktop: ServedDesktop,
     session: RefCell<Option<Session>>,
 }
 
@@ -150,13 +151,13 @@ struct Connection<'a> {
 }
 
 impl Host {
-    fn load(directory: &Path, capture: CaptureFactory) -> Result<Self, GamestreamError> {
+    fn load(directory: &Path, desktop: ServedDesktop) -> Result<Self, GamestreamError> {
         Ok(Self {
             name: gethostname::gethostname().to_string_lossy().into_owned(),
             identity: HostIdentity::load_or_create(directory)?,
             paired: PairedClients::load(directory)?,
             pairings: Pairings::default(),
-            capture,
+            desktop,
             session: RefCell::new(None),
         })
     }
@@ -358,7 +359,7 @@ impl Host {
         let stop = Rc::new(Notify::new());
         let session_stop = Rc::clone(&stop);
         let task = spawn_local(async move {
-            match stream::run(sockets, client, key, played, &session_stop, &host.capture).await {
+            match stream::run(sockets, client, key, played, &session_stop, &host.desktop).await {
                 Ok(()) => eprintln!("g2g-desktop host: Moonlight session ended"),
                 Err(e) => eprintln!("g2g-desktop host: Moonlight session failed: {e}"),
             }
@@ -512,18 +513,21 @@ fn advertise(name: &str) -> Result<ServiceDaemon, GamestreamError> {
     Ok(daemon)
 }
 
-fn log_failure(result: io::Result<()>) {
+fn log_failure(port: u16, result: io::Result<()>) {
     if let Err(e) = result {
-        g2g_core::g2g_warn!(Target::category(LOG_CATEGORY), "request failed: {e}");
+        g2g_core::g2g_warn!(
+            Target::category(LOG_CATEGORY),
+            "request on port {port} failed: {e}"
+        );
     }
 }
 
-pub async fn serve(capture: CaptureFactory) -> Result<(), GamestreamError> {
+pub async fn serve(desktop: ServedDesktop) -> Result<(), GamestreamError> {
     let directory = dirs::config_dir()
         .ok_or(GamestreamError::NoConfigDirectory)?
         .join("g2g-desktop")
         .join("gamestream");
-    let host = Rc::new(Host::load(&directory, capture)?);
+    let host = Rc::new(Host::load(&directory, desktop)?);
     let acceptor = TlsAcceptor::from(tls::server_config(&host.identity)?);
     let http = TcpListener::bind((Ipv4Addr::UNSPECIFIED, HTTP_PORT)).await?;
     let https = TcpListener::bind((Ipv4Addr::UNSPECIFIED, HTTPS_PORT)).await?;
@@ -538,17 +542,17 @@ pub async fn serve(capture: CaptureFactory) -> Result<(), GamestreamError> {
             accepted = http.accept() => {
                 let (stream, _) = accepted?;
                 let task = answer_http(Rc::clone(&host), stream);
-                spawn_local(async move { log_failure(task.await) });
+                spawn_local(async move { log_failure(HTTP_PORT, task.await) });
             }
             accepted = https.accept() => {
                 let (stream, _) = accepted?;
                 let task = answer_https(Rc::clone(&host), acceptor.clone(), stream);
-                spawn_local(async move { log_failure(task.await) });
+                spawn_local(async move { log_failure(HTTPS_PORT, task.await) });
             }
             accepted = rtsp.accept() => {
                 let (stream, _) = accepted?;
                 let task = answer_rtsp(Rc::clone(&host), stream);
-                spawn_local(async move { log_failure(task.await) });
+                spawn_local(async move { log_failure(RTSP_PORT, task.await) });
             }
         }
     }

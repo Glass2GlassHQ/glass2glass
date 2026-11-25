@@ -16,6 +16,7 @@ pub struct WaylandDisplayInjector {
     screen: ScreenSize,
     input: InputSender,
     display: WaylandDisplay,
+    pointer: (u32, u32),
 }
 
 impl WaylandDisplayInjector {
@@ -24,7 +25,19 @@ impl WaylandDisplayInjector {
             screen,
             input: display.input_sender(),
             display: display.clone(),
+            pointer: (0, 0),
         }
+    }
+}
+
+fn moved_pointer(pointer: (u32, u32), dx: i32, dy: i32, screen: ScreenSize) -> WindowInput {
+    // pointers stop at the screen edge
+    let step = |from: u32, delta: i32, extent: u16| {
+        (i64::from(from) + i64::from(delta)).clamp(0, i64::from(extent) - 1) as u32
+    };
+    WindowInput::Pointer {
+        x: step(pointer.0, dx, screen.width),
+        y: step(pointer.1, dy, screen.height),
     }
 }
 
@@ -68,7 +81,13 @@ impl InjectEvents for WaylandDisplayInjector {
                 .set_clipboard(text.clone())
                 .map_err(|_| display_gone());
         }
-        let input = window_input(event, self.screen)?;
+        let input = match *event {
+            Event::Move { dx, dy } => moved_pointer(self.pointer, dx, dy, self.screen),
+            _ => window_input(event, self.screen)?,
+        };
+        if let WindowInput::Pointer { x, y } = input {
+            self.pointer = (x, y);
+        }
         self.input.send(input).map_err(|_| display_gone())
     }
 }
@@ -141,5 +160,20 @@ mod tests {
             ),
             Err(InjectError::OutsideScreen { .. })
         ));
+    }
+
+    #[test]
+    fn relative_motion_moves_the_pointer_within_the_screen() {
+        assert_eq!(
+            moved_pointer((10, 20), 5, -3, SCREEN),
+            WindowInput::Pointer { x: 15, y: 17 }
+        );
+        assert_eq!(
+            moved_pointer((10, 20), -50, 1000, SCREEN),
+            WindowInput::Pointer {
+                x: 0,
+                y: u32::from(SCREEN.height) - 1
+            }
+        );
     }
 }

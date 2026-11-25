@@ -70,6 +70,12 @@ pub trait InjectEvents {
     fn inject(&mut self, event: &Event) -> Result<(), InjectError>;
 }
 
+impl<I: InjectEvents + ?Sized> InjectEvents for Box<I> {
+    fn inject(&mut self, event: &Event) -> Result<(), InjectError> {
+        (**self).inject(event)
+    }
+}
+
 pub fn check_position(x: i32, y: i32, display: u8, screen: ScreenSize) -> Result<(), InjectError> {
     if display != 0 {
         return Err(InjectError::UnknownDisplay(display));

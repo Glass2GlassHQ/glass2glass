@@ -17,12 +17,13 @@ use g2g_plugins::moonlight::videopay::MoonlightVideoPay;
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::udpsink::UdpSink;
 use tokio::net::UdpSocket;
-use tokio::sync::{oneshot, Notify};
+use tokio::sync::{mpsc, oneshot, watch, Notify};
 
-use super::control;
+use super::control::{self, InputRoute};
 use super::rtsp::StreamSettings;
 use crate::audio::CAPTURE as AUDIO_CAPTURE;
-use crate::host::LINK_CAPACITY;
+use crate::host::{inject, CaptureSize, LINK_CAPACITY};
+use crate::injection::{InjectError, InjectEvents, ScreenSize};
 use crate::lineargraph::linear_graph;
 
 pub(crate) const VIDEO_PORT: u16 = 47998;
@@ -48,6 +49,18 @@ impl fmt::Debug for SessionKey {
 }
 
 pub type CaptureFactory = Box<dyn Fn(u32) -> Result<Vec<GraphNode>, String>>;
+pub type InjectorFactory = Box<dyn Fn(ScreenSize) -> Result<Box<dyn InjectEvents>, InjectError>>;
+
+pub struct ServedDesktop {
+    pub capture: CaptureFactory,
+    pub open_injector: InjectorFactory,
+}
+
+impl fmt::Debug for ServedDesktop {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ServedDesktop").finish_non_exhaustive()
+    }
+}
 
 #[derive(Debug)]
 pub(crate) enum StreamError {
@@ -176,6 +189,7 @@ async fn send_video(
     client: SocketAddr,
     capture: &CaptureFactory,
     pay: MoonlightVideoPay,
+    sizes: watch::Sender<Option<ScreenSize>>,
 ) -> Result<(), StreamError> {
     let mut nodes = capture(settings.frames_per_second)
         .map_err(StreamError::Capture)?
@@ -188,6 +202,7 @@ async fn send_video(
     sink.set_property("bind-port", PropValue::Uint(u64::from(VIDEO_PORT)))
         .map_err(|_| StreamError::Property("bind-port"))?;
     let transforms = nodes
+        .chain([GraphNodeRef::element(CaptureSize { sizes })])
         .chain(encoder.into_iter().map(GraphNodeRef::Element))
         .chain([GraphNodeRef::element(pay)]);
     let graph = registry.splice_domain_converters(linear_graph(
@@ -273,7 +288,7 @@ pub(crate) async fn run(
     key: SessionKey,
     play: oneshot::Receiver<StreamSettings>,
     stop: &Notify,
-    capture: &CaptureFactory,
+    desktop: &ServedDesktop,
 ) -> Result<(), StreamError> {
     let SessionSockets {
         control,
@@ -286,6 +301,12 @@ pub(crate) async fn run(
     };
     let pay = payloader(&settings, &key.key)?;
     let keyframe_requests = pay.keyframe_requests();
+    let (events, event_receiver) = mpsc::unbounded_channel();
+    let (sizes, size_receiver) = watch::channel(None);
+    let input = InputRoute {
+        events,
+        sizes: size_receiver.clone(),
+    };
     let audio = async {
         let sent = match wait_for_ping(&audio_socket, client).await {
             Ok(destination) => {
@@ -307,17 +328,33 @@ pub(crate) async fn run(
         // udpsink binds the video port itself
         drop(video_socket);
         tokio::select! {
-            sent = send_video(&settings, destination, capture, pay) => sent,
+            sent = send_video(&settings, destination, &desktop.capture, pay, sizes) => sent,
             () = audio => unreachable!("the audio future never completes"),
         }
     });
-    let mut control = pin!(control::run(control, &key.key, keyframe_requests, stop));
-    tokio::select! {
-        sent = video => {
-            stop.notify_one();
-            control.await.map_err(StreamError::Control)?;
-            sent
+    let mut control = pin!(control::run(
+        control,
+        &key.key,
+        keyframe_requests,
+        input,
+        stop
+    ));
+    let session = async {
+        tokio::select! {
+            sent = video => {
+                stop.notify_one();
+                control.await.map_err(StreamError::Control)?;
+                sent
+            }
+            controlled = &mut control => controlled.map_err(StreamError::Control),
         }
-        controlled = &mut control => controlled.map_err(StreamError::Control),
+    };
+    let (ended, injected) = tokio::join!(
+        session,
+        inject(event_receiver, size_receiver, &desktop.open_injector)
+    );
+    if let Err(e) = injected {
+        eprintln!("g2g-desktop host: Moonlight input stopped: {e}");
     }
+    ended
 }

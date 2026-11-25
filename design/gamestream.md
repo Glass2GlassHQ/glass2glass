@@ -4,7 +4,8 @@ Plan for `g2g-desktop host --protocol gamestream`, a host that stock Moonlight
 clients pair with and stream from, the way they use Sunshine. Discovery,
 pairing, the app list, encrypted H.264 or HEVC video from an X display, the
 desktop portal or a `--run` headless display, at the size the client asks for,
-and encrypted stereo Opus audio from the default output run today. Nothing else in this file is built unless it names an element that
+encrypted stereo Opus audio from the default output, and keyboard, mouse and
+scroll input run today. Nothing else in this file is built unless it names an element that
 already exists. When a slice ships, delete it
 here and from [TODO.md](TODO.md), and write the shipped behavior into the track
 that owns it.
@@ -113,15 +114,18 @@ In `g2g-desktop`, module `gamestream`.
   encryption bit, and a request for more than two channels is refused. Opus
   runs at 96 kbit/s CBR.
 - Control: ENet with AES-GCM on every message. An IDR request (0x0302) goes to
-  `moonlightvideopay`. Input (0x0206) becomes an `Event` for the existing
-  injectors, with keys mapped through a new Windows virtual-key to HID usage
-  table. The host ends a session with 0x0109 carrying 0x80030023, and ends it
+  `moonlightvideopay`. Input (0x0206) becomes an `Event` for the injector of
+  the capture: XTest for `--x11-display`, uinput for the portal, the headless
+  compositor for `--run` and `SendInput` on Windows. Keys map through a
+  Windows virtual-key to HID usage table. Absolute pointer positions scale from
+  the size Moonlight sends to the captured size. Side buttons, touch, pen, text
+  and gamepads are dropped. Keys still held when the control stream ends are
+  released. The host ends a session with 0x0109 carrying 0x80030023, and ends it
   itself after 10 s without a control message.
 
 ## Order
 
-1. Input: keyboard through the virtual-key table, mouse and scroll.
-2. The Windows host.
+1. The Windows host.
 
 After those: reference frame invalidation, gamepad, HDR, surround, and `--run`
 applications as `/applist` entries.
@@ -136,7 +140,9 @@ applications as `/applist` entries.
   for 8 seconds and checks that Moonlight's video stats report decoded frames
   and that its audio stream received packets and decrypted every one. Moonlight
   runs with SDL's dummy audio driver, so nothing plays aloud.
-  `CODEC=HEVC` picks the codec. It runs before each push of this work and puts
+  `CODEC=HEVC` picks the codec. With `CAPTURE=run` the headless display runs
+  `tools/moonlight-input-probe.py`, xdotool clicks and types into Moonlight's
+  window, and the script checks that the probe received the click and the key. It runs before each push of this work and puts
   no window on the desktop.
 
 ## References

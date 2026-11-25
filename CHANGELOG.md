@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2585: The Moonlight host injects keyboard, mouse and scroll input, and the `--run` host takes relative mouse moves.
 - M2584: Stream encrypted Opus audio to Moonlight with `moonlightaudiopay`, and `opusenc` takes `bitrate-type`.
 - M2583: The Moonlight host captures the portal and `--run` displays, and `videorate` passes GPU memory and takes `drop-only`.
 - M2582: `d3d11convert` resizes to the size a downstream caps filter sets, so the Windows Moonlight host streams at the size the client asks for.
