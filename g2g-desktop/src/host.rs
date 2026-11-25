@@ -453,7 +453,7 @@ pub async fn inject<I: InjectEvents>(
                     return Ok(());
                 };
                 let Some(injector) = injector.as_mut() else {
-                    g2g_core::g2g_warn!(log, "dropped {:?} before the capture size was known", event.kind());
+                    g2g_core::g2g_debug!(log, "dropped {:?} before the capture size was known", event.kind());
                     continue;
                 };
                 match injector.inject(&event) {
