@@ -191,7 +191,7 @@ Windows, every frame on the GPU from capture to the encoder:
 
 ```
 d3d11screencapturesrc ! d3d11convert ! mfh264enc hardware=true
-wasapisrc ! audioconvert ! opusenc
+wasapisrc loopback=true ! audioconvert ! opusenc
 ```
 
 Windows with NVIDIA:
@@ -221,10 +221,13 @@ The client dials with `remotewtsrc` and sends no media. Receive side:
 
 ```
 h264parse ! <decoder> ! wgpusink sync=false present-mode=mailbox
-opusdec ! audioconvert ! pulsesink buffer-time=40000
+opusdec ! audioconvert ! pulsesink buffer-time=40000     # Linux
+opusdec ! audioconvert ! wasapisink                      # Windows
 ```
 
-`pulsesink` starts playing once 40 ms of audio is queued. The client's audio
+`pulsesink` starts playing once 40 ms of audio is queued. The audio track
+drops frames that arrive in a burst after a network stall, so a weak Wi-Fi
+link cuts gaps into the sound rather than adding delay. The client's audio
 graph runs beside the video graph on the same runtime. The host's runs on its
 own thread: on the video graph's runtime it adds 1 ms p50 and 3 ms p99 to each
 video frame.

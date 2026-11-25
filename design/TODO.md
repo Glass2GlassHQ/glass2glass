@@ -32,8 +32,9 @@ Highest leverage first:
 
 The plan is [remote.md](remote.md).
 
-- Opus audio on the Windows host (`wasapisrc loopback=true`) and client
-  (`wasapisink`).
+- Hold the remote desktop's audio frames in a jitter buffer instead of
+  dropping the burst that follows a network stall: 20 ms ± 30 ms of netem
+  jitter between a Linux host and client cut a 4 s tone 26 times.
 - Encode with `d3d11convert ! nvenc` on a Windows host with an NVIDIA GPU,
   falling back to `mfh264enc`, and rebuild the host graph after `AccessLost`.
 - The macOS client, then `display-index` on `screencapturesrc` and a macOS

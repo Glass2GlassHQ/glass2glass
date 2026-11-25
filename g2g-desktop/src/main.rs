@@ -73,7 +73,7 @@ use tokio::sync::{mpsc, watch};
 const HOST_USAGE: &str =
     "  g2g-desktop host --token TOKEN [--port 8080] [--fps 60] [--bitrate 4000000]
                    [--send-window BYTES] [--video-mode stream|stream-per-frame|datagrams]
-                   [--trace FILE]";
+                   [--trace FILE] [--audio true]";
 #[cfg(target_os = "linux")]
 const GAMESTREAM_USAGE: &str = "  g2g-desktop host --protocol gamestream
                    [--x11-display :0 | --run COMMAND [--size 1920x1080] [--render-node PATH]
@@ -84,15 +84,15 @@ const GAMESTREAM_USAGE: &str = "  g2g-desktop host --protocol gamestream
   g2g-desktop pin PIN";
 const CLIENT_USAGE: &str =
     "  g2g-desktop client --host HOST --cert-hash SHA256 --token TOKEN [--port 8080] [--inputs true]
-                     [--transport auto|quic|websocket] [--trace FILE]";
+                     [--transport auto|quic|websocket] [--trace FILE] [--audio true]";
 #[cfg(target_os = "linux")]
-const PLATFORM_CLIENT_USAGE: &str = " [--keyboard-grab true] [--audio true]";
+const PLATFORM_CLIENT_USAGE: &str = " [--keyboard-grab true]";
 #[cfg(target_os = "windows")]
 const PLATFORM_CLIENT_USAGE: &str = "";
 #[cfg(target_os = "linux")]
 const PLATFORM_HOST_USAGE: &str =
     "\n                   [--run COMMAND [--size 1920x1080] [--render-node /dev/dri/renderD128]
-                    | --x11-display :0] [--audio true]";
+                    | --x11-display :0]";
 #[cfg(target_os = "windows")]
 const PLATFORM_HOST_USAGE: &str =
     "\n                   [--monitor-index -1] [--quality-vs-speed 0-100]";
@@ -100,8 +100,9 @@ const DEFAULT_PORT: u16 = 8080;
 const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_millis(100);
 const DEFAULT_FPS: u32 = 60;
 const DEFAULT_BITRATE: u32 = 4_000_000;
-const HOST_FLAGS: [&str; 8] = [
+const HOST_FLAGS: [&str; 9] = [
     "protocol",
+    "audio",
     "port",
     "token",
     "fps",
@@ -111,17 +112,17 @@ const HOST_FLAGS: [&str; 8] = [
     "trace",
 ];
 #[cfg(target_os = "linux")]
-const PLATFORM_HOST_FLAGS: [&str; 6] =
-    ["run", "size", "render-node", "x11-display", "audio", "app"];
+const PLATFORM_HOST_FLAGS: [&str; 5] = ["run", "size", "render-node", "x11-display", "app"];
 #[cfg(target_os = "windows")]
 const PLATFORM_HOST_FLAGS: [&str; 2] = ["monitor-index", "quality-vs-speed"];
 #[cfg(target_os = "windows")]
 const PRIMARY_MONITOR: i32 = -1;
 #[cfg(target_os = "linux")]
-const PLATFORM_CLIENT_FLAGS: [&str; 2] = ["keyboard-grab", "audio"];
+const PLATFORM_CLIENT_FLAGS: [&str; 1] = ["keyboard-grab"];
 #[cfg(target_os = "windows")]
 const PLATFORM_CLIENT_FLAGS: [&str; 0] = [];
-const CLIENT_FLAGS: [&str; 7] = [
+const CLIENT_FLAGS: [&str; 8] = [
+    "audio",
     "host",
     "port",
     "cert-hash",
@@ -795,7 +796,7 @@ async fn host(flags: Flags) -> Result<(), Box<dyn Error>> {
         #[cfg(target_os = "linux")]
         audio: host_audio(&flags, &capture)?,
         #[cfg(target_os = "windows")]
-        audio: false,
+        audio: parsed(&flags, "audio", true)?,
         send_window: optional(&flags, "send-window")?,
         video_mode: optional(&flags, "video-mode")?,
         #[cfg(target_os = "windows")]
@@ -852,10 +853,7 @@ async fn client(flags: Flags) -> Result<(), Box<dyn Error>> {
         token: required(&flags, "token")?,
         cert_hash: required(&flags, "cert-hash")?,
         inputs: parsed(&flags, "inputs", true)?,
-        #[cfg(target_os = "linux")]
         audio: parsed(&flags, "audio", true)?,
-        #[cfg(target_os = "windows")]
-        audio: false,
         transport: match flag(&flags, "transport").map(String::as_str) {
             None | Some("auto") => ClientTransport::Auto,
             Some("quic") => ClientTransport::Quic,

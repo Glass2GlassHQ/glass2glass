@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2596: The Windows remote desktop host and client send and play audio.
 - M2595: The Moonlight host sends game rumble back to the client's controller.
 - M2594: The Windows Moonlight host injects gamepads through ViGEmBus when it is installed.
 - M2593: The Moonlight host injects gamepads on Linux through a virtual Xbox 360 pad.
