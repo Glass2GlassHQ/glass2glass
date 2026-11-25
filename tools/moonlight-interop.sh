@@ -33,7 +33,7 @@ moonlight() {
         -c 'XDG_CONFIG_HOME="$0" exec moonlight "$@"' "$OUT/moonlight-config" "$@"
 }
 
-exec 4< <(Xvfb -displayfd 3 -screen 0 1280x720x24 -nolisten tcp 3>&1 >/dev/null 2>&1 & echo "$!")
+exec 4< <(Xvfb -displayfd 3 -screen 0 1920x1080x24 -nolisten tcp 3>&1 >/dev/null 2>&1 & echo "$!")
 read -r XVFB <&4
 read -r DISPLAY_NUMBER <&4
 export DISPLAY=":$DISPLAY_NUMBER"

@@ -2132,6 +2132,8 @@ pub mod pwdevice;
 pub mod cuda;
 #[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
 mod cuda_driver_ffi;
+#[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
+pub mod cudascale;
 #[cfg(all(
     target_os = "linux",
     any(feature = "hip", feature = "unixfd", feature = "dmabuf-cuda")

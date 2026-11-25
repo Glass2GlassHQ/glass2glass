@@ -59,6 +59,19 @@ pub(crate) const FORMATS: [RawVideoFormat; 13] = [
 /// concrete dim within it.
 const MAX_DIM: u32 = 32768;
 
+pub(crate) fn input_size_or_any_size() -> Vec<RawVideoShape> {
+    let range = Dim::Range {
+        min: 1,
+        max: MAX_DIM,
+    };
+    vec![
+        RawVideoShape::PASSTHROUGH,
+        RawVideoShape::PASSTHROUGH
+            .with_width(FieldTransform::Fixed(range.clone()))
+            .with_height(FieldTransform::Fixed(range)),
+    ]
+}
+
 /// # Example
 ///
 /// ```no_run
@@ -234,19 +247,7 @@ impl AsyncElement for VideoScale {
             // capsfilter pins the target. Passthrough is the preferred (first)
             // alternative, so with no downstream constraint the output is the
             // input size (identity scale).
-            let range = Dim::Range {
-                min: 1,
-                max: MAX_DIM,
-            };
-            (
-                FORMATS.to_vec(),
-                vec![
-                    RawVideoShape::PASSTHROUGH,
-                    RawVideoShape::PASSTHROUGH
-                        .with_width(FieldTransform::Fixed(range.clone()))
-                        .with_height(FieldTransform::Fixed(range)),
-                ],
-            )
+            (FORMATS.to_vec(), input_size_or_any_size())
         };
         CapsConstraint::DerivedFields(CapsTransform::RawVideo {
             accept,

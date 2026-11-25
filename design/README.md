@@ -419,6 +419,15 @@ caps too, so a bare `hipconvertscale video-direction=90r` emits the transposed
 size. `hipconvert` and `hipscale` are the same element limited to a format
 change or a size change.
 
+`cudascale` resizes NV12, RGBA and BGRA frames in CUDA memory to the size a
+downstream caps filter sets, stretching the picture with bilinear filtering,
+chroma included. A frame already at that size passes through. It runs on the
+primary context of the device its frames arrive from. Its kernel is PTX checked
+in next to the element, which `tools/cudascale-ptx.sh` builds from
+`cudascale.cu` with CUDA 12.8's NVRTC for `compute_52`. NVIDIA drivers load PTX
+only up to the ISA of their own CUDA release, and 12.8 matches driver 570, the
+oldest driver NVENC API 13.0 runs on, so release hosts need no CUDA toolkit.
+
 `hipcompositor` composites Hip frames of any format `hipconvertscale` reads.
 Each output frame fills an RGBA f32 canvas with the background, then blends
 every pad in paint order with `blend_into_canvas`, a kernel in the same source

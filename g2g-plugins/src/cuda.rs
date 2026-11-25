@@ -215,6 +215,34 @@ impl CudaStream {
         // SAFETY: the caller keeps both ends of the copy alive until the stream passes it.
         check(unsafe { ffi::cu_memcpy_2d_async(copy, self.handle as ffi::CuStream) })
     }
+
+    pub(crate) unsafe fn launch(
+        &self,
+        function: ffi::CuFunction,
+        grid: [u32; 2],
+        block: [u32; 2],
+        parameters: &mut [*mut core::ffi::c_void],
+    ) -> Result<(), G2gError> {
+        let _bound = self.device.bind()?;
+        let [grid_x, grid_y] = grid;
+        let [block_x, block_y] = block;
+        // SAFETY: the caller passes a function of this context and parameters that match its signature, and keeps the memory they point to alive until the stream passes the launch.
+        check(unsafe {
+            ffi::cu_launch_kernel(
+                function,
+                grid_x,
+                grid_y,
+                1,
+                block_x,
+                block_y,
+                1,
+                0,
+                self.handle as ffi::CuStream,
+                parameters.as_mut_ptr(),
+                core::ptr::null_mut(),
+            )
+        })
+    }
 }
 
 impl Drop for CudaStream {
@@ -532,7 +560,7 @@ impl FramePool {
         }
     }
 
-    fn nv12(width: u32, height: u32) -> Self {
+    pub(crate) fn nv12(width: u32, height: u32) -> Self {
         let rows = height as usize + height.div_ceil(2) as usize;
         // an odd width makes the interleaved chroma row one byte wider than the luma row
         let widest_row = 2 * (width as usize).div_ceil(2);
@@ -582,6 +610,10 @@ impl UploadedFrame {
             recycle_into: Arc::clone(&pool.free),
             ready,
         }
+    }
+
+    pub(crate) fn ready(&self) -> &CudaEvent {
+        &self.ready
     }
 }
 

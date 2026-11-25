@@ -207,8 +207,8 @@ pub enum ParseError {
     /// A one-element description held something other than one element: a `!`,
     /// a pad reference, a caps token, or a second element.
     NotOneElement(String),
-    /// A chain description held something other than elements joined by `!`:
-    /// a pad reference, a caps token, or a second chain.
+    /// A chain description held something other than elements and caps joined
+    /// by `!`: a pad reference or a second chain.
     NotElementChain(String),
     /// A one-element description carried `name=` or `log-category=`, which only
     /// a whole launch line can apply.
@@ -515,6 +515,15 @@ fn is_caps_token(tok: &str) -> bool {
     }
 }
 
+fn caps_filter(token: &str) -> ElementSpec {
+    ElementSpec {
+        name: "capsfilter".to_string(),
+        props: alloc::vec![("caps".to_string(), token.to_string())],
+        instance: None,
+        log_category: None,
+    }
+}
+
 fn is_uri_token(tok: &str) -> bool {
     Uri::parse(tok).is_some_and(|uri| {
         uri.scheme.starts_with(|c: char| c.is_ascii_alphabetic())
@@ -800,12 +809,7 @@ fn parse_chains_with(
                     )?));
                     st = St::AfterNode;
                 } else if is_caps_token(tok) {
-                    cur.push(Item::Element(ElementSpec {
-                        name: "capsfilter".to_string(),
-                        props: alloc::vec![("caps".to_string(), tok.to_string())],
-                        instance: None,
-                        log_category: None,
-                    }));
+                    cur.push(Item::Element(caps_filter(tok)));
                     st = St::AfterNode;
                 } else if let Some((name, pad)) = split_pad_ref(tok) {
                     cur.push(Item::Ref {
@@ -4255,10 +4259,14 @@ fn parse_element_chain(
             None if specs.is_empty() => return Err(ParseError::Empty),
             None => return Err(not_a_chain()),
         };
-        if name == "!" || is_caps_token(name) || as_ref_name(name).is_some() {
+        if name == "!" || as_ref_name(name).is_some() {
             return Err(not_a_chain());
         }
-        let spec = consume_element(name, &mut tokens, &|token| registry.knows_element(token))?;
+        let spec = if is_caps_token(name) {
+            caps_filter(name)
+        } else {
+            consume_element(name, &mut tokens, &|token| registry.knows_element(token))?
+        };
         // the mutator names the instance itself
         let keyword = match (&spec.instance, &spec.log_category) {
             (Some(_), _) => Some("name"),
@@ -5548,14 +5556,6 @@ mod tests {
                 .map(|element| element.get_property(LEVEL))
                 .collect();
             assert_eq!(levels, [Some(PropValue::Int(1)), Some(PropValue::Int(2))]);
-        }
-
-        #[test]
-        fn refuses_a_caps_filter_in_a_chain() {
-            let error = parse_chain(&registry(), "leveler ! video/x-raw ! leveler")
-                .map(|_| ())
-                .unwrap_err();
-            assert!(matches!(error, ParseError::NotElementChain(_)), "{error:?}");
         }
     }
 }

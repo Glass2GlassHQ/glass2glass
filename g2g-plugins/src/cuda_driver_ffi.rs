@@ -17,9 +17,7 @@ pub(crate) type CuStream = *mut c_void;
 pub(crate) type CuEvent = *mut c_void;
 pub(crate) const CU_STREAM_NON_BLOCKING: u32 = 0x1;
 pub(crate) const CU_EVENT_DISABLE_TIMING: u32 = 0x2;
-#[cfg(feature = "hip")]
 pub(crate) type CuModule = *mut c_void;
-#[cfg(feature = "hip")]
 pub(crate) type CuFunction = *mut c_void;
 #[cfg(feature = "hip")]
 pub(crate) const CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR: i32 = 75;
@@ -126,13 +124,9 @@ crate::shared_library::shared_library! {
     pub(crate) fn cu_mem_free_host = "cuMemFreeHost"(pointer: *mut c_void) -> CuResult;
     #[cfg(feature = "hip")]
     pub(crate) fn cu_device_get_attribute = "cuDeviceGetAttribute"(value: *mut i32, attribute: i32, device: CuDevice) -> CuResult;
-    #[cfg(feature = "hip")]
     pub(crate) fn cu_module_load_data = "cuModuleLoadData"(module: *mut CuModule, image: *const c_void) -> CuResult;
-    #[cfg(feature = "hip")]
     pub(crate) fn cu_module_unload = "cuModuleUnload"(module: CuModule) -> CuResult;
-    #[cfg(feature = "hip")]
     pub(crate) fn cu_module_get_function = "cuModuleGetFunction"(function: *mut CuFunction, module: CuModule, name: *const core::ffi::c_char) -> CuResult;
-    #[cfg(feature = "hip")]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn cu_launch_kernel = "cuLaunchKernel"(
         function: CuFunction,

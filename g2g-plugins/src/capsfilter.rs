@@ -383,6 +383,22 @@ mod tests {
     use super::*;
     use g2g_core::{Dim, Rate, RawVideoFormat, VideoCodec};
 
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_caps_token_in_a_chain_becomes_a_capsfilter() {
+        let caps = "video/x-raw,format=NV12";
+        let chain = g2g_core::runtime::parse_chain(
+            &crate::registry::default_registry(),
+            &alloc::format!("identity ! {caps} ! identity"),
+        )
+        .unwrap();
+        assert_eq!(chain.len(), 3);
+        assert_eq!(
+            chain[1].get_property("caps"),
+            Some(PropValue::Str(caps.into()))
+        );
+    }
+
     // drm_fourcc.h I915_FORMAT_MOD_X_TILED, a tiled layout gst names after the fourcc
     const X_TILED: u64 = 0x0100_0000_0000_0001;
 

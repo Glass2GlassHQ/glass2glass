@@ -181,6 +181,8 @@ pub(crate) enum VideoCodec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct StreamSettings {
     pub(crate) codec: VideoCodec,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
     pub(crate) frames_per_second: u32,
     pub(crate) packet_size: u32,
     pub(crate) bitrate_kilobits: u32,
@@ -237,6 +239,8 @@ pub(crate) fn parse_announce(body: &[u8]) -> Result<StreamSettings, AnnounceErro
     };
     Ok(StreamSettings {
         codec,
+        width: number("x-nv-video[0].clientViewportWd")?,
+        height: number("x-nv-video[0].clientViewportHt")?,
         frames_per_second: number("x-nv-video[0].maxFPS")?,
         packet_size: number("x-nv-video[0].packetSize")?,
         bitrate_kilobits: number("x-ml-video.configuredBitrateKbps")?,
@@ -281,6 +285,8 @@ mod tests {
     fn an_announce_gives_the_stream_settings() {
         let sdp = "v=0\r\n\
             a=x-ss-general.encryptionEnabled:3\r\n\
+            a=x-nv-video[0].clientViewportWd:1280 \r\n\
+            a=x-nv-video[0].clientViewportHt:720 \r\n\
             a=x-nv-video[0].maxFPS:60 \r\n\
             a=x-nv-video[0].packetSize:1360 \r\n\
             a=x-ml-video.configuredBitrateKbps:20000 \r\n\
@@ -291,6 +297,8 @@ mod tests {
             parse_announce(sdp.as_bytes()),
             Ok(StreamSettings {
                 codec: VideoCodec::Hevc,
+                width: 1280,
+                height: 720,
                 frames_per_second: 60,
                 packet_size: 1360,
                 bitrate_kilobits: 20_000,

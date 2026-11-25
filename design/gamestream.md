@@ -2,11 +2,11 @@
 
 Plan for `g2g-desktop host --protocol gamestream`, a host that stock Moonlight
 clients pair with and stream from, the way they use Sunshine. Discovery,
-pairing, the app list and encrypted H.264 or HEVC video from an X display run
-today. Nothing else in this file is built unless it names an element that
-already exists. When a slice ships, delete it here and
-from [TODO.md](TODO.md), and write the shipped behavior into the track that
-owns it.
+pairing, the app list and encrypted H.264 or HEVC video from an X display, at
+the size the client asks for, run today. Nothing else in this file is built
+unless it names an element that already exists. When a slice ships, delete it
+here and from [TODO.md](TODO.md), and write the shipped behavior into the track
+that owns it.
 
 ## Decisions
 
@@ -27,9 +27,8 @@ owns it.
 6. Video, audio and control are encrypted from the first slice that carries
    them, all under the `rikey` that `/launch` delivers: AES-GCM per video
    packet, AES-CBC per audio packet, AES-GCM per control message.
-7. The stream has the size the client asks for. Linux scales with a new
-   `cudascale` before `nvenc`, Windows with `width` and `height` on
-   `d3d11convert`.
+7. The stream has the size the client asks for. Linux scales with `cudascale`
+   before `nvenc`, Windows with `width` and `height` on `d3d11convert`.
 8. H.264 and HEVC come from `nvenc` on Linux and `mfh264enc`/`mfh265enc` on
    Windows. The software and VA-API encoders refuse `--protocol gamestream`.
 9. A PIN reaches the host on a localhost-only `POST /submit-pin`, and
@@ -49,7 +48,7 @@ video UDP 47998, control UDP 47999, audio UDP 48000.
 ## Host graphs
 
 ```
-<capture> ! dmabuftocuda ! cudascale width=W height=H ! nvenc ! moonlightvideopay ! udpsink
+<capture> ! dmabuftocuda ! cudascale ! video/x-raw,width=W,height=H ! nvenc ! moonlightvideopay ! udpsink
 pulsesrc device=@DEFAULT_MONITOR@ ! audioconvert ! opusenc frame-size=5 bitrate-type=cbr audio-type=restricted-lowdelay ! moonlightaudiopay ! udpsink
 ```
 
@@ -75,8 +74,6 @@ In `g2g-plugins`, behind a `gamestream` feature unless noted.
   AES-CBC under an IV made from `key-id` plus the sequence number, and sends two
   parity packets after every four. Properties: `packet-duration`, `key`,
   `key-id`, `encrypt`.
-- `cudascale` resizes packed RGBA in CUDA memory, behind the `nvenc` feature.
-  Properties: `width`, `height`.
 - `d3d11convert` gets `width` and `height`.
 - `opusenc` gets `bitrate-type` with gst's values `cbr`, `vbr` and
   `constrained-vbr`.
@@ -113,8 +110,7 @@ In `g2g-desktop`, module `gamestream`.
 
 ## Order
 
-1. `cudascale`, the `d3d11convert` size, and video from the portal and `--run`
-   captures. `--protocol gamestream` takes only `--x11-display` today.
+1. The `d3d11convert` size, and video from the portal and `--run` captures. `--protocol gamestream` takes only `--x11-display` today.
 2. Audio: `moonlightaudiopay` and CBR Opus in 5 ms frames.
 3. Input: keyboard through the virtual-key table, mouse and scroll.
 4. The Windows host.

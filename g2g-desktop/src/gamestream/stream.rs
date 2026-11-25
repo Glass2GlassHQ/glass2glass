@@ -99,7 +99,9 @@ fn encoder_launch(settings: &StreamSettings) -> String {
         VideoCodec::Hevc => "hevc",
     };
     format!(
-        "nvenc codec={codec} bitrate={} ref-frames={}",
+        "cudascale ! video/x-raw,width={},height={} ! nvenc codec={codec} bitrate={} ref-frames={}",
+        settings.width,
+        settings.height,
         encoder_bitrate(settings),
         settings.reference_frames
     )
