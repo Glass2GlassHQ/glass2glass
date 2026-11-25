@@ -2,8 +2,9 @@
 
 Plan for `g2g-desktop host --protocol gamestream`, a host that stock Moonlight
 clients pair with and stream from, the way they use Sunshine. Discovery,
-pairing and the app list run today. Nothing else in this file is built unless
-it names an element that already exists. When a slice ships, delete it here and
+pairing, the app list and encrypted H.264 or HEVC video from an X display run
+today. Nothing else in this file is built unless it names an element that
+already exists. When a slice ships, delete it here and
 from [TODO.md](TODO.md), and write the shipped behavior into the track that
 owns it.
 
@@ -33,9 +34,12 @@ owns it.
    Windows. The software and VA-API encoders refuse `--protocol gamestream`.
 9. A PIN reaches the host on a localhost-only `POST /submit-pin`, and
    `g2g-desktop pin <PIN>` calls it.
-10. Video and audio leave through `udpsink` in a new mode that sends each frame
-    as one datagram from a fixed `bind-port`, to the address the client's ping
-    came from.
+10. Video and audio leave through `udpsink`, which sends each
+    `application/x-datagram` frame as one datagram from a fixed `bind-port`, to
+    the address the client's ping came from.
+11. `nvenc` encodes with the `ref-frames` count `ANNOUNCE` asks for. Moonlight
+    asks for 1 when its decoder cannot invalidate references, and its decoder
+    fails on every second P-frame of a stream with more.
 
 ## Ports
 
@@ -73,7 +77,6 @@ In `g2g-plugins`, behind a `gamestream` feature unless noted.
   `key-id`, `encrypt`.
 - `cudascale` resizes packed RGBA in CUDA memory, behind the `nvenc` feature.
   Properties: `width`, `height`.
-- `udpsink` gets the datagram mode and `bind-port`.
 - `d3d11convert` gets `width` and `height`.
 - `opusenc` gets `bitrate-type` with gst's values `cbr`, `vbr` and
   `constrained-vbr`.
@@ -95,11 +98,13 @@ In `g2g-desktop`, module `gamestream`.
   `rsa` crate, signed with `ring`), the host certificate, the `uniqueid` and
   the paired client certificates live in `g2g-desktop/gamestream` under the
   user's config directory.
-- RTSP takes one request per TCP connection and closes it after the reply. It
-  uses the encrypted framing when `/launch` returned `rtspenc://`. `DESCRIBE`
-  lists the HEVC marker, the encryption flags and the `surround-params` lines.
-- The video and audio ports learn the client's address from its ping, which
-  carries the 16-byte payload `SETUP` returned.
+- RTSP takes one request per TCP connection and closes it after the reply.
+  `/launch` returns a plain `rtsp://` URL, so RTSP itself is not encrypted.
+  `DESCRIBE` lists the HEVC marker and the encryption flags, and requests video
+  and audio encryption.
+- `SETUP` returns no ping payload, so Moonlight sends the 4-byte `PING`. The
+  video port takes the address of the first `PING` from the client that
+  launched the session.
 - Control: ENet with AES-GCM on every message. An IDR request (0x0302) goes to
   `moonlightvideopay`. Input (0x0206) becomes an `Event` for the existing
   injectors, with keys mapped through a new Windows virtual-key to HID usage
@@ -108,9 +113,8 @@ In `g2g-desktop`, module `gamestream`.
 
 ## Order
 
-1. RTSP, `/launch`, ENet control, `moonlightvideopay`, the `udpsink` datagram
-   mode, `cudascale`, the `d3d11convert` size, and graphs built from
-   `ANNOUNCE`.
+1. `cudascale`, the `d3d11convert` size, and video from the portal and `--run`
+   captures. `--protocol gamestream` takes only `--x11-display` today.
 2. Audio: `moonlightaudiopay` and CBR Opus in 5 ms frames.
 3. Input: keyboard through the virtual-key table, mouse and scroll.
 4. The Windows host.
@@ -124,9 +128,10 @@ applications as `/applist` entries.
   fixture.
 - `tools/moonlight-interop.sh` runs the Moonlight flatpak under Xvfb against the
   host, each side with a fresh config directory: it pairs with `--pin`, enters
-  the PIN through `g2g-desktop pin`, and lists the apps. Streaming for a few
-  seconds and checking the Moonlight log for decoded frames comes with video.
-  It runs before each push of this work and puts no window on the desktop.
+  the PIN through `g2g-desktop pin`, lists the apps, streams the Xvfb display
+  for 8 seconds and checks that Moonlight's video stats report decoded frames.
+  `CODEC=HEVC` picks the codec. It runs before each push of this work and puts
+  no window on the desktop.
 
 ## References
 

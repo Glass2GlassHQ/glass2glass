@@ -3,23 +3,30 @@
 #
 # SPDX-License-Identifier: MPL-2.0
 
-# Pair the Moonlight flatpak with `g2g-desktop host --protocol gamestream` and list its apps.
-# Moonlight runs on its own Xvfb display, so nothing opens on the desktop.
+# Pair the Moonlight flatpak with `g2g-desktop host --protocol gamestream`, list its apps and
+# stream the desktop for a few seconds. Moonlight runs on its own Xvfb display, which the host
+# also captures, so nothing opens on the desktop.
 #
 # Prerequisites: Xvfb, and Moonlight from Flathub:
 #   flatpak install --user flathub com.moonlight_stream.Moonlight
 #
 # Usage: tools/moonlight-interop.sh <g2g-desktop binary built with --features gamestream>
-# Logs go to $OUT, default ~/tmp/moonlight-interop.
+# Logs go to $OUT, default ~/tmp/moonlight-interop. CODEC picks H.264 (default) or HEVC.
 set -euo pipefail
 
 BIN=$1
 OUT=${OUT:-$HOME/tmp/moonlight-interop}
 PIN=4721
+CODEC=${CODEC:-H.264}
+STREAM_SECONDS=8
 # each run starts unpaired: fresh config directories for Moonlight and the host
 rm -rf "$OUT"
 mkdir -p "$OUT/moonlight-config" "$OUT/host-config"
 # flatpak overrides XDG_CONFIG_HOME from outside, so a shell inside the sandbox sets it
+# killing `flatpak run` leaves the sandboxed moonlight running, so it is stopped by its own command line
+stop_moonlight() {
+    pkill -f "^moonlight $1 127\.0\.0\.1" || true
+}
 moonlight() {
     flatpak run --nosocket=wayland --socket=x11 --env=QT_QPA_PLATFORM=xcb \
         --filesystem="$OUT" --command=sh com.moonlight_stream.Moonlight \
@@ -32,9 +39,10 @@ read -r DISPLAY_NUMBER <&4
 export DISPLAY=":$DISPLAY_NUMBER"
 unset WAYLAND_DISPLAY
 
-XDG_CONFIG_HOME="$OUT/host-config" "$BIN" host --protocol gamestream >"$OUT/host.log" 2>&1 &
+XDG_CONFIG_HOME="$OUT/host-config" "$BIN" host --protocol gamestream --x11-display "$DISPLAY" \
+    >"$OUT/host.log" 2>&1 &
 HOST=$!
-trap 'kill $HOST $XVFB 2>/dev/null || true' EXIT
+trap 'stop_moonlight "(pair|quit|stream)"; kill $HOST $XVFB 2>/dev/null || true' EXIT
 for _ in $(seq 240); do
     grep -q 'Moonlight host' "$OUT/host.log" && break
     sleep 0.5
@@ -54,9 +62,44 @@ for _ in $(seq 120); do
     sleep 0.25
 done
 sleep 1
-kill "$PAIR"
+stop_moonlight pair
+wait "$PAIR" || true
 grep -q 'paired a Moonlight client' "$OUT/host.log"
 
 moonlight list 127.0.0.1 >"$OUT/list.log" 2>&1
 grep -qx 'Desktop' "$OUT/list.log"
 echo "moonlight-interop: paired and listed the Desktop app"
+
+moonlight stream 127.0.0.1 Desktop --720 --fps 30 --video-codec "$CODEC" \
+    --video-decoder software --display-mode windowed --no-quit-after >"$OUT/stream.log" 2>&1 &
+STREAM=$!
+# a fresh moonlight config spends about 40 seconds checking for gamepad mappings before it launches
+for _ in $(seq 240); do
+    grep -q 'Launch response' "$OUT/stream.log" && break
+    sleep 0.5
+done
+grep -q 'Launch response' "$OUT/stream.log"
+sleep "$STREAM_SECONDS"
+# moonlight writes its streaming log only once the session ends, so the host ends it
+moonlight quit 127.0.0.1 >"$OUT/quit.log" 2>&1 &
+QUIT=$!
+# moonlight's quit command, like pair, waits on a dialog after the host answers
+for _ in $(seq 40); do
+    grep -q 'Quit response' "$OUT/quit.log" && break
+    sleep 0.25
+done
+stop_moonlight quit
+wait "$QUIT" || true
+for _ in $(seq 40); do
+    kill -0 "$STREAM" 2>/dev/null || break
+    sleep 0.25
+done
+stop_moonlight stream
+wait "$STREAM" || true
+grep -q 'Received first video packet' "$OUT/stream.log"
+decoded=$(sed -n 's/^Decoding frame rate: \([0-9.]*\) FPS$/\1/p' "$OUT/stream.log")
+if [ -z "$decoded" ] || grep -q 'avcodec_send_packet() failed' "$OUT/stream.log"; then
+    echo "moonlight-interop: Moonlight did not decode the stream, see $OUT/stream.log" >&2
+    exit 1
+fi
+echo "moonlight-interop: Moonlight decoded $CODEC at $decoded fps"

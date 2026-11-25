@@ -15,6 +15,8 @@ use std::sync::Arc;
 #[cfg(target_os = "linux")]
 use g2g_core::element::DynAsyncElement;
 use g2g_core::metrics::LatencyHistogram;
+#[cfg(feature = "gamestream")]
+use g2g_core::runtime::GraphNode;
 use g2g_core::runtime::Observer;
 #[cfg(target_os = "linux")]
 use g2g_core::runtime::{parse_element, ParseError, SourceLoop};
@@ -60,6 +62,10 @@ const HOST_USAGE: &str =
     "  g2g-desktop host --token TOKEN [--port 8080] [--fps 60] [--bitrate 4000000]
                    [--send-window BYTES] [--video-mode stream|stream-per-frame|datagrams]
                    [--trace FILE]";
+#[cfg(target_os = "linux")]
+const GAMESTREAM_USAGE: &str = "  g2g-desktop host --protocol gamestream --x11-display :0
+  g2g-desktop pin PIN";
+#[cfg(target_os = "windows")]
 const GAMESTREAM_USAGE: &str = "  g2g-desktop host --protocol gamestream
   g2g-desktop pin PIN";
 const CLIENT_USAGE: &str =
@@ -513,14 +519,61 @@ fn host_audio(flags: &Flags, capture: &CaptureSettings) -> Result<bool, Box<dyn 
     }
 }
 
+#[cfg(all(target_os = "linux", feature = "gamestream"))]
+fn gamestream_capture(display: &str, fps: u32) -> Result<Vec<GraphNode>, String> {
+    let rate = x11_rate_filter(fps).map_err(|e| e.to_string())?;
+    let convert = parse_element(&default_registry(), "videoconvert").map_err(|e| e.to_string())?;
+    Ok(vec![
+        GraphNodeRef::source(XImageSrc::new().with_display_name(display)),
+        GraphNodeRef::Element(rate),
+        GraphNodeRef::Element(convert),
+    ])
+}
+
+#[cfg(all(target_os = "linux", feature = "gamestream"))]
+async fn gamestream_host(flags: &Flags) -> Result<(), Box<dyn Error>> {
+    if let Some(flag) = flags
+        .keys()
+        .find(|flag| !["protocol", "x11-display"].contains(&flag.as_str()))
+    {
+        return Err(format!("--protocol gamestream takes no --{flag}").into());
+    }
+    let Some(display) = flags.get("x11-display").cloned() else {
+        return Err("--protocol gamestream captures an X display: pass --x11-display".into());
+    };
+    let capture = Box::new(move |fps| gamestream_capture(&display, fps));
+    Ok(g2g_desktop::gamestream::serve(capture).await?)
+}
+
+#[cfg(all(target_os = "windows", feature = "gamestream"))]
+fn gamestream_capture(fps: u32) -> Result<Vec<GraphNode>, String> {
+    let source = D3D11ScreenCaptureSrc::new()
+        .with_monitor_index(PRIMARY_MONITOR)
+        .with_fps(fps);
+    let convert = g2g_core::runtime::parse_element(
+        &g2g_plugins::registry::default_registry(),
+        "d3d11convert",
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(vec![
+        GraphNodeRef::source(source),
+        GraphNodeRef::Element(convert),
+    ])
+}
+
+#[cfg(all(target_os = "windows", feature = "gamestream"))]
+async fn gamestream_host(flags: &Flags) -> Result<(), Box<dyn Error>> {
+    if let Some(flag) = flags.keys().find(|flag| flag.as_str() != "protocol") {
+        return Err(format!("--protocol gamestream takes no --{flag}").into());
+    }
+    Ok(g2g_desktop::gamestream::serve(Box::new(gamestream_capture)).await?)
+}
+
 async fn host(flags: Flags) -> Result<(), Box<dyn Error>> {
     match flags.get("protocol").map(String::as_str) {
         None | Some("remotewt") => {}
-        Some("gamestream") if flags.len() > 1 => {
-            return Err("--protocol gamestream takes no other flags".into())
-        }
         #[cfg(feature = "gamestream")]
-        Some("gamestream") => return Ok(g2g_desktop::gamestream::serve().await?),
+        Some("gamestream") => return gamestream_host(&flags).await,
         #[cfg(not(feature = "gamestream"))]
         Some("gamestream") => {
             return Err("this g2g-desktop was built without the gamestream feature".into())

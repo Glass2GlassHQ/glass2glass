@@ -2,17 +2,21 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
+mod control;
 mod http;
 mod identity;
 mod pairing;
+mod rtsp;
+mod stream;
 mod tls;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
-use std::sync::Arc;
+use std::rc::Rc;
 use std::time::Duration;
 
 use g2g_core::log::Target;
@@ -21,14 +25,20 @@ use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::CertificateDer;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{oneshot, Notify};
+use tokio::task::{spawn_local, JoinHandle};
 use tokio_rustls::TlsAcceptor;
 
 use http::{read_request, write_reply, Reply, Request};
 use identity::{HostIdentity, PairedClients};
 use pairing::Pairings;
+use rtsp::{RtspReply, RtspRequest, StreamSettings};
+pub use stream::CaptureFactory;
+use stream::{AUDIO_PORT, VIDEO_PORT};
 
 pub const HTTP_PORT: u16 = 47989;
 pub const HTTPS_PORT: u16 = 47984;
+const RTSP_PORT: u16 = 48010;
 const LOG_CATEGORY: &str = "g2g-desktop-gamestream";
 const SERVICE_TYPE: &str = "_nvstream._tcp.local.";
 // moonlight takes a negative fourth number as a Sunshine host, which selects SHA-256 pairing and RTSP over TCP
@@ -43,6 +53,8 @@ const DESKTOP_APP_TITLE: &str = "Desktop";
 const PIN_WAIT: Duration = Duration::from_secs(5 * 60);
 const PIN_DIGITS: usize = 4;
 const SALT_BYTES: usize = 16;
+const SESSION_KEY_BYTES: usize = 16;
+const SESSION_STOP_WAIT: Duration = Duration::from_secs(2);
 
 #[derive(Debug)]
 pub enum GamestreamError {
@@ -102,11 +114,30 @@ impl From<mdns_sd::Error> for GamestreamError {
 }
 
 #[derive(Debug)]
+struct Session {
+    client: IpAddr,
+    settings: Option<StreamSettings>,
+    play: Option<oneshot::Sender<StreamSettings>>,
+    stop: Rc<Notify>,
+    task: JoinHandle<()>,
+}
+
 struct Host {
     name: String,
     identity: HostIdentity,
     paired: PairedClients,
     pairings: Pairings,
+    capture: CaptureFactory,
+    session: RefCell<Option<Session>>,
+}
+
+impl fmt::Debug for Host {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Host")
+            .field("name", &self.name)
+            .field("session", &self.session)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -119,12 +150,14 @@ struct Connection<'a> {
 }
 
 impl Host {
-    fn load(directory: &Path) -> Result<Self, GamestreamError> {
+    fn load(directory: &Path, capture: CaptureFactory) -> Result<Self, GamestreamError> {
         Ok(Self {
             name: gethostname::gethostname().to_string_lossy().into_owned(),
             identity: HostIdentity::load_or_create(directory)?,
             paired: PairedClients::load(directory)?,
             pairings: Pairings::default(),
+            capture,
+            session: RefCell::new(None),
         })
     }
 
@@ -134,7 +167,7 @@ impl Host {
             .is_some_and(|certificate| self.paired.contains(certificate))
     }
 
-    async fn route(&self, request: Request, connection: Connection<'_>) -> Reply {
+    async fn route(self: &Rc<Self>, request: Request, connection: Connection<'_>) -> Reply {
         match (
             request.method.as_str(),
             request.path.as_str(),
@@ -142,8 +175,21 @@ impl Host {
         ) {
             ("GET", "/serverinfo", _) => self.server_info(connection),
             ("GET", "/pair", _) => self.pair(&request.query, connection).await,
-            ("GET", "/applist", true) if self.is_paired(connection) => app_list(),
-            ("GET", "/applist", true) => Reply::xml_error(401, "client is not paired"),
+            ("GET", "/applist" | "/launch" | "/resume" | "/cancel", true)
+                if !self.is_paired(connection) =>
+            {
+                Reply::xml_error(401, "client is not paired")
+            }
+            ("GET", "/applist", true) => app_list(),
+            ("GET", "/launch", true) => {
+                self.launch(&request.query, connection, "gamesession").await
+            }
+            // moonlight's /resume carries a fresh rikey
+            ("GET", "/resume", true) => self.launch(&request.query, connection, "resume").await,
+            ("GET", "/cancel", true) => {
+                self.end_session().await;
+                Reply::xml("<cancel>1</cancel>")
+            }
             ("POST", "/submit-pin", false) => self.submit_pin(&request.body, connection),
             _ => Reply::not_found(),
         }
@@ -151,6 +197,10 @@ impl Host {
 
     fn server_info(&self, connection: Connection<'_>) -> Reply {
         let pair_status = u8::from(self.is_paired(connection));
+        let (current_game, state) = match self.session.borrow().is_some() {
+            true => (DESKTOP_APP_ID, "G2G_SERVER_BUSY"),
+            false => (0, "G2G_SERVER_FREE"),
+        };
         Reply::xml(&format!(
             "<hostname>{}</hostname><appversion>{APP_VERSION}</appversion>\
              <GfeVersion>{GFE_VERSION}</GfeVersion><uniqueid>{}</uniqueid>\
@@ -158,7 +208,7 @@ impl Host {
              <mac>00:00:00:00:00:00</mac><MaxLumaPixelsHEVC>{MAX_LUMA_PIXELS_HEVC}</MaxLumaPixelsHEVC>\
              <LocalIP>{}</LocalIP><ServerCodecModeSupport>{CODEC_MODES}</ServerCodecModeSupport>\
              <SupportedDisplayMode></SupportedDisplayMode><PairStatus>{pair_status}</PairStatus>\
-             <currentgame>0</currentgame><state>G2G_SERVER_FREE</state>",
+             <currentgame>{current_game}</currentgame><state>{state}</state>",
             http::escape_xml(&self.name),
             self.identity.unique_id,
             connection.local.ip(),
@@ -255,6 +305,104 @@ impl Host {
         ))
     }
 
+    async fn end_session(&self) {
+        let session = self.session.borrow_mut().take();
+        let Some(mut session) = session else {
+            return;
+        };
+        session.stop.notify_one();
+        if tokio::time::timeout(SESSION_STOP_WAIT, &mut session.task)
+            .await
+            .is_err()
+        {
+            session.task.abort();
+            // the aborted task frees the stream ports only once it is dropped
+            let _ = session.task.await;
+        }
+    }
+
+    async fn launch(
+        self: &Rc<Self>,
+        query: &HashMap<String, String>,
+        connection: Connection<'_>,
+        reply_tag: &str,
+    ) -> Reply {
+        let key = query
+            .get("rikey")
+            .and_then(|key| hex::decode(key).ok())
+            .and_then(|key| <[u8; SESSION_KEY_BYTES]>::try_from(key).ok());
+        let Some(key) = key else {
+            return Reply::xml_error(400, "launch needs a 16-byte hexadecimal rikey");
+        };
+        self.end_session().await;
+        let sockets = match stream::bind().await {
+            Ok(sockets) => sockets,
+            Err(e) => {
+                return Reply::xml_error(503, &format!("could not open the stream ports: {e}"))
+            }
+        };
+        let (play, played) = oneshot::channel();
+        let host = Rc::clone(self);
+        let client = connection.peer.ip();
+        let stop = Rc::new(Notify::new());
+        let session_stop = Rc::clone(&stop);
+        let task = spawn_local(async move {
+            match stream::run(sockets, client, key, played, &session_stop, &host.capture).await {
+                Ok(()) => eprintln!("g2g-desktop host: Moonlight session ended"),
+                Err(e) => eprintln!("g2g-desktop host: Moonlight session failed: {e}"),
+            }
+            host.session.borrow_mut().take();
+        });
+        *self.session.borrow_mut() = Some(Session {
+            client,
+            settings: None,
+            play: Some(play),
+            stop,
+            task,
+        });
+        eprintln!("g2g-desktop host: Moonlight at {client} opened a session");
+        Reply::xml(&format!(
+            "<{reply_tag}>1</{reply_tag}><sessionUrl0>rtsp://{}:{RTSP_PORT}</sessionUrl0>",
+            connection.local.ip()
+        ))
+    }
+
+    fn answer_rtsp(&self, request: &RtspRequest) -> RtspReply {
+        let mut session = self.session.borrow_mut();
+        let Some(session) = session.as_mut() else {
+            return RtspReply::not_found();
+        };
+        match request.method.as_str() {
+            "OPTIONS" => RtspReply::ok(),
+            "DESCRIBE" => RtspReply::description(),
+            "SETUP" => match request.target.split('/').next() {
+                Some("streamid=video") => RtspReply::setup(VIDEO_PORT),
+                Some("streamid=audio") => RtspReply::setup(AUDIO_PORT),
+                Some("streamid=control") => RtspReply::setup(control::CONTROL_PORT),
+                _ => RtspReply::bad_request(),
+            },
+            "ANNOUNCE" => match rtsp::parse_announce(&request.body) {
+                Ok(settings) => {
+                    session.settings = Some(settings);
+                    RtspReply::ok()
+                }
+                Err(e) => {
+                    g2g_core::g2g_warn!(Target::category(LOG_CATEGORY), "{e}");
+                    RtspReply::bad_request()
+                }
+            },
+            "PLAY" => match (session.settings, session.play.take()) {
+                (Some(settings), Some(play)) => {
+                    // the receiver is gone only when the session already ended
+                    let _ = play.send(settings);
+                    RtspReply::ok()
+                }
+                _ => RtspReply::bad_request(),
+            },
+            _ => RtspReply::bad_request(),
+        }
+    }
+
     fn submit_pin(&self, body: &[u8], connection: Connection<'_>) -> Reply {
         if !connection.peer.ip().is_loopback() {
             return Reply::text(403, "a PIN is accepted from this machine only");
@@ -285,7 +433,7 @@ fn app_list() -> Reply {
 }
 
 async fn answer<S: AsyncRead + AsyncWrite + Unpin>(
-    host: &Host,
+    host: &Rc<Host>,
     stream: &mut S,
     connection: Connection<'_>,
 ) -> io::Result<()> {
@@ -294,7 +442,7 @@ async fn answer<S: AsyncRead + AsyncWrite + Unpin>(
     write_reply(stream, reply).await
 }
 
-async fn answer_http(host: Arc<Host>, mut stream: TcpStream) -> io::Result<()> {
+async fn answer_http(host: Rc<Host>, mut stream: TcpStream) -> io::Result<()> {
     let connection = Connection {
         local: stream.local_addr()?,
         peer: stream.peer_addr()?,
@@ -304,7 +452,7 @@ async fn answer_http(host: Arc<Host>, mut stream: TcpStream) -> io::Result<()> {
     answer(&host, &mut stream, connection).await
 }
 
-async fn answer_https(host: Arc<Host>, acceptor: TlsAcceptor, stream: TcpStream) -> io::Result<()> {
+async fn answer_https(host: Rc<Host>, acceptor: TlsAcceptor, stream: TcpStream) -> io::Result<()> {
     let local = stream.local_addr()?;
     let peer = stream.peer_addr()?;
     let mut stream = acceptor.accept(stream).await?;
@@ -321,6 +469,21 @@ async fn answer_https(host: Arc<Host>, acceptor: TlsAcceptor, stream: TcpStream)
         https: true,
     };
     answer(&host, &mut stream, connection).await
+}
+
+async fn answer_rtsp(host: Rc<Host>, mut stream: TcpStream) -> io::Result<()> {
+    let peer = stream.peer_addr()?;
+    let from_client = host
+        .session
+        .borrow()
+        .as_ref()
+        .is_some_and(|session| session.client == peer.ip());
+    if !from_client {
+        return Ok(());
+    }
+    let request = rtsp::read_request(&mut stream).await?;
+    let reply = host.answer_rtsp(&request);
+    rtsp::write_reply(&mut stream, &request, reply).await
 }
 
 fn advertise(name: &str) -> Result<ServiceDaemon, GamestreamError> {
@@ -344,15 +507,16 @@ fn log_failure(result: io::Result<()>) {
     }
 }
 
-pub async fn serve() -> Result<(), GamestreamError> {
+pub async fn serve(capture: CaptureFactory) -> Result<(), GamestreamError> {
     let directory = dirs::config_dir()
         .ok_or(GamestreamError::NoConfigDirectory)?
         .join("g2g-desktop")
         .join("gamestream");
-    let host = Arc::new(Host::load(&directory)?);
+    let host = Rc::new(Host::load(&directory, capture)?);
     let acceptor = TlsAcceptor::from(tls::server_config(&host.identity)?);
     let http = TcpListener::bind((Ipv4Addr::UNSPECIFIED, HTTP_PORT)).await?;
     let https = TcpListener::bind((Ipv4Addr::UNSPECIFIED, HTTPS_PORT)).await?;
+    let rtsp = TcpListener::bind((Ipv4Addr::UNSPECIFIED, RTSP_PORT)).await?;
     let _mdns = advertise(&host.name)?;
     eprintln!(
         "g2g-desktop host: Moonlight host {} on TCP ports {HTTP_PORT} and {HTTPS_PORT}",
@@ -362,13 +526,18 @@ pub async fn serve() -> Result<(), GamestreamError> {
         tokio::select! {
             accepted = http.accept() => {
                 let (stream, _) = accepted?;
-                let task = answer_http(Arc::clone(&host), stream);
-                tokio::spawn(async move { log_failure(task.await) });
+                let task = answer_http(Rc::clone(&host), stream);
+                spawn_local(async move { log_failure(task.await) });
             }
             accepted = https.accept() => {
                 let (stream, _) = accepted?;
-                let task = answer_https(Arc::clone(&host), acceptor.clone(), stream);
-                tokio::spawn(async move { log_failure(task.await) });
+                let task = answer_https(Rc::clone(&host), acceptor.clone(), stream);
+                spawn_local(async move { log_failure(task.await) });
+            }
+            accepted = rtsp.accept() => {
+                let (stream, _) = accepted?;
+                let task = answer_rtsp(Rc::clone(&host), stream);
+                spawn_local(async move { log_failure(task.await) });
             }
         }
     }

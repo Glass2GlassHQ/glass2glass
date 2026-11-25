@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2580: Stream encrypted H.264 or HEVC video from an X display to Moonlight with `moonlightvideopay`, `udpsink bind-port` and `nvenc ref-frames`.
 - M2579: `g2g-desktop host --protocol gamestream` lets stock Moonlight clients find and pair with the host and list its desktop.
 - M2578: Run the `g2g-desktop` client's audio graph on the video graph's runtime instead of its own thread.
 - M2577: Audio sinks wait for room in the device queue on a waker instead of polling the executor.

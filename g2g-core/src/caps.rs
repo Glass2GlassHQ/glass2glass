@@ -1006,6 +1006,7 @@ fn bytestream_gst_media_type(e: ByteStreamEncoding) -> &'static str {
         ByteStreamEncoding::Dtls => "application/x-dtls",
         ByteStreamEncoding::Iv8 => "video/x-iv8",
         ByteStreamEncoding::Mxf => "application/mxf",
+        ByteStreamEncoding::Datagram => "application/x-datagram",
     }
 }
 
@@ -2543,6 +2544,8 @@ pub enum ByteStreamEncoding {
     Iv8,
     // SMPTE ST 377 Material eXchange Format, KLV packets in partitions
     Mxf,
+    // one network datagram per frame, in a format only the two ends parse
+    Datagram,
 }
 
 /// Format of a [`Caps::Text`] stream. Generalizes "subtitles": a `Text` link

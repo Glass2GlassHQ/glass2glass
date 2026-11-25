@@ -48,9 +48,9 @@ The plan is [remote.md](remote.md).
 
 The plan is [gamestream.md](gamestream.md).
 
-- Stream video to Moonlight: RTSP, `/launch`, ENet control,
-  `moonlightvideopay`, the `udpsink` datagram mode, `cudascale` and the
+- Scale Moonlight video to the size the client asks for: `cudascale` and the
   `d3d11convert` size.
+- Stream Moonlight video from the portal and `--run` captures.
 - Stream audio to Moonlight with `moonlightaudiopay` and CBR Opus.
 - Inject Moonlight's keyboard, mouse and scroll input.
 - Run the Moonlight host on Windows.

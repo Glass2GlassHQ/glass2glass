@@ -102,7 +102,7 @@ pub const TS_DATAGRAM_PAYLOAD: usize = TS_PACKET_SIZE * TS_PACKETS_PER_DATAGRAM;
 /// Formats a raw wire sink carries. `ByteStreamEncoding` is `#[non_exhaustive]`
 /// from another crate, so this is the sink's own enumeration of it: a variant
 /// added later is simply not advertised until it is listed here.
-pub const CARRIED_ENCODINGS: [ByteStreamEncoding; 17] = [
+pub const CARRIED_ENCODINGS: [ByteStreamEncoding; 18] = [
     ByteStreamEncoding::MpegTs,
     ByteStreamEncoding::Matroska,
     ByteStreamEncoding::Ogg,
@@ -120,6 +120,7 @@ pub const CARRIED_ENCODINGS: [ByteStreamEncoding; 17] = [
     ByteStreamEncoding::Rtcp,
     ByteStreamEncoding::Srtcp,
     ByteStreamEncoding::Dtls,
+    ByteStreamEncoding::Datagram,
 ];
 
 /// Whether each frame is one complete network packet and must remain one
@@ -132,6 +133,7 @@ pub fn is_packet_encoding(encoding: ByteStreamEncoding) -> bool {
             | ByteStreamEncoding::Rtcp
             | ByteStreamEncoding::Srtcp
             | ByteStreamEncoding::Dtls
+            | ByteStreamEncoding::Datagram
     )
 }
 

@@ -39,7 +39,7 @@ const MAX_TOKEN_LEN: usize = 256;
 const PORT_FREE_TIMEOUT: Duration = Duration::from_secs(3);
 const PORT_POLL_INTERVAL: Duration = Duration::from_millis(20);
 // glass-to-glass latency grows with link depth
-const LINK_CAPACITY: usize = 2;
+pub(crate) const LINK_CAPACITY: usize = 2;
 
 #[derive(Debug, Clone)]
 pub struct HostSettings {

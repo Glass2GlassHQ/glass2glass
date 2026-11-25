@@ -4588,6 +4588,7 @@ dependencies = [
  "sha2 0.10.9",
  "subtle",
  "tokio",
+ "tokio-enet",
  "tokio-rustls",
  "windows",
  "x11rb 0.14.0",
@@ -11312,6 +11313,18 @@ dependencies = [
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "tokio-enet"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ede1e4e6d38df6dcd4891668f532905c6b19640caa142128a6957849cafea3d6"
+dependencies = [
+ "socket2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

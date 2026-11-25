@@ -95,6 +95,8 @@ const DEFAULT_FRAMERATE: (u32, u32) = (30, 1);
 /// Default GOP: negative means infinite, so IDRs are emitted only on demand (the
 /// low-latency live model). gst-nvcodec spells the same knob `gop-size`.
 const DEFAULT_GOP_SIZE: i32 = -1;
+// the H.264 and HEVC limit on max_num_ref_frames
+const MAX_REFERENCE_FRAMES: u32 = 16;
 
 /// Native H.264 encoder over the NVIDIA Video Codec SDK. NV12 CUDA surfaces in,
 /// H.264 Annex-B out. See the module docs.
@@ -134,6 +136,8 @@ pub struct NvEnc {
     /// Write SPS/PPS ahead of every IDR (`repeatSPSPPS`), so a periodic IDR is a
     /// self-contained entry point.
     repeat_sequence_header: bool,
+    // 0 keeps the preset's count
+    reference_frames: u32,
     /// The settings currently programmed into the open session. The targets are
     /// applied at session open and re-applied live via `nvEncReconfigureEncoder`
     /// when they diverge (runtime retarget for an adaptive sink, e.g. a
@@ -327,6 +331,7 @@ impl NvEnc {
             bitrate_bps: DEFAULT_BITRATE_BPS,
             gop_size: DEFAULT_GOP_SIZE,
             repeat_sequence_header: false,
+            reference_frames: 0,
             applied: None,
             session: None,
             frame_no: 0,
@@ -618,6 +623,9 @@ impl NvEnc {
                     &mut *(config.encode_codec_config.as_mut_ptr() as *mut ffi::ConfigHevc)
                 };
                 hevc.idr_period = gop;
+                if self.reference_frames != 0 {
+                    hevc.max_num_ref_frames_in_dpb = self.reference_frames;
+                }
                 set_flag(
                     &mut hevc.bitfields,
                     ffi::NV_ENC_HEVC_REPEAT_SPSPPS_BIT,
@@ -633,6 +641,9 @@ impl NvEnc {
                     &mut *(config.encode_codec_config.as_mut_ptr() as *mut ffi::ConfigH264)
                 };
                 h264.idr_period = gop;
+                if self.reference_frames != 0 {
+                    h264.max_num_ref_frames = self.reference_frames;
+                }
                 set_flag(
                     &mut h264.bitfields,
                     ffi::NV_ENC_H264_REPEAT_SPSPPS_BIT,
@@ -1268,6 +1279,14 @@ impl AsyncElement for NvEnc {
                 self.repeat_sequence_header = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
+            "ref-frames" => {
+                let frames = value.as_uint().ok_or(PropError::Type)?;
+                self.reference_frames = u32::try_from(frames)
+                    .ok()
+                    .filter(|frames| *frames <= MAX_REFERENCE_FRAMES)
+                    .ok_or(PropError::Value)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -1284,6 +1303,7 @@ impl AsyncElement for NvEnc {
             )),
             "gop-size" => Some(PropValue::Int(self.gop_size as i64)),
             "repeat-sequence-header" => Some(PropValue::Bool(self.repeat_sequence_header)),
+            "ref-frames" => Some(PropValue::Uint(u64::from(self.reference_frames))),
             _ => None,
         }
     }
@@ -1374,6 +1394,13 @@ static NVENC_PROPS: &[PropertySpec] = &[
         PropKind::Bool,
         "write SPS/PPS ahead of every IDR",
     ),
+    PropertySpec::new(
+        "ref-frames",
+        PropKind::Uint,
+        "reference frames the decoder keeps, 0 for the preset's count. Read when the session opens",
+    )
+    .with_range("0", "16")
+    .with_default("0"),
 ];
 
 /// Thin hand-rolled FFI for the NVIDIA Video Codec SDK (`nvEncodeAPI.h`, SDK
@@ -1599,7 +1626,9 @@ mod ffi {
         pub bitfields: u32,
         pub level: u32,
         pub idr_period: u32,
-        pub opaque1: [u8; 68],
+        pub opaque1: [u8; 48],
+        pub max_num_ref_frames: u32,
+        pub opaque1b: [u8; 16],
         pub vui: VuiColor,
         pub opaque2: [u8; 104],
         pub output_bit_depth: u32,
@@ -1608,6 +1637,7 @@ mod ffi {
     }
     const _: () = assert!(core::mem::size_of::<ConfigH264>() == 1792);
     const _: () = assert!(core::mem::offset_of!(ConfigH264, idr_period) == 8);
+    const _: () = assert!(core::mem::offset_of!(ConfigH264, max_num_ref_frames) == 60);
     const _: () = assert!(core::mem::offset_of!(ConfigH264, vui) == 80);
     const _: () = assert!(core::mem::offset_of!(ConfigH264, output_bit_depth) == 212);
     const _: () = assert!(core::mem::offset_of!(ConfigH264, input_bit_depth) == 216);
@@ -1619,7 +1649,9 @@ mod ffi {
         pub opaque0: [u8; 16],
         pub bitfields: u32,
         pub idr_period: u32,
-        pub opaque1: [u8; 48],
+        pub opaque1: [u8; 8],
+        pub max_num_ref_frames_in_dpb: u32,
+        pub opaque1b: [u8; 36],
         pub vui: VuiColor,
         pub opaque2: [u8; 100],
         pub output_bit_depth: u32,
@@ -1629,6 +1661,7 @@ mod ffi {
     const _: () = assert!(core::mem::size_of::<ConfigHevc>() == 1560);
     const _: () = assert!(core::mem::offset_of!(ConfigHevc, bitfields) == 16);
     const _: () = assert!(core::mem::offset_of!(ConfigHevc, idr_period) == 20);
+    const _: () = assert!(core::mem::offset_of!(ConfigHevc, max_num_ref_frames_in_dpb) == 32);
     const _: () = assert!(core::mem::offset_of!(ConfigHevc, vui) == 72);
     const _: () = assert!(core::mem::offset_of!(ConfigHevc, output_bit_depth) == 200);
     const _: () = assert!(core::mem::offset_of!(ConfigHevc, input_bit_depth) == 204);

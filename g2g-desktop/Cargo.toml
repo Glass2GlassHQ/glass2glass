@@ -35,6 +35,9 @@ session = [
 ]
 gamestream = [
     "session",
+    "g2g-plugins/gamestream",
+    "g2g-plugins/udp-egress",
+    "dep:tokio-enet",
     "tokio/net",
     "tokio/io-util",
     "dep:aes",
@@ -75,6 +78,7 @@ rustls = { version = "0.23", optional = true, default-features = false, features
 sha2 = { version = "0.10", optional = true }
 tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["ring", "logging", "tls12"] }
 x509-parser = { version = "0.18", optional = true }
+tokio-enet = { version = "0.1.1", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13"

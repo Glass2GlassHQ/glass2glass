@@ -317,6 +317,7 @@ pub struct UdpSink {
     auto_multicast: bool,
     /// `ttl-mc`, the hop count a multicast datagram gets.
     multicast_ttl: u32,
+    bind_port: u16,
     /// Set from the negotiated caps: raw datagram mode carrying this container.
     /// `None` is the RTP payloader path.
     bytestream: Option<ByteStreamEncoding>,
@@ -350,6 +351,7 @@ impl UdpSink {
             clients: Vec::new(),
             auto_multicast: DEFAULT_AUTO_MULTICAST,
             multicast_ttl: DEFAULT_MULTICAST_TTL,
+            bind_port: 0,
             bytestream: None,
             rtcp_sr_interval_ns: None,
             last_sr_ns: 0,
@@ -680,7 +682,10 @@ impl AsyncElement for UdpSink {
             Caps::ByteStream { encoding } => self.bytestream = Some(*encoding),
             _ => return Err(G2gError::CapsMismatch),
         }
-        let socket = StdUdpSocket::bind(("0.0.0.0", 0)).map_err(io_err)?;
+        // a fixed bind-port is free again only once its last socket closes
+        self.std_socket = None;
+        self.socket = None;
+        let socket = StdUdpSocket::bind(("0.0.0.0", self.bind_port)).map_err(io_err)?;
         socket.set_nonblocking(true).map_err(io_err)?;
         socket
             .set_multicast_ttl_v4(self.multicast_ttl)
@@ -776,6 +781,13 @@ impl AsyncElement for UdpSink {
             .with_default("1")
             .with_range("0", "255"),
             PropertySpec::new(
+                "bind-port",
+                PropKind::Uint,
+                "local UDP port to send from, 0 for any",
+            )
+            .with_default("0")
+            .with_range("0", "65535"),
+            PropertySpec::new(
                 "retransmit",
                 PropKind::Bool,
                 "honor RTPFB Generic NACK by resending from the packet history",
@@ -834,6 +846,11 @@ impl AsyncElement for UdpSink {
             }
             "auto-multicast" => {
                 self.auto_multicast = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            "bind-port" => {
+                let port = value.as_uint().ok_or(PropError::Type)?;
+                self.bind_port = u16::try_from(port).map_err(|_| PropError::Value)?;
                 Ok(())
             }
             "ttl-mc" => {
@@ -943,6 +960,7 @@ impl AsyncElement for UdpSink {
             "clients" => Some(PropValue::Str(render_clients(&self.clients))),
             "auto-multicast" => Some(PropValue::Bool(self.auto_multicast)),
             "ttl-mc" => Some(PropValue::Uint(self.multicast_ttl as u64)),
+            "bind-port" => Some(PropValue::Uint(u64::from(self.bind_port))),
             "fec-mode" => Some(PropValue::Str(self.fec_config.mode_str().into())),
             "fec-columns" => Some(PropValue::Uint(self.fec_config.columns as u64)),
             "fec-rows" => Some(PropValue::Uint(self.fec_config.rows as u64)),
@@ -1184,6 +1202,40 @@ mod tests {
             .expect_err("non-h264 caps must be rejected");
         assert_eq!(err, G2gError::CapsMismatch);
         assert!(s.std_socket.is_none(), "no socket bound on a rejected caps");
+    }
+
+    #[tokio::test]
+    async fn a_datagram_frame_leaves_whole_from_the_bind_port() {
+        let receiver = StdUdpSocket::bind("127.0.0.1:0").unwrap();
+        receiver
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let bind_port = StdUdpSocket::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let mut s = UdpSink::new(receiver.local_addr().unwrap());
+        s.set_property("bind-port", PropValue::Uint(u64::from(bind_port)))
+            .unwrap();
+        let datagram_caps = Caps::ByteStream {
+            encoding: ByteStreamEncoding::Datagram,
+        };
+        s.configure_pipeline(&datagram_caps).unwrap();
+        s.configure_pipeline(&datagram_caps)
+            .expect("a second configure rebinds the same port");
+        let datagram: Vec<u8> = (0..DEFAULT_MAX_PAYLOAD * 2).map(|i| i as u8).collect();
+        let frame = crate::testutil::frame(datagram.clone());
+        s.process(
+            PipelinePacket::DataFrame(frame),
+            &mut crate::testutil::CollectSink::default(),
+        )
+        .await
+        .unwrap();
+        let mut received = alloc::vec![0u8; datagram.len() + 1];
+        let (length, from) = receiver.recv_from(&mut received).unwrap();
+        assert_eq!(from.port(), bind_port);
+        assert_eq!(received[..length], datagram[..]);
     }
 
     #[test]

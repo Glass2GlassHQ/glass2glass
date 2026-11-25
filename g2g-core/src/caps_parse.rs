@@ -583,6 +583,7 @@ impl CapsSet {
             "application/x-dtls" => bytestream(ByteStreamEncoding::Dtls),
             "video/x-iv8" => bytestream(ByteStreamEncoding::Iv8),
             "application/mxf" => bytestream(ByteStreamEncoding::Mxf),
+            "application/x-datagram" => bytestream(ByteStreamEncoding::Datagram),
             "subpicture/x-dvd" => Some(CapsSet::one(Caps::SubPicture {
                 format: SubPictureFormat::VobSub,
             })),
@@ -1257,6 +1258,7 @@ mod tests {
             ("audio/x-au", ByteStreamEncoding::Au),
             ("video/x-iv8", ByteStreamEncoding::Iv8),
             ("application/mxf", ByteStreamEncoding::Mxf),
+            ("application/x-datagram", ByteStreamEncoding::Datagram),
         ] {
             let caps = Caps::ByteStream { encoding };
             assert_eq!(caps.to_gst_string(), media_type);

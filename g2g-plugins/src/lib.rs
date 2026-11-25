@@ -747,6 +747,8 @@ pub mod rtpjitter;
 pub mod rtcp;
 // Sans-IO RFC 7714 AES-GCM protection for RTP and RTCP. The feature keeps
 // cryptographic dependencies out of builds that use plain RTP only.
+#[cfg(feature = "gamestream")]
+pub mod moonlight;
 #[cfg(feature = "srtp")]
 pub mod srtp;
 #[cfg(feature = "srtp")]

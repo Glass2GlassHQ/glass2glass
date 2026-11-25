@@ -3229,6 +3229,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "ristsink" => "rist";
         "srtpenc" => "srtp";
         "srtpdec" => "srtp";
+        "moonlightvideopay" => "gamestream";
         "dtlssrtpenc" => "dtls-srtp";
         "dtlssrtpdec" => "dtls-srtp";
         "tcpserversrc" => "tcp";
@@ -3685,6 +3686,12 @@ fn register_feature_gated(reg: &mut Registry) {
     }));
     // RFC 7714 packet protection (M1098): both build keyless and refuse to
     // configure until `key=` supplies one.
+    #[cfg(feature = "gamestream")]
+    reg.register_launch(LaunchFactory::of::<
+        crate::moonlight::videopay::MoonlightVideoPay,
+    >("moonlightvideopay", || {
+        Box::new(crate::moonlight::videopay::MoonlightVideoPay::default())
+    }));
     #[cfg(feature = "srtp")]
     reg.register_launch(LaunchFactory::of::<SrtpEnc>("srtpenc", || {
         Box::new(SrtpEnc::default())
