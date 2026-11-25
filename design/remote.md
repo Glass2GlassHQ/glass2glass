@@ -329,6 +329,10 @@ Host flags, all of them real properties the process applies:
 | `--video-mode` | `stream`, `stream-per-frame` or `datagrams` | `stream` |
 | `--x11-display` | capture this X display and inject through XTest, Linux | none |
 | `--congestion-control` | `low-latency` (BBR), `throughput` or `default` (Cubic) | `low-latency` |
+| `--protocol` | `remotewt`, or `gamestream` for stock Moonlight clients ([gamestream.md](gamestream.md)), which takes no other flag | `remotewt` |
+
+`g2g-desktop pin PIN` hands the PIN Moonlight shows to a `gamestream` host on
+the same machine.
 
 Client flags:
 

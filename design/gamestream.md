@@ -1,10 +1,11 @@
 # Moonlight host
 
 Plan for `g2g-desktop host --protocol gamestream`, a host that stock Moonlight
-clients pair with and stream from, the way they use Sunshine. Nothing in this
-file is built unless it names an element that already exists. When a slice
-ships, delete it here and from [TODO.md](TODO.md), and write the shipped
-behavior into the track that owns it.
+clients pair with and stream from, the way they use Sunshine. Discovery,
+pairing and the app list run today. Nothing else in this file is built unless
+it names an element that already exists. When a slice ships, delete it here and
+from [TODO.md](TODO.md), and write the shipped behavior into the track that
+owns it.
 
 ## Decisions
 
@@ -84,13 +85,16 @@ In `g2g-desktop`, module `gamestream`.
 - mDNS advertises `_nvstream._tcp` on the HTTP port with no TXT records.
 - Plain HTTP serves `/serverinfo`, `/pair` and `/submit-pin`.
 - HTTPS asks for a client certificate, accepts any certificate in the
-  handshake, then serves a request only when that certificate is in the paired
-  list: `/serverinfo`, `/applist` with one "Desktop" entry, `/appasset`,
-  `/launch`, `/resume`, `/cancel`.
+  handshake, then serves `/applist` (one "Desktop" entry) only when that
+  certificate is in the paired list. `/serverinfo` reports `PairStatus` 1 for
+  a paired certificate. `/launch`, `/resume` and `/cancel` come with video.
+  The host serves no `/appasset`, and Moonlight shows its own box art.
 - Pairing hashes the salt and PIN with SHA-256 into an AES-128-ECB key, swaps
   challenges signed with RSA-SHA256 over each certificate's signature, and ends
-  with `pairchallenge` over HTTPS. The host certificate (from `rcgen`) and the
-  paired client certificates are stored in the config directory.
+  with `pairchallenge` over HTTPS. A 2048-bit RSA host key (made once with the
+  `rsa` crate, signed with `ring`), the host certificate, the `uniqueid` and
+  the paired client certificates live in `g2g-desktop/gamestream` under the
+  user's config directory.
 - RTSP takes one request per TCP connection and closes it after the reply. It
   uses the encrypted framing when `/launch` returned `rtspenc://`. `DESCRIBE`
   lists the HEVC marker, the encryption flags and the `surround-params` lines.
@@ -104,13 +108,12 @@ In `g2g-desktop`, module `gamestream`.
 
 ## Order
 
-1. mDNS, `/serverinfo`, pairing, `/applist` and the pinned HTTPS port.
-2. RTSP, `/launch`, ENet control, `moonlightvideopay`, the `udpsink` datagram
+1. RTSP, `/launch`, ENet control, `moonlightvideopay`, the `udpsink` datagram
    mode, `cudascale`, the `d3d11convert` size, and graphs built from
    `ANNOUNCE`.
-3. Audio: `moonlightaudiopay` and CBR Opus in 5 ms frames.
-4. Input: keyboard through the virtual-key table, mouse and scroll.
-5. The Windows host.
+2. Audio: `moonlightaudiopay` and CBR Opus in 5 ms frames.
+3. Input: keyboard through the virtual-key table, mouse and scroll.
+4. The Windows host.
 
 After those: reference frame invalidation, gamepad, HDR, surround, and `--run`
 applications as `/applist` entries.
@@ -120,9 +123,10 @@ applications as `/applist` entries.
 - FEC parity matches vectors generated once with nanors and checked in as a
   fixture.
 - `tools/moonlight-interop.sh` runs the Moonlight flatpak under Xvfb against the
-  host: pair with `--pin`, list, stream for a few seconds, then check the
-  Moonlight log for decoded frames and no connection error. It runs before
-  each push of this work and puts no window on the desktop.
+  host, each side with a fresh config directory: it pairs with `--pin`, enters
+  the PIN through `g2g-desktop pin`, and lists the apps. Streaming for a few
+  seconds and checking the Moonlight log for decoded frames comes with video.
+  It runs before each push of this work and puts no window on the desktop.
 
 ## References
 

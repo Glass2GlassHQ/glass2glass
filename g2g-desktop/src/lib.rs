@@ -6,6 +6,11 @@
 mod audio;
 #[cfg(all(any(target_os = "linux", target_os = "windows"), feature = "session"))]
 pub mod client;
+#[cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "gamestream"
+))]
+pub mod gamestream;
 pub mod hid;
 #[cfg(all(any(target_os = "linux", target_os = "windows"), feature = "session"))]
 pub mod host;

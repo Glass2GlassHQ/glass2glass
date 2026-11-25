@@ -42,7 +42,9 @@ use g2g_plugins::perfetto_trace::PerfettoTrace;
 use g2g_plugins::pipewirevideosrc::PipeWireVideoSrc;
 #[cfg(target_os = "linux")]
 use g2g_plugins::registry::default_registry;
-use g2g_plugins::remotewtio::{generate_certificate, SelfSignedCertificate};
+use g2g_plugins::remotewtio::generate_certificate;
+#[cfg(target_os = "linux")]
+use g2g_plugins::remotewtio::SelfSignedCertificate;
 #[cfg(target_os = "linux")]
 use g2g_plugins::screencastportal::{PortalCursorMode, PortalSourceTypes};
 #[cfg(target_os = "linux")]
@@ -58,6 +60,8 @@ const HOST_USAGE: &str =
     "  g2g-desktop host --token TOKEN [--port 8080] [--fps 60] [--bitrate 4000000]
                    [--send-window BYTES] [--video-mode stream|stream-per-frame|datagrams]
                    [--trace FILE]";
+const GAMESTREAM_USAGE: &str = "  g2g-desktop host --protocol gamestream
+  g2g-desktop pin PIN";
 const CLIENT_USAGE: &str =
     "  g2g-desktop client --host HOST --cert-hash SHA256 --token TOKEN [--port 8080] [--inputs true]
                      [--transport auto|quic|websocket] [--trace FILE]";
@@ -76,7 +80,8 @@ const DEFAULT_PORT: u16 = 8080;
 const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_millis(100);
 const DEFAULT_FPS: u32 = 60;
 const DEFAULT_BITRATE: u32 = 4_000_000;
-const HOST_FLAGS: [&str; 7] = [
+const HOST_FLAGS: [&str; 8] = [
+    "protocol",
     "port",
     "token",
     "fps",
@@ -509,6 +514,19 @@ fn host_audio(flags: &Flags, capture: &CaptureSettings) -> Result<bool, Box<dyn 
 }
 
 async fn host(flags: Flags) -> Result<(), Box<dyn Error>> {
+    match flags.get("protocol").map(String::as_str) {
+        None | Some("remotewt") => {}
+        Some("gamestream") if flags.len() > 1 => {
+            return Err("--protocol gamestream takes no other flags".into())
+        }
+        #[cfg(feature = "gamestream")]
+        Some("gamestream") => return Ok(g2g_desktop::gamestream::serve().await?),
+        #[cfg(not(feature = "gamestream"))]
+        Some("gamestream") => {
+            return Err("this g2g-desktop was built without the gamestream feature".into())
+        }
+        Some(other) => return Err(format!("unknown --protocol {other}").into()),
+    }
     let port = parsed(&flags, "port", DEFAULT_PORT)?;
     let capture = CaptureSettings {
         fps: parsed(&flags, "fps", DEFAULT_FPS)?,
@@ -653,6 +671,16 @@ async fn client(flags: Flags) -> Result<(), Box<dyn Error>> {
     }
 }
 
+#[cfg(feature = "gamestream")]
+fn submit_pin(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
+    let (Some(pin), None) = (args.next(), args.next()) else {
+        return Err(format!("usage:\n{GAMESTREAM_USAGE}").into());
+    };
+    g2g_desktop::gamestream::submit_pin(&pin)?;
+    eprintln!("g2g-desktop: PIN accepted");
+    Ok(())
+}
+
 fn main() -> ExitCode {
     g2g_core::log::init_from_env();
     let mut args = std::env::args().skip(1);
@@ -667,8 +695,10 @@ fn main() -> ExitCode {
             .and_then(|flags| runtime.block_on(local.run_until(host(flags)))),
         Some("client") => parse_flags(args, &[&CLIENT_FLAGS[..], &PLATFORM_CLIENT_FLAGS].concat())
             .and_then(|flags| runtime.block_on(local.run_until(client(flags)))),
+        #[cfg(feature = "gamestream")]
+        Some("pin") => submit_pin(args),
         _ => Err(format!(
-            "usage:\n{HOST_USAGE}{PLATFORM_HOST_USAGE}\n{CLIENT_USAGE}{PLATFORM_CLIENT_USAGE}"
+            "usage:\n{HOST_USAGE}{PLATFORM_HOST_USAGE}\n{GAMESTREAM_USAGE}\n{CLIENT_USAGE}{PLATFORM_CLIENT_USAGE}"
         )
         .into()),
     };

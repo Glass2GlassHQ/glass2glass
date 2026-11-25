@@ -48,8 +48,6 @@ The plan is [remote.md](remote.md).
 
 The plan is [gamestream.md](gamestream.md).
 
-- Pair a stock Moonlight client: mDNS, `/serverinfo`, PIN pairing,
-  `/applist` and the pinned HTTPS port.
 - Stream video to Moonlight: RTSP, `/launch`, ENet control,
   `moonlightvideopay`, the `udpsink` datagram mode, `cudascale` and the
   `d3d11convert` size.

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2579: `g2g-desktop host --protocol gamestream` lets stock Moonlight clients find and pair with the host and list its desktop.
 - M2578: Run the `g2g-desktop` client's audio graph on the video graph's runtime instead of its own thread.
 - M2577: Audio sinks wait for room in the device queue on a waker instead of polling the executor.
 - M2576: Send the Linux host's desktop audio to the Linux `g2g-desktop` client as Opus, and add `buffer-time` to `pulsesink`.
