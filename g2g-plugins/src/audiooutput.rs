@@ -1366,12 +1366,13 @@ mod tests {
         // a seek target between two samples at 48 kHz
         const SEGMENT_START_NS: u64 = 1_000_010_000;
         const BUFFER_BYTES: usize = 4_800;
-        let clock: Arc<dyn g2g_core::PipelineClock + Send + Sync> =
-            Arc::new(g2g_core::MonotonicClock);
+        const NOW_NS: u64 = 5_000_000_000;
+        let manual = crate::testutil::ManualClock::default();
+        manual.set(NOW_NS);
         let anchor = g2g_core::clock::PlayAnchor::new();
         let mut start = PlayoutStart::default();
         start.set_clock_sync(g2g_core::ClockSync::with_play_anchor(
-            Arc::clone(&clock),
+            Arc::new(manual),
             0,
             anchor.clone(),
         ));
@@ -1386,7 +1387,7 @@ mod tests {
         let frame = pcm_frame(SEGMENT_START_NS - one_sample_ns / 2, BUFFER_BYTES);
         g2g_core::runtime::block_on(async {
             start.send(&link, frame, stereo_s16(), err()).await.unwrap();
-            anchor.stamp(clock.now_ns());
+            anchor.stamp(NOW_NS);
             let next = pcm_frame(SEGMENT_START_NS + buffer_ns(BUFFER_BYTES), BUFFER_BYTES);
             start.send(&link, next, stereo_s16(), err()).await.unwrap();
             link.finish(DeviceCmd::Shutdown, err()).await.unwrap();
