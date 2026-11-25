@@ -44,6 +44,19 @@ The plan is [remote.md](remote.md).
 - A Chrome client on the same signaling and the same data channel.
 - OIDC in front of the bearer token, a `g2g://` URL, and install packages.
 
+## Moonlight host
+
+The plan is [gamestream.md](gamestream.md).
+
+- Pair a stock Moonlight client: mDNS, `/serverinfo`, PIN pairing,
+  `/applist` and the pinned HTTPS port.
+- Stream video to Moonlight: RTSP, `/launch`, ENet control,
+  `moonlightvideopay`, the `udpsink` datagram mode, `cudascale` and the
+  `d3d11convert` size.
+- Stream audio to Moonlight with `moonlightaudiopay` and CBR Opus.
+- Inject Moonlight's keyboard, mouse and scroll input.
+- Run the Moonlight host on Windows.
+
 ## Embeddable player (`g2g-player`)
 
 - Take GPU frames in `playervideosink` once decoders open on the host's device.

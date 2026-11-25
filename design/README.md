@@ -85,7 +85,8 @@ document.
 
 Open work is in [TODO.md](TODO.md). Shipped milestones are logged
 in [CHANGELOG.md](../CHANGELOG.md). The remote-desktop session is a plan,
-not a built track: [remote.md](remote.md).
+not a built track: [remote.md](remote.md). The host for stock Moonlight clients is a plan
+too: [gamestream.md](gamestream.md).
 
 ---
 
