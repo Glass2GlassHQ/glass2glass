@@ -224,9 +224,9 @@ pub(crate) fn run_display(
     Ok(())
 }
 
-fn free_x11_display() -> Option<u32> {
+fn free_x11_displays() -> impl Iterator<Item = u32> {
     // Xvfb listens without a lock file
-    (0..33).find(|number| {
+    (0..33).filter(|number| {
         !std::path::Path::new(&format!("/tmp/.X{number}-lock")).exists()
             && !std::path::Path::new(&format!("/tmp/.X11-unix/X{number}")).exists()
     })
@@ -234,19 +234,28 @@ fn free_x11_display() -> Option<u32> {
 
 fn spawn_xwayland(state: &mut DisplayState) -> Result<(), G2gError> {
     // smithay deletes the socket of a display whose lock file is missing before it binds its own
-    let display = free_x11_display()
-        .ok_or_else(|| hardware_error("starting Xwayland", "every X display is taken"))?;
-    let (xwayland, client) = XWayland::spawn(
-        &state.display_handle,
-        display,
-        std::iter::empty::<(String, String)>(),
-        std::iter::empty::<String>(),
-        true,
-        Stdio::null(),
-        Stdio::null(),
-        |_| (),
-    )
-    .map_err(|error| hardware_error("starting Xwayland", error))?;
+    let mut displays = free_x11_displays();
+    let (xwayland, client) = loop {
+        let display = displays
+            .next()
+            .ok_or_else(|| hardware_error("starting Xwayland", "every X display is taken"))?;
+        let spawned = XWayland::spawn(
+            &state.display_handle,
+            display,
+            std::iter::empty::<(String, String)>(),
+            std::iter::empty::<String>(),
+            true,
+            Stdio::null(),
+            Stdio::null(),
+            |_| (),
+        );
+        match spawned {
+            Ok(spawned) => break spawned,
+            // smithay returns AddrInUse when the lock file appeared after the check above or the abstract socket is bound
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
+            Err(error) => return Err(hardware_error("starting Xwayland", error)),
+        }
+    };
     state
         .loop_handle
         .insert_source(xwayland, move |event, _, state| match event {

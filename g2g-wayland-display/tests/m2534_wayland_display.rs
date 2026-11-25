@@ -364,7 +364,9 @@ fn run_xdnd_target(display: String, events: mpsc::UnboundedSender<XdndEvent>) {
             }
             _ => continue,
         };
-        if events.send(event).is_err() {
+        // xwayland keeps running while any X client is connected
+        let dropped = matches!(event, XdndEvent::Dropped(_));
+        if events.send(event).is_err() || dropped {
             return;
         }
     }
