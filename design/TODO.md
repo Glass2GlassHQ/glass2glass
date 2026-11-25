@@ -39,14 +39,21 @@ The plan is [remote.md](remote.md).
 - The macOS client, then `display-index` on `screencapturesrc` and a macOS
   host through `vtencode`.
 - Cursor, clipboard and grab on the Windows client.
-- Gamepad injection on Linux and Windows, and a Windows service that injects
-  on the secure desktop.
+- Route the remote desktop host's gamepad events to `UinputGamepads` and
+  `ViGEmGamepads`, and a Windows service that injects on the secure desktop.
 - A Chrome client on the same signaling and the same data channel.
 - OIDC in front of the bearer token, a `g2g://` URL, and install packages.
 
 ## Moonlight host
 
-The plan is [gamestream.md](gamestream.md).
+The design is [gamestream.md](gamestream.md).
+
+- Send rumble back to Moonlight (control message 0x010b) from the uinput and
+  ViGEm pads' force feedback.
+- HDR: a 10-bit PQ capture source (FP16 `d3d11screencapturesrc` or a KMS
+  source on Linux), HEVC Main10 encode, and Moonlight's HDR mode message.
+- Run a real Moonlight controller through the host on Linux and Windows, the
+  Windows one with ViGEmBus installed.
 
 ## Embeddable player (`g2g-player`)
 

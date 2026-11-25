@@ -1,16 +1,13 @@
 # Moonlight host
 
-Plan for `g2g-desktop host --protocol gamestream`, a host that stock Moonlight
-clients pair with and stream from, the way they use Sunshine. Discovery,
-pairing, the app list with launched `--app` commands, encrypted H.264 or HEVC video from an X display, the
-desktop portal, a `--run` headless display or the Windows desktop, at the size
-the client asks for,
-encrypted stereo, 5.1 or 7.1 Opus audio from the default output, and keyboard, mouse,
-scroll, text, touch and pen input, and reference invalidation on Linux run
-today. Nothing else in this file is built unless it names an element that
-already exists. When a slice ships, delete it
-here and from [TODO.md](TODO.md), and write the shipped behavior into the track
-that owns it.
+`g2g-desktop host --protocol gamestream` is a host that stock Moonlight
+clients pair with and stream from, the way they use Sunshine. It serves
+discovery, pairing, the app list with launched `--app` commands, encrypted
+H.264 or HEVC video from an X display, the desktop portal, a `--run` headless
+display or the Windows desktop at the size the client asks for, reference
+invalidation on Linux, encrypted stereo, 5.1 or 7.1 Opus audio from the
+default output, and keyboard, mouse, scroll, text, touch, pen and gamepad
+input. Open work is under "Moonlight host" in [TODO.md](TODO.md).
 
 ## Decisions
 
@@ -164,10 +161,6 @@ In `g2g-desktop`, module `gamestream`.
   host without ViGEmBus installed warns once and drops gamepads. Keys still held when the control stream ends are
   released. The host ends a session with 0x0109 carrying 0x80030023, and ends it
   itself after 10 s without a control message.
-
-## Order
-
-Rumble back to Moonlight, and HDR.
 
 ## Tests
 
