@@ -37,8 +37,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use windows::Win32::Media::Audio::{
-    eCapture, eRender, IAudioCaptureClient, IAudioClient, AUDCLNT_BUFFERFLAGS_SILENT,
-    AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
+    eCapture, eRender, IAudioCaptureClient, IAudioClient, IAudioRenderClient, IMMDevice,
+    AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
 };
 use windows::Win32::System::Com::{
     CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
@@ -338,6 +338,59 @@ fn capture_worker(
     }
 }
 
+#[derive(Debug)]
+struct LoopbackSilence {
+    client: IAudioClient,
+    render: IAudioRenderClient,
+    buffer_frames: u32,
+}
+
+impl LoopbackSilence {
+    fn start(endpoint: &IMMDevice) -> Result<Self, G2gError> {
+        // SAFETY: WASAPI setup on the owning thread, the mix format is freed after Initialize.
+        unsafe {
+            let client: IAudioClient = endpoint.Activate(CLSCTX_ALL, None).map_err(audio_err)?;
+            let fmt_ptr = client.GetMixFormat().map_err(audio_err)?;
+            client
+                .Initialize(
+                    AUDCLNT_SHAREMODE_SHARED,
+                    0,
+                    BUFFER_DURATION_HNS,
+                    0,
+                    fmt_ptr,
+                    None,
+                )
+                .map_err(audio_err)?;
+            CoTaskMemFree(Some(fmt_ptr.cast()));
+            let buffer_frames = client.GetBufferSize().map_err(audio_err)?;
+            let render: IAudioRenderClient = client.GetService().map_err(audio_err)?;
+            let silence = Self {
+                client,
+                render,
+                buffer_frames,
+            };
+            silence.top_up()?;
+            silence.client.Start().map_err(audio_err)?;
+            Ok(silence)
+        }
+    }
+
+    fn top_up(&self) -> Result<(), G2gError> {
+        // SAFETY: render calls on the owning thread, the buffer is released as silent without a write.
+        unsafe {
+            let padding = self.client.GetCurrentPadding().map_err(audio_err)?;
+            let free = self.buffer_frames - padding;
+            if free == 0 {
+                return Ok(());
+            }
+            self.render.GetBuffer(free).map_err(audio_err)?;
+            self.render
+                .ReleaseBuffer(free, AUDCLNT_BUFFERFLAGS_SILENT.0 as u32)
+                .map_err(audio_err)
+        }
+    }
+}
+
 /// # Safety
 /// Must run on a COM-initialised thread.
 unsafe fn pump_endpoint(
@@ -354,8 +407,14 @@ unsafe fn pump_endpoint(
         0
     };
     // SAFETY: WASAPI setup on the owning thread.
-    let (client, capture) = unsafe {
+    let (client, capture, silence) = unsafe {
         let endpoint = open_endpoint(dataflow, device)?;
+        // windows loopback capture delivers no packets while nothing plays on the endpoint
+        let silence = if loopback {
+            Some(LoopbackSilence::start(&endpoint)?)
+        } else {
+            None
+        };
         let client: IAudioClient = endpoint.Activate(CLSCTX_ALL, None).map_err(audio_err)?;
         let fmt_ptr = client.GetMixFormat().map_err(audio_err)?;
         client
@@ -371,7 +430,7 @@ unsafe fn pump_endpoint(
         CoTaskMemFree(Some(fmt_ptr.cast()));
         let capture: IAudioCaptureClient = client.GetService().map_err(audio_err)?;
         client.Start().map_err(audio_err)?;
-        (client, capture)
+        (client, capture, silence)
     };
 
     let _ = ready_tx.try_send(Ok(()));
@@ -384,6 +443,9 @@ unsafe fn pump_endpoint(
     loop {
         if Instant::now() >= deadline {
             break;
+        }
+        if let Some(silence) = &silence {
+            silence.top_up()?;
         }
         // SAFETY: packet query on the owning thread.
         let packet = unsafe { capture.GetNextPacketSize() }.map_err(audio_err)?;
@@ -425,6 +487,9 @@ unsafe fn pump_endpoint(
     // SAFETY: stop on the owning thread.
     unsafe {
         let _ = client.Stop();
+        if let Some(silence) = &silence {
+            let _ = silence.client.Stop();
+        }
     }
     Ok(())
 }

@@ -37,6 +37,8 @@ gamestream = [
     "session",
     "g2g-plugins/gamestream",
     "g2g-plugins/udp-egress",
+    "g2g-plugins/opus",
+    "g2g-plugins/wasapi-src",
     "dep:tokio-enet",
     "tokio/net",
     "tokio/io-util",

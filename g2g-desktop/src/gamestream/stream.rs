@@ -316,8 +316,9 @@ pub(crate) async fn run(
             }
             Err(e) => Err(StreamError::Io(e)),
         };
-        if let Err(e) = sent {
-            eprintln!("g2g-desktop host: Moonlight audio stopped: {e}");
+        match sent {
+            Ok(()) => eprintln!("g2g-desktop host: Moonlight audio capture ended"),
+            Err(e) => eprintln!("g2g-desktop host: Moonlight audio stopped: {e}"),
         }
         std::future::pending::<()>().await
     };

@@ -49,7 +49,6 @@ The plan is [remote.md](remote.md).
 The plan is [gamestream.md](gamestream.md).
 
 - Inject Moonlight's side mouse buttons, touch, pen and text input.
-- Run the Moonlight host on Windows.
 
 ## Embeddable player (`g2g-player`)
 

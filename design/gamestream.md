@@ -3,7 +3,8 @@
 Plan for `g2g-desktop host --protocol gamestream`, a host that stock Moonlight
 clients pair with and stream from, the way they use Sunshine. Discovery,
 pairing, the app list, encrypted H.264 or HEVC video from an X display, the
-desktop portal or a `--run` headless display, at the size the client asks for,
+desktop portal, a `--run` headless display or the Windows desktop, at the size
+the client asks for,
 encrypted stereo Opus audio from the default output, and keyboard, mouse and
 scroll input run today. Nothing else in this file is built unless it names an element that
 already exists. When a slice ships, delete it
@@ -62,7 +63,9 @@ sources send a frame only when the picture changes, and a `videorate` that
 repeats frames holds each one until the next change.
 Windows replaces the video front with
 `d3d11screencapturesrc ! d3d11convert ! video/x-raw,width=W,height=H ! mfh265enc`
-and the audio source with `wasapisrc loopback=true`. The session builds both
+and the audio source with `wasapisrc loopback=true`, which plays silence to
+the output while it captures because Windows delivers no loopback packets while
+nothing plays. The session builds both
 graphs after RTSP `ANNOUNCE`, which carries the codec, size, frame rate,
 bitrate and packet size.
 
@@ -125,10 +128,8 @@ In `g2g-desktop`, module `gamestream`.
 
 ## Order
 
-1. The Windows host.
-
-After those: reference frame invalidation, gamepad, HDR, surround, and `--run`
-applications as `/applist` entries.
+Reference frame invalidation, gamepad, HDR, surround, and `--run` applications
+as `/applist` entries.
 
 ## Tests
 
@@ -144,6 +145,9 @@ applications as `/applist` entries.
   `tools/moonlight-input-probe.py`, xdotool clicks and types into Moonlight's
   window, and the script checks that the probe received the click and the key. It runs before each push of this work and puts
   no window on the desktop.
+- The Windows host is checked by hand: the Moonlight flatpak on Linux streams
+  over the LAN from a Windows host started in the logged-in session, and the
+  host log at `g2g-desktop-gamestream:debug` lists the input it injected.
 
 ## References
 
