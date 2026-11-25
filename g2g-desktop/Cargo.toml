@@ -40,6 +40,7 @@ gamestream = [
     "g2g-plugins/opus",
     "g2g-plugins/wasapi-src",
     "dep:tokio-enet",
+    "dep:vigem-client",
     "tokio/net",
     "tokio/io-util",
     "dep:aes",
@@ -90,6 +91,7 @@ g2g-wayland-display = { path = "../g2g-wayland-display", optional = true, featur
 x11rb = { version = "0.14", optional = true, features = ["xtest"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+vigem-client = { version = "0.1.4", optional = true }
 windows = { version = "0.62", optional = true, features = [
     "Win32_Foundation",
     "Win32_UI_Controls",

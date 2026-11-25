@@ -25,6 +25,8 @@ pub mod sendinput;
 pub mod uinput;
 #[cfg(target_os = "linux")]
 pub mod uinputgamepad;
+#[cfg(all(target_os = "windows", feature = "gamestream"))]
+pub mod vigemgamepad;
 #[cfg(all(target_os = "linux", feature = "session"))]
 pub mod waylanddisplayinput;
 #[cfg(all(target_os = "linux", feature = "session"))]

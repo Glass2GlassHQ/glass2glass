@@ -37,6 +37,7 @@ pub enum InjectError {
     Refused(io::Error),
     Device(io::Error),
     GamepadUnavailable(io::Error),
+    TriggerOutOfRange(i16),
 }
 
 impl fmt::Display for InjectError {
@@ -71,6 +72,9 @@ impl fmt::Display for InjectError {
             InjectError::Device(e) => write!(f, "input device: {e}"),
             InjectError::GamepadUnavailable(e) => {
                 write!(f, "no virtual gamepad, gamepads are dropped: {e}")
+            }
+            InjectError::TriggerOutOfRange(value) => {
+                write!(f, "trigger value {value} is outside 0 to 255")
             }
         }
     }

@@ -34,7 +34,7 @@ use g2g_desktop::gamestream::{LaunchableApp, ServedApps};
 use g2g_desktop::host::{
     check_token_len, inject, run_session, HostCapture, HostEncoder, HostListener, HostSettings,
 };
-#[cfg(all(target_os = "linux", feature = "gamestream"))]
+#[cfg(feature = "gamestream")]
 use g2g_desktop::injection::WithGamepads;
 use g2g_desktop::injection::{InjectError, InjectEvents, ScreenSize};
 #[cfg(target_os = "windows")]
@@ -43,6 +43,8 @@ use g2g_desktop::sendinput::Injector;
 use g2g_desktop::uinput::Injector;
 #[cfg(all(target_os = "linux", feature = "gamestream"))]
 use g2g_desktop::uinputgamepad::UinputGamepads;
+#[cfg(all(target_os = "windows", feature = "gamestream"))]
+use g2g_desktop::vigemgamepad::ViGEmGamepads;
 #[cfg(target_os = "linux")]
 use g2g_desktop::waylanddisplayinput::WaylandDisplayInjector;
 #[cfg(target_os = "linux")]
@@ -747,7 +749,12 @@ async fn gamestream_host(flags: &Flags) -> Result<(), Box<dyn Error>> {
         monitor_bounds(PRIMARY_MONITOR).map_err(|e| format!("monitor {PRIMARY_MONITOR}: {e:?}"))?;
     let desktop = ServedDesktop {
         capture: Box::new(gamestream_capture),
-        open_injector: Box::new(move |screen| Ok(Box::new(Injector::new(screen, monitor)?))),
+        open_injector: Box::new(move |screen| {
+            Ok(Box::new(WithGamepads {
+                desktop: Injector::new(screen, monitor)?,
+                gamepads: ViGEmGamepads::default(),
+            }))
+        }),
         apps: None,
     };
     Ok(g2g_desktop::gamestream::serve(desktop).await?)

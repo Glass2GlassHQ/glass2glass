@@ -279,7 +279,8 @@ the same index the capture source uses.
 Gamepad capture uses one crate on every client. Injection is a virtual uinput
 gamepad on Linux and ViGEm on Windows. A gamepad event carries XInput's button
 bits, thumbsticks with up positive and triggers from 0 to 255. The Moonlight
-host injects it through `UinputGamepads`, and this host does not yet. macOS injection waits until a virtual
+host injects it through `UinputGamepads` and `ViGEmGamepads`, and this host
+does not yet. macOS injection waits until a virtual
 HID device is chosen. The packet still parses there, and the router counts it
 as undelivered.
 

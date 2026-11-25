@@ -159,14 +159,15 @@ In `g2g-desktop`, module `gamestream`.
   clear in the connected mask removes that pad. On Linux every capture injects
   gamepads through one uinput Xbox 360 pad per controller number, with the
   xpad driver's codes and ranges and the Y axes inverted. A host that cannot
-  open `/dev/uinput` warns once and drops gamepads. Windows drops them. Keys still held when the control stream ends are
+  open `/dev/uinput` warns once and drops gamepads. On Windows each controller
+  becomes an Xbox 360 pad on ViGEmBus through the `vigem-client` crate, and a
+  host without ViGEmBus installed warns once and drops gamepads. Keys still held when the control stream ends are
   released. The host ends a session with 0x0109 carrying 0x80030023, and ends it
   itself after 10 s without a control message.
 
 ## Order
 
-Windows gamepads through ViGEmBus when it is installed, rumble back to
-Moonlight, and HDR.
+Rumble back to Moonlight, and HDR.
 
 ## Tests
 
@@ -196,7 +197,9 @@ Moonlight, and HDR.
   no window on the desktop.
 - A uinput test creates the Xbox 360 pad, grabs it, injects buttons, a stick,
   a trigger and the dpad, and reads the pad's state back. Moonlight on Xvfb
-  has no gamepad, so no interop run sends one.
+  has no gamepad, so no interop run sends one. A Windows test plugs a pad into
+  ViGEmBus, or checks that a host without ViGEmBus reports it once. Neither
+  the Windows laptop nor japan has ViGEmBus installed.
 - `nvenc` encodes H.264 and HEVC with four references, invalidates two frames,
   and checks that the next frame decodes without them as a predicted frame.
 - The Windows host is checked by hand: the Moonlight flatpak on Linux streams
