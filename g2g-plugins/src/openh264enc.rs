@@ -344,7 +344,7 @@ impl OpenH264Enc {
         }) {
             self.settings.bitrate_bps = bitrate_bps.max(1);
             self.reopen()?;
-        } else if feedback.force_keyframe {
+        } else if feedback.requests_keyframe() {
             if let Some(encoder) = self.encoder.as_mut() {
                 encoder.force_intra_frame();
             }

@@ -310,7 +310,7 @@ impl Av1Enc {
         .await?;
         // A downstream keyframe request (PLI) latches here; the next `encode`
         // forces a Key frame.
-        if feedback.force_keyframe {
+        if feedback.requests_keyframe() {
             self.force_keyframe = true;
         }
         // A downstream bitrate estimate (WebRTC BWE) retargets the encoder. The

@@ -38,6 +38,26 @@ pub(crate) struct EmitFeedback {
     /// ([`PushOutcome::Bitrate`], a WebRTC sink's BWE estimate), or `None` if
     /// none was seen this batch.
     pub bitrate_bps: Option<u32>,
+    /// The oldest presentation time downstream asked to stop predicting from
+    /// ([`Reconfigure::InvalidateReferences`]), or `None` if no request came.
+    pub invalidate_from_pts_ns: Option<u64>,
+}
+
+impl EmitFeedback {
+    /// For an encoder that cannot invalidate references: a key frame answers
+    /// both a key frame request and an invalidation.
+    #[cfg(any(
+        feature = "av1-encode",
+        feature = "vpx",
+        all(target_os = "linux", any(feature = "openh264", feature = "v4l2")),
+        all(
+            any(target_os = "linux", target_os = "macos", windows),
+            feature = "ffmpeg"
+        )
+    ))]
+    pub(crate) fn requests_keyframe(&self) -> bool {
+        self.force_keyframe || self.invalidate_from_pts_ns.is_some()
+    }
 }
 
 /// True when a new downstream bitrate estimate differs from the running rate by
@@ -104,6 +124,12 @@ pub(crate) async fn emit_packets(
         *emitted += 1;
         match out.push(PipelinePacket::DataFrame(frame)).await? {
             PushOutcome::Reconfigure(Reconfigure::ForceKeyframe) => feedback.force_keyframe = true,
+            PushOutcome::Reconfigure(Reconfigure::InvalidateReferences { from_pts_ns }) => {
+                let oldest = feedback
+                    .invalidate_from_pts_ns
+                    .map_or(from_pts_ns, |pending| pending.min(from_pts_ns));
+                feedback.invalidate_from_pts_ns = Some(oldest);
+            }
             PushOutcome::Bitrate(bps) => feedback.bitrate_bps = Some(bps),
             _ => {}
         }

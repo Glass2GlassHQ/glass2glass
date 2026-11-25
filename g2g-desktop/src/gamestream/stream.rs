@@ -133,6 +133,10 @@ fn encoder_bitrate(settings: &StreamSettings) -> u64 {
     u64::from(settings.bitrate_kilobits) * 1000 * 100 / u64::from(100 + FEC_PERCENTAGE)
 }
 
+// h264 and hevc keep at most 16, the most frames an invalidation can reach back over
+#[cfg(target_os = "linux")]
+const HOST_CHOSEN_REFERENCE_FRAMES: u32 = 16;
+
 #[cfg(target_os = "linux")]
 fn encoder_launch(settings: &StreamSettings) -> String {
     use super::rtsp::VideoCodec;
@@ -145,7 +149,10 @@ fn encoder_launch(settings: &StreamSettings) -> String {
         settings.width,
         settings.height,
         encoder_bitrate(settings),
-        settings.reference_frames
+        match settings.reference_frames {
+            0 => HOST_CHOSEN_REFERENCE_FRAMES,
+            requested => requested,
+        }
     )
 }
 
@@ -331,7 +338,7 @@ pub(crate) async fn run(
         () = stop.notified() => return Ok(()),
     };
     let pay = payloader(&settings, &key.key)?;
-    let keyframe_requests = pay.keyframe_requests();
+    let recovery = pay.recovery_requests();
     let (events, event_receiver) = mpsc::unbounded_channel();
     let (sizes, size_receiver) = watch::channel(None);
     let input = InputRoute {
@@ -364,13 +371,7 @@ pub(crate) async fn run(
             () = audio => unreachable!("the audio future never completes"),
         }
     });
-    let mut control = pin!(control::run(
-        control,
-        &key.key,
-        keyframe_requests,
-        input,
-        stop
-    ));
+    let mut control = pin!(control::run(control, &key.key, recovery, input, stop));
     let session = async {
         tokio::select! {
             sent = video => {

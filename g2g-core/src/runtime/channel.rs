@@ -1180,7 +1180,8 @@ pub(crate) fn advertise_orientation(in_rx: &LinkReceiver, absorbed: crate::meta:
 /// `Propose` / `Renegotiate` are not listed: every producer answers those.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ReconfigureAnswered {
-    /// [`Reconfigure::ForceKeyframe`](crate::element::Reconfigure::ForceKeyframe).
+    /// [`Reconfigure::ForceKeyframe`](crate::element::Reconfigure::ForceKeyframe)
+    /// and [`Reconfigure::InvalidateReferences`](crate::element::Reconfigure::InvalidateReferences).
     pub keyframe: bool,
     /// [`Reconfigure::AbsorbOrientation`](crate::element::Reconfigure::AbsorbOrientation).
     pub orientation: bool,
@@ -1388,7 +1389,9 @@ impl SenderSink {
         use crate::element::Reconfigure;
         let r = self.link.reconfigure.take()?;
         let answered = match &r {
-            Reconfigure::ForceKeyframe => self.reconfigure_answered.keyframe,
+            Reconfigure::ForceKeyframe | Reconfigure::InvalidateReferences { .. } => {
+                self.reconfigure_answered.keyframe
+            }
             Reconfigure::AbsorbOrientation(_) => self.reconfigure_answered.orientation,
             Reconfigure::Propose(_) | Reconfigure::Renegotiate => true,
         };
@@ -1402,7 +1405,12 @@ impl SenderSink {
                 return None;
             }
             // Nothing resends a packet held back for a keyframe request.
-            if pre_send && matches!(r, Reconfigure::ForceKeyframe) {
+            if pre_send
+                && matches!(
+                    r,
+                    Reconfigure::ForceKeyframe | Reconfigure::InvalidateReferences { .. }
+                )
+            {
                 self.link.reconfigure.store(r);
                 return None;
             }

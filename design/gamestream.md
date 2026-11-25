@@ -6,7 +6,8 @@ pairing, the app list, encrypted H.264 or HEVC video from an X display, the
 desktop portal, a `--run` headless display or the Windows desktop, at the size
 the client asks for,
 encrypted stereo Opus audio from the default output, and keyboard, mouse,
-scroll, text, touch and pen input run today. Nothing else in this file is built unless it names an element that
+scroll, text, touch and pen input, and reference invalidation on Linux run
+today. Nothing else in this file is built unless it names an element that
 already exists. When a slice ships, delete it
 here and from [TODO.md](TODO.md), and write the shipped behavior into the track
 that owns it.
@@ -41,7 +42,12 @@ that owns it.
     the address the client's ping came from.
 11. `nvenc` encodes with the `ref-frames` count `ANNOUNCE` asks for. Moonlight
     asks for 1 when its decoder cannot invalidate references, and its decoder
-    fails on every second P-frame of a stream with more.
+    fails on every second P-frame of a stream with more. It asks for 0 when its
+    decoder can, and the host then keeps 16, the most H.264 and HEVC allow.
+12. On Linux `DESCRIBE` offers reference invalidation, and a Moonlight client
+    whose decoder supports it reports lost frames instead of asking for an IDR.
+    The Windows host does not offer it, because the Media Foundation encoders
+    can only answer with a key frame.
 
 ## Ports
 
@@ -79,7 +85,14 @@ In `g2g-plugins`, behind a `gamestream` feature unless noted.
   slices, each behind an RTP header and the NVIDIA packet header, adds parity
   per FEC block (at most four blocks per frame), and seals every packet with
   AES-GCM. It outputs one frame per datagram, and turns an IDR request from the
-  session into `Reconfigure::ForceKeyframe`. Properties: `packet-size`,
+  session into `Reconfigure::ForceKeyframe`. It keeps the frame numbers and
+  presentation times of the last 16 frames it sent, and turns the first frame
+  of a lost range into `Reconfigure::InvalidateReferences` with that frame's
+  presentation time, or into a key frame request once the frame is older.
+  `nvenc` answers an invalidation with `nvEncInvalidateRefFrames`, which also
+  invalidates every frame predicted from the lost one, and sends an IDR when
+  the lost frame is no longer one of its references. Every other encoder
+  answers it with a key frame. Properties: `packet-size`,
   `fec-percentage`, `min-required-fec-packets`, `key`, `encrypt`.
 - `moonlightaudiopay` puts each Opus packet in one RTP packet, encrypts it with
   AES-CBC under an IV made from `key-id` plus the sequence number, and sends two
@@ -116,7 +129,8 @@ In `g2g-desktop`, module `gamestream`.
 - `ANNOUNCE` sets the audio packet duration (5 or 10 ms) and the audio
   encryption bit, and a request for more than two channels is refused. Opus
   runs at 96 kbit/s CBR.
-- Control: ENet with AES-GCM on every message. An IDR request (0x0302) goes to
+- Control: ENet with AES-GCM on every message. An IDR request (0x0302) and a
+  reference invalidation (0x0301, the first and last lost frame numbers) go to
   `moonlightvideopay`. Input (0x0206) becomes an `Event` for the injector of
   the capture: XTest for `--x11-display`, uinput for the portal, the headless
   compositor for `--run` and `SendInput` on Windows. Keys map through a
@@ -135,8 +149,7 @@ In `g2g-desktop`, module `gamestream`.
 
 ## Order
 
-Reference frame invalidation, gamepad, HDR, surround, and `--run` applications
-as `/applist` entries.
+Gamepad, HDR, surround, and `--run` applications as `/applist` entries.
 
 ## Tests
 
@@ -153,8 +166,15 @@ as `/applist` entries.
   window, pastes text with Moonlight's Ctrl+Alt+Shift+V, and the script checks
   that the probe received a left click, a back click, the key and the pasted
   text. Moonlight on Xvfb has no touch source, so touch is tested by injecting
-  `Event::Touch` into each Linux injector. It runs before each push of this work and puts
+  `Event::Touch` into each Linux injector. `LOSS_PERCENT` runs the script in a
+  network namespace of its own and drops that share of the host's video
+  packets after pairing, and with `CODEC=HEVC` checks that Moonlight asked for
+  reference invalidation and the host answered it. At 30% loss Moonlight
+  invalidated 14 times in 8 seconds, asked for no IDR, and its decoder logged
+  no missing reference. It runs before each push of this work and puts
   no window on the desktop.
+- `nvenc` encodes H.264 and HEVC with four references, invalidates two frames,
+  and checks that the next frame decodes without them as a predicted frame.
 - The Windows host is checked by hand: the Moonlight flatpak on Linux streams
   over the LAN from a Windows host started in the logged-in session, and the
   host log at `g2g-desktop-gamestream:debug` lists the input it injected.

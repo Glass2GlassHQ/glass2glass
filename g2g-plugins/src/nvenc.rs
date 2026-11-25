@@ -138,6 +138,9 @@ pub struct NvEnc {
     repeat_sequence_header: bool,
     // 0 keeps the preset's count
     reference_frames: u32,
+    // input timestamps of the frames since the last IDR that can still be references, oldest first
+    reference_pts: alloc::collections::VecDeque<u64>,
+    invalidate_from_pts_ns: Option<u64>,
     /// The settings currently programmed into the open session. The targets are
     /// applied at session open and re-applied live via `nvEncReconfigureEncoder`
     /// when they diverge (runtime retarget for an adaptive sink, e.g. a
@@ -339,6 +342,8 @@ impl NvEnc {
             caps_sent: false,
             input_arrivals: Default::default(),
             force_keyframe: true,
+            reference_pts: alloc::collections::VecDeque::new(),
+            invalidate_from_pts_ns: None,
             configured: false,
         }
     }
@@ -764,12 +769,43 @@ impl NvEnc {
         }
         let _ctx = session.device.make_current()?;
 
-        let force = core::mem::take(&mut self.force_keyframe);
+        let invalidate_from = core::mem::take(&mut self.invalidate_from_pts_ns);
+        let force = core::mem::take(&mut self.force_keyframe)
+            || invalidate_from.is_some_and(|from_pts_ns| !self.invalidate_references(from_pts_ns));
         // SAFETY: the input surface is valid on the session's device for the
         // life of this call (the frame's keep-alive pins it); the session
         // handle and function table are live.
         let pkt = unsafe { self.encode_locked(input, pts_ns, force) }?;
         Ok(pkt)
+    }
+
+    // true when the next frame can still predict from a frame older than from_pts_ns
+    fn invalidate_references(&mut self, from_pts_ns: u64) -> bool {
+        let Some(session) = self.session.as_ref() else {
+            return false;
+        };
+        let lost = match self
+            .reference_pts
+            .iter()
+            .position(|pts| *pts == from_pts_ns)
+        {
+            Some(0) | None => return false,
+            Some(lost) => lost,
+        };
+        let Some(invalidate) = session.funcs.nv_enc_invalidate_ref_frames else {
+            return false;
+        };
+        // SAFETY: a live encoder handle of this session.
+        let status = unsafe { invalidate(session.encoder, from_pts_ns) };
+        if status != ffi::NV_ENC_SUCCESS {
+            g2g_core::g2g_warn!(
+                self,
+                "nvEncInvalidateRefFrames failed with status {status}, sending an IDR"
+            );
+            return false;
+        }
+        self.reference_pts.truncate(lost);
+        true
     }
 
     /// Register -> map -> encode -> drain one surface. A CUDA input must run
@@ -846,14 +882,20 @@ impl NvEnc {
             ffi::NV_ENC_SUCCESS => {
                 // Output ready (sync mode, no reorder): lock it, copy, release.
                 // SAFETY: `output` was just produced; `mapped`/`registered` are live.
-                let bytes = unsafe { self.lock_copy(output) };
-                let ts = bytes.as_ref().map(|(_, t)| *t).unwrap_or(pts_ns);
+                let picture = unsafe { self.lock_copy(output) };
                 // The output buffer and the registration are pooled (released with
                 // the session); only the per-frame mapping is released here.
                 // SAFETY: `mapped` is this frame's live handle.
                 unsafe { self.unmap(mapped) };
-                let (data, _) = bytes?;
-                Ok(Vec::from([(data, ts)]))
+                let picture = picture?;
+                if picture.idr {
+                    self.reference_pts.clear();
+                }
+                self.reference_pts.push_back(picture.pts_ns);
+                while self.reference_pts.len() > self.reference_frames as usize {
+                    self.reference_pts.pop_front();
+                }
+                Ok(Vec::from([(picture.data, picture.pts_ns)]))
             }
             ffi::NV_ENC_ERR_NEED_MORE_INPUT => {
                 // The encoder is buffering (should not happen with no B-frames +
@@ -878,7 +920,7 @@ impl NvEnc {
     ///
     /// # Safety
     /// `output` must be a valid, encoded bitstream buffer of the open session.
-    unsafe fn lock_copy(&self, output: *mut core::ffi::c_void) -> Result<(Vec<u8>, u64), G2gError> {
+    unsafe fn lock_copy(&self, output: *mut core::ffi::c_void) -> Result<EncodedPicture, G2gError> {
         let session = self.session.as_ref().ok_or(G2gError::NotConfigured)?;
         let enc = session.encoder;
         let f = &session.funcs;
@@ -890,7 +932,6 @@ impl NvEnc {
         // SAFETY: valid encoder + the output buffer just encoded.
         nvchk(unsafe { (f.nv_enc_lock_bitstream.ok_or(hw())?)(enc, &mut lock) })?;
         let size = lock.bitstream_size_in_bytes as usize;
-        let ts = lock.output_time_stamp;
         let data = if lock.bitstream_buffer_ptr.is_null() || size == 0 {
             Vec::new()
         } else {
@@ -902,7 +943,11 @@ impl NvEnc {
         };
         // SAFETY: matching unlock for the lock above.
         nvchk(unsafe { (f.nv_enc_unlock_bitstream.ok_or(hw())?)(enc, output) })?;
-        Ok((data, ts))
+        Ok(EncodedPicture {
+            data,
+            pts_ns: lock.output_time_stamp,
+            idr: lock.picture_type == ffi::NV_ENC_PIC_TYPE_IDR,
+        })
     }
 
     /// # Safety: `mapped` must be a live mapped input resource of the session.
@@ -986,8 +1031,21 @@ impl NvEnc {
         if feedback.force_keyframe {
             self.force_keyframe = true;
         }
+        if let Some(from_pts_ns) = feedback.invalidate_from_pts_ns {
+            let oldest = self
+                .invalidate_from_pts_ns
+                .map_or(from_pts_ns, |pending| pending.min(from_pts_ns));
+            self.invalidate_from_pts_ns = Some(oldest);
+        }
         Ok(())
     }
+}
+
+#[derive(Debug)]
+struct EncodedPicture {
+    data: Vec<u8>,
+    pts_ns: u64,
+    idr: bool,
 }
 
 impl Session {
@@ -1120,6 +1178,12 @@ impl Drop for ContextGuard {
         unsafe {
             let _ = ffi::cu_ctx_pop_current(&mut popped);
         }
+    }
+}
+
+impl g2g_core::log::LogSource for NvEnc {
+    fn log_category(&self) -> &'static str {
+        "nvenc"
     }
 }
 
@@ -1426,6 +1490,7 @@ mod ffi {
     #[cfg(windows)]
     pub const LIBNVIDIA_ENCODE: &str = "nvEncodeAPI64.dll";
     pub const NV_ENC_ERR_NEED_MORE_INPUT: NvEncStatus = 17;
+    pub const NV_ENC_PIC_TYPE_IDR: u32 = 3;
 
     pub const NVENCAPI_MAJOR_VERSION: u32 = 13;
     pub const NVENCAPI_MINOR_VERSION: u32 = 0;
@@ -1860,6 +1925,7 @@ mod ffi {
     pub type FnMap = unsafe extern "C" fn(*mut c_void, *mut MapInputResource) -> NvEncStatus;
     pub type FnEncode = unsafe extern "C" fn(*mut c_void, *mut PicParams) -> NvEncStatus;
     pub type FnLock = unsafe extern "C" fn(*mut c_void, *mut LockBitstream) -> NvEncStatus;
+    pub type FnInvalidateRefFrames = unsafe extern "C" fn(*mut c_void, u64) -> NvEncStatus;
     pub type FnReconfigure =
         unsafe extern "C" fn(*mut c_void, *mut ReconfigureParams) -> NvEncStatus;
     /// Handle-only calls: unlock / unmap / unregister / destroy-buffer take
@@ -1902,7 +1968,7 @@ mod ffi {
         pub nv_enc_map_input_resource: Option<FnMap>,
         pub nv_enc_unmap_input_resource: Option<FnHandle>,
         pub nv_enc_destroy_encoder: Option<FnEncoder>,
-        pub nv_enc_invalidate_ref_frames: *mut c_void,
+        pub nv_enc_invalidate_ref_frames: Option<FnInvalidateRefFrames>,
         pub nv_enc_open_encode_session_ex: Option<FnOpenSessionEx>,
         pub nv_enc_register_resource: Option<FnRegister>,
         pub nv_enc_unregister_resource: Option<FnHandle>,
@@ -2679,6 +2745,148 @@ pub(crate) mod tests {
             idr_at.len(),
             "repeat-sequence-header writes SPS/PPS ahead of every IDR"
         );
+    }
+
+    /// Sends `reply` back to the encoder for the access unit at `reply_at`, and
+    /// accepts every other push.
+    struct ReplySink {
+        capture: CaptureSink,
+        reply_at: usize,
+        reply: g2g_core::PushOutcome,
+    }
+
+    impl OutputSink for ReplySink {
+        fn poll_push(
+            &mut self,
+            cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<g2g_core::PushOutcome, G2gError>> {
+            let replies = matches!(packet_slot, Some(PipelinePacket::DataFrame(_)))
+                && self.capture.frames.len() == self.reply_at;
+            let pushed = self.capture.poll_push(cx, packet_slot);
+            match replies {
+                true => core::task::Poll::Ready(Ok(self.reply.clone())),
+                false => pushed,
+            }
+        }
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    #[derive(Debug)]
+    struct FrameAfterLoss {
+        mean_luma_error: u64,
+        bytes: usize,
+        key_frame_bytes: usize,
+    }
+
+    /// Encodes frames 0 to 7 with four reference frames, sending `reply` after
+    /// frame 6 as a client that lost frames 5 and 6 would, then decodes frames 0
+    /// to 4 and 7 and compares the decoded frame 7 with its source.
+    #[cfg(feature = "ffmpeg")]
+    async fn frame_after_loss(
+        codec: VideoCodec,
+        reply: g2g_core::PushOutcome,
+    ) -> Option<FrameAfterLoss> {
+        use g2g_core::frame::Frame;
+        use g2g_core::memory::SystemSlice;
+        use g2g_core::FrameTiming;
+        const W: u32 = 320;
+        const H: u32 = 240;
+        const FRAMES: u64 = 8;
+        const LOST: core::ops::RangeInclusive<usize> = 5..=6;
+
+        let ctx_guard = test_context()?;
+        let mut enc = NvEnc::new().with_codec(codec);
+        enc.set_property("ref-frames", PropValue::Uint(4)).unwrap();
+        enc.configure_pipeline(&nv12(W, H)).unwrap();
+        let mut sink = ReplySink {
+            capture: CaptureSink::default(),
+            reply_at: *LOST.end(),
+            reply,
+        };
+        for i in 0..FRAMES {
+            let frame = upload_frame(ctx_guard.0, &nv12_pattern(W, H, i), W, H, W, i)?;
+            if enc
+                .process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await
+                .is_err()
+            {
+                std::eprintln!("skipping: NVENC unavailable on this host");
+                return None;
+            }
+        }
+        let encoded = sink.capture.frames;
+        assert_eq!(encoded.len(), FRAMES as usize, "one AU per input frame");
+
+        let mut dec = crate::ffmpegdec::FfmpegVideoDec::new();
+        dec.configure_pipeline(&Caps::CompressedVideo {
+            codec,
+            width: Dim::Fixed(W),
+            height: Dim::Fixed(H),
+            framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
+        })
+        .unwrap();
+        let mut decoded = CaptureSink::default();
+        for (_, access_unit) in encoded
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !LOST.contains(i))
+        {
+            let frame = Frame::new(
+                MemoryDomain::System(SystemSlice::from_boxed(
+                    access_unit.clone().into_boxed_slice(),
+                )),
+                FrameTiming::default(),
+                0,
+            );
+            dec.process(PipelinePacket::DataFrame(frame), &mut decoded)
+                .await
+                .unwrap();
+        }
+        dec.process(PipelinePacket::Eos, &mut decoded)
+            .await
+            .unwrap();
+        let last = decoded.frames.last().expect("frame 7 decodes");
+        let source = nv12_pattern(W, H, FRAMES - 1);
+        let luma = (W * H) as usize;
+        let error: u64 = last[..luma]
+            .iter()
+            .zip(&source[..luma])
+            .map(|(a, b)| u64::from(a.abs_diff(*b)))
+            .sum();
+        Some(FrameAfterLoss {
+            mean_luma_error: error / luma as u64,
+            bytes: encoded[FRAMES as usize - 1].len(),
+            key_frame_bytes: encoded[0].len(),
+        })
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    #[tokio::test]
+    async fn invalidated_references_let_the_next_frame_decode_after_a_loss() {
+        let _lock = encode_session_lock().await;
+        for codec in [VideoCodec::H264, VideoCodec::H265] {
+            let invalidate =
+                g2g_core::PushOutcome::Reconfigure(g2g_core::Reconfigure::InvalidateReferences {
+                    from_pts_ns: 5 * 33_000_000,
+                });
+            let Some(recovered) = frame_after_loss(codec, invalidate).await else {
+                return;
+            };
+            let Some(corrupt) = frame_after_loss(codec, g2g_core::PushOutcome::Accepted).await
+            else {
+                return;
+            };
+            assert!(recovered.mean_luma_error <= 1, "{codec:?}: {recovered:?}");
+            assert!(
+                recovered.bytes * 4 < recovered.key_frame_bytes,
+                "{codec:?}: the recovery frame is predicted, not intra: {recovered:?}"
+            );
+            assert!(corrupt.mean_luma_error >= 10, "{codec:?}: {corrupt:?}");
+        }
     }
 
     #[cfg(feature = "nvdec")]

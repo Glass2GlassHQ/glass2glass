@@ -3,11 +3,11 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use g2g_core::log::Target;
+use g2g_plugins::moonlight::videopay::RecoveryRequests;
 use ring::aead::{Aad, LessSafeKey, Nonce, Tag, UnboundKey, AES_128_GCM};
 use tokio::sync::{mpsc, watch, Notify};
 use tokio::time::Instant;
@@ -25,6 +25,7 @@ const MESSAGE_ENCRYPTED: u16 = 0x0001;
 const MESSAGE_TERMINATION: u16 = 0x0109;
 const MESSAGE_START_B: u16 = 0x0307;
 const MESSAGE_REQUEST_IDR: u16 = 0x0302;
+const MESSAGE_INVALIDATE_REFERENCES: u16 = 0x0301;
 const MESSAGE_INPUT: u16 = 0x0206;
 // moonlight closes the stream without an error dialog for this reason
 const TERMINATION_GRACEFUL: u32 = 0x8003_0023;
@@ -140,12 +141,7 @@ impl InputRoute {
     }
 }
 
-fn handle(
-    cipher: &ControlCipher,
-    message: &[u8],
-    keyframe_requests: &AtomicBool,
-    input: &InputRoute,
-) {
+fn handle(cipher: &ControlCipher, message: &[u8], recovery: &RecoveryRequests, input: &InputRoute) {
     let log = Target::category(LOG_CATEGORY);
     let opened = match message_type(message) {
         Some(MESSAGE_ENCRYPTED) => match cipher.open(message) {
@@ -164,7 +160,10 @@ fn handle(
     match message_type(&opened) {
         Some(MESSAGE_REQUEST_IDR) => {
             g2g_core::g2g_info!(log, "Moonlight asked for a keyframe");
-            keyframe_requests.store(true, Ordering::Relaxed);
+            recovery.request_keyframe();
+        }
+        Some(MESSAGE_INVALIDATE_REFERENCES) => {
+            invalidate_references(&opened[HEADER_BYTES..], recovery)
         }
         Some(MESSAGE_INPUT) => input.route(&opened[HEADER_BYTES..]),
         Some(MESSAGE_START_B) => eprintln!("g2g-desktop host: Moonlight started the stream"),
@@ -172,10 +171,32 @@ fn handle(
     }
 }
 
+// moonlight's body: little-endian first and last lost frame numbers, each followed by reserved bytes
+fn invalidate_references(body: &[u8], recovery: &RecoveryRequests) {
+    let log = Target::category(LOG_CATEGORY);
+    let frame = |offset: usize| {
+        body.get(offset..offset + 4)
+            .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("four bytes")))
+    };
+    match (frame(0), frame(8)) {
+        (Some(first), Some(last)) => {
+            g2g_core::g2g_info!(log, "Moonlight lost frames {first} to {last}");
+            recovery.invalidate_from(first);
+        }
+        _ => {
+            g2g_core::g2g_warn!(
+                log,
+                "a reference invalidation is too short, sending a key frame"
+            );
+            recovery.request_keyframe();
+        }
+    }
+}
+
 pub(crate) async fn run(
     mut host: Host,
     key: &[u8; 16],
-    keyframe_requests: Arc<AtomicBool>,
+    recovery: Arc<RecoveryRequests>,
     input: InputRoute,
     stop: &Notify,
 ) -> Result<(), tokio_enet::Error> {
@@ -198,7 +219,7 @@ pub(crate) async fn run(
             }
             Some(Event::Receive { packet, .. }) => {
                 deadline = Instant::now() + SILENCE_LIMIT;
-                handle(&cipher, packet.data(), &keyframe_requests, &input);
+                handle(&cipher, packet.data(), &recovery, &input);
             }
             None if Instant::now() >= deadline => {
                 eprintln!(
@@ -260,13 +281,65 @@ mod tests {
         (InputRoute { events, sizes }, received)
     }
 
-    #[test]
-    fn a_client_idr_request_opens_and_raises_the_request() {
-        let requests = AtomicBool::new(false);
+    struct DiscardSink;
+
+    impl g2g_core::OutputSink for DiscardSink {
+        fn poll_push(
+            &mut self,
+            _cx: &mut std::task::Context<'_>,
+            packet_slot: &mut Option<g2g_core::PipelinePacket>,
+        ) -> std::task::Poll<Result<g2g_core::PushOutcome, g2g_core::G2gError>> {
+            packet_slot.take();
+            std::task::Poll::Ready(Ok(g2g_core::PushOutcome::Accepted))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_client_reference_invalidation_reaches_the_encoder_as_a_presentation_time() {
+        use g2g_core::{AsyncElement, PropValue, Reconfigure};
+        let mut pay = g2g_plugins::moonlight::videopay::MoonlightVideoPay::default();
+        pay.set_property("encrypt", PropValue::Bool(false)).unwrap();
+        pay.configure_pipeline(&g2g_core::Caps::CompressedVideo {
+            codec: g2g_core::VideoCodec::H265,
+            width: g2g_core::Dim::Fixed(64),
+            height: g2g_core::Dim::Fixed(64),
+            framerate: g2g_core::Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
+            alignment: g2g_core::BitstreamAlignment::AccessUnit,
+        })
+        .unwrap();
+        for pts_ns in [100, 200, 300] {
+            let frame = g2g_core::Frame::new(
+                g2g_core::memory::MemoryDomain::System(g2g_core::memory::SystemSlice::from_boxed(
+                    vec![0, 0, 0, 1, 0x26, 1].into_boxed_slice(),
+                )),
+                g2g_core::FrameTiming {
+                    pts_ns,
+                    ..Default::default()
+                },
+                pts_ns,
+            );
+            pay.process(g2g_core::PipelinePacket::DataFrame(frame), &mut DiscardSink)
+                .await
+                .unwrap();
+        }
         let (input, _) = input_route();
-        let message = client_message(MESSAGE_REQUEST_IDR, &[0, 0]);
-        handle(&ControlCipher::new(&KEY), &message, &requests, &input);
-        assert!(requests.load(Ordering::Relaxed));
+        let mut body = Vec::from(2u32.to_le_bytes());
+        body.extend_from_slice(&[0; 4]);
+        body.extend_from_slice(&3u32.to_le_bytes());
+        body.extend_from_slice(&[0; 12]);
+        let message = client_message(MESSAGE_INVALIDATE_REFERENCES, &body);
+        handle(
+            &ControlCipher::new(&KEY),
+            &message,
+            &pay.recovery_requests(),
+            &input,
+        );
+        assert_eq!(
+            pay.take_reconfigure(),
+            Some(Reconfigure::InvalidateReferences { from_pts_ns: 200 })
+        );
     }
 
     #[test]
@@ -278,7 +351,7 @@ mod tests {
         handle(
             &ControlCipher::new(&KEY),
             &message,
-            &AtomicBool::new(false),
+            &RecoveryRequests::default(),
             &input,
         );
         assert!(matches!(

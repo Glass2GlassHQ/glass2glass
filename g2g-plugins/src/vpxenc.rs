@@ -204,7 +204,7 @@ impl VpxEnc {
         // libvpx context starts on a keyframe, and takes the new rate with it. The
         // rebuild is cheap for the software codecs; bitrate is hysteresis-gated
         // 20% like `Av1Enc` so BWE noise cannot thrash it.
-        let mut rebuild = feedback.force_keyframe;
+        let mut rebuild = feedback.requests_keyframe();
         if let Some(bps) = feedback.bitrate_bps {
             let target_kbps = (bps / 1000).max(1);
             let current = self.bitrate_kbps.max(1);

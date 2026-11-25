@@ -913,7 +913,9 @@ impl AsyncElement for MfEncode {
                 };
                 self.emitted += 1;
                 match out.push(PipelinePacket::DataFrame(frame)).await? {
-                    PushOutcome::Reconfigure(Reconfigure::ForceKeyframe) => {
+                    PushOutcome::Reconfigure(
+                        Reconfigure::ForceKeyframe | Reconfigure::InvalidateReferences { .. },
+                    ) => {
                         self.force_keyframe = true;
                     }
                     // zero asks a simulcast layer to go idle, which has no meaning for one encoder

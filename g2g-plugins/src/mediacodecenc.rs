@@ -534,8 +534,9 @@ impl AsyncElement for MediaCodecEnc {
                     meta: Default::default(),
                 };
                 self.emitted += 1;
-                if let PushOutcome::Reconfigure(Reconfigure::ForceKeyframe) =
-                    out.push(PipelinePacket::DataFrame(frame)).await?
+                if let PushOutcome::Reconfigure(
+                    Reconfigure::ForceKeyframe | Reconfigure::InvalidateReferences { .. },
+                ) = out.push(PipelinePacket::DataFrame(frame)).await?
                 {
                     self.force_keyframe = true;
                 }

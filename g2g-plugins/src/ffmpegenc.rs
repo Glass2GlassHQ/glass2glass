@@ -761,7 +761,7 @@ impl FfmpegVideoEnc {
         )
         .await?;
         // A downstream PLI latches a forced IDR on the next encode.
-        if feedback.force_keyframe {
+        if feedback.requests_keyframe() {
             self.force_keyframe = true;
         }
         // Runtime bitrate retarget (M722): a libavcodec encoder fixes its rate

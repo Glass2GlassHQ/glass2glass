@@ -760,7 +760,7 @@ impl<C: V4l2StatelessEncoder> V4l2StatelessEnc<C> {
             out,
         )
         .await?;
-        self.force_keyframe |= feedback.force_keyframe;
+        self.force_keyframe |= feedback.requests_keyframe();
         Ok(())
     }
 }

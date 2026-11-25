@@ -17,6 +17,11 @@ const ENCRYPT_VIDEO: u32 = 0x2;
 const ENCRYPT_AUDIO: u32 = 0x4;
 // moonlight takes this sprop-parameter-sets value as the host offering HEVC
 const HEVC_MARKER: &str = "sprop-parameter-sets=AAAAAU";
+// nvenc invalidates references, the media foundation encoders answer an invalidation with a key frame
+#[cfg(target_os = "linux")]
+const REFERENCE_INVALIDATION: &str = "a=x-nv-video[0].refPicInvalidation:1\r\n";
+#[cfg(not(target_os = "linux"))]
+const REFERENCE_INVALIDATION: &str = "";
 const BITSTREAM_FORMAT_H264: u32 = 0;
 const BITSTREAM_FORMAT_HEVC: u32 = 1;
 const STEREO_CHANNELS: u32 = 2;
@@ -140,6 +145,7 @@ impl RtspReply {
                 "a=x-ss-general.featureFlags:{PEN_TOUCH_EVENTS}\r\n\
                  a=x-ss-general.encryptionSupported:{supported}\r\n\
                  a=x-ss-general.encryptionRequested:{requested}\r\n\
+                 {REFERENCE_INVALIDATION}\
                  {HEVC_MARKER}\r\n"
             ),
             ..Self::ok()
@@ -303,6 +309,16 @@ mod tests {
     fn the_description_asks_moonlight_for_touch_and_pen() {
         let body = RtspReply::description().body;
         assert!(body.contains("a=x-ss-general.featureFlags:1\r\n"), "{body}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_description_offers_reference_invalidation_on_linux() {
+        let body = RtspReply::description().body;
+        assert!(
+            body.contains("a=x-nv-video[0].refPicInvalidation:1\r\n"),
+            "{body}"
+        );
     }
 
     #[test]

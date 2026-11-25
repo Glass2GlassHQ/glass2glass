@@ -15,7 +15,18 @@
 #
 # Usage: tools/moonlight-interop.sh <g2g-desktop binary built with --features gamestream>
 # Logs go to $OUT, default ~/tmp/moonlight-interop. CODEC picks H.264 (default) or HEVC.
+# LOSS_PERCENT drops that share of the host's video packets once pairing is done. The script then
+# runs in a network namespace of its own, and with HEVC checks that Moonlight recovered by
+# reference invalidation.
 set -euo pipefail
+
+VIDEO_PORT=47998
+if [ -n "${LOSS_PERCENT:-}" ] && [ -z "${MOONLIGHT_INTEROP_NAMESPACE:-}" ]; then
+    exec env MOONLIGHT_INTEROP_NAMESPACE=1 unshare --map-root-user --net "$0" "$@"
+fi
+if [ -n "${LOSS_PERCENT:-}" ]; then
+    ip link set lo up
+fi
 
 BIN=$1
 TOOLS=$(cd "$(dirname "$0")" && pwd)
@@ -85,6 +96,12 @@ grep -q 'paired a Moonlight client' "$OUT/host.log"
 moonlight list 127.0.0.1 >"$OUT/list.log" 2>&1
 grep -qx 'Desktop' "$OUT/list.log"
 echo "moonlight-interop: paired and listed the Desktop app"
+if [ -n "${LOSS_PERCENT:-}" ]; then
+    # every priority goes to the first band, so only the filter puts packets on the lossy third one
+    tc qdisc add dev lo root handle 1: prio priomap 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+    tc qdisc add dev lo parent 1:3 handle 30: netem loss "$LOSS_PERCENT%"
+    tc filter add dev lo parent 1:0 protocol ip u32 match ip sport "$VIDEO_PORT" 0xffff flowid 1:3
+fi
 
 moonlight stream 127.0.0.1 Desktop --720 --fps 30 --video-codec "$CODEC" \
     --video-decoder software --display-mode windowed --no-quit-after >"$OUT/stream.log" 2>&1 &
@@ -147,6 +164,13 @@ if [ "${CAPTURE:-x11}" = run ] && ! { grep -qx 'key a' "$OUT/input.log" && grep 
     grep -qx 'button 8' "$OUT/input.log" && grep -qx 'key H' "$OUT/input.log" &&
     grep -qx 'key i' "$OUT/input.log" && grep -qx 'key exclam' "$OUT/input.log"; }; then
     echo "moonlight-interop: the headless display did not get Moonlight's input, see $OUT/input.log" >&2
+    exit 1
+fi
+if [ -n "${LOSS_PERCENT:-}" ] && [ "$CODEC" = HEVC ] && ! {
+    grep -q 'Invalidate reference frame request sent' "$OUT/stream.log" &&
+        grep -q 'Moonlight lost frames' "$OUT/host.log"
+}; then
+    echo "moonlight-interop: Moonlight did not invalidate references after a loss, see $OUT/stream.log" >&2
     exit 1
 fi
 echo "moonlight-interop: Moonlight decoded $CODEC at $decoded fps and decrypted the audio"

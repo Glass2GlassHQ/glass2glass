@@ -35,6 +35,7 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 /// along a link's reverse channel and is surfaced to the producing element
 /// as a [`PushOutcome::Reconfigure`].
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Reconfigure {
     /// Downstream proposes specific replacement caps (Phase 3 counter).
     Propose(Caps),
@@ -56,6 +57,11 @@ pub enum Reconfigure {
     /// frame is pulled, and relayed past any transform that does not answer it
     /// (see [`AsyncElement::handles_orientation`]).
     AbsorbOrientation(OrientationSet),
+    /// The receiver lost the frames from `from_pts_ns` on: an encoder that can
+    /// should predict its next frame only from references older than that, and
+    /// an encoder that cannot sends a key frame instead. A Moonlight client asks
+    /// for this in place of a key frame when its decoder supports it.
+    InvalidateReferences { from_pts_ns: u64 },
 }
 
 /// Downstream-originated quality-of-service signal: a synchronising sink dropped
@@ -389,8 +395,9 @@ pub trait AsyncElement: ElementBound {
     }
 
     /// Whether this element consumes a downstream keyframe request
-    /// (`PushOutcome::Reconfigure(ForceKeyframe)`) itself, i.e. it is an
-    /// encoder that forces an IDR. Default `false`: the runner then relays the
+    /// (`PushOutcome::Reconfigure(ForceKeyframe)`) and a reference invalidation
+    /// (`InvalidateReferences`) itself, i.e. it is an encoder that forces an IDR.
+    /// Default `false`: the runner then relays the
     /// request onto the element's input link, so a PLI crosses any
     /// number of pass-through transforms (a parser between the encoder and a
     /// WebRTC sink) to reach the encoder.

@@ -4,10 +4,10 @@
 
 use core::future::Future;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -62,6 +62,9 @@ const MAX_PACKET_SIZE: usize = 65_471;
 const DEFAULT_PACKET_SIZE: usize = 1392;
 const DEFAULT_FEC_PERCENTAGE: u8 = 20;
 const DEFAULT_MINIMUM_FEC_PACKETS: u32 = 2;
+// h264 and hevc keep at most 16 reference frames, so an older loss needs a key frame anyway
+const SENT_FRAMES_KEPT: usize = 16;
+const NO_INVALIDATION: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FrameTooLarge {
@@ -372,13 +375,47 @@ const OUTPUT_CAPS: Caps = Caps::ByteStream {
 };
 
 #[derive(Debug)]
+pub struct RecoveryRequests {
+    keyframe: AtomicBool,
+    invalidate_from_frame: AtomicU32,
+}
+
+impl RecoveryRequests {
+    pub fn request_keyframe(&self) {
+        self.keyframe.store(true, Ordering::Relaxed);
+    }
+
+    // frame numbers are the ones Moonlight reads from the video packets
+    pub fn invalidate_from(&self, frame_number: u32) {
+        self.invalidate_from_frame
+            .fetch_min(frame_number, Ordering::Relaxed);
+    }
+}
+
+impl Default for RecoveryRequests {
+    fn default() -> Self {
+        Self {
+            keyframe: AtomicBool::new(false),
+            invalidate_from_frame: AtomicU32::new(NO_INVALIDATION),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SentFrame {
+    frame_number: u32,
+    pts_ns: u64,
+}
+
+#[derive(Debug)]
 pub struct MoonlightVideoPay {
     packet_size: usize,
     fec_percentage: u8,
     minimum_fec_packets: u32,
     key: Option<[u8; GCM_KEY_BYTES]>,
     encrypt: bool,
-    keyframe_requested: Arc<AtomicBool>,
+    recovery: Arc<RecoveryRequests>,
+    sent_frames: VecDeque<SentFrame>,
     packetizer: Option<VideoPacketizer>,
 }
 
@@ -390,15 +427,16 @@ impl Default for MoonlightVideoPay {
             minimum_fec_packets: DEFAULT_MINIMUM_FEC_PACKETS,
             key: None,
             encrypt: true,
-            keyframe_requested: Arc::new(AtomicBool::new(false)),
+            recovery: Arc::default(),
+            sent_frames: VecDeque::new(),
             packetizer: None,
         }
     }
 }
 
 impl MoonlightVideoPay {
-    pub fn keyframe_requests(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.keyframe_requested)
+    pub fn recovery_requests(&self) -> Arc<RecoveryRequests> {
+        Arc::clone(&self.recovery)
     }
 
     async fn send_frame(&mut self, frame: Frame, out: &mut dyn OutputSink) -> Result<(), G2gError> {
@@ -431,10 +469,17 @@ impl MoonlightVideoPay {
                     "dropped a frame of {data_shards} packets, past the {} Moonlight reads",
                     MAX_FEC_BLOCKS * MAX_DATA_SHARDS_PER_BLOCK
                 );
-                self.keyframe_requested.store(true, Ordering::Relaxed);
+                self.recovery.request_keyframe();
                 return Ok(());
             }
         };
+        if self.sent_frames.len() == SENT_FRAMES_KEPT {
+            self.sent_frames.pop_front();
+        }
+        self.sent_frames.push_back(SentFrame {
+            frame_number: packetizer.frame_number,
+            pts_ns,
+        });
         let timing = frame.timing;
         for datagram in datagrams {
             let domain = MemoryDomain::System(SystemSlice::from_boxed(datagram.into_boxed_slice()));
@@ -575,9 +620,32 @@ impl AsyncElement for MoonlightVideoPay {
     }
 
     fn take_reconfigure(&mut self) -> Option<Reconfigure> {
-        self.keyframe_requested
-            .swap(false, Ordering::Relaxed)
-            .then_some(Reconfigure::ForceKeyframe)
+        let invalidate_from = self
+            .recovery
+            .invalidate_from_frame
+            .swap(NO_INVALIDATION, Ordering::Relaxed);
+        if self.recovery.keyframe.swap(false, Ordering::Relaxed) {
+            return Some(Reconfigure::ForceKeyframe);
+        }
+        if invalidate_from == NO_INVALIDATION {
+            return None;
+        }
+        let lost = self
+            .sent_frames
+            .iter()
+            .find(|sent| sent.frame_number == invalidate_from);
+        match lost {
+            Some(lost) => Some(Reconfigure::InvalidateReferences {
+                from_pts_ns: lost.pts_ns,
+            }),
+            None => {
+                g2g_core::g2g_info!(
+                    self,
+                    "frame {invalidate_from} is older than the frames kept, sending a key frame"
+                );
+                Some(Reconfigure::ForceKeyframe)
+            }
+        }
     }
 }
 
@@ -722,9 +790,65 @@ mod tests {
     #[test]
     fn a_keyframe_request_reaches_the_encoder_once() {
         let mut pay = MoonlightVideoPay::default();
-        pay.keyframe_requests().store(true, Ordering::Relaxed);
+        pay.recovery_requests().request_keyframe();
         assert_eq!(pay.take_reconfigure(), Some(Reconfigure::ForceKeyframe));
         assert_eq!(pay.take_reconfigure(), None);
+    }
+
+    struct DiscardSink;
+
+    impl OutputSink for DiscardSink {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<g2g_core::PushOutcome, G2gError>> {
+            packet_slot.take();
+            core::task::Poll::Ready(Ok(g2g_core::PushOutcome::Accepted))
+        }
+    }
+
+    async fn send_frames(pay: &mut MoonlightVideoPay, count: u64) {
+        pay.set_property("encrypt", PropValue::Bool(false)).unwrap();
+        pay.configure_pipeline(&input_caps()[0]).unwrap();
+        for pts_ns in 0..count {
+            let frame = Frame::new(
+                MemoryDomain::System(SystemSlice::from_boxed(
+                    access_unit_filling(1).into_boxed_slice(),
+                )),
+                g2g_core::FrameTiming {
+                    pts_ns: pts_ns * 1000,
+                    ..Default::default()
+                },
+                pts_ns,
+            );
+            pay.process(PipelinePacket::DataFrame(frame), &mut DiscardSink)
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn an_invalidation_reaches_the_encoder_as_the_presentation_time_of_the_first_lost_frame()
+    {
+        let mut pay = MoonlightVideoPay::default();
+        send_frames(&mut pay, 10).await;
+        // moonlight numbers frames from 1, so frame 7 is the one with pts 6000
+        pay.recovery_requests().invalidate_from(8);
+        pay.recovery_requests().invalidate_from(7);
+        assert_eq!(
+            pay.take_reconfigure(),
+            Some(Reconfigure::InvalidateReferences { from_pts_ns: 6000 })
+        );
+        assert_eq!(pay.take_reconfigure(), None);
+    }
+
+    #[tokio::test]
+    async fn a_loss_older_than_the_kept_frames_asks_for_a_key_frame() {
+        let mut pay = MoonlightVideoPay::default();
+        send_frames(&mut pay, SENT_FRAMES_KEPT as u64 + 2).await;
+        pay.recovery_requests().invalidate_from(1);
+        assert_eq!(pay.take_reconfigure(), Some(Reconfigure::ForceKeyframe));
     }
 
     #[test]
