@@ -14,10 +14,12 @@ const KNOWN_FLAGS: u8 = FROM_HOST | DEVICE_REMOVED;
 const RGBA_BYTES_PER_PIXEL: usize = 4;
 const CURSOR_HEADER_LEN: usize = 8;
 // `Event::Button` numbers buttons by their index here
-pub const POINTER_BUTTONS: [PointerButton; 3] = [
+pub const POINTER_BUTTONS: [PointerButton; 5] = [
     PointerButton::Left,
     PointerButton::Right,
     PointerButton::Middle,
+    PointerButton::Back,
+    PointerButton::Forward,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

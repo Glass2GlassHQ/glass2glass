@@ -12,10 +12,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL,
     MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
     MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK,
-    MOUSEEVENTF_WHEEL, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
+    MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, MOUSE_EVENT_FLAGS,
+    VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    XBUTTON1, XBUTTON2,
 };
 
 use crate::hid::windows_scancode_from_usage;
@@ -29,10 +31,38 @@ const SCANCODE_MASK: u16 = 0x00ff;
 // windows spreads absolute pointer coordinates over 65536 steps across the virtual desktop
 const ABSOLUTE_STEPS: i64 = 65536;
 
-const BUTTONS: [(MOUSE_EVENT_FLAGS, MOUSE_EVENT_FLAGS); 3] = [
-    (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
-    (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
-    (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
+struct ButtonFlags {
+    press: MOUSE_EVENT_FLAGS,
+    release: MOUSE_EVENT_FLAGS,
+    x_button: u16,
+}
+
+const BUTTONS: [ButtonFlags; 5] = [
+    ButtonFlags {
+        press: MOUSEEVENTF_LEFTDOWN,
+        release: MOUSEEVENTF_LEFTUP,
+        x_button: 0,
+    },
+    ButtonFlags {
+        press: MOUSEEVENTF_RIGHTDOWN,
+        release: MOUSEEVENTF_RIGHTUP,
+        x_button: 0,
+    },
+    ButtonFlags {
+        press: MOUSEEVENTF_MIDDLEDOWN,
+        release: MOUSEEVENTF_MIDDLEUP,
+        x_button: 0,
+    },
+    ButtonFlags {
+        press: MOUSEEVENTF_XDOWN,
+        release: MOUSEEVENTF_XUP,
+        x_button: XBUTTON1,
+    },
+    ButtonFlags {
+        press: MOUSEEVENTF_XDOWN,
+        release: MOUSEEVENTF_XUP,
+        x_button: XBUTTON2,
+    },
 ];
 
 #[derive(Debug, Clone, Copy)]
@@ -150,10 +180,11 @@ impl InjectEvents for Injector {
                 }
             }
             Event::Button { button, down } => {
-                let (press, release) = BUTTONS
+                let flags = BUTTONS
                     .get(usize::from(button))
                     .ok_or(InjectError::UnknownButton(button))?;
-                send(&[mouse(0, 0, 0, if down { *press } else { *release })])?;
+                let event = if down { flags.press } else { flags.release };
+                send(&[mouse(0, 0, i32::from(flags.x_button), event)])?;
             }
             Event::Move { dx, dy } => send(&[mouse(dx, dy, 0, MOUSEEVENTF_MOVE)])?,
             Event::Position { x, y, display } => {

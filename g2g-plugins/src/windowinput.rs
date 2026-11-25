@@ -7,15 +7,19 @@ pub enum PointerButton {
     Left,
     Right,
     Middle,
+    Back,
+    Forward,
 }
 
 impl PointerButton {
     pub fn evdev_code(self) -> u32 {
-        // linux input-event-codes.h BTN_LEFT, BTN_RIGHT and BTN_MIDDLE
+        // linux input-event-codes.h BTN_LEFT, BTN_RIGHT, BTN_MIDDLE, BTN_SIDE and BTN_EXTRA
         match self {
             PointerButton::Left => 0x110,
             PointerButton::Right => 0x111,
             PointerButton::Middle => 0x112,
+            PointerButton::Back => 0x113,
+            PointerButton::Forward => 0x114,
         }
     }
 
@@ -24,6 +28,8 @@ impl PointerButton {
             PointerButton::Left,
             PointerButton::Right,
             PointerButton::Middle,
+            PointerButton::Back,
+            PointerButton::Forward,
         ]
         .into_iter()
         .find(|button| button.evdev_code() == code)

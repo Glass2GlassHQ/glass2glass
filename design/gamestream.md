@@ -121,8 +121,8 @@ In `g2g-desktop`, module `gamestream`.
   the capture: XTest for `--x11-display`, uinput for the portal, the headless
   compositor for `--run` and `SendInput` on Windows. Keys map through a
   Windows virtual-key to HID usage table. Absolute pointer positions scale from
-  the size Moonlight sends to the captured size. Side buttons, touch, pen, text
-  and gamepads are dropped. Keys still held when the control stream ends are
+  the size Moonlight sends to the captured size. Mouse buttons 4 and 5 become
+  the back and forward buttons. Touch, pen, text and gamepads are dropped. Keys still held when the control stream ends are
   released. The host ends a session with 0x0109 carrying 0x80030023, and ends it
   itself after 10 s without a control message.
 
@@ -143,7 +143,8 @@ as `/applist` entries.
   runs with SDL's dummy audio driver, so nothing plays aloud.
   `CODEC=HEVC` picks the codec. With `CAPTURE=run` the headless display runs
   `tools/moonlight-input-probe.py`, xdotool clicks and types into Moonlight's
-  window, and the script checks that the probe received the click and the key. It runs before each push of this work and puts
+  window, and the script checks that the probe received a left click, a back
+  click and the key. It runs before each push of this work and puts
   no window on the desktop.
 - The Windows host is checked by hand: the Moonlight flatpak on Linux streams
   over the LAN from a Windows host started in the logged-in session, and the

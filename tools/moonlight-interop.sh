@@ -99,7 +99,7 @@ if [ "${CAPTURE:-x11}" = run ]; then
     window=$(xdotool search --sync --onlyvisible --classname moonlight | tail -1)
     xdotool windowfocus --sync "$window"
     # moonlight keeps the first click, which captures the mouse
-    xdotool mousemove --window "$window" 300 200 click 1 sleep 1 click 1 sleep 1 key a
+    xdotool mousemove --window "$window" 300 200 click 1 sleep 1 click 1 sleep 1 click 8 sleep 1 key a
     sleep 1
 fi
 # moonlight writes its streaming log only once the session ends, so the host ends it
@@ -129,7 +129,8 @@ if ! grep -q 'Received first audio packet' "$OUT/stream.log" ||
     echo "moonlight-interop: Moonlight did not decrypt the audio, see $OUT/stream.log" >&2
     exit 1
 fi
-if [ "${CAPTURE:-x11}" = run ] && ! { grep -qx 'key a' "$OUT/input.log" && grep -qx 'button 1' "$OUT/input.log"; }; then
+if [ "${CAPTURE:-x11}" = run ] && ! { grep -qx 'key a' "$OUT/input.log" && grep -qx 'button 1' "$OUT/input.log" &&
+    grep -qx 'button 8' "$OUT/input.log"; }; then
     echo "moonlight-interop: the headless display did not get Moonlight's input, see $OUT/input.log" >&2
     exit 1
 fi

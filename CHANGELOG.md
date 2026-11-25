@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2587: Remote desktop and Moonlight hosts inject the back and forward mouse buttons.
 - M2586: The Moonlight host runs on Windows with audio, and `wasapisrc` loopback keeps capturing while the output is silent.
 - M2585: The Moonlight host injects keyboard, mouse and scroll input, and the `--run` host takes relative mouse moves.
 - M2584: Stream encrypted Opus audio to Moonlight with `moonlightaudiopay`, and `opusenc` takes `bitrate-type`.

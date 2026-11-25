@@ -36,6 +36,8 @@ fn x_button(button: PointerButton) -> u8 {
         PointerButton::Left => 1,
         PointerButton::Middle => 2,
         PointerButton::Right => 3,
+        PointerButton::Back => 8,
+        PointerButton::Forward => 9,
     }
 }
 

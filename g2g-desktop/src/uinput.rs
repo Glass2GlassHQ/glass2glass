@@ -22,7 +22,13 @@ pub const KEYBOARD_NAME_PREFIX: &str = "g2g-desktop keyboard";
 // linux reports one wheel notch as 120 high-resolution units
 const HI_RES_UNITS_PER_NOTCH: i32 = 120;
 
-const BUTTONS: [KeyCode; 3] = [KeyCode::BTN_LEFT, KeyCode::BTN_RIGHT, KeyCode::BTN_MIDDLE];
+const BUTTONS: [KeyCode; 5] = [
+    KeyCode::BTN_LEFT,
+    KeyCode::BTN_RIGHT,
+    KeyCode::BTN_MIDDLE,
+    KeyCode::BTN_SIDE,
+    KeyCode::BTN_EXTRA,
+];
 
 fn keyboard_keys() -> AttributeSet<KeyCode> {
     let mut keys = AttributeSet::new();

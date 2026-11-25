@@ -4,10 +4,11 @@
 
 use std::fmt;
 
+use g2g_plugins::windowinput::PointerButton;
 use keycode::{KeyMap, KeyMappingCode};
 
 use crate::injection::ScreenSize;
-use crate::packet::Event;
+use crate::packet::{Event, POINTER_BUTTONS};
 
 const KEY_DOWN: u32 = 0x03;
 const KEY_UP: u32 = 0x04;
@@ -21,8 +22,14 @@ const SCROLL_HORIZONTAL: u32 = 0x5500_0001;
 const LENGTH_BYTES: usize = 4;
 const MAGIC_BYTES: usize = 4;
 
-// moonlight numbers buttons 1 left, 2 middle, 3 right, and Event::Button indexes POINTER_BUTTONS
-const MOONLIGHT_BUTTONS: [(u8, u8); 3] = [(1, 0), (2, 2), (3, 1)];
+// moonlight numbers buttons 1 left, 2 middle, 3 right, 4 and 5 the side buttons X1 and X2
+const MOONLIGHT_BUTTONS: [(u8, PointerButton); 5] = [
+    (1, PointerButton::Left),
+    (2, PointerButton::Middle),
+    (3, PointerButton::Right),
+    (4, PointerButton::Back),
+    (5, PointerButton::Forward),
+];
 
 const VIRTUAL_KEY_CODES: [(u8, KeyMappingCode); 123] = [
     (0x08, KeyMappingCode::Backspace),
@@ -222,12 +229,16 @@ fn key(payload: &[u8], down: bool) -> Result<Event, InputError> {
 
 fn button(payload: &[u8], down: bool) -> Result<Event, InputError> {
     let moonlight_button = byte(payload, 0)?;
-    let (_, button) = MOONLIGHT_BUTTONS
+    let (_, pointer_button) = MOONLIGHT_BUTTONS
         .iter()
         .find(|(number, _)| *number == moonlight_button)
         .ok_or(InputError::UnknownButton(moonlight_button))?;
+    let button = POINTER_BUTTONS
+        .iter()
+        .position(|known| known == pointer_button)
+        .expect("POINTER_BUTTONS lists every PointerButton");
     Ok(Event::Button {
-        button: *button,
+        button: button as u8,
         down,
     })
 }
@@ -349,7 +360,14 @@ mod tests {
         );
         assert_eq!(
             input_event(&message(MOUSE_BUTTON_UP, &[4]), None),
-            Err(InputError::UnknownButton(4))
+            Ok(Event::Button {
+                button: 3,
+                down: false
+            })
+        );
+        assert_eq!(
+            input_event(&message(MOUSE_BUTTON_UP, &[6]), None),
+            Err(InputError::UnknownButton(6))
         );
         let relative = [(-5i16).to_be_bytes(), 7i16.to_be_bytes()].concat();
         assert_eq!(

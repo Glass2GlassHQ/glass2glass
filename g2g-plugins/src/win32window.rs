@@ -67,7 +67,8 @@ fn window_message(msg: u32, wp: WPARAM, lp: LPARAM) -> Option<WindowMessage> {
     use windows::Win32::UI::WindowsAndMessaging::{
         KF_EXTENDED, KF_REPEAT, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP,
         WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
-        WM_RBUTTONUP, WM_SETFOCUS, WM_SYSKEYDOWN, WM_SYSKEYUP,
+        WM_RBUTTONUP, WM_SETFOCUS, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
+        XBUTTON1,
     };
     // the windows scancode set marks an extended key with an E0 prefix byte
     const EXTENDED_PREFIX: u32 = 0xE000;
@@ -99,6 +100,14 @@ fn window_message(msg: u32, wp: WPARAM, lp: LPARAM) -> Option<WindowMessage> {
         WM_RBUTTONUP => button(PointerButton::Right, false),
         WM_MBUTTONDOWN => button(PointerButton::Middle, true),
         WM_MBUTTONUP => button(PointerButton::Middle, false),
+        WM_XBUTTONDOWN | WM_XBUTTONUP => {
+            let side = if high_word(wp.0) == i32::from(XBUTTON1) {
+                PointerButton::Back
+            } else {
+                PointerButton::Forward
+            };
+            button(side, msg == WM_XBUTTONDOWN)
+        }
         WM_MOUSEWHEEL => Some(WindowMessage::Input(WindowInput::Wheel {
             dx: 0,
             dy: high_word(wp.0),
