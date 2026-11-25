@@ -9,9 +9,9 @@ use std::future::poll_fn;
 use std::time::{Duration, Instant};
 
 use evdev::{AbsoluteAxisCode, Device, FFEffectData, FFEffectKind, FFReplay, FFTrigger, KeyCode};
-use g2g_desktop::injection::{GamepadRumble, InjectEvents, MotorLevels};
+use g2g_desktop::injection::{GamepadRumble, InjectEvents};
 use g2g_desktop::packet::{
-    Event, GamepadAxes, RemovableDevice, GAMEPAD_A, GAMEPAD_DPAD_UP, GAMEPAD_Y,
+    Event, GamepadAxes, MotorLevels, RemovableDevice, GAMEPAD_A, GAMEPAD_DPAD_UP, GAMEPAD_Y,
 };
 use g2g_desktop::uinputgamepad::{UinputGamepads, GAMEPAD_NAME};
 

@@ -4,7 +4,7 @@
 
 use tokio::sync::mpsc;
 
-use crate::packet::{Event, EventKind};
+use crate::packet::{Event, EventKind, GamepadAxes, RemovableDevice};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
@@ -56,6 +56,8 @@ pub struct InputRouter {
     swallowed_keys: Vec<HeldKey>,
     held_keys: Vec<HeldKey>,
     held_buttons: Vec<u8>,
+    // pads that sent a state since the window took focus
+    moved_gamepads: Vec<u8>,
 }
 
 impl InputRouter {
@@ -67,6 +69,7 @@ impl InputRouter {
             swallowed_keys: Vec::new(),
             held_keys: Vec::new(),
             held_buttons: Vec::new(),
+            moved_gamepads: Vec::new(),
         }
     }
 
@@ -106,12 +109,29 @@ impl InputRouter {
                     },
                 );
             }
+            for device in core::mem::take(&mut self.moved_gamepads) {
+                let released = Event::Gamepad {
+                    device,
+                    buttons: 0,
+                    axes: GamepadAxes::default(),
+                };
+                self.deliver(Origin::Local, released);
+            }
             self.swallowed_keys.clear();
         }
         self.focused = focused;
     }
 
     pub fn push(&mut self, origin: Origin, event: Event) -> Routed {
+        // hosts keep a virtual pad until its removal arrives
+        if let Event::DeviceRemoved {
+            kind: RemovableDevice::Gamepad,
+            device,
+        } = event
+        {
+            self.moved_gamepads.retain(|moved| *moved != device);
+            return self.deliver(origin, event);
+        }
         if origin == Origin::Remote || !is_user_input(event.kind()) {
             return self.deliver(origin, event);
         }
@@ -143,6 +163,9 @@ impl InputRouter {
                 if down {
                     self.held_buttons.push(button);
                 }
+            }
+            Event::Gamepad { device, .. } if !self.moved_gamepads.contains(&device) => {
+                self.moved_gamepads.push(device);
             }
             _ => {}
         }

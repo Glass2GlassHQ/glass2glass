@@ -18,8 +18,8 @@ use g2g_core::{
 use g2g_desktop::host::{
     run_session, HostCapture, HostEncoder, HostError, HostListener, HostSettings,
 };
-use g2g_desktop::injection::ScreenSize;
-use g2g_desktop::packet::{CursorImage, Event, PacketReader, PacketWriter, Side};
+use g2g_desktop::injection::{GamepadRumble, ScreenSize};
+use g2g_desktop::packet::{CursorImage, Event, MotorLevels, PacketReader, PacketWriter, Side};
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::cursorshape::{CursorShape, CURSOR_BYTES_PER_PIXEL};
 use g2g_plugins::datachannel::DataChannelEnds;
@@ -39,6 +39,13 @@ const HID_A: u16 = 0x04;
 const CURSOR_SIDE: u32 = 4;
 const HOST_CLIPBOARD: &str = "copied on the host";
 const CLIENT_CLIPBOARD: &str = "copied on the client";
+const RUMBLE: GamepadRumble = GamepadRumble {
+    device: 1,
+    motors: MotorLevels {
+        low_frequency: 0x8000,
+        high_frequency: 0x1000,
+    },
+};
 
 struct CountingSink {
     frames: Arc<AtomicU64>,
@@ -109,7 +116,7 @@ fn capture(registry_source: &str) -> HostCapture {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn client_sees_host_video_cursor_and_clipboard_and_host_receives_client_input() {
+async fn client_sees_host_video_cursor_clipboard_and_rumble_and_host_receives_client_input() {
     let settings = HostSettings {
         token: TOKEN.into(),
         bitrate: BITRATE,
@@ -140,12 +147,15 @@ async fn client_sees_host_video_cursor_and_clipboard_and_host_receives_client_in
     let (client, mut input) = client_source(&listener, &cert_hash, TOKEN);
     let (event_sender, mut host_events) = mpsc::unbounded_channel();
     let (size_sender, sizes) = watch::channel(None);
+    let (rumbled, rumbles) = mpsc::unbounded_channel();
+    rumbled.send(RUMBLE).unwrap();
     let host = run_session(
         listener,
         capture,
         &settings,
         event_sender,
         size_sender,
+        rumbles,
         None,
     );
 
@@ -208,6 +218,14 @@ async fn client_sees_host_video_cursor_and_clipboard_and_host_receives_client_in
         from_host.contains(&Some(Event::Clipboard(String::from(HOST_CLIPBOARD)))),
         "the host sent its clipboard: {from_host:?}"
     );
+    let rumble = Event::Rumble {
+        device: RUMBLE.device,
+        motors: RUMBLE.motors,
+    };
+    assert!(
+        from_host.contains(&Some(rumble)),
+        "the host sent the rumble: {from_host:?}"
+    );
     assert_eq!(
         *sizes.borrow(),
         Some(ScreenSize {
@@ -239,6 +257,7 @@ async fn run_with_wrong_token(
         settings,
         event_sender,
         size_sender,
+        mpsc::unbounded_channel().1,
         None,
     );
     let frames = Arc::new(AtomicU64::new(0));

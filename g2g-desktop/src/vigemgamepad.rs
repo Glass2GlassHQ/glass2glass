@@ -11,8 +11,8 @@ use std::task::{Context, Poll};
 use tokio::sync::mpsc;
 use vigem_client::{Client, TargetId, XButtons, XGamepad, XNotification, Xbox360Wired};
 
-use crate::injection::{GamepadRumble, InjectError, InjectEvents, MotorLevels};
-use crate::packet::{Event, GamepadAxes, RemovableDevice};
+use crate::injection::{GamepadRumble, InjectError, InjectEvents};
+use crate::packet::{Event, GamepadAxes, MotorLevels, RemovableDevice};
 
 fn report(buttons: u32, axes: GamepadAxes) -> Result<XGamepad, InjectError> {
     let trigger =

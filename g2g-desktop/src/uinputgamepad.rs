@@ -18,12 +18,12 @@ use evdev::{
 };
 use tokio::time::{Instant, Sleep};
 
-use crate::injection::{GamepadRumble, InjectError, InjectEvents, MotorLevels};
+use crate::injection::{GamepadRumble, InjectError, InjectEvents};
 use crate::packet::{
-    Event, GamepadAxes, RemovableDevice, GAMEPAD_A, GAMEPAD_B, GAMEPAD_BACK, GAMEPAD_DPAD_DOWN,
-    GAMEPAD_DPAD_LEFT, GAMEPAD_DPAD_RIGHT, GAMEPAD_DPAD_UP, GAMEPAD_GUIDE, GAMEPAD_LEFT_SHOULDER,
-    GAMEPAD_LEFT_THUMB, GAMEPAD_RIGHT_SHOULDER, GAMEPAD_RIGHT_THUMB, GAMEPAD_START, GAMEPAD_X,
-    GAMEPAD_Y,
+    Event, GamepadAxes, MotorLevels, RemovableDevice, GAMEPAD_A, GAMEPAD_B, GAMEPAD_BACK,
+    GAMEPAD_DPAD_DOWN, GAMEPAD_DPAD_LEFT, GAMEPAD_DPAD_RIGHT, GAMEPAD_DPAD_UP, GAMEPAD_GUIDE,
+    GAMEPAD_LEFT_SHOULDER, GAMEPAD_LEFT_THUMB, GAMEPAD_RIGHT_SHOULDER, GAMEPAD_RIGHT_THUMB,
+    GAMEPAD_START, GAMEPAD_X, GAMEPAD_Y,
 };
 
 pub const GAMEPAD_NAME: &str = "g2g-desktop Xbox 360 pad";
@@ -33,6 +33,17 @@ const XBOX_360_PRODUCT: u16 = 0x028e;
 const XBOX_360_VERSION: u16 = 0x0110;
 // the linux xpad driver holds this many force feedback effects per pad
 const RUMBLE_EFFECTS: u32 = 16;
+// linux's memless force feedback layer adds the periodic waveforms and gain to every xpad pad, and gilrs requires them
+const FORCE_FEEDBACK_CODES: [FFEffectCode; 8] = [
+    FFEffectCode::FF_RUMBLE,
+    FFEffectCode::FF_PERIODIC,
+    FFEffectCode::FF_SQUARE,
+    FFEffectCode::FF_TRIANGLE,
+    FFEffectCode::FF_SINE,
+    FFEffectCode::FF_SAW_UP,
+    FFEffectCode::FF_SAW_DOWN,
+    FFEffectCode::FF_GAIN,
+];
 
 // the linux xpad driver reports X and Y with the codes evdev names north and west
 const BUTTON_KEYS: [(u32, KeyCode); 11] = [
@@ -77,7 +88,7 @@ fn build_gamepad() -> io::Result<VirtualDevice> {
             XBOX_360_VERSION,
         ))
         .with_keys(&keys)?
-        .with_ff(&AttributeSet::from_iter([FFEffectCode::FF_RUMBLE]))?
+        .with_ff(&AttributeSet::from_iter(FORCE_FEEDBACK_CODES))?
         .with_ff_effects_max(RUMBLE_EFFECTS);
     for setup in axis_setups() {
         builder = builder.with_absolute_axis(&setup)?;
@@ -103,10 +114,21 @@ impl PlayingEffect {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct RumbleEffects {
     uploaded: BTreeMap<i16, RumbleEffect>,
     playing: BTreeMap<i16, PlayingEffect>,
+    gain: u16,
+}
+
+impl Default for RumbleEffects {
+    fn default() -> Self {
+        Self {
+            uploaded: BTreeMap::new(),
+            playing: BTreeMap::new(),
+            gain: u16::MAX,
+        }
+    }
 }
 
 impl RumbleEffects {
@@ -125,7 +147,10 @@ impl RumbleEffects {
             self.playing.remove(&id);
             return;
         }
-        let replay = self.uploaded[&id].replay;
+        // a process on the host can play an id it never uploaded
+        let Some(replay) = self.uploaded.get(&id).map(|effect| effect.replay) else {
+            return;
+        };
         let starts = now + Duration::from_millis(u64::from(replay.delay));
         // linux plays an effect of length zero until it is stopped
         let ends = (replay.length != 0).then(|| {
@@ -134,16 +159,25 @@ impl RumbleEffects {
         self.playing.insert(id, PlayingEffect { starts, ends });
     }
 
-    // linux adds the magnitudes of rumble effects that play at once
+    // linux adds the magnitudes of rumble effects that play at once, then applies the gain
     fn motors(&self, now: Instant) -> MotorLevels {
-        self.playing
+        let sum = self
+            .playing
             .iter()
             .filter(|(_, playing)| playing.is_on(now))
             .map(|(id, _)| self.uploaded[id].motors)
             .fold(MotorLevels::default(), |sum, motors| MotorLevels {
                 low_frequency: sum.low_frequency.saturating_add(motors.low_frequency),
                 high_frequency: sum.high_frequency.saturating_add(motors.high_frequency),
-            })
+            });
+        let scaled = |level: u16| {
+            let level = u32::from(level) * u32::from(self.gain) / u32::from(u16::MAX);
+            u16::try_from(level).expect("a gain of at most one keeps the level in range")
+        };
+        MotorLevels {
+            low_frequency: scaled(sum.low_frequency),
+            high_frequency: scaled(sum.high_frequency),
+        }
     }
 
     fn next_change(&self, now: Instant) -> Option<Instant> {
@@ -187,16 +221,25 @@ impl Pad {
             EventSummary::UInput(upload, UInputCode::UI_FF_UPLOAD, _) => {
                 let upload = self.device.device_mut().process_ff_upload(upload)?;
                 let effect = upload.effect();
-                let FFEffectKind::Rumble {
-                    strong_magnitude,
-                    weak_magnitude,
-                } = effect.kind
-                else {
-                    unreachable!("linux uploads only the FF_RUMBLE effects the pad declares");
-                };
-                let motors = MotorLevels {
-                    low_frequency: strong_magnitude,
-                    high_frequency: weak_magnitude,
+                let motors = match effect.kind {
+                    FFEffectKind::Rumble {
+                        strong_magnitude,
+                        weak_magnitude,
+                    } => MotorLevels {
+                        low_frequency: strong_magnitude,
+                        high_frequency: weak_magnitude,
+                    },
+                    // linux's memless layer drives both motors at a periodic effect's magnitude
+                    FFEffectKind::Periodic { magnitude, .. } => {
+                        let level = u32::from(magnitude.unsigned_abs()) * u32::from(u16::MAX)
+                            / i16::MAX as u32;
+                        let level = u16::try_from(level).unwrap_or(u16::MAX);
+                        MotorLevels {
+                            low_frequency: level,
+                            high_frequency: level,
+                        }
+                    }
+                    _ => unreachable!("linux uploads only the effect types the pad declares"),
                 };
                 let replay = effect.replay;
                 self.effects
@@ -206,6 +249,12 @@ impl Pad {
                 let erase = self.device.device_mut().process_ff_erase(erase)?;
                 // linux effect ids are below RUMBLE_EFFECTS
                 self.effects.erase(erase.effect_id() as i16);
+            }
+            EventSummary::ForceFeedback(_, FFEffectCode::FF_GAIN, gain) => {
+                // linux ignores a gain past 0xffff
+                if let Ok(gain) = u16::try_from(gain) {
+                    self.effects.gain = gain;
+                }
             }
             EventSummary::ForceFeedback(_, effect, count) => {
                 self.effects.play(effect.0 as i16, count, Instant::now());

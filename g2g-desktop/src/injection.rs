@@ -9,7 +9,7 @@ use std::task::{Context, Poll};
 use keycode::{KeyMap, KeyMappingCode};
 
 use crate::hid::{us_layout_key, UnknownUsage};
-use crate::packet::{Event, EventKind, RemovableDevice};
+use crate::packet::{Event, EventKind, MotorLevels, RemovableDevice};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScreenSize {
@@ -87,12 +87,6 @@ impl From<io::Error> for InjectError {
     fn from(e: io::Error) -> Self {
         InjectError::Device(e)
     }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct MotorLevels {
-    pub low_frequency: u16,
-    pub high_frequency: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

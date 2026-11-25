@@ -76,7 +76,7 @@ impl EventKind {
             EventKind::Move | EventKind::Wheel => Some(8),
             EventKind::Position => Some(9),
             EventKind::Gamepad => Some(17),
-            EventKind::Rumble => Some(7),
+            EventKind::Rumble => Some(5),
             EventKind::Touch => Some(14),
             EventKind::Cursor | EventKind::Clipboard | EventKind::Text => None,
         }
@@ -99,6 +99,12 @@ pub const GAMEPAD_A: u32 = 0x1000;
 pub const GAMEPAD_B: u32 = 0x2000;
 pub const GAMEPAD_X: u32 = 0x4000;
 pub const GAMEPAD_Y: u32 = 0x8000;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MotorLevels {
+    pub low_frequency: u16,
+    pub high_frequency: u16,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct GamepadAxes {
@@ -205,9 +211,7 @@ pub enum Event {
     },
     Rumble {
         device: u8,
-        low: u16,
-        high: u16,
-        duration_ms: u16,
+        motors: MotorLevels,
     },
     Cursor(CursorImage),
     Clipboard(String),
@@ -404,16 +408,10 @@ impl PacketWriter {
                     payload.extend_from_slice(&axis.to_le_bytes());
                 }
             }
-            Event::Rumble {
-                device,
-                low,
-                high,
-                duration_ms,
-            } => {
+            Event::Rumble { device, motors } => {
                 payload.push(*device);
-                payload.extend_from_slice(&low.to_le_bytes());
-                payload.extend_from_slice(&high.to_le_bytes());
-                payload.extend_from_slice(&duration_ms.to_le_bytes());
+                payload.extend_from_slice(&motors.low_frequency.to_le_bytes());
+                payload.extend_from_slice(&motors.high_frequency.to_le_bytes());
             }
             Event::Cursor(cursor) => {
                 payload.extend_from_slice(&cursor.width.to_le_bytes());
@@ -586,9 +584,10 @@ fn decode_event(kind: EventKind, flags: u8, payload: &[u8]) -> Result<Event, Pac
         },
         EventKind::Rumble => Event::Rumble {
             device: fields.u8(),
-            low: fields.u16(),
-            high: fields.u16(),
-            duration_ms: fields.u16(),
+            motors: MotorLevels {
+                low_frequency: fields.u16(),
+                high_frequency: fields.u16(),
+            },
         },
         EventKind::Cursor => {
             if payload.len() < CURSOR_HEADER_LEN {

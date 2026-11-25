@@ -383,7 +383,7 @@ mod tests {
     fn a_rumble_carries_the_controller_and_both_motor_levels() {
         let rumble = GamepadRumble {
             device: 2,
-            motors: crate::injection::MotorLevels {
+            motors: crate::packet::MotorLevels {
                 low_frequency: 0x1234,
                 high_frequency: 0xabcd,
             },

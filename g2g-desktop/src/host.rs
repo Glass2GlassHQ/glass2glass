@@ -388,12 +388,38 @@ async fn forward_input(
     }
 }
 
+async fn forward_rumbles(
+    mut rumbles: mpsc::UnboundedReceiver<GamepadRumble>,
+    outgoing: &mpsc::UnboundedSender<Vec<u8>>,
+) {
+    let log = Target::category(HOST_CATEGORY);
+    let mut writer = PacketWriter::new(Side::Host);
+    loop {
+        let rumble = tokio::select! {
+            rumble = rumbles.recv() => rumble,
+            () = outgoing.closed() => return,
+        };
+        let Some(GamepadRumble { device, motors }) = rumble else {
+            return;
+        };
+        match writer.write(&Event::Rumble { device, motors }) {
+            Ok(packet) => {
+                if outgoing.send(packet).is_err() {
+                    return;
+                }
+            }
+            Err(e) => g2g_core::g2g_warn!(log, "dropped a rumble: {e}"),
+        }
+    }
+}
+
 pub async fn run_session(
     listener: HostListener,
     capture: HostCapture,
     settings: &HostSettings,
     events: mpsc::UnboundedSender<Event>,
     sizes: watch::Sender<Option<ScreenSize>>,
+    rumbles: mpsc::UnboundedReceiver<GamepadRumble>,
     trace: Option<Arc<dyn VisitRecorder>>,
 ) -> Result<RunStats, HostError> {
     let HostListener {
@@ -423,11 +449,12 @@ pub async fn run_session(
     if let Some(track) = audio_track {
         audio::send(track);
     }
-    let (run, (), (), ()) = tokio::join!(
+    let (run, (), (), (), ()) = tokio::join!(
         run.run(),
         forward_input(channel.incoming, events),
         forward_changes(capture.cursor_shapes, &channel.outgoing, cursor_events),
-        forward_changes(capture.clipboard_texts, &channel.outgoing, clipboard_events)
+        forward_changes(capture.clipboard_texts, &channel.outgoing, clipboard_events),
+        forward_rumbles(rumbles, &channel.outgoing)
     );
     run.map_err(HostError::Session)
 }

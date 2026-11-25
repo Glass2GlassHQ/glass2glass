@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use g2g_desktop::packet::{
-    CursorImage, Event, EventKind, GamepadAxes, PacketError, PacketReader, PacketWriter,
-    RemovableDevice, Side, TouchPhase,
+    CursorImage, Event, EventKind, GamepadAxes, MotorLevels, PacketError, PacketReader,
+    PacketWriter, RemovableDevice, Side, TouchPhase,
 };
 use g2g_desktop::router::{InputRouter, Origin, Routed};
 use tokio::sync::mpsc::error::TryRecvError;
@@ -53,9 +53,10 @@ fn every_event() -> Vec<Event> {
         },
         Event::Rumble {
             device: 3,
-            low: u16::MAX,
-            high: 1,
-            duration_ms: 250,
+            motors: MotorLevels {
+                low_frequency: u16::MAX,
+                high_frequency: 1,
+            },
         },
         Event::Cursor(cursor(3, 2)),
         Event::Clipboard("snow \u{2603}".to_string()),

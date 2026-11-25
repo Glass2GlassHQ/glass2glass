@@ -34,16 +34,14 @@ use g2g_desktop::gamestream::{LaunchableApp, ServedApps};
 use g2g_desktop::host::{
     check_token_len, inject, run_session, HostCapture, HostEncoder, HostListener, HostSettings,
 };
-#[cfg(feature = "gamestream")]
-use g2g_desktop::injection::WithGamepads;
-use g2g_desktop::injection::{InjectError, InjectEvents, ScreenSize};
+use g2g_desktop::injection::{InjectError, InjectEvents, ScreenSize, WithGamepads};
 #[cfg(target_os = "windows")]
 use g2g_desktop::sendinput::Injector;
 #[cfg(target_os = "linux")]
 use g2g_desktop::uinput::Injector;
-#[cfg(all(target_os = "linux", feature = "gamestream"))]
+#[cfg(target_os = "linux")]
 use g2g_desktop::uinputgamepad::UinputGamepads;
-#[cfg(all(target_os = "windows", feature = "gamestream"))]
+#[cfg(target_os = "windows")]
 use g2g_desktop::vigemgamepad::ViGEmGamepads;
 #[cfg(target_os = "linux")]
 use g2g_desktop::waylanddisplayinput::WaylandDisplayInjector;
@@ -281,8 +279,7 @@ async fn serve<I: InjectEvents>(
 ) {
     let (events, event_receiver) = mpsc::unbounded_channel();
     let (sizes, size_receiver) = watch::channel(None);
-    // remotewt injectors have no gamepads
-    let (rumbled, _) = mpsc::unbounded_channel();
+    let (rumbled, rumbles) = mpsc::unbounded_channel();
     let (session, injected) = tokio::join!(
         run_session(
             listener,
@@ -290,6 +287,7 @@ async fn serve<I: InjectEvents>(
             settings,
             events,
             sizes,
+            rumbles,
             trace.clone().map(|trace| trace as Arc<dyn VisitRecorder>),
         ),
         inject(event_receiver, size_receiver, open_injector, &rumbled),
@@ -342,7 +340,18 @@ async fn host_portal(
         clipboard_texts: None,
     };
     let ((), saved) = tokio::join!(
-        serve(listener, settings, host_capture, Injector::new, trace),
+        serve(
+            listener,
+            settings,
+            host_capture,
+            |screen| {
+                Ok(WithGamepads {
+                    desktop: Injector::new(screen)?,
+                    gamepads: UinputGamepads::default(),
+                })
+            },
+            trace
+        ),
         saved_tokens
     );
     if let Err(e) = saved {
@@ -378,7 +387,12 @@ async fn host_x11(
         cursor_shapes: Some(cursor_shapes),
         clipboard_texts: None,
     };
-    let open_injector = |screen| XTestInjector::new(display, screen);
+    let open_injector = |screen| {
+        Ok(WithGamepads {
+            desktop: XTestInjector::new(display, screen)?,
+            gamepads: UinputGamepads::default(),
+        })
+    };
     serve(listener, settings, host_capture, open_injector, trace).await;
 }
 
@@ -464,7 +478,12 @@ async fn serve_headless_sessions(
             cursor_shapes: Some(display.cursor_shapes()),
             clipboard_texts: Some(display.clipboard_texts()),
         };
-        let open_injector = |screen| Ok(WaylandDisplayInjector::new(screen, display));
+        let open_injector = |screen| {
+            Ok(WithGamepads {
+                desktop: WaylandDisplayInjector::new(screen, display),
+                gamepads: UinputGamepads::default(),
+            })
+        };
         serve(listener, settings, host_capture, open_injector, trace).await;
     }
 }
@@ -521,7 +540,12 @@ async fn host_monitor(
         nodes: vec![GraphNodeRef::source(source)],
         encoder: HostEncoder::MediaFoundation,
     };
-    let open_injector = move |screen| Injector::new(screen, monitor);
+    let open_injector = move |screen| {
+        Ok(WithGamepads {
+            desktop: Injector::new(screen, monitor)?,
+            gamepads: ViGEmGamepads::default(),
+        })
+    };
     serve(listener, settings, host_capture, open_injector, trace).await;
 }
 

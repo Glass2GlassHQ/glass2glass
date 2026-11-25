@@ -38,8 +38,10 @@ The plan is [remote.md](remote.md).
   host through `vtencode`.
 - Pin `g2g-wayland-display` back to upstream smithay once it flushes in
   `X11Wm::new_selection`, and drop the `boxerab/smithay` fork.
-- Route the remote desktop host's gamepad events to `UinputGamepads` and
-  `ViGEmGamepads`, and a Windows service that injects on the secure desktop.
+- A Windows service that captures and injects on the secure desktop.
+- Apply a periodic effect's envelope on the virtual uinput pad.
+- Feel the remote desktop's rumble on a real pad on the Linux and Windows
+  clients.
 - A Chrome client on the same signaling and the same data channel.
 - OIDC in front of the bearer token, a `g2g://` URL, and install packages.
 

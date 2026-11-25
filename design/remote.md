@@ -283,11 +283,20 @@ Absolute position is the virtual desktop: `x` and `y` in pixels of
 `display`, origin at that display's top left. The host maps `display` through
 the same index the capture source uses.
 
-Gamepad capture uses one crate on every client. Injection is a virtual uinput
-gamepad on Linux and ViGEm on Windows. A gamepad event carries XInput's button
-bits, thumbsticks with up positive and triggers from 0 to 255. The Moonlight
-host injects it through `UinputGamepads` and `ViGEmGamepads`, and this host
-does not yet. macOS injection waits until a virtual
+The client reads gamepads through gilrs on a thread of its own, sends a pad's
+whole state on every change while the window has focus, and on focus loss
+sends a centred state for each pad that moved. A pad's removal is sent even
+without focus. Rumble plays as a gilrs effect that repeats until the next level
+replaces it. On Windows gilrs reads pads only while the window has focus.
+Injection is a virtual uinput gamepad on Linux and ViGEm on Windows. The uinput
+pad declares the periodic waveforms and gain a real xpad pad gets from linux's
+memless layer, which gilrs requires before it rumbles a pad, and drives both
+motors at a periodic effect's magnitude. A gamepad event carries XInput's button
+bits, thumbsticks with up positive and triggers from 0 to 255. Both hosts
+inject it through `UinputGamepads` and `ViGEmGamepads`, which plug in a pad the
+first time its device number arrives. Type 7 sends the client a pad's low and
+high frequency motor levels each time a game changes them, and the levels hold
+until the next type 7. macOS injection waits until a virtual
 HID device is chosen. The packet still parses there, and the router counts it
 as undelivered.
 

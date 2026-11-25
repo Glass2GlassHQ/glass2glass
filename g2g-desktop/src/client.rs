@@ -21,7 +21,9 @@ use g2g_plugins::windowinput::WindowInput;
 use tokio::sync::{mpsc, watch};
 
 use crate::audio;
+use crate::gamepadcapture::capture_gamepads;
 use crate::hid::{usage_from_scancode, ScancodeSet};
+use crate::injection::GamepadRumble;
 use crate::lineargraph::linear_graph;
 use crate::packet::{
     CursorImage, Event, EventKind, PacketReader, PacketWriter, RemovableDevice, Side, TouchPhase,
@@ -44,12 +46,13 @@ const WINDOW_SCANCODES: ScancodeSet = ScancodeSet::Evdev;
 const WINDOW_SCANCODES: ScancodeSet = ScancodeSet::Windows;
 const KEYBOARD_DEVICE: u8 = 0;
 const DISPLAY: u8 = 0;
-const FORWARDED_KINDS: [EventKind; 5] = [
+const FORWARDED_KINDS: [EventKind; 6] = [
     EventKind::Key,
     EventKind::Button,
     EventKind::Position,
     EventKind::Wheel,
     EventKind::Touch,
+    EventKind::Gamepad,
 ];
 
 #[derive(Debug, Clone)]
@@ -139,24 +142,35 @@ fn event_from(input: WindowInput) -> Option<Event> {
 
 pub async fn forward_window_input(
     mut window: mpsc::UnboundedReceiver<WindowInput>,
+    mut gamepad_states: mpsc::UnboundedReceiver<Event>,
     outgoing: mpsc::UnboundedSender<Vec<u8>>,
 ) {
     let log = Target::category(CLIENT_CATEGORY);
     let mut router = InputRouter::new(Vec::new());
     let mut network = router.subscribe(Origin::Local, &FORWARDED_KINDS);
     let mut writer = PacketWriter::new(Side::Client);
-    while let Some(input) = window.recv().await {
-        if let WindowInput::Focus(focused) = input {
-            router.set_focused(focused);
-        }
-        match event_from(input) {
-            Some(event) => {
-                router.push(Origin::Local, event);
+    loop {
+        tokio::select! {
+            input = window.recv() => {
+                let Some(input) = input else {
+                    return;
+                };
+                if let WindowInput::Focus(focused) = input {
+                    router.set_focused(focused);
+                }
+                match event_from(input) {
+                    Some(event) => {
+                        router.push(Origin::Local, event);
+                    }
+                    None if !matches!(input, WindowInput::Focus(_)) => {
+                        g2g_core::g2g_warn!(log, "{input:?} has no packet form");
+                    }
+                    None => {}
+                }
             }
-            None if !matches!(input, WindowInput::Focus(_)) => {
-                g2g_core::g2g_warn!(log, "{input:?} has no packet form");
+            Some(state) = gamepad_states.recv() => {
+                router.push(Origin::Local, state);
             }
-            None => {}
         }
         while let Ok(event) = network.try_recv() {
             let packet = writer
@@ -187,6 +201,7 @@ pub async fn follow_host_events(
     mut messages: mpsc::UnboundedReceiver<Vec<u8>>,
     cursor_shapes: Option<watch::Sender<Option<CursorShape>>>,
     host_clipboard: Option<watch::Sender<Option<String>>>,
+    rumbles: Option<mpsc::UnboundedSender<GamepadRumble>>,
 ) {
     let log = Target::category(CLIENT_CATEGORY);
     let mut reader = PacketReader::new(Side::Client);
@@ -200,6 +215,12 @@ pub async fn follow_host_events(
             Ok(Some(Event::Clipboard(text))) => {
                 if let Some(host_clipboard) = &host_clipboard {
                     host_clipboard.send_replace(Some(text));
+                }
+            }
+            Ok(Some(Event::Rumble { device, motors })) => {
+                if let Some(rumbles) = &rumbles {
+                    // rumbles after the gamepad thread ends are dropped
+                    let _ = rumbles.send(GamepadRumble { device, motors });
                 }
             }
             Ok(Some(event)) => {
@@ -316,9 +337,14 @@ pub async fn run_client(
     let graph = client_graph(source, sink)?;
 
     let clipboard_outgoing = data_channel.outgoing.clone();
+    let (gamepad_states, gamepad_rumbles) = window_input
+        .is_some()
+        .then(capture_gamepads)
+        .map(|capture| (capture.states, capture.rumbles))
+        .unzip();
     let forward = async {
-        if let Some(window_input) = window_input {
-            forward_window_input(window_input, data_channel.outgoing).await;
+        if let (Some(window_input), Some(gamepad_states)) = (window_input, gamepad_states) {
+            forward_window_input(window_input, gamepad_states, data_channel.outgoing).await;
         }
     };
     let copies = async {
@@ -326,7 +352,12 @@ pub async fn run_client(
             forward_local_clipboard(local_copies, clipboard_outgoing).await;
         }
     };
-    let follow = follow_host_events(data_channel.incoming, cursor_shapes, host_clipboard);
+    let follow = follow_host_events(
+        data_channel.incoming,
+        cursor_shapes,
+        host_clipboard,
+        gamepad_rumbles,
+    );
     let clock = WallClock::new();
     let mut run = RunBuilder::new(graph, &clock, LINK_CAPACITY).with_observer(observer);
     if let Some(trace) = trace {
