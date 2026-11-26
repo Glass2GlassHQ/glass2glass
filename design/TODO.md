@@ -34,8 +34,6 @@ The plan is [remote.md](remote.md).
 
 - Encode with `d3d11convert ! nvenc` on a Windows host with an NVIDIA GPU,
   falling back to `mfh264enc`.
-- Rebuild the Windows host graph when a desktop switch changes the capture
-  size.
 - The macOS client, then `display-index` on `screencapturesrc` and a macOS
   host through `vtencode`.
 - Pin `g2g-wayland-display` back to upstream smithay once it flushes in

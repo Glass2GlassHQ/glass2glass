@@ -57,6 +57,10 @@ impl DesktopPacer {
         }
     }
 
+    fn forget_last_image(&mut self) {
+        self.last_image = None;
+    }
+
     fn next_change_allowed(&self) -> Option<Instant> {
         self.last_change.map(|changed_at| changed_at + self.period)
     }
@@ -99,6 +103,8 @@ impl CaptureWorker {
             }
             let changed = grabber.next_image()?;
             if let Some(resized) = grabber.resized_caps() {
+                // the last image still has the size from before the resize
+                pacer.forget_last_image();
                 caps = Some(resized);
             }
             let Some(image) = pacer.image_to_send(changed, Instant::now()) else {
@@ -261,6 +267,19 @@ mod tests {
         let repeated = pacer.image_to_send(None, start + PERIOD).expect("repeat");
         assert_eq!(bytes(&repeated), [7]);
         assert!(pacer.image_to_send(None, start + PERIOD * 3 / 2).is_none());
+    }
+
+    #[test]
+    fn a_forgotten_image_is_not_repeated_until_the_next_change() {
+        let start = Instant::now();
+        let mut pacer = DesktopPacer::new(PERIOD, start);
+        pacer.image_to_send(Some(image(7)), start).expect("change");
+        pacer.forget_last_image();
+        assert!(pacer.image_to_send(None, start + PERIOD * 2).is_none());
+        let resized = pacer
+            .image_to_send(Some(image(8)), start + PERIOD * 3)
+            .expect("new image");
+        assert_eq!(bytes(&resized), [8]);
     }
 
     #[test]

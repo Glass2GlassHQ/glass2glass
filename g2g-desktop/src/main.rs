@@ -522,19 +522,29 @@ async fn host_headless(
 }
 
 #[cfg(target_os = "windows")]
+fn open_windows_injector(
+    screen: ScreenSize,
+    monitor_index: i32,
+) -> Result<WithGamepads<Injector, ViGEmGamepads>, InjectError> {
+    // desktop switches can change the monitor's size and position
+    let monitor = monitor_bounds(monitor_index).map_err(|e| {
+        InjectError::Device(std::io::Error::other(format!(
+            "monitor {monitor_index}: {e:?}"
+        )))
+    })?;
+    Ok(WithGamepads {
+        desktop: Injector::new(screen, monitor)?,
+        gamepads: ViGEmGamepads::default(),
+    })
+}
+
+#[cfg(target_os = "windows")]
 async fn host_monitor(
     listener: HostListener,
     settings: &HostSettings,
     capture: &CaptureSettings,
     trace: Option<Arc<PerfettoTrace>>,
 ) {
-    let monitor = match monitor_bounds(capture.monitor_index) {
-        Ok(monitor) => monitor,
-        Err(e) => {
-            eprintln!("g2g-desktop host: monitor {}: {e:?}", capture.monitor_index);
-            return;
-        }
-    };
     let source = D3D11ScreenCaptureSrc::new()
         .with_monitor_index(capture.monitor_index)
         .with_fps(capture.fps);
@@ -544,12 +554,8 @@ async fn host_monitor(
         nodes: vec![GraphNodeRef::source(source)],
         encoder: HostEncoder::MediaFoundation,
     };
-    let open_injector = move |screen| {
-        Ok(WithGamepads {
-            desktop: Injector::new(screen, monitor)?,
-            gamepads: ViGEmGamepads::default(),
-        })
-    };
+    let monitor_index = capture.monitor_index;
+    let open_injector = move |screen| open_windows_injector(screen, monitor_index);
     serve(listener, settings, host_capture, open_injector, trace).await;
 }
 
@@ -778,15 +784,10 @@ async fn gamestream_host(flags: &Flags) -> Result<(), Box<dyn Error>> {
         Some(state_directory) => PathBuf::from(state_directory).join("gamestream"),
         None => user_gamestream_directory()?,
     };
-    let monitor =
-        monitor_bounds(PRIMARY_MONITOR).map_err(|e| format!("monitor {PRIMARY_MONITOR}: {e:?}"))?;
     let desktop = ServedDesktop {
         capture: Box::new(gamestream_capture),
-        open_injector: Box::new(move |screen| {
-            Ok(Box::new(WithGamepads {
-                desktop: Injector::new(screen, monitor)?,
-                gamepads: ViGEmGamepads::default(),
-            }))
+        open_injector: Box::new(|screen| {
+            Ok(Box::new(open_windows_injector(screen, PRIMARY_MONITOR)?))
         }),
         apps: None,
     };

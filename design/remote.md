@@ -66,7 +66,9 @@ LAN, and a host off the LAN needs a forwarded UDP port.
 7. A resolution change is a `CapsChanged` the encoders already rebuild on
    (`mfencode` drains and reopens). The host rebuilds the graph only when the
    capture source itself dies. `d3d11screencapturesrc` reopens its duplication
-   after a desktop switch instead of failing.
+   after a desktop switch instead of failing, and a reopen at a new desktop
+   size sends a `CapsChanged` with that size. The Windows injector reads the
+   monitor bounds each time the capture size changes.
 8. Wayland capture is `pipewirevideosrc portal=true` with
    `portal-restore-token`, so a later start reuses the grant. Unattended X11
    gets its own source. The portal dialog is the wrong tool for a service.

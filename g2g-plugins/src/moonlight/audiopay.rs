@@ -338,6 +338,10 @@ impl AsyncElement for MoonlightAudioPay {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         self.intercept_caps(absolute_caps)?;
+        // moonlight drops packets numbered below the last it received, and the cbc iv includes the sequence number
+        if self.packetizer.is_some() {
+            return Ok(ConfigureOutcome::Accepted);
+        }
         let key = match (self.encrypt, self.key) {
             (false, _) => None,
             (true, Some(key)) => Some((key, self.key_id)),
@@ -390,6 +394,18 @@ mod tests {
         0x3c,
     ];
     const PACKET_DURATION_MS: u32 = 5;
+
+    #[test]
+    fn a_mid_stream_caps_change_keeps_the_sequence_numbers_going() {
+        let mut pay = MoonlightAudioPay::default();
+        pay.set_property("encrypt", PropValue::Bool(false)).unwrap();
+        pay.configure_pipeline(&input_caps()[0]).unwrap();
+        let packetizer = pay.packetizer.as_mut().expect("configured");
+        packetizer.packetize(&[0; 20]).expect("one packet");
+        pay.configure_pipeline(&input_caps()[0]).unwrap();
+        let packetizer = pay.packetizer.as_ref().expect("configured");
+        assert_eq!(packetizer.sequence_number, 1);
+    }
 
     #[test]
     fn cbc_matches_openssl() {

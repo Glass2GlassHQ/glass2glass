@@ -262,15 +262,19 @@ impl D3D11ScreenCaptureSrc {
             Some(bounds) => bounds,
             None => *self.bounds.insert(monitor_bounds(self.monitor_index)?),
         };
-        Ok(Caps::RawVideo {
-            format: RawVideoFormat::Bgra8,
-            width: Dim::Fixed(bounds.width),
-            height: Dim::Fixed(bounds.height),
-            framerate: Rate::Fixed(self.fps << 16),
-            interlace: Interlace::Progressive,
-            colorimetry: Colorimetry::SRGB,
-            pixel_aspect: PixelAspect::SQUARE,
-        })
+        Ok(bgra_caps(bounds.width, bounds.height, self.fps))
+    }
+}
+
+fn bgra_caps(width: u32, height: u32, fps: u32) -> Caps {
+    Caps::RawVideo {
+        format: RawVideoFormat::Bgra8,
+        width: Dim::Fixed(width),
+        height: Dim::Fixed(height),
+        framerate: Rate::Fixed(fps << 16),
+        interlace: Interlace::Progressive,
+        colorimetry: Colorimetry::SRGB,
+        pixel_aspect: PixelAspect::SQUARE,
     }
 }
 
@@ -397,6 +401,7 @@ impl SourceLoop for D3D11ScreenCaptureSrc {
                 return Ok(0);
             }
             let monitor_index = self.monitor_index;
+            let fps = self.fps;
             let out_domain = self.out_domain;
             let cursor = self.cursor.clone();
             let settings = DesktopCaptureSettings {
@@ -408,7 +413,7 @@ impl SourceLoop for D3D11ScreenCaptureSrc {
             run_desktop_capture(settings, out, move |worker| {
                 with_physical_pixels(|| {
                     let mut duplication =
-                        open_duplication(monitor_index, bounds, out_domain, cursor)?;
+                        open_duplication(monitor_index, bounds, fps, out_domain, cursor)?;
                     worker.pace(&mut duplication).inspect_err(|e| {
                         g2g_error!(
                             Target::category(CATEGORY),
@@ -452,6 +457,8 @@ struct Duplication {
     copy: ImageCopy,
     width: u32,
     height: u32,
+    fps: u32,
+    resized: Option<Caps>,
     pointer: PointerTracker,
 }
 
@@ -604,8 +611,29 @@ fn bgra_texture(
     texture.ok_or(G2gError::Hardware(HardwareError::Other))
 }
 
+fn image_copy(
+    device: &ID3D11Device,
+    out_domain: MemoryDomainKind,
+    width: u32,
+    height: u32,
+) -> Result<ImageCopy, G2gError> {
+    if out_domain == MemoryDomainKind::D3D11Texture {
+        return Ok(ImageCopy::Texture { pool: Vec::new() });
+    }
+    let staging = bgra_texture(
+        device,
+        width,
+        height,
+        D3D11_USAGE_STAGING,
+        D3D11_BIND_FLAG(0),
+        D3D11_CPU_ACCESS_READ.0 as u32,
+    )?;
+    Ok(ImageCopy::System { staging })
+}
+
 fn duplicate(
     selected: &SelectedOutput,
+    fps: u32,
     out_domain: MemoryDomainKind,
     cursor: watch::Sender<Option<CursorShape>>,
 ) -> Result<Duplication, G2gError> {
@@ -641,19 +669,7 @@ fn duplicate(
             );
             return Err(G2gError::CapsMismatch);
         }
-        let copy = match to_texture {
-            true => ImageCopy::Texture { pool: Vec::new() },
-            false => ImageCopy::System {
-                staging: bgra_texture(
-                    &device,
-                    mode.Width,
-                    mode.Height,
-                    D3D11_USAGE_STAGING,
-                    D3D11_BIND_FLAG(0),
-                    D3D11_CPU_ACCESS_READ.0 as u32,
-                )?,
-            },
-        };
+        let copy = image_copy(&device, out_domain, mode.Width, mode.Height)?;
         Ok(Duplication {
             duplication: Some(duplication),
             output,
@@ -663,6 +679,8 @@ fn duplicate(
             copy,
             width: mode.Width,
             height: mode.Height,
+            fps,
+            resized: None,
             pointer: PointerTracker {
                 shape: None,
                 visible: false,
@@ -791,18 +809,28 @@ impl Duplication {
         // SAFETY: GetDesc fills a struct and takes no pointers from this code.
         let mode = unsafe { duplication.GetDesc() }.ModeDesc;
         if (mode.Width, mode.Height) != (self.width, self.height) {
-            g2g_error!(
-                Target::category(CATEGORY),
-                "desktop is {}x{} after a desktop switch but was {}x{}",
-                mode.Width,
-                mode.Height,
-                self.width,
-                self.height
-            );
-            return Err(G2gError::CapsMismatch);
+            self.resize(mode.Width, mode.Height)?;
         }
         g2g_info!(Target::category(CATEGORY), "desktop duplication reopened");
         self.duplication = Some(duplication);
+        Ok(())
+    }
+
+    fn resize(&mut self, width: u32, height: u32) -> Result<(), G2gError> {
+        g2g_info!(
+            Target::category(CATEGORY),
+            "desktop is {width}x{height} after a desktop switch, was {}x{}",
+            self.width,
+            self.height
+        );
+        let out_domain = match self.copy {
+            ImageCopy::System { .. } => MemoryDomainKind::System,
+            ImageCopy::Texture { .. } => MemoryDomainKind::D3D11Texture,
+        };
+        self.copy = image_copy(&self.device, out_domain, width, height)?;
+        self.width = width;
+        self.height = height;
+        self.resized = Some(bgra_caps(width, height, self.fps));
         Ok(())
     }
 
@@ -816,6 +844,10 @@ impl Duplication {
 }
 
 impl DesktopGrabber for Duplication {
+    fn resized_caps(&mut self) -> Option<Caps> {
+        self.resized.take()
+    }
+
     fn next_image(&mut self) -> Result<Option<MemoryDomain>, G2gError> {
         if self.duplication.is_none() {
             self.reopen()?;
@@ -862,6 +894,7 @@ impl DesktopGrabber for Duplication {
 fn open_duplication(
     monitor_index: i32,
     bounds: MonitorBounds,
+    fps: u32,
     out_domain: MemoryDomainKind,
     cursor: watch::Sender<Option<CursorShape>>,
 ) -> Result<Duplication, G2gError> {
@@ -874,7 +907,7 @@ fn open_duplication(
         );
         return Err(G2gError::CapsMismatch);
     }
-    duplicate(&selected, out_domain, cursor)
+    duplicate(&selected, fps, out_domain, cursor)
 }
 
 #[cfg(test)]

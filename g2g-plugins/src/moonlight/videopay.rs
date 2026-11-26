@@ -582,6 +582,10 @@ impl AsyncElement for MoonlightVideoPay {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         self.intercept_caps(absolute_caps)?;
+        // moonlight drops frames numbered below the last it received, and gcm nonces must not repeat
+        if self.packetizer.is_some() {
+            return Ok(ConfigureOutcome::Accepted);
+        }
         let key = match (self.encrypt, self.key) {
             (false, _) => None,
             (true, Some(key)) => Some(key),
@@ -849,6 +853,16 @@ mod tests {
         send_frames(&mut pay, SENT_FRAMES_KEPT as u64 + 2).await;
         pay.recovery_requests().invalidate_from(1);
         assert_eq!(pay.take_reconfigure(), Some(Reconfigure::ForceKeyframe));
+    }
+
+    #[tokio::test]
+    async fn a_mid_stream_caps_change_keeps_the_frame_numbers_going() {
+        let mut pay = MoonlightVideoPay::default();
+        send_frames(&mut pay, 3).await;
+        // send_frames configures again first, as the runner does on a caps change
+        send_frames(&mut pay, 1).await;
+        let packetizer = pay.packetizer.as_ref().expect("configured");
+        assert_eq!(packetizer.frame_number, 4);
     }
 
     #[test]
