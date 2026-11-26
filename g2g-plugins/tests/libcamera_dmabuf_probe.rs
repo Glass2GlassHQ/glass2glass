@@ -21,7 +21,7 @@ use libcamera::geometry::Size;
 use libcamera::pixel_format::PixelFormat;
 use libcamera::stream::StreamRole;
 
-const PF_YUYV: PixelFormat = PixelFormat::new(u32::from_le_bytes([b'Y', b'U', b'Y', b'V']), 0);
+const PF_YUYV: PixelFormat = PixelFormat::new(u32::from_le_bytes(*b"YUYV"), 0);
 
 /// Resolve what a file descriptor points at via /proc/self/fd (a dma-buf shows
 /// up as "/dmabuf:..." or "anon_inode:dmabuf").

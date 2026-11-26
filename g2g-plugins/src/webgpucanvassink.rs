@@ -38,7 +38,7 @@ use g2g_core::{
     RawVideoFormat,
 };
 
-use js_sys::JsOption;
+use js_sys::JsNullable;
 use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
@@ -388,7 +388,7 @@ impl WebGpuCanvasSink {
             GpuStoreOp::Store,
             &view,
         );
-        let color_attachments = [JsOption::wrap(attachment)];
+        let color_attachments = [JsNullable::wrap(attachment)];
         let pass_desc = GpuRenderPassDescriptor::new(&color_attachments);
 
         let encoder = gpu.device.create_command_encoder();
@@ -501,7 +501,7 @@ fn build_pipeline(
     let err = || G2gError::Hardware(HardwareError::Other);
     let module = device.create_shader_module(&GpuShaderModuleDescriptor::new(SHADER));
 
-    let layouts = [JsOption::wrap(bgl.clone())];
+    let layouts = [JsNullable::wrap(bgl.clone())];
     let pipeline_layout =
         device.create_pipeline_layout(&GpuPipelineLayoutDescriptor::new(&layouts));
 
@@ -509,7 +509,7 @@ fn build_pipeline(
     vertex.set_entry_point("vs");
 
     let target = GpuColorTargetState::new(format);
-    let targets = [JsOption::wrap(target)];
+    let targets = [JsNullable::wrap(target)];
     let fragment = GpuFragmentState::new(&module, &targets);
     fragment.set_entry_point(frag_entry);
 

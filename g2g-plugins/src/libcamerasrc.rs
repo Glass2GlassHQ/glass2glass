@@ -69,13 +69,13 @@ const DEFAULT_FPS: u32 = 30;
 const BUFFER_COUNT: usize = 4;
 
 /// NV12 (planar 4:2:0), the preferred raw output: Y plane then interleaved UV.
-const PF_NV12: PixelFormat = PixelFormat::new(u32::from_le_bytes([b'N', b'V', b'1', b'2']), 0);
+const PF_NV12: PixelFormat = PixelFormat::new(u32::from_le_bytes(*b"NV12"), 0);
 /// YUYV (packed 4:2:2), the UVC-universal raw fallback.
-const PF_YUYV: PixelFormat = PixelFormat::new(u32::from_le_bytes([b'Y', b'U', b'Y', b'V']), 0);
+const PF_YUYV: PixelFormat = PixelFormat::new(u32::from_le_bytes(*b"YUYV"), 0);
 /// MJPEG (on-camera baseline JPEG per frame). The UVC high-frame-rate path:
 /// compressing on the camera fits resolutions over USB that uncompressed YUYV
 /// cannot. Decoded downstream by `MjpegDec`. Note the fourcc is `MJPG`.
-const PF_MJPEG: PixelFormat = PixelFormat::new(u32::from_le_bytes([b'M', b'J', b'P', b'G']), 0);
+const PF_MJPEG: PixelFormat = PixelFormat::new(u32::from_le_bytes(*b"MJPG"), 0);
 
 /// The libcamera pixel format to ask for. libcamera's registry is DRM-based, so
 /// only the codes it shares with V4L2 appear here.
@@ -1039,7 +1039,7 @@ mod tests {
             let pf = pixel_format(format).expect("libcamera carries it");
             assert_eq!(format_for_pixel_format(pf), Some(format));
         }
-        let rgb = PixelFormat::new(u32::from_le_bytes([b'R', b'G', b'2', b'4']), 0);
+        let rgb = PixelFormat::new(u32::from_le_bytes(*b"RG24"), 0);
         assert_eq!(format_for_pixel_format(rgb), None);
 
         // Raw kinds produce RawVideo; MJPEG produces CompressedVideo{Mjpeg}.

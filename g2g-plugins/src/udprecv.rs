@@ -433,7 +433,9 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     const SEGMENT_LEN: usize = 100;
+    #[cfg(target_os = "linux")]
     const SEGMENTS: usize = 3;
 
     // linux loopback hands a GSO send to a UDP_GRO socket as one buffer instead of splitting it
