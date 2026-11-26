@@ -393,6 +393,10 @@ impl AsyncElement for RistSink {
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        // receivers drop packets whose sequence number jumps, and a nack can only reach packets in the history
+        if !self.links.is_empty() {
+            return Ok(ConfigureOutcome::Accepted);
+        }
         self.links = self
             .settings
             .links()

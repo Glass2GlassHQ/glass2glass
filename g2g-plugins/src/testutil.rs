@@ -14,6 +14,39 @@ use g2g_core::{
     PushOutcome,
 };
 
+#[cfg(feature = "std")]
+pub(crate) fn received_rtp_sequences(socket: &std::net::UdpSocket) -> Vec<u16> {
+    const SEQUENCE_END: usize = 4;
+    let mut sequences = Vec::new();
+    let mut datagram = [0u8; 9000];
+    while let Ok(length) = socket.recv(&mut datagram) {
+        assert!(
+            length >= SEQUENCE_END,
+            "a datagram shorter than an RTP header"
+        );
+        sequences.push(u16::from_be_bytes([datagram[2], datagram[3]]));
+    }
+    sequences
+}
+
+#[cfg(feature = "std")]
+pub(crate) fn rtp_receiver() -> std::net::UdpSocket {
+    const QUIET_PERIOD: core::time::Duration = core::time::Duration::from_millis(300);
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind a loopback receiver");
+    socket
+        .set_read_timeout(Some(QUIET_PERIOD))
+        .expect("read timeout");
+    socket
+}
+
+#[cfg(feature = "std")]
+pub(crate) fn assert_consecutive(sequences: &[u16]) {
+    assert!(sequences.len() >= 2, "packets arrived: {sequences:?}");
+    for pair in sequences.windows(2) {
+        assert_eq!(pair[1], pair[0].wrapping_add(1), "sequences {sequences:?}");
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct CollectSink {
     pub packets: Vec<PipelinePacket>,

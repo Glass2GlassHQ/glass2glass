@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2607: Network sinks keep their sequence numbers and sockets across a mid-stream caps change.
 - M2606: The Windows remote desktop and Moonlight hosts follow a desktop size change without restarting the session.
 - M2605: The remote desktop client reconnects when the host restarts.
 - M2604: A Windows service runs the remote desktop host as SYSTEM, so it reaches UAC prompts and the lock screen.

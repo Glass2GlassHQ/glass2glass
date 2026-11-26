@@ -120,6 +120,9 @@ fn raw_jpegxs_st2110_22_roundtrip() {
         .unwrap();
     src.set_property("height", PropValue::Uint(h as u64))
         .unwrap();
+    // st2110 sources wait forever for packets unless an idle timeout ends the stream
+    src.set_property("idle-timeout", PropValue::Uint(300_000_000))
+        .unwrap();
     src.configure_pipeline(&jxs_caps).expect("src binds");
     let port = src.local_port().expect("bound");
 

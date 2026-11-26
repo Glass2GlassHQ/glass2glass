@@ -290,6 +290,11 @@ fn unpack_2px_10(b: &[u8]) -> (u16, u16, u16, u16) {
     (cb, y0, cr, y1)
 }
 
+fn smallest_packet(sampling: Sampling) -> usize {
+    // Floor the cap at a header plus one pgroup, else no data ever fits.
+    RTP_HEADER_LEN + EXT_SEQ_LEN + SRD_HEADER_LEN + sampling.octets_per_group()
+}
+
 /// Packetizes an uncompressed video frame into ST 2110-20 (RFC 4175) RTP packets.
 #[derive(Debug)]
 pub struct St2110VideoPacketizer {
@@ -308,16 +313,19 @@ impl St2110VideoPacketizer {
     /// (a typical 1500-octet MTU leaves ~1460 after IP/UDP; pass that). `payload_type`
     /// is the dynamic RTP PT, `ssrc` the stream source id.
     pub fn new(payload_type: u8, ssrc: u32, sampling: Sampling, max_packet: usize) -> Self {
-        // Floor the cap at a header plus one pgroup, else no data ever fits.
-        let floor = RTP_HEADER_LEN + EXT_SEQ_LEN + SRD_HEADER_LEN + sampling.octets_per_group();
         Self {
             payload_type: payload_type & 0x7f,
             ssrc,
             sequence: 0,
             sampling,
             clock: MediaClock::video(),
-            max_packet: max_packet.max(floor),
+            max_packet: max_packet.max(smallest_packet(sampling)),
         }
+    }
+
+    pub fn set_sampling(&mut self, sampling: Sampling) {
+        self.sampling = sampling;
+        self.max_packet = self.max_packet.max(smallest_packet(sampling));
     }
 
     /// The media clock (for recovering a frame's PTP time on the receive side).

@@ -56,6 +56,9 @@ Adding a dependency to one of the 1.86 crates means checking its MSRV, and a
 - **Caps refinement** flows at runtime via `PipelinePacket::CapsChanged`, not
   just at negotiation. Emit it before the first affected `DataFrame` and on any
   mid-stream change; suppress re-emission when unchanged.
+- **`configure_pipeline` runs again on every mid-stream `CapsChanged`.** Rebuild
+  only caps-derived state there. Sequence numbers, frame counters, cipher
+  nonces, sockets and retransmit histories are created once and survive it.
 - **Parsers / demuxers: never trust the stream.** Counts, lengths, offsets,
   and dimensions read from a bitstream or container are attacker-controlled.
   Validate before use and fold arithmetic with checked / saturating ops, so

@@ -176,6 +176,10 @@ impl AsyncElement for St2110AncSink {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         self.codec = Some(video_codec(absolute_caps)?);
+        // receivers drop rtp packets whose sequence number restarts under the same ssrc
+        if self.packetizer.is_some() {
+            return Ok(ConfigureOutcome::Accepted);
+        }
         self.packetizer = Some(St2110AncPacketizer::new(self.payload_type, self.ssrc));
         let sock = UdpSocket::bind(("0.0.0.0", 0)).map_err(io_err)?;
         sock.connect((self.host.as_str(), self.port))
@@ -566,6 +570,35 @@ mod tests {
             },
             0,
         ))
+    }
+
+    #[test]
+    fn a_mid_stream_caps_change_keeps_the_rtp_sequence_going() {
+        let receiver = crate::testutil::rtp_receiver();
+        let mut sink = St2110AncSink::new();
+        sink.host = String::from("127.0.0.1");
+        sink.port = receiver.local_addr().unwrap().port();
+        let clock: Arc<dyn g2g_core::PipelineClock + Send + Sync> = Arc::new(MonotonicClock);
+        sink.set_clock_sync(ClockSync::new(clock, 1_700_000_000_000_000_000));
+        let caption = CcTriple {
+            cc_type: 0,
+            b0: b'H',
+            b1: b'I',
+        };
+        let mut sequences = Vec::new();
+        for frame in 0..2u64 {
+            sink.configure_pipeline(&h264_caps())
+                .expect("sink configures");
+            for pts in [frame * 2, frame * 2 + 1] {
+                block_on(sink.process(
+                    video_frame(h264_au(&[caption]), pts * 1_000_000),
+                    &mut Capture::default(),
+                ))
+                .expect("sink sends");
+            }
+            sequences.extend(crate::testutil::received_rtp_sequences(&receiver));
+        }
+        crate::testutil::assert_consecutive(&sequences);
     }
 
     #[test]

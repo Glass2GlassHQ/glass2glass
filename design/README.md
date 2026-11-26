@@ -810,6 +810,15 @@ elements that emit nothing until enough input has accumulated. Push is async so
 elements await downstream capacity rather than failing fast on a full bounded
 link.
 
+The runner calls a transform's or sink's `configure_pipeline` at startup and
+again on every mid-stream `CapsChanged`, the way a GStreamer element gets
+`set_caps` again on a new CAPS event. A reconfigure rebuilds only what the caps
+determine, such as a scaler sized to the input or an encoder's geometry. Stream
+state is created once and survives it: packet sequence numbers, frame counters,
+timestamps that must stay monotonic, cipher nonce and IV counters, open sockets
+and retransmit histories. Moonlight drops frames numbered below the last one it
+received, and a restarted GCM nonce counter reuses nonces under the same key.
+
 The `ElementBound` marker is `Send` on multi-threaded targets and empty on
 single-core ones, gated by the `multi-thread` cargo feature, because Embassy and
 the WebGPU main-thread wasm executor do not require `Send` and many

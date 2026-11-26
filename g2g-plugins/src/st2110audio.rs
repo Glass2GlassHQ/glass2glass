@@ -85,15 +85,30 @@ impl St2110AudioPacketizer {
         depth: SampleDepth,
         frames_per_packet: usize,
     ) -> Self {
-        Self {
+        let mut packetizer = Self {
             payload_type: payload_type & 0x7f,
             ssrc,
             sequence: 0,
-            channels: channels.max(1),
+            channels: 1,
             depth,
             clock: MediaClock::audio(sample_rate_hz),
-            frames_per_packet: frames_per_packet.max(1),
-        }
+            frames_per_packet: 1,
+        };
+        packetizer.set_format(sample_rate_hz, channels, depth, frames_per_packet);
+        packetizer
+    }
+
+    pub fn set_format(
+        &mut self,
+        sample_rate_hz: u32,
+        channels: u16,
+        depth: SampleDepth,
+        frames_per_packet: usize,
+    ) {
+        self.channels = channels.max(1);
+        self.depth = depth;
+        self.clock = MediaClock::audio(sample_rate_hz);
+        self.frames_per_packet = frames_per_packet.max(1);
     }
 
     /// The media clock (for recovering a packet's PTP time on the receive side).

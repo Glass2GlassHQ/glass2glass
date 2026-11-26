@@ -247,6 +247,12 @@ impl AsyncElement for St2110AudioSink {
         let depth = wire_depth(format).ok_or(G2gError::CapsMismatch)?;
         let fpp = frames_per_packet(sample_rate, self.ptime_us);
         self.format = Some(format);
+        self.caps = Some(absolute_caps.clone());
+        // receivers drop rtp packets whose sequence number restarts under the same ssrc
+        if let Some(packetizer) = self.packetizer.as_mut() {
+            packetizer.set_format(sample_rate, u16::from(channels), depth, fpp);
+            return Ok(ConfigureOutcome::Accepted);
+        }
         self.packetizer = Some(St2110AudioPacketizer::new(
             self.payload_type,
             self.ssrc,
@@ -259,7 +265,6 @@ impl AsyncElement for St2110AudioSink {
         sock.connect((self.host.as_str(), self.port))
             .map_err(io_err)?;
         self.socket = Some(sock);
-        self.caps = Some(absolute_caps.clone());
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -669,6 +674,32 @@ mod tests {
             "a timer on the same thread fired while the source waited: {:?}",
             start.elapsed()
         );
+    }
+
+    #[test]
+    fn a_mid_stream_caps_change_keeps_the_rtp_sequence_going() {
+        let receiver = crate::testutil::rtp_receiver();
+        let mut sink = St2110AudioSink::new();
+        sink.host = String::from("127.0.0.1");
+        sink.port = receiver.local_addr().unwrap().port();
+        let clock: Arc<dyn g2g_core::PipelineClock + Send + Sync> = Arc::new(MonotonicClock);
+        sink.set_clock_sync(ClockSync::new(clock, 1_700_000_000_000_000_000));
+        let mut sequences = Vec::new();
+        for channels in [2u8, 1] {
+            let caps = Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                channels,
+                sample_rate: 48_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+            };
+            sink.configure_pipeline(&caps).expect("sink configures");
+            // two 1 ms packets at 48 kHz
+            let samples = alloc::vec![7i16; 96 * usize::from(channels)];
+            block_on(sink.process(pcm_frame(&samples, 0), &mut Capture::default()))
+                .expect("sink sends");
+            sequences.extend(crate::testutil::received_rtp_sequences(&receiver));
+        }
+        crate::testutil::assert_consecutive(&sequences);
     }
 
     #[test]

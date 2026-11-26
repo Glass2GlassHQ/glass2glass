@@ -20,9 +20,12 @@ use std::time::Duration;
 
 use g2g_core::rtp::{RtpHeader, RTP_HEADER_LEN};
 use g2g_core::runtime::{parse_launch, run_simple_pipeline, LatencyProfile, SourceLoop};
-use g2g_core::{AsyncElement, G2gError, PropValue, PropertySpec};
+use g2g_core::{
+    AsyncElement, Frame, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
+    PropValue, PropertySpec, PushOutcome, SystemSlice,
+};
 
-use g2g_plugins::bytestream::{TS_DATAGRAM_PAYLOAD, TS_PACKET_SIZE};
+use g2g_plugins::bytestream::{mpegts_caps, TS_DATAGRAM_PAYLOAD, TS_PACKET_SIZE};
 use g2g_plugins::filesink::FileSink;
 use g2g_plugins::gst_compat::{gst_equivalent, GstEquivalent};
 use g2g_plugins::registry::default_registry;
@@ -38,9 +41,9 @@ use g2g_plugins::rtpjitter::{JitterConfig, RtpJitterBuffer};
 
 mod rist_common;
 use rist_common::{
-    assert_recovered_through, collect_from_gst, free_even_port, loopback, output_path,
-    rerun_on_port_collision, spawn_gst, stop_gst, synthetic_ts, FirstMediaOrder, LossyRelay,
-    PacedTsSource, RelayLog, ZeroClock, GST_BIND_WAIT, GST_DEADLINE, SEND_INTERVAL,
+    assert_recovered_through, bound_even_port_pair, collect_from_gst, free_even_port, loopback,
+    output_path, rerun_on_port_collision, spawn_gst, stop_gst, synthetic_ts, FirstMediaOrder,
+    LossyRelay, PacedTsSource, RelayLog, ZeroClock, GST_BIND_WAIT, GST_DEADLINE, SEND_INTERVAL,
 };
 
 const MEDIA_SSRC: u32 = 0x1234_5670;
@@ -612,6 +615,46 @@ fn both_elements_build_from_a_launch_line_and_the_gst_helpers_answer() {
 }
 
 // ---- g2g to g2g over loopback ----
+
+struct DiscardOut;
+
+impl OutputSink for DiscardOut {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        packet.take();
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
+    }
+}
+
+#[tokio::test]
+async fn a_mid_stream_caps_change_keeps_the_rtp_sequence_going() {
+    const FIRST_SEQUENCE: u16 = 100;
+    let (media, _rtcp) = bound_even_port_pair();
+    media
+        .set_read_timeout(Some(LOOPBACK_DEADLINE))
+        .expect("read timeout");
+    let mut sink = ristsink_to(media.local_addr().expect("bound address").port());
+    sink.set_property("seqnum-offset", PropValue::Int(FIRST_SEQUENCE.into()))
+        .unwrap();
+    let mut sequences = Vec::new();
+    for _ in 0..2 {
+        sink.configure_pipeline(&mpegts_caps()).unwrap();
+        let datagram = PipelinePacket::DataFrame(Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(synthetic_ts(1).into_boxed_slice())),
+            FrameTiming::default(),
+            0,
+        ));
+        sink.process(datagram, &mut DiscardOut).await.unwrap();
+        let mut packet = [0u8; 1500];
+        let length = media.recv(&mut packet).expect("a media packet");
+        assert!(length > RTP_HEADER_LEN, "an RTP packet arrived");
+        sequences.push(u16::from_be_bytes([packet[2], packet[3]]));
+    }
+    assert_eq!(sequences, [FIRST_SEQUENCE, FIRST_SEQUENCE + 1]);
+}
 
 #[tokio::test]
 async fn g2g_to_g2g_without_loss() {

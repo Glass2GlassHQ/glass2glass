@@ -224,6 +224,10 @@ impl AsyncElement for St2110JxsSink {
         self.width = width;
         self.height = height;
         self.frame_period_ns = caps_frame_period_ns(absolute_caps);
+        // receivers drop rtp packets whose sequence number restarts under the same ssrc
+        if self.packetizer.is_some() {
+            return Ok(ConfigureOutcome::Accepted);
+        }
         self.packetizer = Some(St2110JxsPacketizer::new(
             self.payload_type,
             self.ssrc,
@@ -691,6 +695,48 @@ mod tests {
             pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
+    }
+
+    #[test]
+    fn a_mid_stream_caps_change_keeps_the_rtp_sequence_going() {
+        let receiver = crate::testutil::rtp_receiver();
+        let mut sink = St2110JxsSink::new();
+        sink.host = String::from("127.0.0.1");
+        sink.port = receiver.local_addr().unwrap().port();
+        sink.max_packet = 80;
+        let clock: Arc<dyn g2g_core::PipelineClock + Send + Sync> = Arc::new(MonotonicClock);
+        sink.set_clock_sync(ClockSync::new(clock, 1_700_000_000_000_000_000));
+        let mut sequences = Vec::new();
+        for width in [1920, 1280] {
+            let caps = match caps() {
+                Caps::CompressedVideo {
+                    height,
+                    framerate,
+                    colorimetry,
+                    pixel_aspect,
+                    alignment,
+                    codec,
+                    ..
+                } => Caps::CompressedVideo {
+                    codec,
+                    width: Dim::Fixed(width),
+                    height,
+                    framerate,
+                    colorimetry,
+                    pixel_aspect,
+                    alignment,
+                },
+                _ => unreachable!("caps() is compressed video"),
+            };
+            sink.configure_pipeline(&caps).expect("sink configures");
+            block_on(sink.process(
+                jxs_frame(alloc::vec![0x33; 200], 0),
+                &mut Capture::default(),
+            ))
+            .expect("sink sends");
+            sequences.extend(crate::testutil::received_rtp_sequences(&receiver));
+        }
+        crate::testutil::assert_consecutive(&sequences);
     }
 
     #[test]

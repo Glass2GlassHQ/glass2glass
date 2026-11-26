@@ -656,6 +656,11 @@ impl AsyncElement for UdpSink {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        self.intercept_caps(absolute_caps)?;
+        // receivers drop rtp packets whose sequence number restarts under the same ssrc
+        if self.std_socket.is_some() || self.socket.is_some() {
+            return Ok(ConfigureOutcome::Accepted);
+        }
         match absolute_caps {
             Caps::CompressedVideo {
                 codec: VideoCodec::H264,
@@ -1223,7 +1228,7 @@ mod tests {
         };
         s.configure_pipeline(&datagram_caps).unwrap();
         s.configure_pipeline(&datagram_caps)
-            .expect("a second configure rebinds the same port");
+            .expect("a second configure keeps the bound socket");
         let datagram: Vec<u8> = (0..DEFAULT_MAX_PAYLOAD * 2).map(|i| i as u8).collect();
         let frame = crate::testutil::frame(datagram.clone());
         s.process(
@@ -1236,6 +1241,31 @@ mod tests {
         let (length, from) = receiver.recv_from(&mut received).unwrap();
         assert_eq!(from.port(), bind_port);
         assert_eq!(received[..length], datagram[..]);
+    }
+
+    #[tokio::test]
+    async fn a_mid_stream_caps_change_keeps_the_rtp_sequence_going() {
+        let receiver = StdUdpSocket::bind("127.0.0.1:0").unwrap();
+        receiver
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut s = UdpSink::new(receiver.local_addr().unwrap());
+        let mut sequences = Vec::new();
+        for caps in [h264(640, 480), h264(1280, 720)] {
+            s.configure_pipeline(&caps).unwrap();
+            let access_unit = alloc::vec![0, 0, 0, 1, 0x65, 0x88, 0x84];
+            s.process(
+                PipelinePacket::DataFrame(crate::testutil::frame(access_unit)),
+                &mut crate::testutil::CollectSink::default(),
+            )
+            .await
+            .unwrap();
+            let mut packet = [0u8; 1500];
+            let length = receiver.recv(&mut packet).unwrap();
+            assert!(length > 4, "an RTP packet arrived");
+            sequences.push(u16::from_be_bytes([packet[2], packet[3]]));
+        }
+        assert_eq!(sequences[1], sequences[0].wrapping_add(1));
     }
 
     #[test]
