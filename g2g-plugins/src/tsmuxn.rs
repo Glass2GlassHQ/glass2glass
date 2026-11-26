@@ -45,13 +45,13 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
+
 use g2g_core::time::ns_to_ticks;
 use g2g_core::{
     g2g_error, resolve_tags, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
-    ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, InputAggregator, MemoryDomain,
-    MultiInputElement, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
-    SubPictureFormat, Tag, TagList, VideoCodec,
+    ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, InputAggregator, MultiInputElement,
+    OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, SubPictureFormat,
+    Tag, TagList, VideoCodec,
 };
 
 use crate::aacparse::{
@@ -69,7 +69,7 @@ use crate::mpegts::{
     STREAM_TYPE_MPEG2_VIDEO, STREAM_TYPE_MPEG4P2, STREAM_TYPE_PRIVATE_PES, TAG_KEY_SERVICE_NAME,
     TAG_KEY_SERVICE_PROVIDER,
 };
-use crate::mux::{audio_track_params, refused_input};
+use crate::mux::{audio_track_params, push_muxed_bytes, refused_input};
 use crate::opusparse::{is_opus_config, parse_opus_head, OPUS_RATE_HZ};
 use g2g_core::log::{short_type_name, Target};
 
@@ -929,18 +929,11 @@ impl TsMux {
             .as_mut()
             .expect("built above")
             .push_splice_info(section, pts_90khz)?;
-        let out_frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(ts.into_boxed_slice())),
-            FrameTiming {
-                pts_ns: frame.timing.pts_ns,
-                ..FrameTiming::default()
-            },
-            self.emitted,
-        );
-        self.emitted += 1;
-        out.push(PipelinePacket::DataFrame(out_frame))
-            .await
-            .map(|_| ())
+        let timing = FrameTiming {
+            pts_ns: frame.timing.pts_ns,
+            ..FrameTiming::default()
+        };
+        push_muxed_bytes(out, ts, timing, &mut self.emitted).await
     }
 }
 
@@ -1243,23 +1236,17 @@ impl MultiInputElement for TsMux {
                     dts_90khz,
                     frame.timing.keyframe,
                 );
-                let out_frame = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(ts.into_boxed_slice())),
-                    FrameTiming {
-                        pts_ns: frame.timing.pts_ns,
-                        // one output frame is one access unit's packets, so the
-                        // AU's sync flag still describes it and a downstream
-                        // segmenter cuts on it. Beside a video pad only the video
-                        // counts: every audio AU is a sync sample, which would cut
-                        // everywhere.
-                        keyframe: frame.timing.keyframe
-                            && (self.is_video(stream) || !carries_video),
-                        ..FrameTiming::default()
-                    },
-                    self.emitted,
-                );
-                self.emitted += 1;
-                out.push(PipelinePacket::DataFrame(out_frame)).await?;
+                let timing = FrameTiming {
+                    pts_ns: frame.timing.pts_ns,
+                    // one output frame is one access unit's packets, so the
+                    // AU's sync flag still describes it and a downstream
+                    // segmenter cuts on it. Beside a video pad only the video
+                    // counts: every audio AU is a sync sample, which would cut
+                    // everywhere.
+                    keyframe: frame.timing.keyframe && (self.is_video(stream) || !carries_video),
+                    ..FrameTiming::default()
+                };
+                push_muxed_bytes(out, ts, timing, &mut self.emitted).await?;
             }
             Ok(())
         })
@@ -1341,8 +1328,8 @@ mod tests {
     }
 
     fn au_frame(au: Vec<u8>, pts_ns: u64, keyframe: bool) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            au,
             FrameTiming {
                 pts_ns,
                 keyframe,
@@ -1439,10 +1426,8 @@ mod tests {
         let mut sink = CaptureSink::default();
         for i in 0..20u64 {
             let key = i % 6 == 0;
-            let video = PipelinePacket::DataFrame(Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(
-                    if key { idr.clone() } else { inter.clone() }.into_boxed_slice(),
-                )),
+            let video = PipelinePacket::DataFrame(Frame::from_system_bytes(
+                if key { idr.clone() } else { inter.clone() },
                 FrameTiming {
                     pts_ns: i * FRAME_NS + REORDER_LAG_NS,
                     dts_ns: i * FRAME_NS,
@@ -1511,10 +1496,8 @@ mod tests {
         let mut mux = TsMux::new(1);
         mux.configure_pipeline(0, &h264_caps()).unwrap();
         let mut sink = CaptureSink::default();
-        let idr = PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(
-                alloc::vec![0u8, 0, 0, 1, 0x65, 0xAA].into_boxed_slice(),
-            )),
+        let idr = PipelinePacket::DataFrame(Frame::from_system_bytes(
+            alloc::vec![0u8, 0, 0, 1, 0x65, 0xAA],
             FrameTiming {
                 pts_ns: REORDER_LAG_NS,
                 dts_ns: 0,
@@ -1788,11 +1771,7 @@ mod tests {
             .configure_pipeline(&TsMux::output_caps_value())
             .unwrap();
         let mut au_sink = AuSink::default();
-        let ts_frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(ts_sink.bytes.into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let ts_frame = Frame::from_system_bytes(ts_sink.bytes, FrameTiming::default(), 0);
         demux
             .process(PipelinePacket::DataFrame(ts_frame), &mut au_sink)
             .await
@@ -1852,13 +1831,8 @@ mod tests {
                 .configure_pipeline(&TsMux::output_caps_value())
                 .unwrap();
             let mut au_sink = AuSink::default();
-            let ts_frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(
-                    ts_sink.bytes.clone().into_boxed_slice(),
-                )),
-                FrameTiming::default(),
-                0,
-            );
+            let ts_frame =
+                Frame::from_system_bytes(ts_sink.bytes.clone(), FrameTiming::default(), 0);
             demux
                 .process(PipelinePacket::DataFrame(ts_frame), &mut au_sink)
                 .await

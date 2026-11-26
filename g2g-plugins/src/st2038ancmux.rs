@@ -11,14 +11,15 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::log::{short_type_name, LogName, LogSource};
-use g2g_core::memory::SystemSlice;
+
 use g2g_core::{
     g2g_warn, st2038_any_alignment, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    ElementMetadata, Frame, FrameTiming, G2gError, MemoryDomain, MultiInputElement, OutputSink,
-    PipelinePacket, PropError, PropValue, PropertySpec, Rate, St2038Alignment,
+    ElementMetadata, FrameTiming, G2gError, MultiInputElement, OutputSink, PipelinePacket,
+    PropError, PropValue, PropertySpec, Rate, St2038Alignment,
 };
 
 use crate::livemux::{LIVE_MUX_LATENCY_PROPERTY, UNKNOWN_FRAME_PERIOD_TICK_NS};
+use crate::mux::push_muxed_bytes;
 use crate::st2038::{framerate_period_ns, parse_st2038, write_st2038};
 use crate::st291::AncPacket;
 
@@ -265,13 +266,7 @@ impl St2038AncMux {
         }
         for group in groups {
             let payload = write_st2038(&group).expect("parsed packets fit their fields");
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
-                timing,
-                self.sequence,
-            );
-            self.sequence += 1;
-            out.push(PipelinePacket::DataFrame(frame)).await?;
+            push_muxed_bytes(out, payload, timing, &mut self.sequence).await?;
         }
         Ok(())
     }

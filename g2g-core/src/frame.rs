@@ -79,6 +79,21 @@ impl Frame {
         }
     }
 
+    #[cfg(feature = "alloc")]
+    pub fn from_system_bytes(
+        bytes: alloc::vec::Vec<u8>,
+        timing: FrameTiming,
+        sequence: u64,
+    ) -> Self {
+        Self::new(
+            MemoryDomain::System(crate::memory::SystemSlice::from_boxed(
+                bytes.into_boxed_slice(),
+            )),
+            timing,
+            sequence,
+        )
+    }
+
     /// Duplicate this frame for fan-out (a tee branch, or a multicast route).
     /// The buffer is shared where the memory domain allows it: GPU handles and
     /// pre-shared `System` bytes are refcounted (cheap), owned `System` bytes are

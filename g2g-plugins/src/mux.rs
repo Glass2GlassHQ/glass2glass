@@ -20,20 +20,24 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use alloc::vec;
 use alloc::vec::Vec;
 
 use g2g_core::log::Target;
 use g2g_core::{
     g2g_error, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    Frame, G2gError, InputAggregator, MultiInputElement, OutputSink, PipelinePacket, PropError,
-    PropValue, PropertySpec, VideoCodec, ANY_CHANNELS, ANY_SAMPLE_RATE,
+    Frame, FrameTiming, G2gError, InputAggregator, MultiInputElement, OutputSink, PipelinePacket,
+    PropError, PropValue, PropertySpec, VideoCodec, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
 use crate::livemux::{wall_clock_ns, LiveMuxDeadline, LIVE_MUX_PROPS};
 
 use crate::aacparse::audio_specific_config_info;
+use crate::mpeg4videoparse::Mpeg4VideoCodec;
+use crate::mpegvideoparse::MpegVideoCodec;
 use crate::opusparse::{is_opus_config, parse_opus_head, OPUS_RATE_HZ};
+use crate::startcodeparse::StartCodeCodec;
 
 // the solver lets any caps onto a fan-in muxer pad and reports no refusal itself
 pub(crate) fn refused_input(muxer: &'static str, caps: &Caps) -> G2gError {
@@ -194,11 +198,135 @@ impl InputPriming {
     }
 }
 
+pub(crate) async fn push_muxed_bytes(
+    out: &mut dyn OutputSink,
+    bytes: Vec<u8>,
+    timing: FrameTiming,
+    emitted: &mut u64,
+) -> Result<(), G2gError> {
+    let frame = Frame::from_system_bytes(bytes, timing, *emitted);
+    *emitted += 1;
+    out.push(PipelinePacket::DataFrame(frame)).await?;
+    Ok(())
+}
+
+// the decoder config a keyframe carries in band, None until a frame carries it
+pub(crate) fn keyframe_codec_config(codec: VideoCodec, access_unit: &[u8]) -> Option<Vec<Vec<u8>>> {
+    match codec {
+        VideoCodec::H264 | VideoCodec::H265 => {
+            let nalus = crate::annexb::split_annexb(access_unit);
+            let sets = crate::annexb::parameter_sets(codec, &nalus).ok()?;
+            Some(sets.iter().map(|set| set.to_vec()).collect())
+        }
+        VideoCodec::Av1 => {
+            crate::av1parse::seq_header_obu(access_unit).map(|(_, obu)| vec![obu.to_vec()])
+        }
+        VideoCodec::Mpeg2 => {
+            MpegVideoCodec::config_headers(access_unit).map(|headers| vec![headers])
+        }
+        VideoCodec::Mpeg4Part2 => {
+            Mpeg4VideoCodec::config_headers(access_unit).map(|headers| vec![headers])
+        }
+        _ => None,
+    }
+}
+
+// codec configs that take effect at a given frame of an input, counted as frames enter and leave the aggregator
+#[derive(Debug)]
+pub(crate) struct ConfigChanges<T> {
+    received_frames: Vec<u64>,
+    written_frames: Vec<u64>,
+    awaiting_config: Vec<bool>,
+    pending: Vec<VecDeque<(u64, T)>>,
+}
+
+impl<T: PartialEq> ConfigChanges<T> {
+    pub(crate) fn new(inputs: usize) -> Self {
+        Self {
+            received_frames: vec![0; inputs],
+            written_frames: vec![0; inputs],
+            awaiting_config: vec![false; inputs],
+            pending: (0..inputs).map(|_| VecDeque::new()).collect(),
+        }
+    }
+
+    pub(crate) fn await_config(&mut self, input: usize) {
+        self.awaiting_config[input] = true;
+    }
+
+    pub(crate) fn is_awaiting_config(&self, input: usize) -> bool {
+        self.awaiting_config[input]
+    }
+
+    // the config the next received frame carries, scheduled only when it differs from the latest
+    pub(crate) fn offer(&mut self, input: usize, current: &T, config: T) {
+        self.awaiting_config[input] = false;
+        if self.latest_pending(input).unwrap_or(current) != &config {
+            self.start_at_next_received(input, config);
+        }
+    }
+
+    #[cfg(feature = "std")]
+    pub(crate) fn has_received(&self, input: usize) -> bool {
+        self.received_frames[input] > 0
+    }
+
+    pub(crate) fn note_received(&mut self, input: usize) {
+        self.received_frames[input] += 1;
+    }
+
+    pub(crate) fn start_at_next_received(&mut self, input: usize, config: T) {
+        let first_frame = self.received_frames[input];
+        self.pending[input].push_back((first_frame, config));
+    }
+
+    pub(crate) fn latest_pending(&self, input: usize) -> Option<&T> {
+        self.pending[input].back().map(|(_, config)| config)
+    }
+
+    pub(crate) fn take_starting_at_next_written(&mut self, input: usize) -> Option<T> {
+        let frame = self.written_frames[input];
+        self.written_frames[input] += 1;
+        let starts_here = self.pending[input]
+            .front()
+            .is_some_and(|(first_frame, _)| *first_frame == frame);
+        if !starts_here {
+            return None;
+        }
+        self.pending[input].pop_front().map(|(_, config)| config)
+    }
+}
+
 // the channel count and sample rate an audio track header declares
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AudioTrackParams {
     pub(crate) channels: u8,
     pub(crate) sample_rate: u32,
+}
+
+// an AAC track's layout and AudioSpecificConfig, None until a frame carries the config
+#[cfg(feature = "std")]
+pub(crate) fn aac_track_config(
+    muxer: &'static str,
+    channels: u8,
+    sample_rate: u32,
+    frame: &[u8],
+) -> Result<Option<(AudioTrackParams, Vec<u8>)>, G2gError> {
+    let Some(config) = crate::aacparse::muxer_audio_specific_config(frame, muxer)? else {
+        return Ok(None);
+    };
+    let params = audio_track_params(muxer, AudioFormat::Aac, channels, sample_rate, &config)?;
+    Ok(Some((params, config)))
+}
+
+// demuxers leave channels or rate as any until parsed, and filling one in is no change
+#[cfg(feature = "std")]
+pub(crate) fn audio_layout_changed(old: AudioTrackParams, new: AudioTrackParams) -> bool {
+    let channels_changed =
+        ![old.channels, new.channels].contains(&ANY_CHANNELS) && old.channels != new.channels;
+    let rate_changed = ![old.sample_rate, new.sample_rate].contains(&ANY_SAMPLE_RATE)
+        && old.sample_rate != new.sample_rate;
+    channels_changed || rate_changed
 }
 
 // the caps' channels and rate where known, else the ones the codec's config header states

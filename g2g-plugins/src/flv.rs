@@ -34,9 +34,9 @@ use crate::bereader::be_u24;
 use g2g_core::{Tag, TagList};
 
 /// FLV tag type: an audio tag (codec-tagged audio data).
-const TAG_AUDIO: u8 = 8;
+pub(crate) const TAG_AUDIO: u8 = 8;
 /// FLV tag type: a video tag (codec-tagged video data).
-const TAG_VIDEO: u8 = 9;
+pub(crate) const TAG_VIDEO: u8 = 9;
 /// FLV tag type: a script-data tag (AMF, carries `onMetaData`).
 const TAG_SCRIPT: u8 = 18;
 
@@ -767,30 +767,63 @@ impl FlvMuxer {
         // Sequence headers (AVC packet type 0 / AAC packet type 0) carry the
         // decoder config a player needs before the media frames. Only H.264 and
         // AAC have one: VP6's dimension byte leads each media unit instead.
+        self.write_video_sequence_header(out, first_tag_ms);
+        self.write_audio_sequence_header(out, first_tag_ms);
+        for track in &self.multitrack_audio {
+            track.write_sequence_header(out, first_tag_ms);
+        }
+    }
+
+    fn write_video_sequence_header(&self, out: &mut Vec<u8>, timestamp_ms: u32) {
         if self.video == Some(FlvCodec::H264) && !self.video_config.is_empty() {
             emit_tag(
                 out,
                 TAG_VIDEO,
-                first_tag_ms,
+                timestamp_ms,
                 &[&[0x17, 0x00, 0x00, 0x00, 0x00], &self.video_config],
             );
         }
+    }
+
+    fn write_audio_sequence_header(&self, out: &mut Vec<u8>, timestamp_ms: u32) {
         if self.audio == Some(FlvCodec::Aac) && !self.audio_config.is_empty() {
             emit_tag(
                 out,
                 TAG_AUDIO,
-                first_tag_ms,
+                timestamp_ms,
                 &[&[self.audio_flags, 0x00], &self.audio_config],
             );
         }
-        for track in self
-            .multitrack_audio
-            .iter()
-            .filter(|track| !track.config.is_empty())
-        {
-            let prefix = track.tag_prefix(AUDIO_PACKET_SEQUENCE_START);
-            emit_tag(out, TAG_AUDIO, first_tag_ms, &[&prefix, &track.config]);
+    }
+
+    pub fn change_video_config(&mut self, config: Vec<u8>, dts_ms: u32) -> Vec<u8> {
+        self.video_config = config;
+        let mut out = Vec::new();
+        if self.header_written {
+            self.write_video_sequence_header(&mut out, dts_ms);
         }
+        out
+    }
+
+    pub fn change_audio_config(&mut self, track_id: u8, config: Vec<u8>, pts_ms: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        if track_id == LEGACY_AUDIO_TRACK {
+            self.audio_config = config;
+            if self.header_written {
+                self.write_audio_sequence_header(&mut out, pts_ms);
+            }
+            return out;
+        }
+        let track = self
+            .multitrack_audio
+            .iter_mut()
+            .find(|track| track.track_id == track_id)
+            .expect("the track was added before its frames");
+        track.config = config;
+        if self.header_written {
+            track.write_sequence_header(&mut out, pts_ms);
+        }
+        out
     }
 }
 
@@ -803,6 +836,14 @@ struct MultitrackAudio {
 }
 
 impl MultitrackAudio {
+    fn write_sequence_header(&self, out: &mut Vec<u8>, timestamp_ms: u32) {
+        if self.config.is_empty() {
+            return;
+        }
+        let prefix = self.tag_prefix(AUDIO_PACKET_SEQUENCE_START);
+        emit_tag(out, TAG_AUDIO, timestamp_ms, &[&prefix, &self.config]);
+    }
+
     fn tag_prefix(&self, packet_type: u8) -> Vec<u8> {
         let mut prefix = alloc::vec![
             (SOUND_FORMAT_EX_HEADER << 4) | AUDIO_PACKET_MULTITRACK,

@@ -36,15 +36,15 @@ use alloc::boxed::Box;
 
 use alloc::vec::Vec;
 
-use g2g_core::frame::Frame;
 use g2g_core::log::short_type_name;
-use g2g_core::memory::SystemSlice;
+
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, MemoryDomain,
-    OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, TagList,
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, OutputSink,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, TagList,
 };
 
 use crate::id3::{id3v2_len, write_id3v1, write_id3v2, ID3V2_HEADER_LEN, ID3V2_VERSION_2_3};
+use crate::mux::push_muxed_bytes;
 use crate::tagproperty::TagsProperty;
 
 /// # Example
@@ -124,13 +124,7 @@ impl Id3V2Mux {
         }
         // Unstamped: a buffer here can carry bytes from two inputs, so neither
         // input's time describes it, the same as `id3demux`.
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-            Default::default(),
-            self.sequence,
-        );
-        self.sequence += 1;
-        out.push(PipelinePacket::DataFrame(frame)).await?;
+        push_muxed_bytes(out, data, Default::default(), &mut self.sequence).await?;
         Ok(())
     }
 
@@ -307,11 +301,7 @@ mod tests {
             })
             .expect("any byte stream");
         for piece in input.chunks(chunk) {
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(Vec::from(piece).into_boxed_slice())),
-                Default::default(),
-                0,
-            );
+            let frame = g2g_core::Frame::from_system_bytes(Vec::from(piece), Default::default(), 0);
             element
                 .process(PipelinePacket::DataFrame(frame), &mut out)
                 .await

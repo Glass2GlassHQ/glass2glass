@@ -383,6 +383,16 @@ jobs:
           done
           cd "$packaged"/g2g-plugins-*/
           CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo check --features linux-full "${patches[@]}"
+      # ubuntu packages no SVT-JPEG-XS, so the jpegxs feature links a source build
+      - name: build SVT-JPEG-XS
+        run: |
+          git clone --depth 1 -b v0.10.0 https://github.com/OpenVisualCloud/SVT-JPEG-XS "$RUNNER_TEMP/svt-jpegxs"
+          cmake -S "$RUNNER_TEMP/svt-jpegxs" -B "$RUNNER_TEMP/svt-jpegxs-build" -DCMAKE_BUILD_TYPE=Release -DBUILD_APPS=OFF
+          cmake --build "$RUNNER_TEMP/svt-jpegxs-build" -j "$(nproc)"
+          sudo cmake --install "$RUNNER_TEMP/svt-jpegxs-build"
+          sudo ldconfig
+      - name: test g2g-plugins (jpegxs + st2110)
+        run: cargo test -p g2g-plugins --locked --features st2110,jpegxs --lib --test m605_jpegxs_st2110 jpegxs
       # Plugin loading v1 (same-toolchain dlopen) + v2 (frozen C ABI, M1010):
       # each test builds its fixture cdylib (v2 also compiles the plain-C
       # plugin with cc), so the dynamic boundary is exercised, not just checked.

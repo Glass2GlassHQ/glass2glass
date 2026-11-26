@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2609: `mp4mux` follows audio layout changes, `flvmux` writes new sequence headers, and `matroskamux` refuses caps changes its track header cannot describe.
 - M2608: `mp4mux` writes a new sample entry when a video input changes resolution mid-stream.
 - M2607: Network sinks keep their sequence numbers and sockets across a mid-stream caps change.
 - M2606: The Windows remote desktop and Moonlight hosts follow a desktop size change without restarting the session.

@@ -37,31 +37,29 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
-use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::log::short_type_name;
-use g2g_core::memory::SystemSlice;
+
 #[cfg(feature = "metadata")]
 use g2g_core::meta::CropMeta;
 use g2g_core::meta::CropRectangle;
 use g2g_core::{
     resolve_tags, split_tags, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
     Chapter, ClosedCaptionFormat, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError,
-    InputAggregator, MemoryDomain, MultiInputElement, OutputSink, PipelinePacket, PixelAspect,
-    PropError, PropKind, PropValue, PropertySpec, Rate, Tag, TagList, TextFormat, VideoCodec,
+    InputAggregator, MultiInputElement, OutputSink, PipelinePacket, PixelAspect, PropError,
+    PropKind, PropValue, PropertySpec, Rate, Tag, TagList, TextFormat, VideoCodec,
 };
 
 use g2g_core::caps::framerate_q16_period_ns;
-use g2g_core::time::ns_to_ticks;
+use g2g_core::time::{ns_to_ticks, ticks_to_ns};
 
-use crate::aacparse::{is_leading_aac_config, muxer_access_unit, muxer_audio_specific_config};
+use crate::aacparse::{is_leading_aac_config, muxer_access_unit};
 use crate::cea::{build_cdp, parse_cc_data, CcTriple};
 use crate::fmp4::{MPEG1_AUDIO_OBJECT_TYPE, MPEG4_VISUAL_OBJECT_TYPE};
 use crate::fmp4mux::{
-    av1c_record, h26x_sample_config, parameter_sets, split_annexb, video_sample,
-    visual_sample_entry, VideoGeometry,
+    av1c_record, h26x_sample_config, video_sample, visual_sample_entry, VideoGeometry,
 };
 use crate::livemux::{wall_clock_ns, LiveMuxDeadline, LIVE_MUX_LATENCY_PROPERTY};
 use crate::mp4audiosink::{esds, AAC_OBJECT_TYPE, AUDIO_STREAM_TYPE, VISUAL_STREAM_TYPE};
@@ -70,17 +68,16 @@ use crate::mp4box::{
     orientation_matrix, packed_mdhd_language, prft, put_box_header, styp_cmaf, udta_with_tags,
     BOX_HEADER_LEN, ISO_AUDIO_SAMPLE_SIZE, MATRIX, UNDETERMINED_MDHD_LANGUAGE,
 };
-use crate::mpeg4videoparse::Mpeg4VideoCodec;
 use crate::mux::{
-    audio_header_config, audio_track_params, every_track_header_ready, is_audio_config_packet,
+    aac_track_config, audio_header_config, audio_layout_changed, audio_track_params,
+    every_track_header_ready, is_audio_config_packet, keyframe_codec_config, push_muxed_bytes,
     refused_input, refused_input_because, require_header_config_at_end, video_header_config,
-    InputPriming, CODEC_CONFIG,
+    AudioTrackParams, ConfigChanges, InputPriming, CODEC_CONFIG,
 };
 use crate::opusparse::{
     dops_from_opus_head, is_opus_config, parse_opus_head, synth_opus_head, OPUS_ENCODER_PRE_SKIP,
 };
 use crate::rtcp;
-use crate::startcodeparse::StartCodeCodec;
 use crate::tagproperty::TagsProperty;
 use crate::uncv::{self, UncvSampleEntry};
 
@@ -237,17 +234,8 @@ pub struct Mp4MuxN {
     track_tags: Vec<TagList>,
     /// The table of contents, written as the `moov`'s `udta/chpl`.
     chapters: Vec<Chapter>,
-    received_frames: Vec<u64>,
-    written_frames: Vec<u64>,
-    awaiting_codec_config: Vec<bool>,
-    pending_sample_entries: Vec<VecDeque<SampleEntryChange>>,
+    sample_entry_changes: ConfigChanges<TrackInit>,
     later_sample_entries: Vec<Vec<TrackInit>>,
-}
-
-#[derive(Debug)]
-struct SampleEntryChange {
-    first_frame: u64,
-    init: TrackInit,
 }
 
 /// One buffered sample of the progressive (moov-at-end) layout: its `mdat`
@@ -376,10 +364,7 @@ impl Mp4MuxN {
             tags: TagsProperty::default(),
             track_tags: alloc::vec![TagList::new(); inputs],
             chapters: Vec::new(),
-            received_frames: alloc::vec![0; inputs],
-            written_frames: alloc::vec![0; inputs],
-            awaiting_codec_config: alloc::vec![false; inputs],
-            pending_sample_entries: (0..inputs).map(|_| VecDeque::new()).collect(),
+            sample_entry_changes: ConfigChanges::new(inputs),
             later_sample_entries: alloc::vec![Vec::new(); inputs],
         }
     }
@@ -655,28 +640,16 @@ impl Mp4MuxN {
             Some(PadKind::Video { codec, .. }) => {
                 let geometry = self.geometry[input];
                 match codec {
-                    VideoCodec::H264 | VideoCodec::H265 => {
-                        let nalus = split_annexb(au);
-                        // Parameter sets only ride the IDR; a leading P-frame has
-                        // none, so wait for the keyframe that carries them.
-                        if let Ok(param_sets) = parameter_sets(codec, &nalus) {
-                            let owned: Vec<Vec<u8>> =
-                                param_sets.iter().map(|s| s.to_vec()).collect();
+                    // the parameter sets, sequence header or VOS/VO/VOL headers ride the keyframe
+                    VideoCodec::H264
+                    | VideoCodec::H265
+                    | VideoCodec::Av1
+                    | VideoCodec::Mpeg4Part2 => {
+                        if let Some(param_sets) = keyframe_codec_config(codec, au) {
                             return Ok(Some(TrackInit::Video {
                                 codec,
                                 geometry,
-                                param_sets: owned,
-                            }));
-                        }
-                    }
-                    // AV1's `av1C` needs the sequence-header OBU; wait for the
-                    // temporal unit that carries it (keyframes do).
-                    VideoCodec::Av1 => {
-                        if let Some((_, obu)) = crate::av1parse::seq_header_obu(au) {
-                            return Ok(Some(TrackInit::Video {
-                                codec,
-                                geometry,
-                                param_sets: alloc::vec![obu.to_vec()],
+                                param_sets,
                             }));
                         }
                     }
@@ -687,16 +660,6 @@ impl Mp4MuxN {
                                 codec,
                                 geometry,
                                 param_sets: alloc::vec![vp9_vpcc_record(color)?.to_vec()],
-                            }));
-                        }
-                    }
-                    // the `esds` carries the VOS, VO and VOL headers a keyframe leads with
-                    VideoCodec::Mpeg4Part2 => {
-                        if let Some(config) = Mpeg4VideoCodec::config_headers(au) {
-                            return Ok(Some(TrackInit::Video {
-                                codec,
-                                geometry,
-                                param_sets: alloc::vec![config],
                             }));
                         }
                     }
@@ -719,16 +682,9 @@ impl Mp4MuxN {
                 // AAC's AudioSpecificConfig is synthesised from the first ADTS
                 // header, or is the frame leading a raw stream.
                 AudioFormat::Aac => {
-                    if let Some(config) =
-                        muxer_audio_specific_config(au, short_type_name::<Self>())?
+                    if let Some((params, config)) =
+                        aac_track_config(short_type_name::<Self>(), channels, rate, au)?
                     {
-                        let params = audio_track_params(
-                            short_type_name::<Self>(),
-                            format,
-                            channels,
-                            rate,
-                            &config,
-                        )?;
                         return Ok(Some(TrackInit::Audio {
                             format,
                             channels: params.channels,
@@ -807,22 +763,20 @@ impl Mp4MuxN {
     }
 
     fn capture_init(&mut self, input: usize, au: &[u8]) -> Result<(), G2gError> {
-        let awaiting = self.awaiting_codec_config[input];
+        let awaiting = self.sample_entry_changes.is_awaiting_config(input);
         if self.inits[input].is_some() && !awaiting {
             return Ok(());
         }
         let Some(init) = self.parse_init(input, au)? else {
             return Ok(());
         };
-        if !awaiting {
-            self.inits[input] = Some(init);
-            return Ok(());
+        let current = self.later_sample_entries[input]
+            .last()
+            .or(self.inits[input].as_ref());
+        match current {
+            None => self.inits[input] = Some(init),
+            Some(current) => self.sample_entry_changes.offer(input, current, init),
         }
-        self.awaiting_codec_config[input] = false;
-        self.pending_sample_entries[input].push_back(SampleEntryChange {
-            first_frame: self.received_frames[input],
-            init,
-        });
         Ok(())
     }
 
@@ -862,6 +816,10 @@ impl Mp4MuxN {
         }
         // fragmented mp4 readers take every sample entry from the moov ahead of the fragments
         self.flush_all(out).await?;
+        if let Some(previous) = &self.inits[input] {
+            let decode_time_ns = ticks_to_ns(self.decode_time[input], previous.timescale());
+            self.decode_time[input] = ns_to_ticks(decode_time_ns, init.timescale());
+        }
         self.inits[input] = Some(init);
         self.header_written = false;
         Ok(())
@@ -877,16 +835,11 @@ impl Mp4MuxN {
         frame: Frame,
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
-        let frame_number = self.written_frames[input];
-        self.written_frames[input] += 1;
-        let entry_starts_here = self.pending_sample_entries[input]
-            .front()
-            .is_some_and(|change| change.first_frame == frame_number);
-        if entry_starts_here {
-            let change = self.pending_sample_entries[input]
-                .pop_front()
-                .expect("checked non-empty");
-            self.change_sample_entry(input, change.init, out).await?;
+        if let Some(init) = self
+            .sample_entry_changes
+            .take_starting_at_next_written(input)
+        {
+            self.change_sample_entry(input, init, out).await?;
         }
         let au = frame
             .domain
@@ -1140,16 +1093,16 @@ impl Mp4MuxN {
             &fragment_samples,
         );
 
-        let out_frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+        push_muxed_bytes(
+            out,
+            bytes,
             FrameTiming {
                 pts_ns: base_pts_ns,
                 ..FrameTiming::default()
             },
-            self.emitted,
-        );
-        self.emitted += 1;
-        out.push(PipelinePacket::DataFrame(out_frame)).await?;
+            &mut self.emitted,
+        )
+        .await?;
         Ok(())
     }
 
@@ -1259,29 +1212,13 @@ impl Mp4MuxN {
             lead.extend_from_slice(b"mdat");
         }
         // Each sample goes out as its own frame so the file is never held twice.
-        self.emit_bytes(out, lead).await?;
+        push_muxed_bytes(out, lead, FrameTiming::default(), &mut self.emitted).await?;
         for sample in samples {
-            self.emit_bytes(out, sample.bytes).await?;
+            push_muxed_bytes(out, sample.bytes, FrameTiming::default(), &mut self.emitted).await?;
         }
         if !self.faststart {
-            self.emit_bytes(out, moov).await?;
+            push_muxed_bytes(out, moov, FrameTiming::default(), &mut self.emitted).await?;
         }
-        Ok(())
-    }
-
-    /// Push one untimed byte-stream frame.
-    async fn emit_bytes(
-        &mut self,
-        out: &mut dyn OutputSink,
-        bytes: Vec<u8>,
-    ) -> Result<(), G2gError> {
-        let out_frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            FrameTiming::default(),
-            self.emitted,
-        );
-        self.emitted += 1;
-        out.push(PipelinePacket::DataFrame(out_frame)).await?;
         Ok(())
     }
 }
@@ -1348,11 +1285,41 @@ impl MultiInputElement for Mp4MuxN {
         }
         let kind = Self::pad_kind_for(absolute_caps)
             .ok_or_else(|| refused_input(short_type_name::<Self>(), absolute_caps))?;
+        let audio_layout_changed = match (self.kinds[input], kind) {
+            (
+                Some(PadKind::Audio {
+                    channels: old_channels,
+                    rate: old_rate,
+                    ..
+                }),
+                PadKind::Audio { channels, rate, .. },
+            ) => audio_layout_changed(
+                AudioTrackParams {
+                    channels: old_channels,
+                    sample_rate: old_rate,
+                },
+                AudioTrackParams {
+                    channels,
+                    sample_rate: rate,
+                },
+            ),
+            _ => false,
+        };
+        if audio_layout_changed && self.inits[input].is_some() {
+            if !self.fragmented {
+                return Err(refused_input_because(
+                    short_type_name::<Self>(),
+                    absolute_caps,
+                    "a progressive MP4 audio track keeps its first sample rate and channel count",
+                ));
+            }
+            self.sample_entry_changes.await_config(input);
+        }
         if let Some(geometry) = VideoGeometry::from_caps(uncv::original_caps(absolute_caps)) {
             let resized = self.geometry[input] != geometry;
             self.geometry[input] = geometry;
             if resized && matches!(kind, PadKind::Video { .. }) && self.inits[input].is_some() {
-                self.awaiting_codec_config[input] = true;
+                self.sample_entry_changes.await_config(input);
             }
         }
         // A text track's `trak` needs nothing from the stream, so it is ready now:
@@ -1366,18 +1333,14 @@ impl MultiInputElement for Mp4MuxN {
                 geometry: self.geometry[input],
                 entry: uncv::sample_entry(absolute_caps).expect("pad_kind_for built this entry"),
             };
-            let latest = self.pending_sample_entries[input]
-                .back()
-                .map(|change| &change.init)
-                .or(self.later_sample_entries[input].last())
+            let current = self.later_sample_entries[input]
+                .last()
                 .or(self.inits[input].as_ref());
-            if self.received_frames[input] == 0 {
-                self.inits[input] = Some(init);
-            } else if latest != Some(&init) {
-                self.pending_sample_entries[input].push_back(SampleEntryChange {
-                    first_frame: self.received_frames[input],
-                    init,
-                });
+            match current {
+                Some(current) if self.sample_entry_changes.has_received(input) => {
+                    self.sample_entry_changes.offer(input, current, init);
+                }
+                _ => self.inits[input] = Some(init),
             }
         }
         self.kinds[input] = Some(kind);
@@ -1543,7 +1506,7 @@ impl MultiInputElement for Mp4MuxN {
                             frame.meta.get::<CropMeta>().map(|crop| crop.rectangle);
                     }
                     self.priming.note_frame(input, frame.timing.pts_ns);
-                    self.received_frames[input] += 1;
+                    self.sample_entry_changes.note_received(input);
                     self.agg.push(input, frame);
                 }
                 PipelinePacket::Eos => {
@@ -2452,8 +2415,8 @@ mod tests {
     }
 
     fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            data,
             FrameTiming {
                 pts_ns,
                 ..FrameTiming::default()
@@ -3043,6 +3006,86 @@ mod tests {
         assert_eq!(moov_sizes, [[(320, 240)], [(640, 480)]]);
     }
 
+    async fn mux_aac_layout_change(fragmented: bool) -> Result<Vec<u8>, G2gError> {
+        const AAC_LC_PROFILE: u8 = 1;
+        let layouts = [(2u8, 48_000u32, 3u8), (1, 44_100, 4)];
+        let mut mux = Mp4MuxN::new(1).with_fragmented(fragmented);
+        let mut sink = CaptureSink::default();
+        let mut pts_ns = 0;
+        for (channels, sample_rate, sampling_frequency_index) in layouts {
+            let caps = Caps::Audio {
+                format: AudioFormat::Aac,
+                channels,
+                sample_rate,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+            };
+            mux.configure_pipeline(0, &caps)?;
+            for _ in 0..2 {
+                let frame_bytes = crate::aacparse::adts_frame(
+                    AAC_LC_PROFILE,
+                    sampling_frequency_index,
+                    channels,
+                    &[0x21, 0x10, 0x05],
+                )
+                .unwrap();
+                mux.process(0, frame(frame_bytes, pts_ns), &mut sink)
+                    .await?;
+                pts_ns += 1024 * 1_000_000_000 / u64::from(sample_rate);
+            }
+        }
+        mux.process(0, PipelinePacket::Eos, &mut sink).await?;
+        Ok(sink.bytes)
+    }
+
+    #[tokio::test]
+    async fn a_fragmented_stream_starts_a_new_init_segment_where_the_audio_layout_changes() {
+        let file = mux_aac_layout_change(true).await.unwrap();
+        let moovs: Vec<&[u8]> = crate::mp4box::boxes(&file)
+            .filter(|(kind, _)| *kind == b"moov")
+            .map(|(_, moov)| moov)
+            .collect();
+        let audio_layouts: Vec<(u16, u32)> = moovs
+            .iter()
+            .map(|moov| {
+                let stsd =
+                    crate::mp4box::find_path(moov, &[b"trak", b"mdia", b"minf", b"stbl", b"stsd"])
+                        .unwrap();
+                let entry = &stsd[8..];
+                let channels = u16::from_be_bytes(entry[24..26].try_into().unwrap());
+                let rate = u32::from(u16::from_be_bytes(entry[32..34].try_into().unwrap()));
+                (channels, rate)
+            })
+            .collect();
+        assert_eq!(audio_layouts, [(2, 48_000), (1, 44_100)]);
+        // the first fragment after the change starts at two 48 kHz frames, in 44.1 kHz ticks
+        let second_moov_at = file
+            .windows(4)
+            .enumerate()
+            .filter(|(_, window)| *window == b"moov")
+            .nth(1)
+            .unwrap()
+            .0;
+        let tfdt_at = second_moov_at
+            + file[second_moov_at..]
+                .windows(4)
+                .position(|window| window == b"tfdt")
+                .unwrap();
+        let version = file[tfdt_at + 4];
+        assert_eq!(version, 1);
+        let base_decode_time =
+            u64::from_be_bytes(file[tfdt_at + 8..tfdt_at + 16].try_into().unwrap());
+        let two_frames_ns = 2 * 1024 * 1_000_000_000 / 48_000;
+        assert_eq!(base_decode_time, ns_to_ticks(two_frames_ns, 44_100));
+    }
+
+    #[tokio::test]
+    async fn a_progressive_file_refuses_an_audio_layout_change() {
+        assert!(matches!(
+            mux_aac_layout_change(false).await,
+            Err(G2gError::CapsMismatch)
+        ));
+    }
+
     #[tokio::test]
     async fn a_progressive_raw_track_switches_sample_entry_where_the_resolution_changes() {
         let raw_caps = |width| {
@@ -3284,8 +3327,8 @@ mod tests {
         let mut sink = CaptureSink::default();
         for i in 0..3u64 {
             let pts = 100_000_000 + i * 33_333_333;
-            let packet = PipelinePacket::DataFrame(Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(idr.clone().into_boxed_slice())),
+            let packet = PipelinePacket::DataFrame(Frame::from_system_bytes(
+                idr.clone(),
                 FrameTiming {
                     pts_ns: pts,
                     // Two frames of reorder delay.
@@ -3329,8 +3372,8 @@ mod tests {
         mux.configure_pipeline(0, &h264_caps(320, 240)).unwrap();
         let mut sink = CaptureSink::default();
         for (decode_index, rank) in (0u64..).zip(presentation_ranks) {
-            let packet = PipelinePacket::DataFrame(Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(idr.clone().into_boxed_slice())),
+            let packet = PipelinePacket::DataFrame(Frame::from_system_bytes(
+                idr.clone(),
                 FrameTiming {
                     pts_ns: (rank + 2) * FRAME_NS,
                     dts_ns: decode_index * FRAME_NS,

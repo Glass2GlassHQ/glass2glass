@@ -49,12 +49,13 @@ use g2g_core::{
 };
 
 use crate::aacparse::{is_leading_aac_config, muxer_access_unit, muxer_audio_specific_config};
-use crate::annexb::{au_is_keyframe, avcc_record, avcc_sample, parameter_sets, split_annexb};
+use crate::annexb::{au_is_keyframe, avcc_record, avcc_sample, split_annexb};
 use crate::flv::{tag_flags_declare, FlvCodec, FlvMuxer, FlvTrack, LEGACY_AUDIO_TRACK};
 use crate::livemux::{wall_clock_ns, LiveMuxDeadline, LIVE_MUX_PROPS};
 use crate::mux::{
-    audio_header_config, audio_track_params, every_track_header_ready, refused_input,
-    refused_input_because, require_header_config_at_end, video_header_config, CODEC_CONFIG,
+    audio_header_config, audio_track_params, every_track_header_ready, keyframe_codec_config,
+    push_muxed_bytes, refused_input, refused_input_because, require_header_config_at_end,
+    video_header_config, ConfigChanges, CODEC_CONFIG,
 };
 use g2g_core::log::short_type_name;
 
@@ -62,7 +63,7 @@ use g2g_core::log::short_type_name;
 /// (video) or AudioSpecificConfig (audio) the FLV sequence header needs. The
 /// legacy Flash codecs have no sequence header, so theirs is empty and ready
 /// immediately.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum TrackInit {
     Video {
         param_sets: Vec<Vec<u8>>,
@@ -115,6 +116,8 @@ pub struct FlvMuxN {
     // the timestamp of the last tag written, which a frame with no timestamp reuses as gst's flvmux does
     last_tag_ms: u32,
     deadline: LiveMuxDeadline,
+    configured_caps: Vec<Option<Caps>>,
+    config_changes: ConfigChanges<TrackInit>,
 }
 
 impl FlvMuxN {
@@ -141,6 +144,8 @@ impl FlvMuxN {
             written_span_ns: None,
             last_tag_ms: 0,
             deadline: LiveMuxDeadline::default(),
+            configured_caps: alloc::vec![None; inputs],
+            config_changes: ConfigChanges::new(inputs),
         }
     }
 
@@ -193,27 +198,27 @@ impl FlvMuxN {
         }
     }
 
-    /// Capture a pad's track init from its first access unit, if not already set.
+    fn parse_init(&self, input: usize, au: &[u8]) -> Result<Option<TrackInit>, G2gError> {
+        Ok(match self.kinds[input] {
+            Some(FlvCodec::H264) => keyframe_codec_config(VideoCodec::H264, au)
+                .map(|param_sets| TrackInit::Video { param_sets }),
+            Some(FlvCodec::Aac) => muxer_audio_specific_config(au, short_type_name::<Self>())?
+                .map(|asc| TrackInit::Audio { asc }),
+            Some(_) => Some(TrackInit::None),
+            None => None,
+        })
+    }
+
     fn capture_init(&mut self, input: usize, au: &[u8]) -> Result<(), G2gError> {
-        if self.inits[input].is_some() {
+        if self.inits[input].is_some() && !self.config_changes.is_awaiting_config(input) {
             return Ok(());
         }
-        match self.kinds[input] {
-            Some(FlvCodec::H264) => {
-                let nalus = split_annexb(au);
-                // Parameter sets only ride the IDR; wait for the keyframe.
-                if let Ok(param_sets) = parameter_sets(VideoCodec::H264, &nalus) {
-                    let owned: Vec<Vec<u8>> = param_sets.iter().map(|s| s.to_vec()).collect();
-                    self.inits[input] = Some(TrackInit::Video { param_sets: owned });
-                }
-            }
-            Some(FlvCodec::Aac) => {
-                if let Some(asc) = muxer_audio_specific_config(au, short_type_name::<Self>())? {
-                    self.inits[input] = Some(TrackInit::Audio { asc });
-                }
-            }
-            Some(_) => self.inits[input] = Some(TrackInit::None),
-            None => {}
+        let Some(init) = self.parse_init(input, au)? else {
+            return Ok(());
+        };
+        match &self.inits[input] {
+            None => self.inits[input] = Some(init),
+            Some(current) => self.config_changes.offer(input, current, init),
         }
         Ok(())
     }
@@ -307,7 +312,19 @@ impl FlvMuxN {
             .map_or(self.last_tag_ms, |pts_ns| (pts_ns / 1_000_000) as u32);
         let track_id = self.audio_track_id(input);
         let mux = self.mux.as_mut().ok_or(G2gError::NotConfigured)?;
-        let bytes = match self.kinds[input] {
+        let mut bytes = Vec::new();
+        if let Some(init) = self.config_changes.take_starting_at_next_written(input) {
+            bytes = match &init {
+                TrackInit::Video { param_sets } => {
+                    let refs: Vec<&[u8]> = param_sets.iter().map(Vec::as_slice).collect();
+                    mux.change_video_config(avcc_record(&refs), dts_ms)
+                }
+                TrackInit::Audio { asc } => mux.change_audio_config(track_id, asc.clone(), pts_ms),
+                TrackInit::None => Vec::new(),
+            };
+            self.inits[input] = Some(init);
+        }
+        let media = match self.kinds[input] {
             Some(FlvCodec::H264) => {
                 let nalus = split_annexb(slice);
                 let keyframe = au_is_keyframe(VideoCodec::H264, slice);
@@ -332,6 +349,7 @@ impl FlvMuxN {
                 }
             }
         };
+        bytes.extend_from_slice(&media);
 
         self.last_tag_ms = match self.kinds[input] {
             Some(c) if c.track() == FlvTrack::Video => dts_ms,
@@ -344,16 +362,16 @@ impl FlvMuxN {
                 Some((first, last)) => (first.min(start_ns), last.max(end_ns)),
             });
         }
-        let out_frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+        push_muxed_bytes(
+            out,
+            bytes,
             FrameTiming {
                 pts_ns: frame.timing.pts_ns,
                 ..FrameTiming::default()
             },
-            self.emitted,
-        );
-        self.emitted += 1;
-        out.push(PipelinePacket::DataFrame(out_frame)).await?;
+            &mut self.emitted,
+        )
+        .await?;
         Ok(())
     }
 
@@ -389,14 +407,18 @@ impl FlvMuxN {
                 if let Some(s) = frame.domain.as_system_slice() {
                     self.capture_init(input, s)?;
                     // a raw AAC stream's config became the sequence header above
-                    if self.inits[input]
-                        .as_ref()
+                    let latest_init = self
+                        .config_changes
+                        .latest_pending(input)
+                        .or(self.inits[input].as_ref());
+                    if latest_init
                         .and_then(TrackInit::asc)
                         .is_some_and(|config| is_leading_aac_config(config, s))
                     {
                         return Ok(());
                     }
                 }
+                self.config_changes.note_received(input);
                 self.agg.push(input, frame);
             }
             PipelinePacket::Eos => {
@@ -540,6 +562,13 @@ impl MultiInputElement for FlvMuxN {
                 self.audio_params = Some((*channels, *sample_rate));
             }
         }
+        let caps_changed = self.configured_caps[input]
+            .as_ref()
+            .is_some_and(|configured| configured != absolute_caps);
+        if caps_changed && self.inits[input].is_some() {
+            self.config_changes.await_config(input);
+        }
+        self.configured_caps[input] = Some(absolute_caps.clone());
         self.kinds[input] = Some(kind);
         Ok(ConfigureOutcome::Accepted)
     }
@@ -591,6 +620,7 @@ impl MultiInputElement for FlvMuxN {
 mod tests {
     use super::*;
     use crate::flv::{FlvDemuxer, FlvTrack as DemuxTrack, FLV_FLAG_AUDIO, FLV_FLAG_VIDEO};
+    use crate::flv::{TAG_AUDIO, TAG_VIDEO};
     use crate::flvdemux::{FlvDemux, FlvStream};
     use g2g_core::{AsyncElement, AudioFormat, Dim};
 
@@ -639,8 +669,8 @@ mod tests {
     }
 
     fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            data,
             FrameTiming {
                 pts_ns,
                 ..FrameTiming::default()
@@ -709,11 +739,7 @@ mod tests {
             .configure_pipeline(&FlvMuxN::output_caps_value())
             .unwrap();
         let mut sink = CaptureSink::default();
-        let flv_frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(flv.into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let flv_frame = Frame::from_system_bytes(flv, FrameTiming::default(), 0);
         demux
             .process(PipelinePacket::DataFrame(flv_frame), &mut sink)
             .await
@@ -857,6 +883,127 @@ mod tests {
             at = body.end;
         }
         tags
+    }
+
+    fn video_tag_frame_and_packet_types(flv: &[u8]) -> Vec<[u8; 2]> {
+        let mut at = crate::flv::file_header_len(flv).expect("FLV file header");
+        let mut types = Vec::new();
+        while let Some((tag, body)) = crate::flv::tag_at(flv, at) {
+            if tag.tag_type == TAG_VIDEO {
+                types.push([flv[body.start], flv[body.start + 1]]);
+            }
+            at = body.end;
+        }
+        types
+    }
+
+    fn sequence_header_bodies(flv: &[u8], tag_type: u8) -> Vec<Vec<u8>> {
+        const SEQUENCE_HEADER_PACKET: u8 = 0;
+        let mut at = crate::flv::file_header_len(flv).expect("FLV file header");
+        let mut bodies = Vec::new();
+        while let Some((tag, body)) = crate::flv::tag_at(flv, at) {
+            if tag.tag_type == tag_type && flv[body.start + 1] == SEQUENCE_HEADER_PACKET {
+                bodies.push(flv[body.clone()].to_vec());
+            }
+            at = body.end;
+        }
+        bodies
+    }
+
+    async fn mux_with_caps_change(
+        first: (Caps, [Vec<u8>; 2]),
+        second: (Caps, [Vec<u8>; 2]),
+    ) -> Vec<u8> {
+        let mut mux = FlvMuxN::new(1);
+        let mut sink = CaptureSink::default();
+        let mut pts_ns = 0;
+        for (caps, aus) in [first, second] {
+            mux.configure_pipeline(0, &caps).unwrap();
+            mux.process(0, PipelinePacket::CapsChanged(caps), &mut sink)
+                .await
+                .unwrap();
+            for au in aus {
+                mux.process(0, frame(au, pts_ns), &mut sink).await.unwrap();
+                pts_ns += 33_000_000;
+            }
+        }
+        mux.process(0, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
+        sink.bytes
+    }
+
+    #[tokio::test]
+    async fn a_resolution_change_writes_a_new_video_sequence_header_at_the_keyframe() {
+        let new_sps: &[u8] = &[0x67, 0x42, 0x00, 0x1f, 0x88];
+        let inter = || annexb(&[&[0x41, 0x9a, 0x00]]);
+        let larger = match video_caps() {
+            Caps::CompressedVideo {
+                codec,
+                framerate,
+                colorimetry,
+                pixel_aspect,
+                alignment,
+                ..
+            } => Caps::CompressedVideo {
+                codec,
+                width: Dim::Fixed(640),
+                height: Dim::Fixed(480),
+                framerate,
+                colorimetry,
+                pixel_aspect,
+                alignment,
+            },
+            _ => unreachable!(),
+        };
+        let new_idr = annexb(&[new_sps, PPS, &[0x65, 0x88, 0x84]]);
+        let flv = mux_with_caps_change(
+            (video_caps(), [h264_idr(), inter()]),
+            (larger, [new_idr, inter()]),
+        )
+        .await;
+        const KEYFRAME_AVC: u8 = 0x17;
+        const INTERFRAME_AVC: u8 = 0x27;
+        assert_eq!(
+            video_tag_frame_and_packet_types(&flv),
+            [
+                [KEYFRAME_AVC, 0],
+                [KEYFRAME_AVC, 1],
+                [INTERFRAME_AVC, 1],
+                [KEYFRAME_AVC, 0],
+                [KEYFRAME_AVC, 1],
+                [INTERFRAME_AVC, 1],
+            ]
+        );
+        let headers = sequence_header_bodies(&flv, TAG_VIDEO);
+        assert!(headers[1]
+            .windows(new_sps.len())
+            .any(|window| window == new_sps));
+    }
+
+    #[tokio::test]
+    async fn an_audio_layout_change_writes_a_new_audio_sequence_header() {
+        const AAC_LC_PROFILE: u8 = 1;
+        const SAMPLING_FREQUENCY_INDEX_44100: u8 = 4;
+        let mono_44100 = || {
+            crate::aacparse::adts_frame(AAC_LC_PROFILE, SAMPLING_FREQUENCY_INDEX_44100, 1, &[0xAB])
+                .unwrap()
+        };
+        let mono_caps = Caps::Audio {
+            format: AudioFormat::Aac,
+            channels: 1,
+            sample_rate: 44_100,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+        };
+        let flv = mux_with_caps_change(
+            (audio_caps(), [aac_adts(), aac_adts()]),
+            (mono_caps, [mono_44100(), mono_44100()]),
+        )
+        .await;
+        let headers = sequence_header_bodies(&flv, TAG_AUDIO);
+        let new_config = crate::aacparse::asc_from_adts(&mono_44100()).unwrap();
+        assert_eq!(headers.len(), 2);
+        assert_eq!(headers[1][2..], new_config[..]);
     }
 
     #[tokio::test]

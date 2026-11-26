@@ -55,35 +55,31 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::log::short_type_name;
-use g2g_core::memory::SystemSlice;
+
 use g2g_core::{
     split_tags, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, Chapter, CodecTag,
-    ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, InputAggregator, MemoryDomain,
-    MultiInputElement, OutputSink, PipelinePacket, PixelAspect, PropError, PropKind, PropValue,
-    PropertySpec, RawVideoFormat, SubPictureFormat, TagList, TagNamespace, TextFormat, VideoCodec,
+    ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, InputAggregator, MultiInputElement,
+    OutputSink, PipelinePacket, PixelAspect, PropError, PropKind, PropValue, PropertySpec,
+    RawVideoFormat, SubPictureFormat, TagList, TagNamespace, TextFormat, VideoCodec,
 };
 
-use crate::aacparse::{is_leading_aac_config, muxer_access_unit, muxer_audio_specific_config};
+use crate::aacparse::{is_leading_aac_config, muxer_access_unit};
 use crate::dvbsub::DEFAULT_PAGE_ID;
-use crate::fmp4mux::{
-    avcc_record, hvcc_record, parameter_sets, split_annexb, video_sample, VideoGeometry,
-};
+use crate::fmp4mux::{avcc_record, hvcc_record, video_sample, VideoGeometry};
 use crate::livemux::{wall_clock_ns, LiveMuxDeadline, LIVE_MUX_LATENCY_PROPERTY};
 use crate::matroska::{
     default_page_blob, finalize_seekable, prores_frame_without_header, subpicture_block,
     subpicture_config, subpicture_mkv_codec, subtitle_format_from_str, subtitle_format_str,
     text_codec_private, xiph_codec_private, MatroskaMuxer, MkvCodec, MkvTrackConfig, MkvTrackSpec,
 };
-use crate::mpeg4videoparse::Mpeg4VideoCodec;
-use crate::mpegvideoparse::MpegVideoCodec;
 use crate::mux::{
-    audio_header_config, audio_track_params, every_track_header_ready, is_audio_config_packet,
-    refused_input, require_header_config_at_end, video_header_config, xiph_header, InputPriming,
-    CODEC_CONFIG,
+    aac_track_config, audio_header_config, audio_layout_changed, audio_track_params,
+    every_track_header_ready, is_audio_config_packet, keyframe_codec_config, push_muxed_bytes,
+    refused_input, refused_input_because, require_header_config_at_end, video_header_config,
+    xiph_header, AudioTrackParams, InputPriming, CODEC_CONFIG,
 };
 use crate::ogg::{is_theora_header, THEORA_HEADER_TYPES, THEORA_MAGIC, VORBIS_MAGIC};
 use crate::opusparse::{is_opus_config, parse_opus_head, synth_opus_head, OPUS_ENCODER_PRE_SKIP};
-use crate::startcodeparse::StartCodeCodec;
 use crate::subparse::frame_subtitle_block;
 use crate::uncompressedvideo::raw_video_fourcc;
 use crate::vorbiscomment::empty_vorbis_comment;
@@ -529,42 +525,17 @@ impl MkvMuxN {
             Some(PadKind::Video(codec)) => {
                 let geometry = self.geometry[input];
                 match codec {
-                    VideoCodec::H264 | VideoCodec::H265 => {
-                        let nalus = split_annexb(au);
-                        // Parameter sets only ride the IDR; a leading P-frame has
-                        // none, so wait for the keyframe that carries them.
-                        if let Ok(param_sets) = parameter_sets(codec, &nalus) {
-                            let owned: Vec<Vec<u8>> =
-                                param_sets.iter().map(|s| s.to_vec()).collect();
+                    // the parameter sets, sequence header or start-code headers ride the keyframe
+                    VideoCodec::H264
+                    | VideoCodec::H265
+                    | VideoCodec::Av1
+                    | VideoCodec::Mpeg2
+                    | VideoCodec::Mpeg4Part2 => {
+                        if let Some(param_sets) = keyframe_codec_config(codec, au) {
                             self.inits[input] = Some(TrackInit::Video {
                                 codec,
                                 geometry,
-                                param_sets: owned,
-                            });
-                        }
-                    }
-                    // AV1's config record needs the sequence-header OBU; wait
-                    // for the temporal unit that carries it (keyframes do).
-                    VideoCodec::Av1 => {
-                        if let Some((_, obu)) = crate::av1parse::seq_header_obu(au) {
-                            self.inits[input] = Some(TrackInit::Video {
-                                codec,
-                                geometry,
-                                param_sets: alloc::vec![obu.to_vec()],
-                            });
-                        }
-                    }
-                    // the CodecPrivate is the start-code headers a keyframe leads with
-                    VideoCodec::Mpeg2 | VideoCodec::Mpeg4Part2 => {
-                        let headers = match codec {
-                            VideoCodec::Mpeg2 => MpegVideoCodec::config_headers(au),
-                            _ => Mpeg4VideoCodec::config_headers(au),
-                        };
-                        if let Some(headers) = headers {
-                            self.inits[input] = Some(TrackInit::Video {
-                                codec,
-                                geometry,
-                                param_sets: alloc::vec![headers],
+                                param_sets,
                             });
                         }
                     }
@@ -615,16 +586,9 @@ impl MkvMuxN {
                 // AAC's AudioSpecificConfig is synthesised from the first ADTS
                 // header, or is the frame leading a raw stream.
                 AudioFormat::Aac => {
-                    if let Some(config) =
-                        muxer_audio_specific_config(au, short_type_name::<Self>())?
+                    if let Some((params, config)) =
+                        aac_track_config(short_type_name::<Self>(), channels, rate, au)?
                     {
-                        let params = audio_track_params(
-                            short_type_name::<Self>(),
-                            format,
-                            channels,
-                            rate,
-                            &config,
-                        )?;
                         self.inits[input] = Some(TrackInit::Audio {
                             format,
                             channels: params.channels,
@@ -837,16 +801,16 @@ impl MkvMuxN {
             self.pending.extend_from_slice(&bytes);
             return Ok(());
         }
-        let out_frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+        push_muxed_bytes(
+            out,
+            bytes,
             FrameTiming {
                 pts_ns,
                 ..FrameTiming::default()
             },
-            self.emitted,
-        );
-        self.emitted += 1;
-        out.push(PipelinePacket::DataFrame(out_frame)).await?;
+            &mut self.emitted,
+        )
+        .await?;
         Ok(())
     }
 }
@@ -1038,7 +1002,51 @@ impl MultiInputElement for MkvMuxN {
     ) -> Result<ConfigureOutcome, G2gError> {
         let kind = Self::pad_kind_for(absolute_caps)
             .ok_or_else(|| refused_input(short_type_name::<Self>(), absolute_caps))?;
-        if let Some(geometry) = VideoGeometry::from_caps(absolute_caps) {
+        let geometry = VideoGeometry::from_caps(absolute_caps);
+        let track_header_written = self.mux.is_some() && self.inits[input].is_some();
+        if track_header_written {
+            let resized = geometry.is_some_and(|geometry| geometry != self.geometry[input]);
+            let header_still_describes_track = match (self.kinds[input], kind) {
+                // h.264 and h.265 samples carry their parameter sets in band
+                (Some(PadKind::Video(old)), PadKind::Video(new)) => {
+                    old == new && (!resized || matches!(new, VideoCodec::H264 | VideoCodec::H265))
+                }
+                (Some(PadKind::RawVideo(old)), PadKind::RawVideo(new)) => old == new && !resized,
+                (
+                    Some(PadKind::Audio {
+                        format: old_format,
+                        channels: old_channels,
+                        rate: old_rate,
+                    }),
+                    PadKind::Audio {
+                        format,
+                        channels,
+                        rate,
+                    },
+                ) => {
+                    let old_layout = AudioTrackParams {
+                        channels: old_channels,
+                        sample_rate: old_rate,
+                    };
+                    let layout = AudioTrackParams {
+                        channels,
+                        sample_rate: rate,
+                    };
+                    old_format == format && !audio_layout_changed(old_layout, layout)
+                }
+                (Some(PadKind::Text), PadKind::Text) => true,
+                (Some(PadKind::SubPicture(old)), PadKind::SubPicture(new)) => old == new,
+                _ => false,
+            };
+            if !header_still_describes_track {
+                return Err(refused_input_because(
+                    short_type_name::<Self>(),
+                    absolute_caps,
+                    "a Matroska track keeps the caps its header was written with",
+                ));
+            }
+        }
+        if let Some(geometry) = geometry {
             self.geometry[input] = geometry;
         }
         // A text track's `TrackEntry` needs nothing from the stream, so it is
@@ -1261,24 +1269,14 @@ impl MultiInputElement for MkvMuxN {
                     }
                     if !self.pending.is_empty() {
                         let file = core::mem::take(&mut self.pending);
-                        let out_frame = Frame::new(
-                            MemoryDomain::System(SystemSlice::from_boxed(file.into_boxed_slice())),
-                            FrameTiming::default(),
-                            self.emitted,
-                        );
-                        self.emitted += 1;
-                        out.push(PipelinePacket::DataFrame(out_frame)).await?;
+                        push_muxed_bytes(out, file, FrameTiming::default(), &mut self.emitted)
+                            .await?;
                     }
                 } else if let Some(mux) = self.mux.as_ref().filter(|_| !self.settings.streamable) {
                     let cues = mux.finish();
                     if !cues.is_empty() {
-                        let out_frame = Frame::new(
-                            MemoryDomain::System(SystemSlice::from_boxed(cues.into_boxed_slice())),
-                            FrameTiming::default(),
-                            self.emitted,
-                        );
-                        self.emitted += 1;
-                        out.push(PipelinePacket::DataFrame(out_frame)).await?;
+                        push_muxed_bytes(out, cues, FrameTiming::default(), &mut self.emitted)
+                            .await?;
                     }
                 }
                 self.cues_emitted = true;
@@ -1338,8 +1336,8 @@ mod tests {
     }
 
     fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            data,
             FrameTiming {
                 pts_ns,
                 ..FrameTiming::default()
@@ -1579,6 +1577,70 @@ mod tests {
         assert!(mux.intercept_caps(0, &raw).is_err());
         assert!(mux.intercept_caps(0, &video_caps()).is_ok());
         assert!(mux.intercept_caps(0, &audio_caps()).is_ok());
+    }
+
+    fn resized(caps: Caps, new_width: u32, new_height: u32) -> Caps {
+        match caps {
+            Caps::CompressedVideo {
+                codec,
+                framerate,
+                colorimetry,
+                pixel_aspect,
+                alignment,
+                ..
+            } => Caps::CompressedVideo {
+                codec,
+                width: Dim::Fixed(new_width),
+                height: Dim::Fixed(new_height),
+                framerate,
+                colorimetry,
+                pixel_aspect,
+                alignment,
+            },
+            other => panic!("not compressed video: {other:?}"),
+        }
+    }
+
+    fn aac_caps(channels: u8, sample_rate: u32) -> Caps {
+        Caps::Audio {
+            format: AudioFormat::Aac,
+            channels,
+            sample_rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+        }
+    }
+
+    async fn reconfigure_after_the_header(
+        first: Caps,
+        first_frame: Vec<u8>,
+        second: Caps,
+    ) -> Result<ConfigureOutcome, G2gError> {
+        let mut mux = MkvMuxN::new(1);
+        mux.configure_pipeline(0, &first).unwrap();
+        let mut sink = CaptureSink::default();
+        mux.process(0, frame(first_frame, 0), &mut sink)
+            .await
+            .unwrap();
+        mux.configure_pipeline(0, &second)
+    }
+
+    #[tokio::test]
+    async fn caps_changes_after_the_header_keep_only_what_the_track_header_still_describes() {
+        let h264_resize =
+            reconfigure_after_the_header(video_caps(), h264_idr(), resized(video_caps(), 640, 480));
+        assert!(h264_resize.await.is_ok());
+        let vp9_resize =
+            reconfigure_after_the_header(vp9_caps(), vp9_key(), resized(vp9_caps(), 640, 480));
+        assert!(matches!(vp9_resize.await, Err(G2gError::CapsMismatch)));
+        let rate_change =
+            reconfigure_after_the_header(aac_caps(2, 48_000), aac_adts(), aac_caps(2, 44_100));
+        assert!(matches!(rate_change.await, Err(G2gError::CapsMismatch)));
+        let rate_filled_in = reconfigure_after_the_header(
+            aac_caps(g2g_core::ANY_CHANNELS, g2g_core::ANY_SAMPLE_RATE),
+            aac_adts(),
+            aac_caps(2, 48_000),
+        );
+        assert!(rate_filled_in.await.is_ok());
     }
 
     fn vp9_caps() -> Caps {

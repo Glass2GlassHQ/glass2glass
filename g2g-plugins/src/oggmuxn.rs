@@ -61,11 +61,11 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
+
 use g2g_core::{
     AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    ElementMetadata, FrameTiming, G2gError, InputAggregator, MemoryDomain, MultiInputElement,
-    OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Segment,
+    ElementMetadata, FrameTiming, G2gError, InputAggregator, MultiInputElement, OutputSink,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Segment,
 };
 
 use crate::livemux::{wall_clock_ns, LiveMuxDeadline, LIVE_MUX_LATENCY_PROPERTY};
@@ -577,11 +577,7 @@ impl OggMuxN {
         if bytes.is_empty() {
             return None;
         }
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            FrameTiming::default(),
-            self.emitted,
-        );
+        let frame = Frame::from_system_bytes(bytes, FrameTiming::default(), self.emitted);
         self.emitted += 1;
         Some(PipelinePacket::DataFrame(frame))
     }
@@ -882,8 +878,8 @@ mod tests {
     }
 
     fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            data,
             FrameTiming {
                 pts_ns,
                 ..FrameTiming::default()
@@ -1084,8 +1080,8 @@ mod tests {
 
     /// A timed frame: `samples` of the packet's output are real audio.
     fn timed_frame(data: Vec<u8>, samples: u64) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            data,
             FrameTiming {
                 duration_ns: samples * 1_000_000_000 / u64::from(OPUS_RATE_HZ),
                 ..FrameTiming::default()

@@ -876,7 +876,6 @@ pub(crate) fn extract_seq_header(data: &[u8]) -> Option<Av1SeqHeader> {
 /// The first sequence-header OBU of a temporal unit, whole (header byte through
 /// payload), as a muxer's `av1C` `configOBUs` carries it verbatim. Paired with
 /// its parse, so a caller gets consistent record fields and config bytes.
-#[cfg(feature = "std")]
 pub(crate) fn seq_header_obu(data: &[u8]) -> Option<(Av1SeqHeader, &[u8])> {
     let obus = obu_ranges(data)?;
     obus.iter()

@@ -893,7 +893,7 @@ omitted. Every sample entry of the track carries the first frame's aperture.
 Fragmented output waits for each raw video input's first frame or end of stream
 before writing the `moov`.
 
-### MP4 resolution changes
+### Mid-stream caps changes in muxers
 
 When a video input's caps change size mid-stream, `mp4mux` starts a new sample
 entry at the first frame that carries the new codec config: the next keyframe's
@@ -901,9 +901,27 @@ parameter sets for H.264 and H.265, its sequence header for AV1, and the next
 frame for raw video. A progressive file lists every entry in the track's `stsd`
 and switches the `stsc` sample description index at that frame, as gst's
 `qtmux` does. A fragmented stream flushes its open fragments and writes a new
-`ftyp` and `moov` before that frame, as gst's `fmp4mux` does. The `tkhd` keeps
-the first entry's size. ffmpeg 8.1 and gst 1.28 decode both layouts across a
-320x240 to 640x480 change. Audio rate and channel changes get no new entry.
+`ftyp` and `moov` before that frame, as gst's `fmp4mux` does, and an audio
+sample rate or channel count change takes the same path, with the track's decode
+time carried into the new timescale. A progressive file refuses an audio layout
+change, as `qtmux` does. The `tkhd` keeps the first entry's size. ffmpeg 8.1 and
+gst 1.28 decode both layouts across a 320x240 to 640x480 change. A file reader
+(ffmpeg, `qtdemux` pulling from `filesrc`) takes only the first `moov`, so it
+plays a fragmented audio layout change with the first config, while `qtdemux`
+fed as a stream switches at the new `moov`.
+
+`flvmux` writes a new video or audio sequence header tag ahead of the frame that
+carries the new config, as gst's `flvmux` does when its `codec_data` changes.
+`matroskamux` writes every track header once, so after it a caps change is
+refused unless the header still describes the track: an H.264 or H.265 size
+change passes, because those samples carry their parameter sets in band, and a
+demuxer filling in a channel count or rate it left open passes. This is gst's
+`matroskamux` rule.
+
+The bookkeeping lives in `mux::ConfigChanges`: a muxer counts each input's
+frames as they enter and leave the aggregator, so a config captured from a frame
+takes effect when that frame is written, after the frames queued under the old
+config.
 
 ## Chapters
 

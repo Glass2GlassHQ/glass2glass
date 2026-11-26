@@ -17,7 +17,7 @@ use crate::annexb::au_is_keyframe;
 // The Annex-B split / NAL-type / parameter-set / AVCC helpers moved to the
 // ungated `annexb` module (M662, the no_std FLV muxer shares them);
 // re-exported so this module's users keep their import path.
-pub(crate) use crate::annexb::{avcc_record, avcc_sample, parameter_sets, split_annexb};
+pub(crate) use crate::annexb::{avcc_record, avcc_sample, split_annexb};
 
 use crate::mp4box::mp4_box;
 
@@ -256,7 +256,7 @@ pub(crate) fn av1c_record(seq: &crate::av1parse::Av1SeqHeader, seq_obu: &[u8]) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::annexb::nalu_type;
+    use crate::annexb::{nalu_type, parameter_sets};
     use alloc::vec;
 
     #[test]
