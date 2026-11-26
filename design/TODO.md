@@ -33,12 +33,19 @@ Highest leverage first:
 The plan is [remote.md](remote.md).
 
 - Encode with `d3d11convert ! nvenc` on a Windows host with an NVIDIA GPU,
-  falling back to `mfh264enc`, and rebuild the host graph after `AccessLost`.
+  falling back to `mfh264enc`.
+- Rebuild the Windows host graph when a desktop switch changes the capture
+  size.
 - The macOS client, then `display-index` on `screencapturesrc` and a macOS
   host through `vtencode`.
 - Pin `g2g-wayland-display` back to upstream smithay once it flushes in
   `X11Wm::new_selection`, and drop the `boxerab/smithay` fork.
-- A Windows service that captures and injects on the secure desktop.
+- Reconnect the remotewt client when the host restarts, such as when the
+  Windows service moves it to a new console session.
+- Register the Windows service from the MSI.
+- Rotate the Windows service host's remotewt certificate before it expires
+  once a browser client exists, since browsers reject an expired pinned
+  certificate.
 - Apply a periodic effect's envelope on the virtual uinput pad.
 - Feel the remote desktop's rumble on a real pad on the Linux and Windows
   clients.

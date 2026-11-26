@@ -120,7 +120,8 @@ In `g2g-desktop`, module `gamestream`.
   with `pairchallenge` over HTTPS. A 2048-bit RSA host key (made once with the
   `rsa` crate, signed with `ring`), the host certificate, the `uniqueid` and
   the paired client certificates live in `g2g-desktop/gamestream` under the
-  user's config directory.
+  user's config directory, or in `gamestream` under `--state-dir` when the
+  Windows service starts the host.
 - RTSP takes one request per TCP connection and closes it after the reply.
   `/launch` returns a plain `rtsp://` URL, so RTSP itself is not encrypted.
   `DESCRIBE` lists the HEVC marker and the encryption flags, and requests video

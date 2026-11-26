@@ -23,8 +23,8 @@ A host and a client for Linux, Windows, and macOS, plus a Chrome page.
   client, clipboard text, gamepad and rumble on Linux and Windows.
 - A bearer token on the message channel. OIDC mints that token in a later slice.
 - The client shows the newest frame. Audio uses a short queue and does not hold the picture.
-- A Windows service whose only job is input injection on the secure desktop.
-  Capture stays in the interactive user session.
+- A Windows service that runs the host with a SYSTEM token in the console
+  session, so capture and injection reach the secure desktop.
 - Packages that install the host and the client. No media-library build.
 
 Out of this plan: phones, headsets, USB forwarding, a graphical client, file
@@ -274,7 +274,7 @@ stay shared and are tested without a desktop.
 | Edge | Capture | Inject |
 | :--- | :--- | :--- |
 | Linux | the client window's keyboard and pointer, with the desktop's shortcuts inhibited while grabbed | `/dev/uinput`, which Fedora creates as root-only `0600`, so the host needs a udev rule that gives the `input` group write access. |
-| Windows | the client window's key and mouse messages, plus a low-level keyboard hook while grabbed | `SendInput` in the interactive session. The service injects when the interactive process cannot, which is the secure desktop. |
+| Windows | the client window's key and mouse messages, plus a low-level keyboard hook while grabbed | `SendInput` in the interactive session. A host started by the Windows service also reaches the secure desktop. |
 | macOS | the client window | `CGEvent`, which needs the accessibility permission. Screen recording stays the permission `screencapturesrc` already needs. |
 
 Relative move is `EV_REL` on Linux and `MOUSEEVENTF_MOVE` on Windows. On the
@@ -348,12 +348,27 @@ through its compositor's `wl_touch`.
 
 ## Windows service
 
-The service process is installed separately, runs as SYSTEM, and accepts
-injection packets on a named pipe from the interactive host. It does not
-capture, encode, or speak QUIC. The interactive host captures. When
-`SendInput` from the interactive process fails because the secure desktop is
-up, the host forwards the same packets down the pipe. The service is optional
-at build time and required for the UAC slice.
+`g2g-desktop service install HOST-FLAGS...`, run from an elevated shell,
+registers the `g2g-desktop` service (automatic start, LocalSystem) with those
+host flags and starts it. `service uninstall` stops and removes it. The
+service starts `g2g-desktop host --state-dir %ProgramData%\g2g-desktop
+HOST-FLAGS` on `winsta0\default` in the active console session, with a copy of
+its own SYSTEM token. Only a SYSTEM process captures and injects on the secure
+desktop (UAC prompts, the lock screen, the logon screen). The service starts
+the host again 5 s after it exits, and at once in the new session when the
+console session changes. Either restart drops the connected client.
+
+`%ProgramData%\g2g-desktop` grants access to SYSTEM and Administrators only.
+It holds `service.log`, the host's output in `host.log`, the remotewt
+certificate, key and token in `remotewt\`, and the gamestream identity and
+pairings in `gamestream\`. The remotewt files are made once, and `install`
+prints the certificate hash and the token. The certificate expires after 13
+days and the host keeps using it, because native clients check only its hash.
+
+The host listens on the network with SYSTEM rights, so a bug in packet
+parsing or injection runs as SYSTEM, the same as Sunshine. The service runs
+the exe it was installed from, so that exe belongs in a folder only
+Administrators can write, such as Program Files.
 
 ## g2g-desktop
 

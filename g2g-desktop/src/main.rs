@@ -33,6 +33,7 @@ use g2g_desktop::gamestream::ServedDesktop;
 use g2g_desktop::gamestream::{LaunchableApp, ServedApps};
 use g2g_desktop::host::{
     check_token_len, inject, run_session, HostCapture, HostEncoder, HostListener, HostSettings,
+    RemotewtIdentity,
 };
 use g2g_desktop::injection::{InjectError, InjectEvents, ScreenSize, WithGamepads};
 #[cfg(target_os = "windows")]
@@ -45,6 +46,8 @@ use g2g_desktop::uinputgamepad::UinputGamepads;
 use g2g_desktop::vigemgamepad::ViGEmGamepads;
 #[cfg(target_os = "linux")]
 use g2g_desktop::waylanddisplayinput::WaylandDisplayInjector;
+#[cfg(target_os = "windows")]
+use g2g_desktop::windowsservice;
 #[cfg(target_os = "linux")]
 use g2g_desktop::xtest::XTestInjector;
 #[cfg(target_os = "windows")]
@@ -90,7 +93,8 @@ const PLATFORM_HOST_USAGE: &str =
                     | --x11-display :0]";
 #[cfg(target_os = "windows")]
 const PLATFORM_HOST_USAGE: &str =
-    "\n                   [--monitor-index -1] [--quality-vs-speed 0-100]";
+    "\n                   [--monitor-index -1] [--quality-vs-speed 0-100] [--state-dir DIR]
+  g2g-desktop service install HOST-FLAGS... | service uninstall";
 const DEFAULT_PORT: u16 = 8080;
 const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_millis(100);
 const DEFAULT_FPS: u32 = 60;
@@ -109,7 +113,7 @@ const HOST_FLAGS: [&str; 9] = [
 #[cfg(target_os = "linux")]
 const PLATFORM_HOST_FLAGS: [&str; 5] = ["run", "size", "render-node", "x11-display", "app"];
 #[cfg(target_os = "windows")]
-const PLATFORM_HOST_FLAGS: [&str; 2] = ["monitor-index", "quality-vs-speed"];
+const PLATFORM_HOST_FLAGS: [&str; 3] = ["monitor-index", "quality-vs-speed", "state-dir"];
 #[cfg(target_os = "windows")]
 const PRIMARY_MONITOR: i32 = -1;
 const CLIENT_FLAGS: [&str; 9] = [
@@ -698,8 +702,9 @@ async fn gamestream_headless(
             start: Box::new(move |command| launch_app(launched.names(), command)),
         }),
     };
+    let directory = user_gamestream_directory()?;
     run_app_while_serving(&display, &headless.command, async {
-        Ok(g2g_desktop::gamestream::serve(desktop).await?)
+        Ok(g2g_desktop::gamestream::serve(desktop, &directory).await?)
     })
     .await
 }
@@ -750,7 +755,7 @@ async fn gamestream_host(flags: &Flags) -> Result<(), Box<dyn Error>> {
             }
         }
     };
-    Ok(g2g_desktop::gamestream::serve(desktop).await?)
+    Ok(g2g_desktop::gamestream::serve(desktop, &user_gamestream_directory()?).await?)
 }
 
 #[cfg(all(target_os = "windows", feature = "gamestream"))]
@@ -763,9 +768,16 @@ fn gamestream_capture(fps: u32) -> Result<Vec<GraphNode>, String> {
 
 #[cfg(all(target_os = "windows", feature = "gamestream"))]
 async fn gamestream_host(flags: &Flags) -> Result<(), Box<dyn Error>> {
-    if let Some(flag) = flags.keys().find(|flag| flag.as_str() != "protocol") {
+    if let Some(flag) = flags
+        .keys()
+        .find(|flag| !["protocol", "state-dir"].contains(&flag.as_str()))
+    {
         return Err(format!("--protocol gamestream takes no --{flag}").into());
     }
+    let directory = match flag(flags, "state-dir") {
+        Some(state_directory) => PathBuf::from(state_directory).join("gamestream"),
+        None => user_gamestream_directory()?,
+    };
     let monitor =
         monitor_bounds(PRIMARY_MONITOR).map_err(|e| format!("monitor {PRIMARY_MONITOR}: {e:?}"))?;
     let desktop = ServedDesktop {
@@ -778,7 +790,27 @@ async fn gamestream_host(flags: &Flags) -> Result<(), Box<dyn Error>> {
         }),
         apps: None,
     };
-    Ok(g2g_desktop::gamestream::serve(desktop).await?)
+    Ok(g2g_desktop::gamestream::serve(desktop, &directory).await?)
+}
+
+#[cfg(feature = "gamestream")]
+fn user_gamestream_directory() -> Result<PathBuf, Box<dyn Error>> {
+    let config = dirs::config_dir().ok_or("no config directory for the host identity")?;
+    Ok(config.join("g2g-desktop").join("gamestream"))
+}
+
+fn host_identity(flags: &Flags) -> Result<RemotewtIdentity, Box<dyn Error>> {
+    #[cfg(target_os = "windows")]
+    if let Some(directory) = flag(flags, "state-dir") {
+        if flags.contains_key("token") {
+            return Err("--state-dir holds the token, so it takes no --token".into());
+        }
+        return windowsservice::load_or_create_remotewt_identity(Path::new(directory));
+    }
+    Ok(RemotewtIdentity {
+        certificate: generate_certificate()?,
+        token: required(flags, "token")?,
+    })
 }
 
 async fn host(flags: Flags) -> Result<(), Box<dyn Error>> {
@@ -808,8 +840,9 @@ async fn host(flags: Flags) -> Result<(), Box<dyn Error>> {
         #[cfg(target_os = "windows")]
         monitor_index: parsed(&flags, "monitor-index", PRIMARY_MONITOR)?,
     };
+    let identity = host_identity(&flags)?;
     let settings = HostSettings {
-        token: required(&flags, "token")?,
+        token: identity.token,
         bitrate: parsed(&flags, "bitrate", DEFAULT_BITRATE)?,
         #[cfg(target_os = "linux")]
         audio: host_audio(&flags, &capture)?,
@@ -833,7 +866,7 @@ async fn host(flags: Flags) -> Result<(), Box<dyn Error>> {
             .expect("the token path is joined onto a state directory"),
     )?;
     let trace_path = flag(&flags, "trace").map(PathBuf::from);
-    let certificate = generate_certificate()?;
+    let certificate = identity.certificate;
     let address = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
     eprintln!(
         "g2g-desktop host: listening on UDP and TCP port {port}, certificate sha256 {}",
@@ -936,6 +969,34 @@ async fn client(flags: Flags) -> Result<(), Box<dyn Error>> {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn service(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
+    match args.next().as_deref() {
+        Some("install") => {
+            let host_arguments: Vec<String> = args.collect();
+            let flags = parse_flags(
+                host_arguments.iter().cloned(),
+                &[&HOST_FLAGS[..], &PLATFORM_HOST_FLAGS].concat(),
+            )?;
+            if let Some(flag) = ["token", "state-dir"]
+                .iter()
+                .find(|flag| flags.contains_key(**flag))
+            {
+                return Err(format!("the service supplies --{flag}").into());
+            }
+            let remotewt = match flag(&flags, "protocol").map(String::as_str) {
+                None | Some("remotewt") => true,
+                Some("gamestream") => false,
+                Some(other) => return Err(format!("unknown --protocol {other}").into()),
+            };
+            windowsservice::install(&host_arguments, remotewt)
+        }
+        Some("uninstall") => windowsservice::uninstall(),
+        Some("run") => windowsservice::run(),
+        _ => Err(format!("usage:\n{HOST_USAGE}{PLATFORM_HOST_USAGE}").into()),
+    }
+}
+
 #[cfg(feature = "gamestream")]
 fn submit_pin(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
     let (Some(pin), None) = (args.next(), args.next()) else {
@@ -962,6 +1023,8 @@ fn main() -> ExitCode {
             .and_then(|flags| runtime.block_on(local.run_until(client(flags)))),
         #[cfg(feature = "gamestream")]
         Some("pin") => submit_pin(args),
+        #[cfg(target_os = "windows")]
+        Some("service") => service(args),
         _ => Err(format!(
             "usage:\n{HOST_USAGE}{PLATFORM_HOST_USAGE}\n{GAMESTREAM_USAGE}\n{CLIENT_USAGE}"
         )

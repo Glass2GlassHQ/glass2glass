@@ -30,6 +30,7 @@ session = [
     "dep:vigem-client",
     "dep:gilrs",
     "dep:windows",
+    "dep:windows-service",
     "g2g-plugins/wgpu-present",
     "g2g-plugins/metadata",
     "tokio/time",
@@ -96,8 +97,15 @@ x11rb = { version = "0.14", optional = true, features = ["xtest"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 vigem-client = { version = "0.1.4", optional = true, features = ["unstable_xtarget_notification"] }
+windows-service = { version = "0.8.1", optional = true }
 windows = { version = "0.62", optional = true, features = [
     "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Threading",
     "Win32_UI_Controls",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Input_Pointer",

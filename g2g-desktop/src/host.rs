@@ -52,6 +52,12 @@ pub struct HostSettings {
     pub quality_vs_speed: Option<u32>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RemotewtIdentity {
+    pub certificate: SelfSignedCertificate,
+    pub token: String,
+}
+
 #[derive(Debug)]
 pub enum HostError {
     TokenLength(usize),

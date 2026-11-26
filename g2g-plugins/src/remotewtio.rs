@@ -1212,6 +1212,19 @@ pub fn generate_certificate() -> Result<SelfSignedCertificate, rcgen::Error> {
     })
 }
 
+pub fn certificate_from_pem(
+    certificate_pem: String,
+    private_key_pem: String,
+) -> Result<SelfSignedCertificate, G2gError> {
+    let (chain, _) = parse_certificate(certificate_pem.as_bytes(), private_key_pem.as_bytes())?;
+    let digest = crypto::sha256(&crypto::default_provider(), &chain[0]);
+    Ok(SelfSignedCertificate {
+        certificate_pem,
+        private_key_pem,
+        sha256_hex: hex_encode(digest.as_ref()),
+    })
+}
+
 /// Parse a comma-separated list of hex SHA-256 certificate digests (the browser
 /// WebTransport API's `serverCertificateHashes`, for a self-signed or short-lived
 /// certificate no system root covers). Empty means "use the system roots".
@@ -1236,6 +1249,18 @@ pub(crate) fn parse_cert_hashes(spec: &str) -> Result<Vec<Vec<u8>>, G2gError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_saved_certificate_loads_with_its_generated_hash() {
+        let generated = generate_certificate().unwrap();
+        let loaded = certificate_from_pem(
+            generated.certificate_pem.clone(),
+            generated.private_key_pem.clone(),
+        )
+        .unwrap();
+        assert_eq!(loaded.sha256_hex, generated.sha256_hex);
+        assert!(certificate_from_pem(String::new(), generated.private_key_pem).is_err());
+    }
 
     #[test]
     fn listener_location_binds_an_ip_literal_for_either_scheme() {

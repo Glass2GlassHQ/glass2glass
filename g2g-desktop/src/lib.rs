@@ -31,5 +31,7 @@ pub mod uinputgamepad;
 pub mod vigemgamepad;
 #[cfg(all(target_os = "linux", feature = "session"))]
 pub mod waylanddisplayinput;
+#[cfg(all(target_os = "windows", feature = "session"))]
+pub mod windowsservice;
 #[cfg(all(target_os = "linux", feature = "session"))]
 pub mod xtest;

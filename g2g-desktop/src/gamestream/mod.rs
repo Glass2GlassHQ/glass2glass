@@ -64,7 +64,6 @@ pub enum GamestreamError {
     Tls(rustls::Error),
     Certificate(rcgen::Error),
     Mdns(mdns_sd::Error),
-    NoConfigDirectory,
     BadHostCertificate,
     BadHostKey,
     KeyGeneration,
@@ -79,7 +78,6 @@ impl fmt::Display for GamestreamError {
             Self::Tls(e) => write!(f, "TLS: {e}"),
             Self::Certificate(e) => write!(f, "host certificate: {e}"),
             Self::Mdns(e) => write!(f, "mDNS: {e}"),
-            Self::NoConfigDirectory => f.write_str("no config directory for the host identity"),
             Self::BadHostCertificate => f.write_str("the stored host certificate does not parse"),
             Self::BadHostKey => f.write_str("the stored host key is not an RSA PKCS#8 key"),
             Self::KeyGeneration => f.write_str("could not generate the host key"),
@@ -543,12 +541,8 @@ fn log_failure(port: u16, result: io::Result<()>) {
     }
 }
 
-pub async fn serve(desktop: ServedDesktop) -> Result<(), GamestreamError> {
-    let directory = dirs::config_dir()
-        .ok_or(GamestreamError::NoConfigDirectory)?
-        .join("g2g-desktop")
-        .join("gamestream");
-    let host = Rc::new(Host::load(&directory, desktop)?);
+pub async fn serve(desktop: ServedDesktop, directory: &Path) -> Result<(), GamestreamError> {
+    let host = Rc::new(Host::load(directory, desktop)?);
     let acceptor = TlsAcceptor::from(tls::server_config(&host.identity)?);
     let http = TcpListener::bind((Ipv4Addr::UNSPECIFIED, HTTP_PORT)).await?;
     let https = TcpListener::bind((Ipv4Addr::UNSPECIFIED, HTTPS_PORT)).await?;
