@@ -14,7 +14,7 @@ use g2g_core::{
     PushOutcome,
 };
 
-#[cfg(feature = "std")]
+#[cfg(feature = "st2110")]
 pub(crate) fn received_rtp_sequences(socket: &std::net::UdpSocket) -> Vec<u16> {
     const SEQUENCE_END: usize = 4;
     let mut sequences = Vec::new();
@@ -29,7 +29,7 @@ pub(crate) fn received_rtp_sequences(socket: &std::net::UdpSocket) -> Vec<u16> {
     sequences
 }
 
-#[cfg(feature = "std")]
+#[cfg(feature = "st2110")]
 pub(crate) fn rtp_receiver() -> std::net::UdpSocket {
     const QUIET_PERIOD: core::time::Duration = core::time::Duration::from_millis(300);
     let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind a loopback receiver");
@@ -39,7 +39,7 @@ pub(crate) fn rtp_receiver() -> std::net::UdpSocket {
     socket
 }
 
-#[cfg(feature = "std")]
+#[cfg(feature = "st2110")]
 pub(crate) fn assert_consecutive(sequences: &[u16]) {
     assert!(sequences.len() >= 2, "packets arrived: {sequences:?}");
     for pair in sequences.windows(2) {

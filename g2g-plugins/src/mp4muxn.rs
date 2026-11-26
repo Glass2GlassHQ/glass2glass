@@ -37,6 +37,7 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
@@ -122,7 +123,7 @@ enum PadKind {
 }
 
 /// A track's `moov` init data, captured from its first access unit.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum TrackInit {
     Video {
         codec: VideoCodec,
@@ -236,6 +237,17 @@ pub struct Mp4MuxN {
     track_tags: Vec<TagList>,
     /// The table of contents, written as the `moov`'s `udta/chpl`.
     chapters: Vec<Chapter>,
+    received_frames: Vec<u64>,
+    written_frames: Vec<u64>,
+    awaiting_codec_config: Vec<bool>,
+    pending_sample_entries: Vec<VecDeque<SampleEntryChange>>,
+    later_sample_entries: Vec<Vec<TrackInit>>,
+}
+
+#[derive(Debug)]
+struct SampleEntryChange {
+    first_frame: u64,
+    init: TrackInit,
 }
 
 /// One buffered sample of the progressive (moov-at-end) layout: its `mdat`
@@ -252,6 +264,7 @@ struct ProgSample {
     /// two independently rounded tick values, so a constant reorder delay stays
     /// constant instead of dithering by a tick.
     composition_offset: u32,
+    sample_description_index: u32,
 }
 
 /// One buffered sample of an in-progress fragment (batched mode).
@@ -363,6 +376,11 @@ impl Mp4MuxN {
             tags: TagsProperty::default(),
             track_tags: alloc::vec![TagList::new(); inputs],
             chapters: Vec::new(),
+            received_frames: alloc::vec![0; inputs],
+            written_frames: alloc::vec![0; inputs],
+            awaiting_codec_config: alloc::vec![false; inputs],
+            pending_sample_entries: (0..inputs).map(|_| VecDeque::new()).collect(),
+            later_sample_entries: alloc::vec![Vec::new(); inputs],
         }
     }
 
@@ -632,11 +650,7 @@ impl Mp4MuxN {
         }
     }
 
-    /// Capture a pad's track init from its first access unit, if not already set.
-    fn capture_init(&mut self, input: usize, au: &[u8]) -> Result<(), G2gError> {
-        if self.inits[input].is_some() {
-            return Ok(());
-        }
+    fn parse_init(&self, input: usize, au: &[u8]) -> Result<Option<TrackInit>, G2gError> {
         match self.kinds[input] {
             Some(PadKind::Video { codec, .. }) => {
                 let geometry = self.geometry[input];
@@ -648,52 +662,52 @@ impl Mp4MuxN {
                         if let Ok(param_sets) = parameter_sets(codec, &nalus) {
                             let owned: Vec<Vec<u8>> =
                                 param_sets.iter().map(|s| s.to_vec()).collect();
-                            self.inits[input] = Some(TrackInit::Video {
+                            return Ok(Some(TrackInit::Video {
                                 codec,
                                 geometry,
                                 param_sets: owned,
-                            });
+                            }));
                         }
                     }
                     // AV1's `av1C` needs the sequence-header OBU; wait for the
                     // temporal unit that carries it (keyframes do).
                     VideoCodec::Av1 => {
                         if let Some((_, obu)) = crate::av1parse::seq_header_obu(au) {
-                            self.inits[input] = Some(TrackInit::Video {
+                            return Ok(Some(TrackInit::Video {
                                 codec,
                                 geometry,
                                 param_sets: alloc::vec![obu.to_vec()],
-                            });
+                            }));
                         }
                     }
                     // VP9's vpcC describes the keyframe's colour config, so wait for one
                     VideoCodec::Vp9 => {
                         if let Some(color) = crate::vp9parse::keyframe_color_config(au) {
-                            self.inits[input] = Some(TrackInit::Video {
+                            return Ok(Some(TrackInit::Video {
                                 codec,
                                 geometry,
                                 param_sets: alloc::vec![vp9_vpcc_record(color)?.to_vec()],
-                            });
+                            }));
                         }
                     }
                     // the `esds` carries the VOS, VO and VOL headers a keyframe leads with
                     VideoCodec::Mpeg4Part2 => {
                         if let Some(config) = Mpeg4VideoCodec::config_headers(au) {
-                            self.inits[input] = Some(TrackInit::Video {
+                            return Ok(Some(TrackInit::Video {
                                 codec,
                                 geometry,
                                 param_sets: alloc::vec![config],
-                            });
+                            }));
                         }
                     }
                     // VP8 carries no out-of-band parameter sets; the track is
                     // ready at the first frame (the vpcC uses caps geometry).
                     _ => {
-                        self.inits[input] = Some(TrackInit::Video {
+                        return Ok(Some(TrackInit::Video {
                             codec,
                             geometry,
                             param_sets: Vec::new(),
-                        });
+                        }));
                     }
                 }
             }
@@ -715,12 +729,12 @@ impl Mp4MuxN {
                             rate,
                             &config,
                         )?;
-                        self.inits[input] = Some(TrackInit::Audio {
+                        return Ok(Some(TrackInit::Audio {
                             format,
                             channels: params.channels,
                             rate: params.sample_rate,
                             config,
-                        });
+                        }));
                     }
                 }
                 // An Opus stream leads with its `OpusHead` when it came from a
@@ -732,7 +746,7 @@ impl Mp4MuxN {
                         Some(_) => au.to_vec(),
                         // An `OpusTags` ahead of the identification header is not
                         // the config: wait rather than fix an empty one.
-                        None if is_opus_config(au) => return Ok(()),
+                        None if is_opus_config(au) => return Ok(None),
                         None => Vec::new(),
                     };
                     let params = audio_track_params(
@@ -742,53 +756,73 @@ impl Mp4MuxN {
                         rate,
                         &config,
                     )?;
-                    self.inits[input] = Some(TrackInit::Audio {
+                    return Ok(Some(TrackInit::Audio {
                         format,
                         channels: params.channels,
                         rate: params.sample_rate,
                         config,
-                    });
+                    }));
                 }
                 // the `alac` atom leading the stream is the sample entry's child box verbatim
                 AudioFormat::Alac => {
                     if !is_audio_config_packet(format, au) {
-                        return Ok(());
+                        return Ok(None);
                     }
                     let alac = crate::alac::alac_config(au)?;
-                    self.inits[input] = Some(TrackInit::Audio {
+                    return Ok(Some(TrackInit::Audio {
                         format,
                         channels: alac.channels,
                         rate: alac.sample_rate,
                         config: au.to_vec(),
-                    });
+                    }));
                 }
                 // MP2 and MP3 frames describe themselves, and an AC-3 frame's header fills the `dac3`
                 _ => {
                     let config = match format {
                         AudioFormat::Ac3 => match crate::audioframe::ac3_specific_box(au) {
                             Some(record) => record,
-                            None => return Ok(()),
+                            None => return Ok(None),
                         },
                         _ => Vec::new(),
                     };
                     let params =
                         audio_track_params(short_type_name::<Self>(), format, channels, rate, &[])?;
-                    self.inits[input] = Some(TrackInit::Audio {
+                    return Ok(Some(TrackInit::Audio {
                         format,
                         channels: params.channels,
                         rate: params.sample_rate,
                         config,
-                    });
+                    }));
                 }
             },
             // A caption track needs no out-of-band config: it is ready at its
             // first sample.
             Some(PadKind::ClosedCaption(format)) => {
-                self.inits[input] = Some(TrackInit::ClosedCaption { format });
+                return Ok(Some(TrackInit::ClosedCaption { format }));
             }
             // A text or uncompressed track's init was fixed at configure, nothing rides the samples.
             Some(PadKind::Text) | Some(PadKind::Uncompressed { .. }) | None => {}
         }
+        Ok(None)
+    }
+
+    fn capture_init(&mut self, input: usize, au: &[u8]) -> Result<(), G2gError> {
+        let awaiting = self.awaiting_codec_config[input];
+        if self.inits[input].is_some() && !awaiting {
+            return Ok(());
+        }
+        let Some(init) = self.parse_init(input, au)? else {
+            return Ok(());
+        };
+        if !awaiting {
+            self.inits[input] = Some(init);
+            return Ok(());
+        }
+        self.awaiting_codec_config[input] = false;
+        self.pending_sample_entries[input].push_back(SampleEntryChange {
+            first_frame: self.received_frames[input],
+            init,
+        });
         Ok(())
     }
 
@@ -816,6 +850,23 @@ impl Mp4MuxN {
         }
     }
 
+    async fn change_sample_entry(
+        &mut self,
+        input: usize,
+        init: TrackInit,
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
+        if !self.fragmented {
+            self.later_sample_entries[input].push(init);
+            return Ok(());
+        }
+        // fragmented mp4 readers take every sample entry from the moov ahead of the fragments
+        self.flush_all(out).await?;
+        self.inits[input] = Some(init);
+        self.header_written = false;
+        Ok(())
+    }
+
     /// Buffer one access unit for its track. In per-AU mode (`fragment-duration`
     /// = 0) it is flushed immediately as its own `moof`+`mdat` fragment; in
     /// batched mode it accumulates into the track's pending fragment, which is
@@ -826,6 +877,17 @@ impl Mp4MuxN {
         frame: Frame,
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
+        let frame_number = self.written_frames[input];
+        self.written_frames[input] += 1;
+        let entry_starts_here = self.pending_sample_entries[input]
+            .front()
+            .is_some_and(|change| change.first_frame == frame_number);
+        if entry_starts_here {
+            let change = self.pending_sample_entries[input]
+                .pop_front()
+                .expect("checked non-empty");
+            self.change_sample_entry(input, change.init, out).await?;
+        }
         let au = frame
             .domain
             .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
@@ -937,6 +999,7 @@ impl Mp4MuxN {
                 is_sync,
                 dts: ns_to_ticks(dts_ns, timescale),
                 composition_offset: ns_to_ticks(pts_ns - dts_ns, timescale) as u32,
+                sample_description_index: self.later_sample_entries[input].len() as u32 + 1,
             });
             return Ok(());
         }
@@ -1151,8 +1214,9 @@ impl Mp4MuxN {
             let starts = self.media_starts();
             let tables: Vec<Option<TrackTables>> = (0..self.inputs)
                 .map(|input| {
-                    self.inits[input].as_ref().map(|init| {
-                        track_tables(input, init, &samples, &offsets, force_co64, starts[input])
+                    self.inits[input].as_ref().map(|init| TrackTables {
+                        later_sample_entries: self.later_sample_entries[input].clone(),
+                        ..track_tables(input, init, &samples, &offsets, force_co64, starts[input])
                     })
                 })
                 .collect();
@@ -1285,7 +1349,11 @@ impl MultiInputElement for Mp4MuxN {
         let kind = Self::pad_kind_for(absolute_caps)
             .ok_or_else(|| refused_input(short_type_name::<Self>(), absolute_caps))?;
         if let Some(geometry) = VideoGeometry::from_caps(uncv::original_caps(absolute_caps)) {
+            let resized = self.geometry[input] != geometry;
             self.geometry[input] = geometry;
+            if resized && matches!(kind, PadKind::Video { .. }) && self.inits[input].is_some() {
+                self.awaiting_codec_config[input] = true;
+            }
         }
         // A text track's `trak` needs nothing from the stream, so it is ready now:
         // the first cue can be many seconds in, and the `moov` (which waits on
@@ -1294,10 +1362,23 @@ impl MultiInputElement for Mp4MuxN {
             self.inits[input] = Some(TrackInit::Text);
         }
         if let PadKind::Uncompressed { .. } = kind {
-            self.inits[input] = Some(TrackInit::Uncompressed {
+            let init = TrackInit::Uncompressed {
                 geometry: self.geometry[input],
                 entry: uncv::sample_entry(absolute_caps).expect("pad_kind_for built this entry"),
-            });
+            };
+            let latest = self.pending_sample_entries[input]
+                .back()
+                .map(|change| &change.init)
+                .or(self.later_sample_entries[input].last())
+                .or(self.inits[input].as_ref());
+            if self.received_frames[input] == 0 {
+                self.inits[input] = Some(init);
+            } else if latest != Some(&init) {
+                self.pending_sample_entries[input].push_back(SampleEntryChange {
+                    first_frame: self.received_frames[input],
+                    init,
+                });
+            }
         }
         self.kinds[input] = Some(kind);
         Ok(ConfigureOutcome::Accepted)
@@ -1462,6 +1543,7 @@ impl MultiInputElement for Mp4MuxN {
                             frame.meta.get::<CropMeta>().map(|crop| crop.rectangle);
                     }
                     self.priming.note_frame(input, frame.timing.pts_ns);
+                    self.received_frames[input] += 1;
                     self.agg.push(input, frame);
                 }
                 PipelinePacket::Eos => {
@@ -1643,6 +1725,7 @@ pub(crate) struct TrackTables {
     /// `segment_duration`): the media duration less any codec delay trimmed by
     /// the edit.
     track_duration: u64,
+    later_sample_entries: Vec<TrackInit>,
 }
 
 /// Build one progressive track's sample tables from the muxer's buffered
@@ -1732,12 +1815,24 @@ fn track_tables(
         full_box(b"stss", 0, 0, &p)
     };
 
-    // stsc: one sample per chunk, so one entry covers the whole track.
+    // stsc: one sample per chunk, so a new entry starts only where the sample description changes.
+    let mut stsc_runs: Vec<(u32, u32)> = Vec::new();
+    for (chunk, &i) in idx.iter().enumerate() {
+        let description = samples[i].sample_description_index;
+        if stsc_runs
+            .last()
+            .is_none_or(|&(_, last)| last != description)
+        {
+            stsc_runs.push((chunk as u32 + 1, description));
+        }
+    }
     let mut stsc = Vec::new();
-    stsc.extend_from_slice(&1u32.to_be_bytes()); // entry count
-    stsc.extend_from_slice(&1u32.to_be_bytes()); // first chunk
-    stsc.extend_from_slice(&1u32.to_be_bytes()); // samples per chunk
-    stsc.extend_from_slice(&1u32.to_be_bytes()); // sample description index
+    stsc.extend_from_slice(&(stsc_runs.len() as u32).to_be_bytes());
+    for (first_chunk, description) in &stsc_runs {
+        stsc.extend_from_slice(&first_chunk.to_be_bytes());
+        stsc.extend_from_slice(&1u32.to_be_bytes()); // samples per chunk
+        stsc.extend_from_slice(&description.to_be_bytes());
+    }
 
     // stsz: explicit per-sample sizes (default_size 0).
     let mut stsz = Vec::new();
@@ -1775,6 +1870,7 @@ fn track_tables(
         .concat(),
         media_duration,
         track_duration: presentation * u64::from(MOVIE_TIMESCALE) / u64::from(timescale.max(1)),
+        later_sample_entries: Vec::new(),
     }
 }
 
@@ -2205,9 +2301,13 @@ fn trak(
     };
     let stbl = {
         let stsd = {
+            let later_sample_entries = tables.map_or(&[][..], |t| &t.later_sample_entries);
             let mut p = Vec::new();
-            p.extend_from_slice(&1u32.to_be_bytes());
+            p.extend_from_slice(&(later_sample_entries.len() as u32 + 1).to_be_bytes());
             p.extend_from_slice(&sample_entry);
+            for init in later_sample_entries {
+                p.extend_from_slice(&trak_media(init, clean_aperture).sample_entry);
+            }
             full_box(b"stsd", 0, 0, &p)
         };
         // A fragmented file's tables are empty (the `trun`s carry the samples);
@@ -2861,6 +2961,117 @@ mod tests {
             .await
             .unwrap();
         sink.bytes
+    }
+
+    async fn mux_h264_resized_mid_stream(fragmented: bool) -> Vec<u8> {
+        let pps = [0x68u8, 0xce, 0x3c, 0x80];
+        let idr = [0x65u8, 0x88, 0x84, 0x00];
+        let inter = || annexb(&[&[0x41u8, 0x9a, 0x00]]);
+        let mut mux = Mp4MuxN::new(1).with_fragmented(fragmented);
+        let mut sink = CaptureSink::default();
+        let mut pts_ns = 0;
+        for (caps, sps) in [
+            (h264_caps(320, 240), [0x67u8, 0x42, 0x00, 0x1e, 0x88]),
+            (h264_caps(640, 480), [0x67u8, 0x42, 0x00, 0x1f, 0x88]),
+        ] {
+            mux.configure_pipeline(0, &caps).unwrap();
+            mux.process(0, PipelinePacket::CapsChanged(caps), &mut sink)
+                .await
+                .unwrap();
+            for au in [annexb(&[&sps, &pps, &idr]), inter()] {
+                mux.process(0, frame(au, pts_ns), &mut sink).await.unwrap();
+                pts_ns += 33_333_333;
+            }
+        }
+        mux.process(0, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
+        sink.bytes
+    }
+
+    fn visual_sample_entry_sizes(moov: &[u8]) -> Vec<(u16, u16)> {
+        let stsd = crate::mp4box::find_path(moov, &[b"trak", b"mdia", b"minf", b"stbl", b"stsd"])
+            .expect("the track has an stsd");
+        let count = u32::from_be_bytes(stsd[4..8].try_into().unwrap());
+        let mut at = 8;
+        let mut sizes = Vec::new();
+        for _ in 0..count {
+            let entry_size = u32::from_be_bytes(stsd[at..at + 4].try_into().unwrap()) as usize;
+            let width = u16::from_be_bytes(stsd[at + 32..at + 34].try_into().unwrap());
+            let height = u16::from_be_bytes(stsd[at + 34..at + 36].try_into().unwrap());
+            sizes.push((width, height));
+            at += entry_size;
+        }
+        sizes
+    }
+
+    #[tokio::test]
+    async fn a_progressive_file_switches_sample_entry_where_the_resolution_changes() {
+        let file = mux_h264_resized_mid_stream(false).await;
+        let moov = crate::mp4box::find_box(&file, b"moov").unwrap();
+        assert_eq!(visual_sample_entry_sizes(moov), [(320, 240), (640, 480)]);
+        let stsc =
+            crate::mp4box::find_path(moov, &[b"trak", b"mdia", b"minf", b"stbl", b"stsc"]).unwrap();
+        let entries: Vec<[u32; 3]> = stsc[8..]
+            .as_chunks::<12>()
+            .0
+            .iter()
+            .map(|entry| {
+                core::array::from_fn(|field| {
+                    u32::from_be_bytes(entry[field * 4..field * 4 + 4].try_into().unwrap())
+                })
+            })
+            .collect();
+        // first chunk, samples per chunk, sample description index
+        assert_eq!(entries, [[1, 1, 1], [3, 1, 2]]);
+    }
+
+    #[tokio::test]
+    async fn a_fragmented_stream_starts_a_new_init_segment_where_the_resolution_changes() {
+        let file = mux_h264_resized_mid_stream(true).await;
+        assert_eq!(
+            top_level_boxes(&file),
+            [
+                *b"ftyp", *b"moov", *b"moof", *b"mdat", *b"moof", *b"mdat", *b"ftyp", *b"moov",
+                *b"moof", *b"mdat", *b"moof", *b"mdat"
+            ]
+        );
+        let moov_sizes: Vec<Vec<(u16, u16)>> = crate::mp4box::boxes(&file)
+            .filter(|(kind, _)| *kind == b"moov")
+            .map(|(_, moov)| visual_sample_entry_sizes(moov))
+            .collect();
+        assert_eq!(moov_sizes, [[(320, 240)], [(640, 480)]]);
+    }
+
+    #[tokio::test]
+    async fn a_progressive_raw_track_switches_sample_entry_where_the_resolution_changes() {
+        let raw_caps = |width| {
+            crate::uncompressedvideo::raw_video_caps(
+                g2g_core::RawVideoFormat::Gray8,
+                Dim::Fixed(width),
+                Dim::Fixed(8),
+                Rate::Any,
+                PixelAspect::Any,
+            )
+        };
+        let mut mux = Mp4MuxN::new(1).with_fragmented(false);
+        let mut sink = CaptureSink::default();
+        let mut pts_ns = 0;
+        for width in [16u32, 32] {
+            mux.configure_pipeline(0, &raw_caps(width)).unwrap();
+            for _ in 0..2 {
+                let picture = alloc::vec![0; width as usize * 8];
+                mux.process(0, frame(picture, pts_ns), &mut sink)
+                    .await
+                    .unwrap();
+                pts_ns += 33_333_333;
+            }
+        }
+        mux.process(0, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
+        let moov = crate::mp4box::find_box(&sink.bytes, b"moov").unwrap();
+        assert_eq!(visual_sample_entry_sizes(moov), [(16, 8), (32, 8)]);
     }
 
     #[cfg(feature = "std")]

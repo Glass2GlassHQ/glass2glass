@@ -889,9 +889,21 @@ With `metadata` enabled, `mp4mux` takes each video track's clean aperture from
 entry in both fragmented and progressive files. The box stores the aperture
 size in coded pixels and its signed centre offsets as half-pixel fractions.
 Apertures outside the coded picture and crops covering the whole picture are
-omitted. The sample entry applies to the entire track. Fragmented output waits
-for each raw video input's first frame or end of stream before writing the
-`moov`.
+omitted. Every sample entry of the track carries the first frame's aperture.
+Fragmented output waits for each raw video input's first frame or end of stream
+before writing the `moov`.
+
+### MP4 resolution changes
+
+When a video input's caps change size mid-stream, `mp4mux` starts a new sample
+entry at the first frame that carries the new codec config: the next keyframe's
+parameter sets for H.264 and H.265, its sequence header for AV1, and the next
+frame for raw video. A progressive file lists every entry in the track's `stsd`
+and switches the `stsc` sample description index at that frame, as gst's
+`qtmux` does. A fragmented stream flushes its open fragments and writes a new
+`ftyp` and `moov` before that frame, as gst's `fmp4mux` does. The `tkhd` keeps
+the first entry's size. ffmpeg 8.1 and gst 1.28 decode both layouts across a
+320x240 to 640x480 change. Audio rate and channel changes get no new entry.
 
 ## Chapters
 
