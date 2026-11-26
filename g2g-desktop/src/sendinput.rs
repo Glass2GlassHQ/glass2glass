@@ -10,7 +10,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use g2g_core::log::Target;
-use g2g_plugins::d3d11screencapturesrc::{with_physical_pixels, MonitorBounds};
+use g2g_plugins::d3d11screencapturesrc::{
+    switch_to_input_desktop, with_physical_pixels, MonitorBounds,
+};
 use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::Controls::{
     CreateSyntheticPointerDevice, DestroySyntheticPointerDevice, HSYNTHETICPOINTERDEVICE,
@@ -148,13 +150,22 @@ fn key(scancode: u16, down: bool) -> INPUT {
     keyboard(scancode & SCANCODE_MASK, flags, down)
 }
 
-fn send(inputs: &[INPUT]) -> Result<(), InjectError> {
+fn send_on_thread_desktop(inputs: &[INPUT]) -> Result<(), io::Error> {
     // SAFETY: the slice holds initialised INPUT structs and cbsize is their size.
     let sent = unsafe { SendInput(inputs, size_of::<INPUT>() as i32) };
     if sent as usize != inputs.len() {
-        return Err(InjectError::Refused(io::Error::last_os_error()));
+        return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+fn send(inputs: &[INPUT]) -> Result<(), InjectError> {
+    // SendInput fails while the input desktop (a UAC prompt, the lock screen) is not this thread's desktop
+    if send_on_thread_desktop(inputs).is_ok() {
+        return Ok(());
+    }
+    switch_to_input_desktop().map_err(|e| InjectError::Refused(io::Error::other(e)))?;
+    send_on_thread_desktop(inputs).map_err(InjectError::Refused)
 }
 
 const TOUCH_LOG_CATEGORY: &str = "g2g-desktop-sendinput";

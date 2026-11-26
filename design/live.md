@@ -178,8 +178,12 @@ sends it at once, at most one changed image per `1/fps`. After a full period
 with no change, the last image goes out again as a refcounted share. The
 channel to the `run` loop holds only the newest frame, so a frame the pipeline
 has not taken is replaced.
-`DXGI_ERROR_ACCESS_LOST` (a mode change, the secure desktop, a full-screen
-exclusive app) fails the source. `monitor_bounds` gives a monitor's position on
+After `DXGI_ERROR_ACCESS_LOST` (the secure desktop, a mode change, a full-screen
+exclusive app) the last image keeps going out, and every 100 ms the worker
+switches its thread to the input desktop and reopens the duplication. A
+process not running as SYSTEM gets it back only once the secure desktop is
+gone. A reopened duplication of a different size fails the source.
+`monitor_bounds` gives a monitor's position on
 the virtual desktop for input injection.
 
 When the next element accepts `MemoryDomain::D3D11Texture`, the device is

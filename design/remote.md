@@ -65,7 +65,8 @@ LAN, and a host off the LAN needs a forwarded UDP port.
    workspace member, uses `std`, and is not on the 1.86 MSRV line.
 7. A resolution change is a `CapsChanged` the encoders already rebuild on
    (`mfencode` drains and reopens). The host rebuilds the graph only when the
-   capture source itself dies, which DXGI does on a desktop switch.
+   capture source itself dies. `d3d11screencapturesrc` reopens its duplication
+   after a desktop switch instead of failing.
 8. Wayland capture is `pipewirevideosrc portal=true` with
    `portal-restore-token`, so a later start reuses the grant. Unattended X11
    gets its own source. The portal dialog is the wrong tool for a service.

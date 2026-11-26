@@ -1170,6 +1170,8 @@ windows = { version = "0.62", optional = true, features = [
     # wgpupresentsink's window syncs the clipboard
     "Win32_System_DataExchange",
     "Win32_System_Memory",
+    # d3d11screencapturesrc switches its capture thread to the input desktop
+    "Win32_System_StationsAndDesktops",
 ] }
 # wgpu-hal's D3D12 backend, for the raw device and queue the D3D12 decoder shares
 # with wgpu (d3d12-decode).

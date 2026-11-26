@@ -659,8 +659,9 @@ tracks the keys each `device` holds and releases them when that device is
 removed. A position is offset by the captured monitor's place on the virtual
 desktop and sent as an absolute move aimed at the pixel's centre. The injector
 fails to build when the capture size differs from the monitor's size. A
-`SendInput` call the OS refuses, such as while the secure desktop is up, is
-logged and the session goes on.
+failed `SendInput` call is sent again after the thread switches to the input
+desktop, which reaches the secure desktop when the host runs as SYSTEM. A call
+that still fails is logged and the session goes on.
 
 ## Distributed graphs
 

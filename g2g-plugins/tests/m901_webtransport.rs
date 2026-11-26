@@ -26,7 +26,9 @@
 #![cfg(feature = "webtransport")]
 
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
+#[cfg(unix)]
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use tokio::io::AsyncReadExt;

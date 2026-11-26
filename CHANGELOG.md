@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2603: Windows desktop capture survives a secure desktop switch, and input injection follows the input desktop.
 - M2602: Remote desktop gamepads: the client captures them and plays rumble, the host injects them.
 - M2601: The Windows remote desktop client grabs the keyboard.
 - M2600: X11 apps on the `--run` desktop can copy after a remote clipboard arrives.

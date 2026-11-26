@@ -2,10 +2,12 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
+use core::cell::Cell;
 use core::future::Future;
 use core::pin::Pin;
 
-use std::time::Duration;
+use std::thread_local;
+use std::time::{Duration, Instant};
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -15,7 +17,7 @@ use alloc::vec::Vec;
 use tokio::sync::watch;
 
 use windows::core::Interface;
-use windows::Win32::Foundation::{HMODULE, POINT};
+use windows::Win32::Foundation::{E_ACCESSDENIED, GENERIC_ALL, HMODULE, POINT};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D,
@@ -30,12 +32,17 @@ use windows::Win32::Graphics::Dxgi::Common::{
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput, IDXGIOutput1,
-    IDXGIOutputDuplication, DXGI_ERROR_NOT_CURRENTLY_AVAILABLE, DXGI_ERROR_NOT_FOUND,
-    DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_POINTER_SHAPE_INFO,
-    DXGI_OUTDUPL_POINTER_SHAPE_TYPE, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR,
-    DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME,
+    IDXGIOutputDuplication, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_NOT_CURRENTLY_AVAILABLE,
+    DXGI_ERROR_NOT_FOUND, DXGI_ERROR_SESSION_DISCONNECTED, DXGI_ERROR_WAIT_TIMEOUT,
+    DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_POINTER_SHAPE_INFO, DXGI_OUTDUPL_POINTER_SHAPE_TYPE,
+    DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR,
+    DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME,
 };
 use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTOPRIMARY};
+use windows::Win32::System::StationsAndDesktops::{
+    CloseDesktop, OpenInputDesktop, SetThreadDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS,
+    HDESK,
+};
 use windows::Win32::UI::HiDpi::{
     SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
@@ -48,7 +55,7 @@ use crate::texturepool::take_from_pool;
 use g2g_core::log::Target;
 use g2g_core::memory::{DomainSet, MemoryDomainKind, SystemSlice};
 use g2g_core::runtime::SourceLoop;
-use g2g_core::{g2g_error, g2g_warn};
+use g2g_core::{g2g_error, g2g_info, g2g_warn};
 use g2g_core::{
     AllocationParams, Caps, CapsConstraint, CapsSet, ClockSync, Colorimetry, ConfigureOutcome, Dim,
     ElementMetadata, G2gError, HardwareError, Interlace, LatencyReport, MemoryDomain, OutputSink,
@@ -88,6 +95,30 @@ pub fn with_physical_pixels<T>(run: impl FnOnce() -> T) -> T {
     // SAFETY: restores the awareness this thread had before the call above.
     unsafe { SetThreadDpiAwarenessContext(previous) };
     result
+}
+
+thread_local! {
+    static OPENED_INPUT_DESKTOP: Cell<Option<HDESK>> = const { Cell::new(None) };
+}
+
+pub fn switch_to_input_desktop() -> windows::core::Result<()> {
+    // SAFETY: the opened handle is closed on failure, or kept until the next switch replaces it.
+    unsafe {
+        let desktop = OpenInputDesktop(
+            DESKTOP_CONTROL_FLAGS(0),
+            false,
+            DESKTOP_ACCESS_FLAGS(GENERIC_ALL.0),
+        )?;
+        if let Err(e) = SetThreadDesktop(desktop) {
+            CloseDesktop(desktop)?;
+            return Err(e);
+        }
+        // CloseDesktop fails on the desktop this thread is assigned to
+        match OPENED_INPUT_DESKTOP.replace(Some(desktop)) {
+            Some(previous) => CloseDesktop(previous),
+            None => Ok(()),
+        }
+    }
 }
 
 fn desktop_outputs() -> Result<Vec<(IDXGIAdapter1, IDXGIOutput)>, G2gError> {
@@ -413,7 +444,9 @@ enum ImageCopy {
 
 #[derive(Debug)]
 struct Duplication {
-    duplication: IDXGIOutputDuplication,
+    duplication: Option<IDXGIOutputDuplication>,
+    output: IDXGIOutput1,
+    next_reopen: Instant,
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     copy: ImageCopy,
@@ -593,6 +626,7 @@ fn duplicate(
             let _ = multithread.SetMultithreadProtected(true);
         }
         let output: IDXGIOutput1 = selected.output.cast().map_err(mf_err)?;
+        switch_to_input_desktop().map_err(mf_err)?;
         let duplication = output.DuplicateOutput(&device).map_err(mf_err)?;
         let mode = duplication.GetDesc().ModeDesc;
         let bounds = selected.bounds;
@@ -621,7 +655,9 @@ fn duplicate(
             },
         };
         Ok(Duplication {
-            duplication,
+            duplication: Some(duplication),
+            output,
+            next_reopen: Instant::now(),
             device,
             context,
             copy,
@@ -694,7 +730,11 @@ impl Duplication {
 }
 
 impl Duplication {
-    fn update_pointer(&mut self, info: &DXGI_OUTDUPL_FRAME_INFO) {
+    fn update_pointer(
+        &mut self,
+        duplication: &IDXGIOutputDuplication,
+        info: &DXGI_OUTDUPL_FRAME_INFO,
+    ) {
         if info.LastMouseUpdateTime != 0 {
             self.pointer.visible = info.PointerPosition.Visible.as_bool();
         }
@@ -704,7 +744,7 @@ impl Duplication {
             let mut shape_info = DXGI_OUTDUPL_POINTER_SHAPE_INFO::default();
             // SAFETY: the buffer holds the size DXGI reported for this frame, and the out-params are valid locals.
             let read = unsafe {
-                self.duplication.GetFramePointerShape(
+                duplication.GetFramePointerShape(
                     info.PointerShapeBufferSize,
                     buffer.as_mut_ptr().cast(),
                     &mut required,
@@ -723,22 +763,81 @@ impl Duplication {
     }
 }
 
+const DESKTOP_UNAVAILABLE_ERRORS: [windows::core::HRESULT; 4] = [
+    // processes not running as SYSTEM get E_ACCESSDENIED while a UAC prompt or the lock screen is up
+    E_ACCESSDENIED,
+    DXGI_ERROR_ACCESS_LOST,
+    DXGI_ERROR_NOT_CURRENTLY_AVAILABLE,
+    DXGI_ERROR_SESSION_DISCONNECTED,
+];
+
+const REOPEN_INTERVAL: Duration = Duration::from_millis(100);
+
+impl Duplication {
+    fn reopen(&mut self) -> Result<(), G2gError> {
+        let now = Instant::now();
+        if now < self.next_reopen {
+            return Ok(());
+        }
+        self.next_reopen = now + REOPEN_INTERVAL;
+        // SAFETY: DuplicateOutput takes a device this thread created and returns an owned interface.
+        let reopened = switch_to_input_desktop()
+            .and_then(|()| unsafe { self.output.DuplicateOutput(&self.device) });
+        let duplication = match reopened {
+            Ok(duplication) => duplication,
+            Err(e) if DESKTOP_UNAVAILABLE_ERRORS.contains(&e.code()) => return Ok(()),
+            Err(e) => return Err(mf_err(e)),
+        };
+        // SAFETY: GetDesc fills a struct and takes no pointers from this code.
+        let mode = unsafe { duplication.GetDesc() }.ModeDesc;
+        if (mode.Width, mode.Height) != (self.width, self.height) {
+            g2g_error!(
+                Target::category(CATEGORY),
+                "desktop is {}x{} after a desktop switch but was {}x{}",
+                mode.Width,
+                mode.Height,
+                self.width,
+                self.height
+            );
+            return Err(G2gError::CapsMismatch);
+        }
+        g2g_info!(Target::category(CATEGORY), "desktop duplication reopened");
+        self.duplication = Some(duplication);
+        Ok(())
+    }
+
+    fn lose_access(&mut self) {
+        g2g_warn!(
+            Target::category(CATEGORY),
+            "desktop duplication lost access, repeating the last image until it reopens"
+        );
+        self.duplication = None;
+    }
+}
+
 impl DesktopGrabber for Duplication {
     fn next_image(&mut self) -> Result<Option<MemoryDomain>, G2gError> {
+        if self.duplication.is_none() {
+            self.reopen()?;
+        }
+        let Some(duplication) = self.duplication.clone() else {
+            return Ok(None);
+        };
         let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource = None;
         // SAFETY: both out-params are valid locals, and every acquired frame is released below.
         unsafe {
             // AcquireNextFrame holds the device lock while it waits, and the converter and encoder share the device
-            match self
-                .duplication
-                .AcquireNextFrame(0, &mut info, &mut resource)
-            {
+            match duplication.AcquireNextFrame(0, &mut info, &mut resource) {
                 Ok(()) => {}
                 Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(None),
+                Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => {
+                    self.lose_access();
+                    return Ok(None);
+                }
                 Err(e) => return Err(mf_err(e)),
             }
-            self.update_pointer(&info);
+            self.update_pointer(&duplication, &info);
             // DXGI reports a frame with only a pointer update with LastPresentTime 0
             let image = match resource {
                 Some(resource) if info.LastPresentTime != 0 => resource
@@ -748,8 +847,14 @@ impl DesktopGrabber for Duplication {
                     .map(Some),
                 _ => Ok(None),
             };
-            self.duplication.ReleaseFrame().map_err(mf_err)?;
-            image
+            match duplication.ReleaseFrame() {
+                Ok(()) => image,
+                Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => {
+                    self.lose_access();
+                    Ok(None)
+                }
+                Err(e) => Err(mf_err(e)),
+            }
         }
     }
 }
