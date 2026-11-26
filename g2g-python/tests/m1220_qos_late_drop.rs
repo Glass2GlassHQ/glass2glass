@@ -4,11 +4,10 @@
 
 #![cfg(feature = "analytics")]
 
-use g2g_core::memory::SystemSlice;
 use g2g_core::metrics::monotonic_ns;
 use g2g_core::{
-    AsyncElement, BlobMeta, Caps, Dim, Frame, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PipelinePacket, PropValue, PushOutcome, QosMessage, Rate, RawVideoFormat, Segment,
+    AsyncElement, BlobMeta, Caps, Dim, Frame, FrameTiming, G2gError, OutputSink, PipelinePacket,
+    PropValue, PushOutcome, QosMessage, Rate, RawVideoFormat, Segment,
 };
 use g2g_python::PyTransform;
 

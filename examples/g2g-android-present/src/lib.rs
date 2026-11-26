@@ -245,12 +245,16 @@ impl Presenter {
         }
         self.last_feed = Instant::now();
         let au = self.aus[self.au_idx].clone();
-        let frame = Frame::from_system_bytes(au, FrameTiming {
+        let frame = Frame::from_system_bytes(
+            au,
+            FrameTiming {
                 pts_ns: self.pts_ns,
                 dts_ns: self.pts_ns,
                 capture_ns: self.pts_ns,
                 ..FrameTiming::default()
-            }, 0);
+            },
+            0,
+        );
         self.pts_ns += FRAME_DURATION_NS;
         let mut relay = PresentRelay {
             sink: &mut self.sink,

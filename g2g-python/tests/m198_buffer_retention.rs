@@ -8,10 +8,9 @@
 //! buffer exports and fails the frame loud instead of risking a use-after-free.
 #![cfg(feature = "python")]
 
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, Dim, Frame, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PipelinePacket, PushOutcome, Rate, RawVideoFormat,
+    AsyncElement, Caps, Dim, Frame, FrameTiming, G2gError, OutputSink, PipelinePacket, PushOutcome,
+    Rate, RawVideoFormat,
 };
 use g2g_python::PyTransform;
 

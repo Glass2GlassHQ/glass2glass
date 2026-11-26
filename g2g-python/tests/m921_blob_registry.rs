@@ -12,10 +12,9 @@
 //! without the `analytics` feature.
 #![cfg(feature = "analytics")]
 
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     decode_blob, AsyncElement, BlobMeta, Caps, DecodedBlob, Dim, Frame, FrameTiming, G2gError,
-    MemoryDomain, OutputSink, PipelinePacket, PropValue, PushOutcome, Rate, RawVideoFormat,
+    OutputSink, PipelinePacket, PropValue, PushOutcome, Rate, RawVideoFormat,
 };
 use g2g_python::PyTransform;
 

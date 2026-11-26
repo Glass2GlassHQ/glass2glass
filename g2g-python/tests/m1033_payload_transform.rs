@@ -12,7 +12,6 @@
 //! payload the hosted element emitted (M1032) rather than the buffer it read.
 #![cfg(feature = "analytics")]
 
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::{
     AsyncElement, AudioFormat, BlobMeta, Caps, CapsConstraint, Dim, Frame, FrameTiming, G2gError,

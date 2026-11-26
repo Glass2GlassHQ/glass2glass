@@ -14,12 +14,10 @@
 //! `PyTransform`'s do (M321).
 #![cfg(feature = "analytics")]
 
-use g2g_core::memory::SystemSlice;
 use g2g_core::property::{PropError, PropKind};
 use g2g_core::{
-    AudioFormat, BlobMeta, Caps, Dim, Frame, FrameTiming, G2gError, Interlace, MemoryDomain,
-    MultiInputElement, OutputSink, PipelinePacket, PropValue, PushOutcome, Rate, RawVideoFormat,
-    TextFormat,
+    AudioFormat, BlobMeta, Caps, Dim, Frame, FrameTiming, G2gError, Interlace, MultiInputElement,
+    OutputSink, PipelinePacket, PropValue, PushOutcome, Rate, RawVideoFormat, TextFormat,
 };
 use g2g_python::PyAggregator;
 

@@ -15,9 +15,8 @@
 //! test therefore fails if the sink regresses to thread-affine.
 #![cfg(feature = "analytics")]
 
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AnalyticsMeta, AsyncElement, Caps, Dim, Frame, FrameTiming, G2gError, MemoryDomain, OutputSink,
+    AnalyticsMeta, AsyncElement, Caps, Dim, Frame, FrameTiming, G2gError, OutputSink,
     PipelinePacket, PushOutcome, Rate, RawVideoFormat,
 };
 use g2g_python::PyTransform;

@@ -20,7 +20,6 @@
 
 use g2g_core::element::PushOutcome;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AsyncElement, Caps, Dim, G2gError, OutputSink, Rate, RawVideoFormat, TensorDType, TensorLayout,
     TensorShape,
@@ -102,11 +101,15 @@ fn frame_f32(f: &Frame) -> Vec<f32> {
 async fn logits_from(mut element: BurnInference) -> Vec<f32> {
     element.configure_pipeline(&rgba_caps()).expect("configure");
 
-    let frame = Frame::from_system_bytes(RGBA_FRAME.to_vec(), FrameTiming {
+    let frame = Frame::from_system_bytes(
+        RGBA_FRAME.to_vec(),
+        FrameTiming {
             pts_ns: PTS_NS,
             dts_ns: PTS_NS,
             ..FrameTiming::default()
-        }, SEQUENCE);
+        },
+        SEQUENCE,
+    );
 
     let mut out = Collect::default();
     element

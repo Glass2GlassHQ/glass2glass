@@ -29,11 +29,9 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AnalyticsMeta, AnalyticsNode, AsyncElement, Caps, Dim, Frame, FrameTiming, G2gError,
-    MemoryDomain, OutputSink, PipelinePacket, PropValue, PushOutcome, Rate, RawVideoFormat,
-    RelationKind,
+    OutputSink, PipelinePacket, PropValue, PushOutcome, Rate, RawVideoFormat, RelationKind,
 };
 use g2g_python::PyTransform;
 

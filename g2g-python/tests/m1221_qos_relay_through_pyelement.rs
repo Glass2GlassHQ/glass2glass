@@ -8,12 +8,11 @@ use core::future::Future;
 use core::pin::Pin;
 
 use g2g_core::element::DynAsyncElement;
-use g2g_core::memory::SystemSlice;
 use g2g_core::metrics::monotonic_ns;
 use g2g_core::runtime::{run_linear_chain, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, Frame, FrameTiming, G2gError,
-    MemoryDomain, OutputSink, PipelineClock, PipelinePacket, QosMessage, Rate, RawVideoFormat,
+    OutputSink, PipelineClock, PipelinePacket, QosMessage, Rate, RawVideoFormat,
 };
 use g2g_python::PyTransform;
 

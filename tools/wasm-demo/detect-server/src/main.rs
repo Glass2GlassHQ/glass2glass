@@ -32,7 +32,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use g2g_core::element::{AsyncElement, BoxFuture, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
+use g2g_core::memory::MemoryDomain;
 use g2g_core::wire::{decode_packet, encode_packet};
 use g2g_core::{AnalyticsMeta, Caps, Dim, G2gError, TensorDType, TensorLayout, TensorShape};
 use g2g_ml::detect::DetectionPostprocess;

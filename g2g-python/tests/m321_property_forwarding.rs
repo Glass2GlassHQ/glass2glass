@@ -13,11 +13,10 @@
 //! away without the `analytics` feature.
 #![cfg(feature = "analytics")]
 
-use g2g_core::memory::SystemSlice;
 use g2g_core::property::{PropError, PropKind};
 use g2g_core::{
-    AnalyticsMeta, AsyncElement, BlobMeta, Caps, Dim, Frame, FrameTiming, G2gError, MemoryDomain,
-    OutputSink, PipelinePacket, PropValue, PushOutcome, Rate, RawVideoFormat,
+    AnalyticsMeta, AsyncElement, BlobMeta, Caps, Dim, Frame, FrameTiming, G2gError, OutputSink,
+    PipelinePacket, PropValue, PushOutcome, Rate, RawVideoFormat,
 };
 use g2g_python::PyTransform;
 

@@ -8,11 +8,10 @@
 
 use std::path::{Path, PathBuf};
 
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::{
-    AsyncElement, Caps, Frame, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
-    PropValue, PushOutcome, TextFormat,
+    AsyncElement, Caps, Frame, FrameTiming, G2gError, OutputSink, PipelinePacket, PropValue,
+    PushOutcome, TextFormat,
 };
 use g2g_plugins::clock::WallClock;
 use g2g_python::PySink;

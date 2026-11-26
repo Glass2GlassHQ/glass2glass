@@ -13,7 +13,6 @@
 //! output through `meta.emit`.
 #![cfg(feature = "analytics")]
 
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AudioFormat, BlobMeta, Caps, Frame, FrameTiming, G2gError, MemoryDomain, MultiInputElement,
     OutputSink, PipelinePacket, PropValue, PushOutcome,

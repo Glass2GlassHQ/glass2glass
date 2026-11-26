@@ -9,7 +9,6 @@
 ))]
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, ChannelLayout, G2gError, OutputSink, PushOutcome,
     ANY_CHANNELS, ANY_SAMPLE_RATE,

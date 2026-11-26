@@ -137,7 +137,7 @@ use g2g_core::log::Target;
 use g2g_core::runtime::{bounded, Receiver};
 use g2g_core::{
     g2g_warn, Caps, Colorimetry, Dim, Frame, FrameTiming, G2gError, HardwareError, MemoryDomain,
-    PropValue, RawVideoFormat, SystemSlice,
+    PropValue, RawVideoFormat,
 };
 
 use crate::cuda_plane::{nv12_planes, produced_cuda_buffer, CudaPlane};

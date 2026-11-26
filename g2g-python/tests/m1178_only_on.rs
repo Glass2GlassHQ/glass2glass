@@ -10,10 +10,9 @@
 //! on it. Needs libpython + the `metadata`-enabled core.
 #![cfg(feature = "analytics")]
 
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, BlobMeta, Caps, Dim, Frame, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PipelinePacket, PropValue, PushOutcome, Rate, RawVideoFormat,
+    AsyncElement, BlobMeta, Caps, Dim, Frame, FrameTiming, G2gError, OutputSink, PipelinePacket,
+    PropValue, PushOutcome, Rate, RawVideoFormat,
 };
 use g2g_python::PyTransform;
 
