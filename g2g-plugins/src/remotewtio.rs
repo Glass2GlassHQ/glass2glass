@@ -687,7 +687,14 @@ fn accept_data_channel(session: &Session, channel: SharedDataChannel) -> AbortOn
 async fn carry_messages(mut tx: SendStream, mut rx: RecvStream, channel: SharedDataChannel) {
     // tokio releases the lock when a replaced connection's task is aborted
     let mut ends = channel.lock().await;
-    let DataChannelTransportEnds { outgoing, incoming } = &mut *ends;
+    if let Some(greeting) = ends.greeting_for_new_connection() {
+        if send_frame_bytes(&mut tx, greeting).await.is_err() {
+            return;
+        }
+    }
+    let DataChannelTransportEnds {
+        outgoing, incoming, ..
+    } = &mut *ends;
     let mut reader = FramedRead::default();
     let mut sending = true;
     let mut receiving = true;

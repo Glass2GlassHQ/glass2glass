@@ -356,7 +356,8 @@ HOST-FLAGS` on `winsta0\default` in the active console session, with a copy of
 its own SYSTEM token. Only a SYSTEM process captures and injects on the secure
 desktop (UAC prompts, the lock screen, the logon screen). The service starts
 the host again 5 s after it exits, and at once in the new session when the
-console session changes. Either restart drops the connected client.
+console session changes. The client dials again and keeps its window through
+either restart.
 
 `%ProgramData%\g2g-desktop` grants access to SYSTEM and Administrators only.
 It holds `service.log`, the host's output in `host.log`, the remotewt

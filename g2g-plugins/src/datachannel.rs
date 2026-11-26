@@ -29,6 +29,17 @@ mod ends {
     pub(crate) struct DataChannelTransportEnds {
         pub(crate) outgoing: mpsc::UnboundedReceiver<Vec<u8>>,
         pub(crate) incoming: mpsc::UnboundedSender<Vec<u8>>,
+        #[cfg(feature = "webtransport")]
+        pub(crate) greeting: Option<Vec<u8>>,
+    }
+
+    #[cfg(feature = "webtransport")]
+    impl DataChannelTransportEnds {
+        pub(crate) fn greeting_for_new_connection(&mut self) -> Option<&[u8]> {
+            let greeting = self.greeting.as_deref()?;
+            while self.outgoing.try_recv().is_ok() {}
+            Some(greeting)
+        }
     }
 
     #[cfg(any(feature = "webrtc", feature = "webtransport"))]
@@ -40,6 +51,8 @@ mod ends {
             DataChannelTransportEnds {
                 outgoing: outgoing_receiver,
                 incoming: incoming_sender,
+                #[cfg(feature = "webtransport")]
+                greeting: None,
             },
         )
     }

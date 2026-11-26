@@ -612,8 +612,11 @@ logged and dropped.
 ### Client session
 
 `client::run_client` dials the host's `quic://` location with a caller-mode
-`remotewtsrc`, pinned to the host certificate's SHA-256, and sends the token as
-the first data channel message. Video passes through `h264parse` and
+`remotewtsrc` in keep-listening mode, pinned to the host certificate's
+SHA-256, and opens its data channel with the token as the greeting, so each
+connection carries the token first. When the host goes away the window keeps
+the last frame while the source dials again, and closing the window ends the
+client even with no frame arriving. Video passes through `h264parse` and
 `ffmpegdec` into a `wgpusink` window that presents each frame as it arrives
 (`sync=false`, mailbox). `remotewtsrc` reports a live source, so `ffmpegdec`'s
 auto choice is slice threading, which holds no pictures. With `inputs` on, the window's input goes through an
@@ -957,8 +960,12 @@ attempt budget.
 `keep-listening` property. A client that drops without a clean `Eos` is not the
 stream's end: the source keeps its listener open and accepts a replacement
 client, which re-sends its leading caps to be forwarded downstream so it
-re-negotiates if changed. Only an explicit `Eos` or a frame limit ends a
-keep-listening source. Both directions are validated over loopback, the sink
+re-negotiates if changed. A failed connection counts as a drop, and a failed
+replacement accept is retried every second, which in caller mode is a redial
+of a sender that is restarting. Only an explicit `Eos` or a frame limit ends a
+keep-listening source. `RemoteWtSrc::open_data_channel_with_greeting` sends its
+greeting first on each connection and drops the messages queued while no
+connection was up. Both directions are validated over loopback, the sink
 retrying until a late-binding server appears and the source stitching a stream
 across a sender that drops and is replaced.
 

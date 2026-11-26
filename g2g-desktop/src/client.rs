@@ -316,13 +316,11 @@ pub async fn run_client(
             .with_fallback_location(websocket),
         ClientTransport::Quic => RemoteWtSrc::new(unbound).with_caller(quic, hash),
         ClientTransport::WebSocket => RemoteWtSrc::new(unbound).with_caller(websocket, hash),
-    };
-    let data_channel = source.open_data_channel();
+    }
+    .with_reconnect();
+    // the host reads the token as the first data channel message of each connection
+    let data_channel = source.open_data_channel_with_greeting(settings.token.as_bytes().to_vec());
     let audio_track = settings.audio.then(|| source.open_track());
-    data_channel
-        .outgoing
-        .send(settings.token.as_bytes().to_vec())
-        .expect("the source holds the data channel until it runs");
     let window = WgpuPresentSink::new()
         .with_title(WINDOW_TITLE)
         .with_sync(false)
@@ -330,21 +328,25 @@ pub async fn run_client(
         .with_latency_histogram(Arc::clone(glass_to_glass));
     let (cursor_shapes, mut sink) =
         show_host_cursor(grab_keyboard(window, settings), settings.inputs);
-    let window_input = settings.inputs.then(|| sink.input_events());
+    let mut window_input = sink.input_events();
     let (host_clipboard, local_copies) = sync_clipboard(&mut sink, settings.inputs)
         .map(|sync| (sync.host_texts, sync.local_copies))
         .unzip();
     let graph = client_graph(source, sink)?;
 
     let clipboard_outgoing = data_channel.outgoing.clone();
-    let (gamepad_states, gamepad_rumbles) = window_input
-        .is_some()
+    let (gamepad_states, gamepad_rumbles) = settings
+        .inputs
         .then(capture_gamepads)
         .map(|capture| (capture.states, capture.rumbles))
         .unzip();
-    let forward = async {
-        if let (Some(window_input), Some(gamepad_states)) = (window_input, gamepad_states) {
-            forward_window_input(window_input, gamepad_states, data_channel.outgoing).await;
+    // the window's input channel closes with the window
+    let window_open = async {
+        match gamepad_states {
+            Some(gamepad_states) => {
+                forward_window_input(window_input, gamepad_states, data_channel.outgoing).await;
+            }
+            None => while window_input.recv().await.is_some() {},
         }
     };
     let copies = async {
@@ -363,7 +365,13 @@ pub async fn run_client(
     if let Some(trace) = trace {
         run = run.with_visit_recorder(trace);
     }
-    let (run, (), (), (), ()) =
-        tokio::join!(run.run(), forward, copies, follow, audio::play(audio_track));
-    run.map_err(ClientError::Session)
+    let session = async {
+        let (run, (), (), ()) = tokio::join!(run.run(), copies, follow, audio::play(audio_track));
+        run
+    };
+    // the runner sees a closed window only through a frame, and none arrive while the source redials
+    tokio::select! {
+        run = session => run.map_err(ClientError::Session),
+        () = window_open => Err(ClientError::Session(G2gError::WindowClosed)),
+    }
 }

@@ -233,6 +233,15 @@ async fn write_socket<S>(
         Some(channel) => Some(channel.lock().await),
         None => None,
     };
+    let greeting = ends
+        .as_mut()
+        .and_then(|ends| ends.greeting_for_new_connection())
+        .map(|greeting| tagged(MESSAGE_TAG, greeting));
+    if let Some(greeting) = greeting {
+        if socket.send(greeting).await.is_err() {
+            return;
+        }
+    }
     let mut messages_open = ends.is_some();
     let mut track = match &track {
         Some(track) => Some(track.lock().await),

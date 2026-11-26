@@ -40,8 +40,6 @@ The plan is [remote.md](remote.md).
   host through `vtencode`.
 - Pin `g2g-wayland-display` back to upstream smithay once it flushes in
   `X11Wm::new_selection`, and drop the `boxerab/smithay` fork.
-- Reconnect the remotewt client when the host restarts, such as when the
-  Windows service moves it to a new console session.
 - Register the Windows service from the MSI.
 - Rotate the Windows service host's remotewt certificate before it expires
   once a browser client exists, since browsers reject an expired pinned

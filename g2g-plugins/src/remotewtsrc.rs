@@ -98,12 +98,21 @@ impl RemoteWtSrc {
     }
 
     pub fn open_data_channel(&mut self) -> DataChannelEnds {
+        self.open_channel(None)
+    }
+
+    pub fn open_data_channel_with_greeting(&mut self, greeting: Vec<u8>) -> DataChannelEnds {
+        self.open_channel(Some(greeting))
+    }
+
+    fn open_channel(&mut self, greeting: Option<Vec<u8>>) -> DataChannelEnds {
         let transport = self.transport_mut();
         assert!(
             !transport.listened,
             "the data channel opens before the source listens"
         );
-        let (application, transport_ends) = data_channel();
+        let (application, mut transport_ends) = data_channel();
+        transport_ends.greeting = greeting;
         transport.data_channel = Some(Arc::new(Mutex::new(transport_ends)));
         application
     }

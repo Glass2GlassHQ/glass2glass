@@ -24,8 +24,11 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
+use std::time::Duration;
 
 use g2g_core::clock::ClockSync;
+use g2g_core::g2g_warn;
+use g2g_core::log::Target;
 use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
@@ -207,6 +210,24 @@ impl<T: PacketTransport> RemoteSource<T> {
         self
     }
 
+    async fn accept_replacement(&mut self) -> Result<(T::Conn, Caps), G2gError> {
+        // a caller-mode transport dials on accept, and a restarting sender is not listening yet
+        const REPLACEMENT_RETRY_DELAY: Duration = Duration::from_secs(1);
+        let listener = self.listener.as_mut().ok_or(G2gError::NotConfigured)?;
+        loop {
+            match T::accept(listener).await {
+                Ok(accepted) => return Ok(accepted),
+                Err(e) => {
+                    g2g_warn!(
+                        Target::category(T::NAME),
+                        "no replacement sender yet: {e:?}"
+                    );
+                    tokio::time::sleep(REPLACEMENT_RETRY_DELAY).await;
+                }
+            }
+        }
+    }
+
     #[cfg(feature = "webtransport")]
     pub(crate) fn transport_mut(&mut self) -> &mut T {
         &mut self.transport
@@ -353,7 +374,17 @@ impl<T: PacketTransport> SourceLoop for RemoteSource<T> {
             let mut timeline = SenderTimelineShift::new(self.clock_sync.clone());
             loop {
                 let conn = self.conn.as_mut().ok_or(G2gError::NotConfigured)?;
-                let received = T::recv(conn).await?;
+                let received = match T::recv(conn).await {
+                    Ok(received) => received,
+                    Err(e) if self.keep_listening => {
+                        g2g_warn!(
+                            Target::category(T::NAME),
+                            "the sender's connection failed: {e:?}"
+                        );
+                        None
+                    }
+                    Err(e) => return Err(e),
+                };
                 out.latency_changed(T::latency(conn));
                 let pkt = match received {
                     Some(p) => p,
@@ -363,10 +394,7 @@ impl<T: PacketTransport> SourceLoop for RemoteSource<T> {
                             // Wait for a replacement client and continue. It
                             // re-sends its leading caps, which we forward so a
                             // downstream re-negotiates if they changed.
-                            let listener = self.listener.as_mut().ok_or(G2gError::NotConfigured)?;
-                            let (conn, caps) = T::accept(listener)
-                                .await
-                                .map_err(G2gError::during_connect)?;
+                            let (conn, caps) = self.accept_replacement().await?;
                             self.conn = Some(conn);
                             out.push(PipelinePacket::CapsChanged(caps)).await?;
                             continue;
