@@ -28,7 +28,6 @@ use android_binder::start_binder_threadpool;
 
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{Caps, G2gError, TensorDType, TensorLayout, TensorShape};
 use g2g_ml::ortinfer::OrtInference;
@@ -100,12 +99,7 @@ impl OutputSink for OneFrame {
 
 fn f32_frame(values: &[f32]) -> Frame {
     let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: 0,
-        meta: Default::default(),
-    }
+    Frame::from_system_bytes(bytes, FrameTiming::default(), 0)
 }
 
 fn tensor_caps(dtype: TensorDType) -> Caps {
@@ -209,12 +203,11 @@ async fn live_camera_quantize_to_edge_tpu() {
         .expect("inference configure");
     let mut inf_out = OneFrame::default();
     inf.process(
-        PipelinePacket::DataFrame(Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(u8_tensor.into_boxed_slice())),
-            timing: FrameTiming::default(),
-            sequence: 0,
-            meta: Default::default(),
-        }),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            u8_tensor,
+            FrameTiming::default(),
+            0,
+        )),
         &mut inf_out,
     )
     .await

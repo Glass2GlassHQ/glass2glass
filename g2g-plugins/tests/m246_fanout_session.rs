@@ -38,10 +38,8 @@ fn caps() -> Caps {
 }
 
 fn frame(seq: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(g2g_core::frame::Frame::new(
-        g2g_core::MemoryDomain::System(g2g_core::memory::SystemSlice::from_boxed(
-            std::vec![0u8; 4].into_boxed_slice(),
-        )),
+    PipelinePacket::DataFrame(g2g_core::frame::Frame::from_system_bytes(
+        std::vec![0u8; 4],
         g2g_core::FrameTiming {
             pts_ns: seq,
             ..Default::default()

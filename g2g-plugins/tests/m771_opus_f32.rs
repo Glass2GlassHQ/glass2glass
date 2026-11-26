@@ -11,10 +11,8 @@
 #![cfg(feature = "opus")]
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PipelinePacket, PushOutcome,
+    AsyncElement, AudioFormat, Caps, FrameTiming, G2gError, OutputSink, PipelinePacket, PushOutcome,
 };
 use g2g_plugins::opusdec::OpusDec;
 use g2g_plugins::opusenc::OpusEnc;
@@ -48,8 +46,8 @@ impl OutputSink for CaptureSink {
 }
 
 fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        data,
         FrameTiming {
             pts_ns,
             ..FrameTiming::default()

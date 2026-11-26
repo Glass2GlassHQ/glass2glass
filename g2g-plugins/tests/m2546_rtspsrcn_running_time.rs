@@ -12,9 +12,8 @@ use std::sync::Arc;
 
 use g2g_core::clock::ClockSync;
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, Dim, FrameTiming, G2gError, MemoryDomain, MonotonicClock, MultiOutputSink,
+    AsyncElement, Caps, Dim, FrameTiming, G2gError, MonotonicClock, MultiOutputSink,
     MultiOutputSource, PipelineClock, PipelinePacket, PushOutcome, Rate, VideoCodec,
 };
 use g2g_plugins::rtspserversink::RtspServerSink;
@@ -94,17 +93,14 @@ async fn the_first_picture_is_stamped_with_the_running_time_it_arrived_at() {
                 break;
             }
             let sequence = index as u64;
-            let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(
-                    access_unit.clone().into_boxed_slice(),
-                )),
-                timing: FrameTiming {
+            let frame = Frame::from_system_bytes(
+                access_unit.clone(),
+                FrameTiming {
                     pts_ns: sequence * FRAME_PERIOD.as_nanos() as u64,
                     ..FrameTiming::default()
                 },
                 sequence,
-                meta: Default::default(),
-            };
+            );
             if server
                 .process(PipelinePacket::DataFrame(frame), &mut out)
                 .await

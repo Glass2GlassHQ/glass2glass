@@ -53,8 +53,8 @@ fn payloads(packets: &[PipelinePacket]) -> Vec<Vec<u8>> {
 }
 
 fn frame(bytes: Vec<u8>, sequence: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        bytes,
         FrameTiming::default(),
         sequence,
     ))

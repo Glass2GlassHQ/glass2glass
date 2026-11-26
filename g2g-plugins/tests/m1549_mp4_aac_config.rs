@@ -15,7 +15,6 @@ mod collect_sink;
 mod mp4_demux;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{AsyncElement, AudioFormat, ByteStreamEncoding, Caps, PropValue};
 use g2g_plugins::aacparse::AacParse;
 use g2g_plugins::mp4demux::Mp4Demux;
@@ -25,11 +24,7 @@ use collect_sink::CollectSink;
 use mp4_demux::demux_first_port;
 
 fn data_frame(data: Vec<u8>) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    ))
+    PipelinePacket::DataFrame(Frame::from_system_bytes(data, FrameTiming::default(), 0))
 }
 
 fn frame_bytes(packets: &[PipelinePacket]) -> Vec<Vec<u8>> {

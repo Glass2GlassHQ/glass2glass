@@ -28,12 +28,11 @@ use std::io::{Read, Write};
 use std::os::fd::{FromRawFd, RawFd};
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    ElementMetadata, FrameTiming, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::filesink::io_err;
@@ -175,8 +174,8 @@ impl SourceLoop for FdSrc {
                 // Source-side wall-clock stamp so a sink can record
                 // glass-to-glass latency, as filesrc does.
                 let arrival_ns = g2g_core::metrics::monotonic_ns();
-                let frame = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(buf.into_boxed_slice())),
+                let frame = Frame::from_system_bytes(
+                    buf,
                     FrameTiming {
                         arrival_ns,
                         ..FrameTiming::default()

@@ -30,11 +30,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, TextFormat,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, TextFormat,
 };
 
 use crate::vmti::VmtiLocalSet;
@@ -1107,13 +1106,8 @@ impl AsyncElement for KlvDecode {
                             continue;
                         };
                         let line = ls.to_line();
-                        let text = Frame::new(
-                            MemoryDomain::System(SystemSlice::from_boxed(
-                                line.into_bytes().into_boxed_slice(),
-                            )),
-                            frame.timing,
-                            self.emitted,
-                        );
+                        let text =
+                            Frame::from_system_bytes(line.into_bytes(), frame.timing, self.emitted);
                         self.emitted += 1;
                         out.push(PipelinePacket::DataFrame(text)).await?;
                     }

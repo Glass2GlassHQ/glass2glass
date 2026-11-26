@@ -23,13 +23,11 @@ use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
 
 use g2g_core::frame::Frame;
 use g2g_core::log::Target;
-use g2g_core::memory::SystemSlice;
 use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError,
-    MemoryDomain, NetworkFailure, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec,
+    NetworkFailure, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::bytestream::mpegts_caps;
@@ -145,15 +143,14 @@ impl SrtSrc {
 }
 
 fn ts_frame(bytes: alloc::vec::Vec<u8>, sequence: u64) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        bytes,
+        FrameTiming {
             arrival_ns: g2g_core::metrics::monotonic_ns(),
             ..FrameTiming::default()
         },
         sequence,
-        meta: Default::default(),
-    }
+    )
 }
 
 impl SourceLoop for SrtSrc {

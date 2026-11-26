@@ -21,10 +21,9 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::log::short_type_name;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, BusHandle, BusMessage, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata,
-    G2gError, MemoryDomain, OutputSink, PipelinePacket, TagList,
+    G2gError, OutputSink, PipelinePacket, TagList,
 };
 
 use crate::apev2mux::{apev2_start_len, parse_apev2_tail, APE_FOOTER_LEN, APE_PREAMBLE, TAIL_HELD};
@@ -69,11 +68,7 @@ impl ApeDemux {
         if data.is_empty() {
             return Ok(());
         }
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-            Default::default(),
-            self.sequence,
-        );
+        let frame = Frame::from_system_bytes(data, Default::default(), self.sequence);
         self.sequence += 1;
         out.push(PipelinePacket::DataFrame(frame)).await?;
         Ok(())

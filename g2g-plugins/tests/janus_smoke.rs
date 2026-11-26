@@ -182,11 +182,7 @@ async fn a_codec_the_room_refuses_fails_the_first_frame() {
         .with_room(room_id)
         .with_display_name(DISPLAY_NAME);
     sink.configure_pipeline(&fixed_caps(codec)).unwrap();
-    let frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(units[0].clone().into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    );
+    let frame = Frame::from_system_bytes(units[0].clone(), FrameTiming::default(), 0);
     let result = sink
         .process(PipelinePacket::DataFrame(frame), &mut Discard)
         .await;
@@ -202,11 +198,7 @@ async fn publish(sink: &mut JanusVrSink, units: &[Vec<u8>]) -> WebRtcStats {
             pts_ns: sequence as u64 * interval.as_nanos() as u64,
             ..FrameTiming::default()
         };
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(unit.clone().into_boxed_slice())),
-            timing,
-            sequence as u64,
-        );
+        let frame = Frame::from_system_bytes(unit.clone(), timing, sequence as u64);
         sink.process(PipelinePacket::DataFrame(frame), &mut Discard)
             .await
             .expect("publish frame");

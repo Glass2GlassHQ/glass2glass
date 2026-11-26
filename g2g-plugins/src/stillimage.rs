@@ -17,10 +17,8 @@
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket, Rate,
-    RawVideoFormat,
+    Caps, Dim, FrameTiming, G2gError, OutputSink, PipelinePacket, Rate, RawVideoFormat,
 };
 
 /// Widest / tallest still image decoded. Above 8K in both axes, so no real
@@ -122,11 +120,7 @@ impl StillImageOutput {
             .await?;
             self.out_dims = Some((format, width, height));
         }
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(pixels.into_boxed_slice())),
-            timing,
-            self.sequence,
-        );
+        let frame = Frame::from_system_bytes(pixels, timing, self.sequence);
         self.sequence += 1;
         out.push(PipelinePacket::DataFrame(frame)).await?;
         Ok(())

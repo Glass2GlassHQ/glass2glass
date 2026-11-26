@@ -191,11 +191,7 @@ async fn malformed_preskip_and_granule_are_clamped() {
         })
         .unwrap();
     let mut sink = CaptureSink::default();
-    let frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(stream.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    );
+    let frame = Frame::from_system_bytes(stream, FrameTiming::default(), 0);
     // Must not panic on the underflowing granule / oversized pre-skip.
     demux
         .process(PipelinePacket::DataFrame(frame), &mut sink)
@@ -257,11 +253,7 @@ async fn decoder_clamps_oversized_preskip_and_duration() {
     }
     let mut g = Grab::default();
     enc.process(
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(pcm.into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        )),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(pcm, FrameTiming::default(), 0)),
         &mut g,
     )
     .await
@@ -281,10 +273,8 @@ async fn decoder_clamps_oversized_preskip_and_duration() {
     // Oversized pre-skip via OpusHead: the whole 960-sample frame is inside the
     // skip window, so it decodes to no PCM (consumed, not emitted, no panic).
     dec.process(
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(
-                opus_head(1, 0xFFFF).into_boxed_slice(),
-            )),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            opus_head(1, 0xFFFF),
             FrameTiming::default(),
             0,
         )),

@@ -165,8 +165,8 @@ impl LiveKitDataSrc {
 }
 
 fn data_frame(payload: Vec<u8>, sequence: u64) -> Frame {
-    Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
+    Frame::from_system_bytes(
+        payload,
         FrameTiming {
             arrival_ns: g2g_core::metrics::monotonic_ns(),
             ..FrameTiming::default()

@@ -23,7 +23,6 @@ use std::path::PathBuf;
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AnalyticsMeta, BBox, BlobMeta, Bus, BusMessage, Caps, Colorimetry, Dim, Interlace,
     ObjectDetection, PropValue, Rate, RawVideoFormat,
@@ -80,15 +79,14 @@ fn rgba_caps(width: u32, height: u32, framerate: Rate) -> Caps {
 
 fn black_frame(width: u32, height: u32, pts_ns: u64) -> Frame {
     let pixels = vec![0u8; width as usize * height as usize * 4];
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(pixels.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        pixels,
+        FrameTiming {
             pts_ns,
             ..FrameTiming::default()
         },
-        sequence: pts_ns,
-        meta: Default::default(),
-    }
+        pts_ns,
+    )
 }
 
 /// One recorded row as the detection it describes.

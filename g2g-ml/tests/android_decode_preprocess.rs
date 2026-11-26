@@ -21,7 +21,7 @@ use android_binder::start_binder_threadpool;
 
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
+use g2g_core::memory::MemoryDomain;
 use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, Rate, RawVideoFormat, VideoCodec};
 use g2g_ml::wgpupreprocess::WgpuPreprocess;
 use g2g_plugins::mediacodecdec::MediaCodecDec;
@@ -148,17 +148,16 @@ async fn decode_gpu_to_preprocess_tensor() {
     let mut dec_sink = Collect::default();
     let mut pts_ns = 0u64;
     for au in access_units(H264) {
-        let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(au.to_vec().into_boxed_slice())),
-            timing: FrameTiming {
+        let frame = Frame::from_system_bytes(
+            au.to_vec(),
+            FrameTiming {
                 pts_ns,
                 dts_ns: pts_ns,
                 capture_ns: pts_ns,
                 ..FrameTiming::default()
             },
-            sequence: 0,
-            meta: Default::default(),
-        };
+            0,
+        );
         dec.process(PipelinePacket::DataFrame(frame), &mut dec_sink)
             .await
             .expect("decode AU");

@@ -14,12 +14,11 @@ use md5::{Digest, Md5};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::rtp::RTP_HEADER_LEN;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    AudioFormat, Caps, ChannelLayout, Dim, FrameTiming, G2gError, MemoryDomain, MultiInputElement,
-    OutputSink, PipelinePacket, PushOutcome, Rate, VideoCodec,
+    AudioFormat, Caps, ChannelLayout, Dim, FrameTiming, G2gError, MultiInputElement, OutputSink,
+    PipelinePacket, PushOutcome, Rate, VideoCodec,
 };
 
 use g2g_core::mediaclock::MediaClock;
@@ -177,8 +176,8 @@ fn pts_at(index: usize, samples_per_frame: u64) -> u64 {
 }
 
 fn data_frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        data,
         FrameTiming {
             pts_ns,
             ..FrameTiming::default()

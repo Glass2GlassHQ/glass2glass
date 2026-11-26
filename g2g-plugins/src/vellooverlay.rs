@@ -1350,7 +1350,7 @@ impl AsyncElement for VelloTextOverlay {
 mod tests {
     use super::*;
     use crate::gpu::shared_ctx;
-    use g2g_core::memory::SystemSlice;
+
     use g2g_core::{
         AnalyticsNode, FrameTiming, Mask, ObjectDetection, PushOutcome, Rate, RelationKind, Roi,
         Segmentation,
@@ -1492,11 +1492,7 @@ mod tests {
         for _ in 0..w * h {
             bytes.extend_from_slice(&[20, 20, 20, 255]);
         }
-        let mut frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let mut frame = Frame::from_system_bytes(bytes, FrameTiming::default(), 0);
         let mut a = AnalyticsMeta::new();
         a.add_detection(det(0.25, 0.25, 0.5, 0.5, 0)); // box spans pixels 16..48
         frame.meta.attach(a);
@@ -1545,12 +1541,8 @@ mod tests {
             .with_thickness(4.0)
             .with_context(ctx);
         ov.configure_pipeline(&rgba_caps(w, h)).unwrap();
-        let mut frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(
-                [20u8, 20, 20, 255]
-                    .repeat((w * h) as usize)
-                    .into_boxed_slice(),
-            )),
+        let mut frame = Frame::from_system_bytes(
+            [20u8, 20, 20, 255].repeat((w * h) as usize),
             FrameTiming::default(),
             0,
         );
@@ -1607,11 +1599,7 @@ mod tests {
         for _ in 0..w * h {
             bytes.extend_from_slice(&[20, 20, 20, 255]);
         }
-        let mut frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let mut frame = Frame::from_system_bytes(bytes, FrameTiming::default(), 0);
         // An instance over pixels 16..48 whose 2x2 mask covers only its left
         // column, so the fill is pixels 16..32; the ROI is that mask-tight half.
         let bbox = BBox {

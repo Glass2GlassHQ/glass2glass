@@ -20,7 +20,6 @@ use collect_sink::CollectSink;
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{Caps, ClosedCaptionFormat, PropValue, TextFormat};
 use g2g_plugins::ccconverter::CcConverter;
 use g2g_plugins::ccextract::CcExtract;
@@ -80,8 +79,8 @@ fn utf8_caps() -> Caps {
 }
 
 fn data_frame(payload: Vec<u8>, pts_ns: u64, duration_ns: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        payload,
         FrameTiming {
             pts_ns,
             duration_ns,
@@ -546,11 +545,7 @@ mod combiner {
                 .await
                 .expect("the caption payload queues");
 
-            let mut frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(access_unit().into_boxed_slice())),
-                FrameTiming::default(),
-                0,
-            );
+            let mut frame = Frame::from_system_bytes(access_unit(), FrameTiming::default(), 0);
             let mut meta = CaptionMeta::new();
             meta.push(existing.into());
             frame.meta.attach(meta);
@@ -580,11 +575,7 @@ mod combiner {
         element
             .set_property("input-meta-processing", PropValue::Str("drop".into()))
             .expect("input-meta-processing is settable");
-        let mut frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(access_unit().into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let mut frame = Frame::from_system_bytes(access_unit(), FrameTiming::default(), 0);
         let mut meta = CaptionMeta::new();
         meta.push(
             CcTriple {

@@ -102,18 +102,11 @@ fn frame_f32(f: &Frame) -> Vec<f32> {
 async fn logits_from(mut element: BurnInference) -> Vec<f32> {
     element.configure_pipeline(&rgba_caps()).expect("configure");
 
-    let frame = Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(
-            RGBA_FRAME.to_vec().into_boxed_slice(),
-        )),
-        timing: FrameTiming {
+    let frame = Frame::from_system_bytes(RGBA_FRAME.to_vec(), FrameTiming {
             pts_ns: PTS_NS,
             dts_ns: PTS_NS,
             ..FrameTiming::default()
-        },
-        sequence: SEQUENCE,
-        meta: Default::default(),
-    };
+        }, SEQUENCE);
 
     let mut out = Collect::default();
     element

@@ -24,7 +24,7 @@ use g2g_core::element::{AsyncElement, BoxFuture, ConfigureOutcome, OutputSink};
 use g2g_core::graph::Graph;
 use g2g_core::runtime::{run_graph, run_source_transform_sink, GraphNode};
 use g2g_core::RawVideoFormat;
-use g2g_core::{Caps, G2gError, HardwareError, MemoryDomain, PipelineClock, PipelinePacket};
+use g2g_core::{Caps, G2gError, HardwareError, PipelineClock, PipelinePacket};
 
 use g2g_core::offload;
 use g2g_plugins::videoconvert::VideoConvert;
@@ -181,13 +181,8 @@ impl AsyncElement for SpinTransform {
 /// only needs a `DataFrame` to fire, so emit a 1-byte system frame.
 fn packet_frame(seq: u64) -> PipelinePacket {
     use g2g_core::frame::Frame;
-    use g2g_core::memory::SystemSlice;
-    PipelinePacket::DataFrame(Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(vec![0u8].into_boxed_slice())),
-        timing: Default::default(),
-        sequence: seq,
-        meta: Default::default(),
-    })
+
+    PipelinePacket::DataFrame(Frame::from_system_bytes(vec![0u8], Default::default(), seq))
 }
 
 /// Sink that sets the shared flag on the first `DataFrame` it receives.

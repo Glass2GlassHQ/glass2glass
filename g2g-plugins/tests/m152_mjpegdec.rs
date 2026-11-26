@@ -13,10 +13,9 @@
 #![cfg(feature = "mjpeg")]
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
-    PushOutcome, Rate, RawVideoFormat, VideoCodec,
+    AsyncElement, Caps, Dim, FrameTiming, G2gError, OutputSink, PipelinePacket, PushOutcome, Rate,
+    RawVideoFormat, VideoCodec,
 };
 use g2g_plugins::mjpegdec::MjpegDec;
 
@@ -74,8 +73,8 @@ fn mjpeg_caps() -> Caps {
 }
 
 fn frame(seq: u64) -> Frame {
-    Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(RED16.to_vec().into_boxed_slice())),
+    Frame::from_system_bytes(
+        RED16.to_vec(),
         FrameTiming {
             pts_ns: seq * 33_000_000,
             ..FrameTiming::default()
@@ -179,11 +178,7 @@ async fn decode_once(jpeg: &[u8], format: RawVideoFormat) -> Vec<u8> {
 async fn decode_with(mut dec: MjpegDec, jpeg: &[u8]) -> Vec<u8> {
     dec.configure_pipeline(&mjpeg_caps()).unwrap();
     let mut sink = CaptureSink::default();
-    let f = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(jpeg.to_vec().into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    );
+    let f = Frame::from_system_bytes(jpeg.to_vec(), FrameTiming::default(), 0);
     dec.process(PipelinePacket::DataFrame(f), &mut sink)
         .await
         .unwrap();
@@ -340,11 +335,7 @@ async fn gradient_jpeg(w: u32, h: u32) -> Vec<u8> {
     })
     .unwrap();
     let mut sink = CaptureSink::default();
-    let f = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(pixels.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    );
+    let f = Frame::from_system_bytes(pixels, FrameTiming::default(), 0);
     enc.process(PipelinePacket::DataFrame(f), &mut sink)
         .await
         .unwrap();

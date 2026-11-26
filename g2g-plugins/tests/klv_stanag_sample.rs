@@ -16,10 +16,8 @@
 use std::process::Command;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    ByteStreamEncoding, Caps, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
-    PushOutcome,
+    ByteStreamEncoding, Caps, FrameTiming, G2gError, OutputSink, PipelinePacket, PushOutcome,
 };
 
 use g2g_core::element::AsyncElement;
@@ -71,11 +69,7 @@ async fn demux_file(path: &std::path::Path, stream: TsStream) -> Vec<Vec<u8>> {
         .unwrap();
     let mut sink = CaptureSink::default();
     for chunk in bytes.chunks(64 * 1024) {
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(chunk.to_vec().into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let frame = Frame::from_system_bytes(chunk.to_vec(), FrameTiming::default(), 0);
         demux
             .process(PipelinePacket::DataFrame(frame), &mut sink)
             .await

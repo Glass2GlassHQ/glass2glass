@@ -39,11 +39,10 @@ use ffmpeg::Error as FfError;
 use ffmpeg_next as ffmpeg;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    FrameTiming, G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec,
 };
 
 /// Default constant bitrate: 128 kbps, the usual stereo-AAC streaming target.
@@ -288,8 +287,8 @@ impl FfmpegAacEnc {
             self.caps_sent = true;
         }
         for (au, pts_ns) in packets {
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
+            let frame = Frame::from_system_bytes(
+                au,
                 FrameTiming {
                     pts_ns,
                     dts_ns: pts_ns,

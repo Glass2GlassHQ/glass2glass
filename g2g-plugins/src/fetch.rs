@@ -17,8 +17,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
-use g2g_core::{FrameTiming, G2gError, HardwareError, HttpTransportFailure, MemoryDomain};
+use g2g_core::{FrameTiming, G2gError, HardwareError, HttpTransportFailure};
 
 /// Body-size cap for manifests and keys (playlists, MPDs, AES-128 keys). These
 /// are small by construction; 16 MiB is generous headroom for the largest live
@@ -451,15 +450,14 @@ pub(crate) async fn get_text_query(
 
 /// A `DataFrame`-ready system-memory frame for a fetched byte chunk.
 pub(crate) fn byte_frame(bytes: Vec<u8>, sequence: u64) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        bytes,
+        FrameTiming {
             arrival_ns: g2g_core::metrics::monotonic_ns(),
             ..FrameTiming::default()
         },
         sequence,
-        meta: Default::default(),
-    }
+    )
 }
 
 /// Resolve a possibly-relative URI against a base URL. Handles absolute URLs,

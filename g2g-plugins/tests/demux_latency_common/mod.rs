@@ -7,7 +7,6 @@ use core::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use g2g_core::clock::{ClockCandidate, ClockPriority, ClockSync};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{block_on, run_graph, GraphNode, RunStats, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, ConfigureOutcome, Frame, FrameTiming, G2gError, Graph, MultiOutputElement,
@@ -26,11 +25,7 @@ impl PipelineClock for ZeroClock {
 }
 
 pub(crate) fn data_frame(payload: Vec<u8>, timing: FrameTiming, sequence: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
-        timing,
-        sequence,
-    ))
+    PipelinePacket::DataFrame(Frame::from_system_bytes(payload, timing, sequence))
 }
 
 // Pushes one chunk per frame, the way a live capture delivers the container.

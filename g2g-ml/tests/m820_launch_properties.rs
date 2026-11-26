@@ -259,7 +259,7 @@ fn detectionpostprocess_thresholds_and_input_size_round_trip() {
 async fn conf_threshold_property_changes_what_is_detected() {
     use g2g_core::element::{OutputSink, PushOutcome};
     use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-    use g2g_core::memory::{MemoryDomain, SystemSlice};
+
     use g2g_core::{AnalyticsMeta, Caps, G2gError, TensorDType, TensorLayout, TensorShape};
     use g2g_ml::detect::DetectionPostprocess;
 
@@ -303,12 +303,7 @@ async fn conf_threshold_property_changes_what_is_detected() {
         e.set_property("conf-threshold", PropValue::Double(threshold))
             .unwrap();
         e.configure_pipeline(&caps).unwrap();
-        let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.clone().into_boxed_slice())),
-            timing: FrameTiming::default(),
-            sequence: 0,
-            meta: Default::default(),
-        };
+        let frame = Frame::from_system_bytes(bytes.clone(), FrameTiming::default(), 0);
         let mut sink = MetaSink::default();
         e.process(PipelinePacket::DataFrame(frame), &mut sink)
             .await

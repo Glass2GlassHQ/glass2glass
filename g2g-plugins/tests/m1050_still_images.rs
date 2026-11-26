@@ -23,11 +23,10 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::{
-    AsyncElement, Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelineClock,
-    PipelinePacket, PushOutcome, Rate, RawVideoFormat, VideoCodec,
+    AsyncElement, Caps, Dim, FrameTiming, G2gError, OutputSink, PipelineClock, PipelinePacket,
+    PushOutcome, Rate, RawVideoFormat, VideoCodec,
 };
 use g2g_plugins::pngdec::PngDec;
 use g2g_plugins::pngenc::PngEnc;
@@ -85,11 +84,7 @@ fn pattern_rgba() -> Vec<u8> {
 }
 
 fn data_frame(bytes: Vec<u8>) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    ))
+    PipelinePacket::DataFrame(Frame::from_system_bytes(bytes, FrameTiming::default(), 0))
 }
 
 fn rgba_caps() -> Caps {

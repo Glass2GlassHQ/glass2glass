@@ -12,10 +12,7 @@
 
 use g2g_core::element::PushOutcome;
 use g2g_core::frame::{Frame, FrameTiming};
-use g2g_core::memory::SystemSlice;
-use g2g_core::{
-    AsyncElement, AudioFormat, Caps, G2gError, MemoryDomain, OutputSink, PipelinePacket,
-};
+use g2g_core::{AsyncElement, AudioFormat, Caps, G2gError, OutputSink, PipelinePacket};
 use g2g_plugins::aacparse::AacParse;
 
 const ADTS: &[u8] = include_bytes!("fixtures/aac_stereo_44100.adts");
@@ -61,12 +58,7 @@ async fn refine(stream: &[u8]) -> Collect {
     };
     parse.configure_pipeline(&sentinel).expect("configures");
     let mut sink = Collect::default();
-    let frame = Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(stream.to_vec().into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: 0,
-        meta: Default::default(),
-    };
+    let frame = Frame::from_system_bytes(stream.to_vec(), FrameTiming::default(), 0);
     parse
         .process(PipelinePacket::DataFrame(frame), &mut sink)
         .await

@@ -22,7 +22,7 @@ use whisper_rs::{
 };
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::{DomainSet, MemoryDomain, MemoryDomainKind, SystemSlice};
+use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ChannelLayout, ConfigureOutcome,
     ElementMetadata, FrameTiming, G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates,
@@ -292,10 +292,8 @@ impl WhisperTranscribe {
             self.caps_emitted = true;
         }
         for segment in segments {
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(
-                    segment.text.into_bytes().into_boxed_slice(),
-                )),
+            let frame = Frame::from_system_bytes(
+                segment.text.into_bytes(),
                 FrameTiming {
                     pts_ns: segment.pts_ns,
                     duration_ns: segment.duration_ns,

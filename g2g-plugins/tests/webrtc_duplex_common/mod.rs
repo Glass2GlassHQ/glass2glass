@@ -11,11 +11,10 @@ use std::time::Duration;
 
 use g2g_core::element::DynAsyncElement;
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_duplex_session, DynSourceLoop, SourceLoop};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, FrameTiming, G2gError, MemoryDomain,
-    OutputSink, PipelineClock, PipelinePacket,
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, FrameTiming, G2gError, OutputSink,
+    PipelineClock, PipelinePacket,
 };
 use g2g_plugins::webrtc_codec::WebRtcVideoCodec;
 use g2g_plugins::webrtcduplex::WebRtcDuplexSession;
@@ -53,8 +52,8 @@ impl SourceLoop for PacedSrc {
             out.push(PipelinePacket::CapsChanged(fixed_caps(self.codec)))
                 .await?;
             for (seq, unit) in self.units.iter().enumerate() {
-                let frame = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(unit.clone().into_boxed_slice())),
+                let frame = Frame::from_system_bytes(
+                    unit.clone(),
                     FrameTiming {
                         pts_ns: self.first_pts_ns + seq as u64 * FRAME_INTERVAL.as_nanos() as u64,
                         ..FrameTiming::default()

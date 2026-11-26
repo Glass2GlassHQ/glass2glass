@@ -659,8 +659,8 @@ impl AsyncElement for Tracker {
 mod tests {
     use super::*;
     use g2g_core::frame::Frame;
-    use g2g_core::memory::SystemSlice;
-    use g2g_core::{Classification, FrameTiming, MemoryDomain, PushOutcome};
+
+    use g2g_core::{Classification, FrameTiming, PushOutcome};
 
     const SIDE: f32 = 0.1;
     const CONFIDENT: f32 = 0.9;
@@ -811,11 +811,7 @@ mod tests {
     }
 
     fn frame(meta: Option<AnalyticsMeta>) -> Frame {
-        let mut frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(vec![7u8; 16].into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let mut frame = Frame::from_system_bytes(vec![7u8; 16], FrameTiming::default(), 0);
         if let Some(meta) = meta {
             frame.meta.attach(meta);
         }

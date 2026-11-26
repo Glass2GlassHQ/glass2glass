@@ -17,7 +17,6 @@ use std::path::PathBuf;
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AudioFormat, Bus, BusMessage, ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement,
@@ -167,11 +166,7 @@ async fn tsdemux_announces_a_stream_collection_from_the_pmt() {
     let mut sink = Drain::default();
     demux
         .process(
-            PipelinePacket::DataFrame(Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(ts.into_boxed_slice())),
-                FrameTiming::default(),
-                0,
-            )),
+            PipelinePacket::DataFrame(Frame::from_system_bytes(ts, FrameTiming::default(), 0)),
             &mut sink,
         )
         .await
@@ -233,8 +228,8 @@ fn h264_caps() -> Caps {
     }
 }
 fn frame(data: Vec<u8>, i: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        data,
         FrameTiming {
             pts_ns: i * 33_000_000,
             dts_ns: i * 33_000_000,

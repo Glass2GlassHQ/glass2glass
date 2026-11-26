@@ -116,15 +116,14 @@ fn start_code_offsets(data: &[u8]) -> Vec<usize> {
 }
 
 fn au_frame(bytes: Vec<u8>, seq: u64) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        bytes,
+        FrameTiming {
             pts_ns: seq * 33_000_000,
             ..Default::default()
         },
-        sequence: seq,
-        meta: Default::default(),
-    }
+        seq,
+    )
 }
 
 #[test]

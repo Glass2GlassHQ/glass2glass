@@ -538,17 +538,14 @@ impl SourceLoop for St2110JxsSrc {
                 // lands at its local arrival (the PTP grandmaster supplies absolute
                 // time upstream).
                 let pts_ns = timeline.pts_ns(jxs.rtp_timestamp, clock.rate_hz());
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(
-                        jxs.codestream.into_boxed_slice(),
-                    )),
-                    timing: FrameTiming {
+                let frame = Frame::from_system_bytes(
+                    jxs.codestream,
+                    FrameTiming {
                         pts_ns,
                         ..FrameTiming::default()
                     },
-                    sequence: count,
-                    meta: Default::default(),
-                };
+                    count,
+                );
                 out.push(PipelinePacket::DataFrame(frame)).await?;
                 count += 1;
             }
@@ -674,15 +671,14 @@ mod tests {
     }
 
     fn jxs_frame(bytes: Vec<u8>, pts_ns: u64) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            timing: FrameTiming {
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            bytes,
+            FrameTiming {
                 pts_ns,
                 ..FrameTiming::default()
             },
-            sequence: 0,
-            meta: Default::default(),
-        })
+            0,
+        ))
     }
 
     fn caps() -> Caps {

@@ -26,12 +26,11 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, HardwareError,
-    Interlace, MemoryDomain, OutputSink, PipelinePacket, Rate, RawVideoFormat,
+    Interlace, OutputSink, PipelinePacket, Rate, RawVideoFormat,
 };
 
 use wasm_bindgen::prelude::*;
@@ -214,19 +213,16 @@ impl SourceLoop for WebCameraSrc {
                     frame.close();
 
                     self.announce(w, h, out).await?;
-                    let out_frame = Frame {
-                        domain: MemoryDomain::System(SystemSlice::from_boxed(
-                            bytes.into_boxed_slice(),
-                        )),
-                        timing: FrameTiming {
+                    let out_frame = Frame::from_system_bytes(
+                        bytes,
+                        FrameTiming {
                             pts_ns,
                             dts_ns: pts_ns,
                             capture_ns: pts_ns,
                             ..FrameTiming::default()
                         },
                         sequence,
-                        meta: Default::default(),
-                    };
+                    );
                     sequence += 1;
                     out.push(PipelinePacket::DataFrame(out_frame)).await?;
 

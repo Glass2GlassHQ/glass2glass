@@ -22,7 +22,6 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{is_raw_video, parse_launch, run_graph, GraphNode, Registry};
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, Dim, G2gError, Graph, Interlace, OutputSink,
@@ -236,11 +235,7 @@ async fn decode_fixture(name: &str) -> CaptureSink {
         .expect("a y4m byte stream is accepted");
     let mut sink = CaptureSink::default();
     for piece in bytes.chunks(CHUNK_LEN) {
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(piece.to_vec().into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let frame = Frame::from_system_bytes(piece.to_vec(), FrameTiming::default(), 0);
         element
             .process(PipelinePacket::DataFrame(frame), &mut sink)
             .await

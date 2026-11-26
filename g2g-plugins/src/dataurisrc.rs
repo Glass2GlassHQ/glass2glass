@@ -22,12 +22,11 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec,
+    FrameTiming, G2gError, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec,
 };
 
 /// What every `data:` URI opens with, and the marker separating the payload.
@@ -192,13 +191,8 @@ impl SourceLoop for DataUriSrc {
             }
             let mut sequence = 0u64;
             for chunk in bytes.chunks(self.blocksize) {
-                let frame = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(
-                        chunk.to_vec().into_boxed_slice(),
-                    )),
-                    FrameTiming::default(),
-                    sequence,
-                );
+                let frame =
+                    Frame::from_system_bytes(chunk.to_vec(), FrameTiming::default(), sequence);
                 sequence += 1;
                 out.push(PipelinePacket::DataFrame(frame)).await?;
             }

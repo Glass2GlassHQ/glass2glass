@@ -16,7 +16,7 @@
 
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
+use g2g_core::memory::MemoryDomain;
 use g2g_core::runtime::SeekController;
 use g2g_core::{ByteStreamEncoding, Caps, G2gError, Seek};
 use g2g_plugins::mkvdemux::{MkvDemux, MkvStream};
@@ -154,8 +154,8 @@ impl OutputSink for Capture {
 }
 
 fn data_frame(bytes: &[u8]) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        bytes.to_vec(),
         FrameTiming::default(),
         0,
     ))

@@ -7,7 +7,6 @@
 use std::path::PathBuf;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{parse_launch, run_graph_with_bus};
 use g2g_core::{
     AsyncElement, AudioFormat, Bus, BusMessage, Caps, FrameTiming, PipelineClock, PipelinePacket,
@@ -187,11 +186,8 @@ async fn wavparse_times_each_buffer_by_its_data_offset() {
         .expect("wavparse configures");
     let mut out = CollectSink::default();
     for (sequence, chunk) in file.chunks(WAV_CHUNK_BYTES).enumerate() {
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(chunk.to_vec().into_boxed_slice())),
-            FrameTiming::default(),
-            sequence as u64,
-        );
+        let frame =
+            Frame::from_system_bytes(chunk.to_vec(), FrameTiming::default(), sequence as u64);
         parse
             .process(PipelinePacket::DataFrame(frame), &mut out)
             .await

@@ -9,7 +9,6 @@ mod collect_sink;
 use collect_sink::CollectSink;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AnalyticsMeta, AnalyticsNode, BBox, Caps, Colorimetry, Dim, Interlace, MultiInputElement,
     ObjectDetection, Rate, RawVideoFormat, RelationKind, Tracking,
@@ -35,8 +34,8 @@ fn rgba() -> Caps {
 }
 
 fn frame_at(pts_ns: u64, duration_ns: u64) -> Frame {
-    Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(vec![0u8; 4].into_boxed_slice())),
+    Frame::from_system_bytes(
+        vec![0u8; 4],
         FrameTiming {
             pts_ns,
             duration_ns,
@@ -563,10 +562,8 @@ async fn video_caps_with_an_unknown_framerate_mid_stream_keep_the_join_running()
 }
 
 fn rgba_frame(width: u32, index: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(
-            vec![0u8; (width * HEIGHT * 4) as usize].into_boxed_slice(),
-        )),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        vec![0u8; (width * HEIGHT * 4) as usize],
         FrameTiming {
             pts_ns: index * FRAME_PERIOD_NS,
             duration_ns: FRAME_PERIOD_NS,

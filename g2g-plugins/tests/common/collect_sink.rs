@@ -4,7 +4,6 @@
 
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::G2gError;
 
 #[derive(Debug, Default)]
@@ -32,11 +31,7 @@ pub(crate) async fn feed_in_chunks<E: AsyncElement>(
 ) {
     const READ_CHUNK_LEN: usize = 4096;
     for chunk in bytes.chunks(READ_CHUNK_LEN) {
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(chunk.to_vec().into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let frame = Frame::from_system_bytes(chunk.to_vec(), FrameTiming::default(), 0);
         element
             .process(PipelinePacket::DataFrame(frame), sink)
             .await

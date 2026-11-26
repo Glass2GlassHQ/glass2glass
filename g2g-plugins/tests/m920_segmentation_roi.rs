@@ -18,12 +18,11 @@ use core::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use g2g_core::frame::{Frame, FrameTiming};
-use g2g_core::memory::SystemSlice;
 use g2g_core::meta::{AnalyticsMeta, AnalyticsNode, BBox, Mask, Roi, Segmentation};
 use g2g_core::runtime::{run_graph, GraphNode, SourceLoop};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, Graph, MemoryDomain,
-    OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, Graph, OutputSink,
+    PipelineClock, PipelinePacket, Rate, RawVideoFormat,
 };
 use g2g_plugins::videoscale::VideoScale;
 
@@ -102,10 +101,8 @@ impl SourceLoop for AnalyticsSrc {
     }
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
-            let mut f = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(
-                    vec![128u8; (SRC_W * SRC_H * 4) as usize].into_boxed_slice(),
-                )),
+            let mut f = Frame::from_system_bytes(
+                vec![128u8; (SRC_W * SRC_H * 4) as usize],
                 FrameTiming::default(),
                 0,
             );

@@ -345,7 +345,6 @@ mod tests {
     use super::*;
     use crate::testutil::CollectSink;
     use g2g_core::frame::{Frame, FrameTiming};
-    use g2g_core::memory::SystemSlice;
 
     const W: u32 = 8;
     const H: u32 = 4;
@@ -363,8 +362,8 @@ mod tests {
     }
 
     fn frame(pixels: Vec<u8>, pts_ns: u64) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(pixels.into_boxed_slice())),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            pixels,
             FrameTiming {
                 pts_ns,
                 dts_ns: pts_ns,

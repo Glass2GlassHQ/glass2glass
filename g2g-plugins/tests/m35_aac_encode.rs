@@ -16,7 +16,6 @@
 
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{AudioFormat, Caps, G2gError};
 use g2g_plugins::mfaacencode::MfAacEncode;
 
@@ -63,16 +62,15 @@ fn pcm_buffer(index: usize) -> Frame {
         }
     }
     let pts = (index * SAMPLES_PER_BUFFER) as u64 * 1_000_000_000 / RATE as u64;
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        data,
+        FrameTiming {
             pts_ns: pts,
             dts_ns: pts,
             ..FrameTiming::default()
         },
-        sequence: index as u64,
-        meta: Default::default(),
-    }
+        index as u64,
+    )
 }
 
 #[tokio::test(flavor = "current_thread")]

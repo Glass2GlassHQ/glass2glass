@@ -8,10 +8,8 @@
 mod collect_sink;
 use collect_sink::CollectSink;
 
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, ChannelLayout, Frame, FrameTiming, MemoryDomain,
-    PipelinePacket,
+    AsyncElement, AudioFormat, Caps, ChannelLayout, Frame, FrameTiming, PipelinePacket,
 };
 use g2g_plugins::opusdec::OpusDec;
 use g2g_plugins::opusenc::OpusEnc;
@@ -94,8 +92,8 @@ fn opus_head() -> Vec<u8> {
 }
 
 fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        data,
         FrameTiming {
             pts_ns,
             dts_ns: pts_ns,

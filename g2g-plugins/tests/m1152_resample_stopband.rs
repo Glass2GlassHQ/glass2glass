@@ -13,10 +13,8 @@
 mod collect_sink;
 use collect_sink::CollectSink;
 
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, ChannelLayout, Frame, FrameTiming, MemoryDomain,
-    PipelinePacket,
+    AsyncElement, AudioFormat, Caps, ChannelLayout, Frame, FrameTiming, PipelinePacket,
 };
 use g2g_plugins::audioresample::AudioResample;
 
@@ -73,12 +71,7 @@ fn tone_bytes(frequency_hz: f64) -> Vec<u8> {
 }
 
 fn frame(bytes: Vec<u8>) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: 0,
-        meta: Default::default(),
-    }
+    Frame::from_system_bytes(bytes, FrameTiming::default(), 0)
 }
 
 /// Resample one probe tone from [`IN_RATE`] to [`OUT_RATE`] at the default

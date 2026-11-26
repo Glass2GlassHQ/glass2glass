@@ -11,7 +11,6 @@ use collect_sink::CollectSink;
 use std::path::PathBuf;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::{AsyncElement, ByteStreamEncoding, Caps, PipelineClock};
 use g2g_plugins::mkvdemux::{MkvDemux, MkvStream};
@@ -42,11 +41,7 @@ async fn temporal_units_in(path: &PathBuf) -> usize {
         .unwrap();
     let file = std::fs::read(path).unwrap();
     let mut sink = CollectSink::default();
-    let frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(file.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    );
+    let frame = Frame::from_system_bytes(file, FrameTiming::default(), 0);
     demux
         .process(PipelinePacket::DataFrame(frame), &mut sink)
         .await

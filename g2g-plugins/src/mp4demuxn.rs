@@ -37,13 +37,12 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::log::Target;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{ElementSeekRoute, SeekController, StreamSelectController};
 use g2g_core::{
     g2g_error, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
     CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError, LatencyReport,
-    MemoryDomain, MultiOutputElement, MultiOutputSink, PipelinePacket, PropError, PropValue,
-    PropertySpec, Rate, Segment, Stream, StreamCollection, StreamType, VideoCodec,
+    MultiOutputElement, MultiOutputSink, PipelinePacket, PropError, PropValue, PropertySpec, Rate,
+    Segment, Stream, StreamCollection, StreamType, VideoCodec,
 };
 
 use crate::demuxseek::{with_stream_time, DemuxSeek};
@@ -1537,12 +1536,7 @@ impl Mp4DemuxN {
 
     /// Wrap `data` as the next outgoing frame, taking the running sequence number.
     fn next_frame(&mut self, data: Vec<u8>, timing: FrameTiming) -> Frame {
-        let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-            timing,
-            sequence: self.emitted,
-            meta: Default::default(),
-        };
+        let frame = Frame::from_system_bytes(data, timing, self.emitted);
         self.emitted += 1;
         frame
     }
@@ -1819,7 +1813,7 @@ mod tests {
     use crate::aacparse::adts_from_asc;
     use crate::mp4muxn::Mp4MuxN;
     use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-    use g2g_core::memory::{MemoryDomain, SystemSlice};
+
     use g2g_core::runtime::block_on;
     use g2g_core::{
         AudioFormat, Caps, Dim, G2gError, MultiInputElement, OutputSink, PushOutcome, Rate,
@@ -1909,8 +1903,8 @@ mod tests {
     use crate::aacparse::test_frames::adts_au;
 
     fn vframe(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            data,
             FrameTiming {
                 pts_ns,
                 dts_ns: pts_ns,

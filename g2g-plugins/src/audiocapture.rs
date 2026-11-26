@@ -12,11 +12,8 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::log::Target;
-use g2g_core::memory::SystemSlice;
 use g2g_core::time::ticks_to_ns;
-use g2g_core::{
-    CaptureAnchor, ClockSync, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
-};
+use g2g_core::{CaptureAnchor, ClockSync, FrameTiming, G2gError, OutputSink, PipelinePacket};
 
 // 64 periods is 640 ms at the usual 10 ms period
 const CAPTURE_QUEUE_DEPTH: usize = 64;
@@ -232,9 +229,9 @@ pub(crate) async fn run_capture(
             Some(sync) => anchor.stamp(sync, start_ns, duration_ns),
             None => start_ns,
         };
-        let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(chunk.bytes.into_boxed_slice())),
-            timing: FrameTiming {
+        let frame = Frame::from_system_bytes(
+            chunk.bytes,
+            FrameTiming {
                 pts_ns,
                 dts_ns: pts_ns,
                 duration_ns,
@@ -244,8 +241,7 @@ pub(crate) async fn run_capture(
                 ..FrameTiming::default()
             },
             sequence,
-            meta: Default::default(),
-        };
+        );
         if out.push(PipelinePacket::DataFrame(frame)).await.is_err() {
             downstream_open = false;
             break;

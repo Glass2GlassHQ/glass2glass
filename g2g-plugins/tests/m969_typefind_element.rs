@@ -15,11 +15,10 @@ use core::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{parse_launch, run_graph, run_source_transform_sink, SourceLoop};
 use g2g_core::{
     AsyncElement, AudioFormat, ByteStreamEncoding, Caps, ConfigureOutcome, FrameTiming, G2gError,
-    MemoryDomain, OutputSink, PipelineClock, PipelinePacket, VideoCodec,
+    OutputSink, PipelineClock, PipelinePacket, VideoCodec,
 };
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::typefind::{elementary_audio_caps, TypeFind};
@@ -63,14 +62,8 @@ impl SourceLoop for ChunkedByteSource {
         Box::pin(async move {
             let mut pushed = 0u64;
             for (i, part) in self.payload.chunks(self.chunk).enumerate() {
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(
-                        part.to_vec().into_boxed_slice(),
-                    )),
-                    timing: FrameTiming::default(),
-                    sequence: i as u64,
-                    meta: Default::default(),
-                };
+                let frame =
+                    Frame::from_system_bytes(part.to_vec(), FrameTiming::default(), i as u64);
                 out.push(PipelinePacket::DataFrame(frame)).await?;
                 pushed += 1;
             }

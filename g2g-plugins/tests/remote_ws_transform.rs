@@ -22,7 +22,6 @@ use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_source_transform_sink, LatencyProfile, SourceLoop};
 use g2g_core::wire::{decode_packet, encode_packet};
 use g2g_core::{
@@ -84,17 +83,14 @@ impl SourceLoop for CountSrc {
             out.push(PipelinePacket::CapsChanged(test_caps())).await?;
             const LEN: usize = 2 * 2 * 4;
             for i in 0..self.n {
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(
-                        vec![i; LEN].into_boxed_slice(),
-                    )),
-                    timing: FrameTiming {
+                let frame = Frame::from_system_bytes(
+                    vec![i; LEN],
+                    FrameTiming {
                         pts_ns: i as u64 * 1000,
                         ..FrameTiming::default()
                     },
-                    sequence: i as u64,
-                    meta: Default::default(),
-                };
+                    i as u64,
+                );
                 out.push(PipelinePacket::DataFrame(frame)).await?;
             }
             out.push(PipelinePacket::Eos).await?;

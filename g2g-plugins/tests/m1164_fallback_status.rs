@@ -18,16 +18,14 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{
     parse_launch, run_graph, run_graph_with_bus, DynSourceLoop, FallbackSourceRole, GraphNode,
     ParseError, RestartPolicy, SourceLoop, UriRebuild, FALLBACK_FALLBACK_SOURCE_SUFFIX,
     FALLBACK_MAIN_SOURCE_SUFFIX, FALLBACK_SWITCH_NAME,
 };
 use g2g_core::{
-    Bus, BusHandle, BusMessage, Caps, ConfigureOutcome, G2gError, Graph, MemoryDomain, NodeId,
-    OutputSink, PipelineClock, PipelinePacket, PushOutcome, SourceRestartReason,
-    SourceRestartStatus,
+    Bus, BusHandle, BusMessage, Caps, ConfigureOutcome, G2gError, Graph, NodeId, OutputSink,
+    PipelineClock, PipelinePacket, PushOutcome, SourceRestartReason, SourceRestartStatus,
 };
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::fallbacksrc::{RestartSrc, RETRY_DELAY};
@@ -303,12 +301,7 @@ impl SourceLoop for StallSrc {
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
             let bytes = vec![0u8; (WIDTH * HEIGHT * 4) as usize];
-            let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                timing: Default::default(),
-                sequence: 0,
-                meta: Default::default(),
-            };
+            let frame = Frame::from_system_bytes(bytes, Default::default(), 0);
             out.push(PipelinePacket::DataFrame(frame)).await?;
             core::future::pending::<()>().await;
             Ok(1)

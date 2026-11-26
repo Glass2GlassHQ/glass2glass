@@ -38,11 +38,10 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::log::short_type_name;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropValue,
-    PropertySpec, Tag, TagList,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropValue, PropertySpec, Tag,
+    TagList,
 };
 
 use crate::flacparse::complete_header_len;
@@ -94,11 +93,7 @@ impl FlacTag {
         // Unstamped: a buffer here can carry bytes from two inputs, so neither
         // input's time describes it. The parser behind this stamps from the
         // frame headers.
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-            Default::default(),
-            self.sequence,
-        );
+        let frame = Frame::from_system_bytes(data, Default::default(), self.sequence);
         self.sequence += 1;
         out.push(PipelinePacket::DataFrame(frame)).await?;
         Ok(())
@@ -370,11 +365,7 @@ mod tests {
         element.configure_pipeline(&flac_caps()).expect("flac in");
         let mut out = CollectSink::default();
         for piece in input.chunks(chunk) {
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(Vec::from(piece).into_boxed_slice())),
-                Default::default(),
-                0,
-            );
+            let frame = Frame::from_system_bytes(Vec::from(piece), Default::default(), 0);
             element
                 .process(PipelinePacket::DataFrame(frame), &mut out)
                 .await

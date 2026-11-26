@@ -625,8 +625,8 @@ mod tests {
     }
 
     fn frame(pts_ns: u64) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(vec![7u8; 16].into_boxed_slice())),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            vec![7u8; 16],
             FrameTiming {
                 pts_ns,
                 duration_ns: period_ns(),

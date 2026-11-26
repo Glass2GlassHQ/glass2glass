@@ -7,7 +7,6 @@
 use std::time::Duration;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{block_on, parse_launch, RunBuilder, SeekController};
 use g2g_core::{
     Bus, BusMessage, ByteStreamEncoding, G2gError, MultiOutputElement, MultiOutputSink,
@@ -104,11 +103,7 @@ fn demuxer(file: &[u8]) -> (MxfDemuxN, Ports) {
 
 async fn feed(demux: &mut MxfDemuxN, bytes: &[u8], ports: &mut Ports) {
     for chunk in bytes.chunks(CHUNK_LEN) {
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(chunk.to_vec().into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let frame = Frame::from_system_bytes(chunk.to_vec(), FrameTiming::default(), 0);
         demux
             .process(PipelinePacket::DataFrame(frame), ports)
             .await

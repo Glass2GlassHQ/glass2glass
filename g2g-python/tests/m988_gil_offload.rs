@@ -76,12 +76,7 @@ fn caps() -> Caps {
 }
 
 fn frame() -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(vec![0u8; 8].into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: 0,
-        meta: Default::default(),
-    }
+    Frame::from_system_bytes(vec![0u8; 8], FrameTiming::default(), 0)
 }
 
 /// A hosted element with its worker thread already spawned.

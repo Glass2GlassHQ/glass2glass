@@ -20,11 +20,10 @@ use alloc::boxed::Box;
 use alloc::vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, Interlace,
-    MemoryDomain, OutputSink, PipelinePacket, Rate, RawVideoFormat,
+    OutputSink, PipelinePacket, Rate, RawVideoFormat,
 };
 
 use wasm_bindgen::prelude::*;
@@ -115,9 +114,9 @@ impl SourceLoop for PatternSrc {
             for i in 0..self.frames {
                 let mut buf = vec![0u8; w * h * 4];
                 fill_pattern(&mut buf, w, h, i);
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(buf.into_boxed_slice())),
-                    timing: {
+                let frame = Frame::from_system_bytes(
+                    buf,
+                    {
                         let pts = i * frame_ns;
                         FrameTiming {
                             pts_ns: pts,
@@ -126,9 +125,8 @@ impl SourceLoop for PatternSrc {
                             ..FrameTiming::default()
                         }
                     },
-                    sequence: i,
-                    meta: Default::default(),
-                };
+                    i,
+                );
                 out.push(PipelinePacket::DataFrame(frame)).await?;
                 // Pace + yield so the encoder's output callbacks can run.
                 sleep_ms(delay_ms).await;

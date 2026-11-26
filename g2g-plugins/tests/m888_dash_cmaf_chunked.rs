@@ -33,11 +33,8 @@ use std::time::{Duration, Instant};
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming};
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
-use g2g_core::{
-    ByteStreamEncoding, Caps, G2gError, MemoryDomain, OutputSink, PipelinePacket, PushOutcome,
-};
+use g2g_core::{ByteStreamEncoding, Caps, G2gError, OutputSink, PipelinePacket, PushOutcome};
 use g2g_plugins::dashsrc::DashSrc;
 use g2g_plugins::fmp4demux::Fmp4Demux;
 
@@ -100,12 +97,7 @@ impl OutputSink for CaptureSink {
 }
 
 fn byte_frame(bytes: Vec<u8>) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: 0,
-        meta: Default::default(),
-    }
+    Frame::from_system_bytes(bytes, FrameTiming::default(), 0)
 }
 
 /// The CMAF chunks of `data`: each run of boxes up to and including an `mdat`

@@ -16,7 +16,6 @@
 use std::path::PathBuf;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, FrameTiming, G2gError, OutputSink, PipelineClock,
@@ -178,11 +177,7 @@ impl OutputSink for Collect {
 }
 
 fn coded_frame(bytes: Vec<u8>) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    ))
+    PipelinePacket::DataFrame(Frame::from_system_bytes(bytes, FrameTiming::default(), 0))
 }
 
 /// Driven directly, since the `adpcmenc` upstream of it is mono-only and a

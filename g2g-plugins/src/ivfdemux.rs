@@ -15,11 +15,10 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
-    ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, Rate, VideoCodec,
+    ElementMetadata, FrameTiming, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    Rate, VideoCodec,
 };
 
 use crate::fifobuffer::FifoBuffer;
@@ -172,8 +171,8 @@ impl IvfDemux {
             self.buf.discard(end);
             let pts_ns = (u128::from(ts) * u128::from(header.scale) * 1_000_000_000
                 / u128::from(header.rate)) as u64;
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+            let frame = Frame::from_system_bytes(
+                data,
                 FrameTiming {
                     pts_ns,
                     dts_ns: pts_ns,
@@ -289,12 +288,7 @@ pub fn fuzz_parse(data: &[u8]) {
     {
         return;
     }
-    let frame = Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(data.to_vec().into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: 0,
-        meta: Default::default(),
-    };
+    let frame = Frame::from_system_bytes(data.to_vec(), FrameTiming::default(), 0);
     let _ = crate::fuzz_process(&mut demux, PipelinePacket::DataFrame(frame));
 }
 
@@ -326,12 +320,7 @@ mod tests {
     }
 
     fn data_frame(bytes: Vec<u8>) -> Frame {
-        Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            timing: FrameTiming::default(),
-            sequence: 0,
-            meta: Default::default(),
-        }
+        Frame::from_system_bytes(bytes, FrameTiming::default(), 0)
     }
 
     fn configured() -> IvfDemux {

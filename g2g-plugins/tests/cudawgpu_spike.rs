@@ -155,7 +155,6 @@ async fn wgpu_reads_what_cuda_wrote() {
 
 #[tokio::test]
 async fn an_odd_size_cuda_frame_lands_in_the_packed_texture() {
-    use g2g_core::memory::SystemSlice;
     use g2g_core::{
         AsyncElement, Caps, Dim, Frame, FrameTiming, G2gError, MemoryDomain, OutputSink,
         PipelinePacket, PushOutcome, Rate, RawVideoFormat,
@@ -197,11 +196,7 @@ async fn an_odd_size_cuda_frame_lands_in_the_packed_texture() {
         .unpadded_frame_bytes(ODD_W, ODD_H)
         .unwrap() as usize;
     let bytes: Vec<u8> = (0..len).map(|i| i as u8).collect();
-    let frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.clone().into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    );
+    let frame = Frame::from_system_bytes(bytes.clone(), FrameTiming::default(), 0);
     let mut uploaded = Collect::default();
     up.process(PipelinePacket::DataFrame(frame), &mut uploaded)
         .await

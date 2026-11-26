@@ -23,10 +23,9 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::g2g_warn;
 use g2g_core::log::{short_type_name, LogName, LogSource};
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, MemoryDomain,
-    MultiInputElement, OutputSink, PipelinePacket, Rate, VideoCodec,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, MultiInputElement, OutputSink,
+    PipelinePacket, Rate, VideoCodec,
 };
 
 use crate::annexb::vcl_start;
@@ -268,11 +267,7 @@ impl CcInsert {
             // No VCL slice (e.g. a parameter-set-only AU): leave it unchanged.
             None => bytes.extend_from_slice(au),
         }
-        let new = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            frame.timing,
-            frame.sequence,
-        );
+        let new = Frame::from_system_bytes(bytes, frame.timing, frame.sequence);
         out.push(PipelinePacket::DataFrame(new)).await.map(|_| ())
     }
 }
@@ -514,8 +509,8 @@ mod tests {
     }
 
     fn video_frame(pts: u64) -> PipelinePacket {
-        let f = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(plain_au().into_boxed_slice())),
+        let f = Frame::from_system_bytes(
+            plain_au(),
             FrameTiming {
                 pts_ns: pts,
                 ..Default::default()
@@ -526,9 +521,8 @@ mod tests {
     }
 
     fn cue_frame(text: &str, start: u64, dur: u64) -> PipelinePacket {
-        let payload = text.as_bytes().to_vec().into_boxed_slice();
-        let f = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(payload)),
+        let f = Frame::from_system_bytes(
+            text.as_bytes().to_vec(),
             FrameTiming {
                 pts_ns: start,
                 duration_ns: dur,

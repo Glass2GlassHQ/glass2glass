@@ -24,7 +24,6 @@ use std::process::Command;
 
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, Rate, VideoCodec};
 use g2g_plugins::ffmpegdec::FfmpegVideoDec;
 
@@ -169,15 +168,14 @@ async fn run_depth_check(mut dec: FfmpegVideoDec, max_depth: Option<usize>) {
     let mut sink = Collect::default();
     let mut worst_depth = 0;
     for (index, au) in access_units.into_iter().enumerate() {
-        let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-            timing: FrameTiming {
+        let frame = Frame::from_system_bytes(
+            au,
+            FrameTiming {
                 pts_ns: index as u64 * NANOSECONDS_PER_SECOND / FRAMERATE,
                 ..FrameTiming::default()
             },
-            sequence: index as u64,
-            meta: Default::default(),
-        };
+            index as u64,
+        );
         dec.process(PipelinePacket::DataFrame(frame), &mut sink)
             .await
             .expect("decode access unit");

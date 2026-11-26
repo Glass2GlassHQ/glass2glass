@@ -2128,12 +2128,7 @@ mod tests {
             start_discard_ns: 3,
             end_discard_ns: 5,
         };
-        let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.clone().into_boxed_slice())),
-            timing,
-            sequence: 12_345,
-            meta: FrameMetaSet::new(),
-        };
+        let frame = Frame::from_system_bytes(bytes.clone(), timing, 12_345);
         match roundtrip(&PipelinePacket::DataFrame(frame)) {
             PipelinePacket::DataFrame(got) => {
                 assert_eq!(got.sequence, 12_345);
@@ -2156,8 +2151,8 @@ mod tests {
     #[test]
     fn splice_info_round_trips_its_section() {
         let section: Vec<u8> = (0u8..40).collect();
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(section.clone().into_boxed_slice())),
+        let frame = Frame::from_system_bytes(
+            section.clone(),
             FrameTiming {
                 pts_ns: 1_000,
                 ..FrameTiming::default()

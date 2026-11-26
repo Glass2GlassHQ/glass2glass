@@ -34,7 +34,6 @@ use std::process::Command;
 
 use g2g_core::conformance::{ConformanceDimension, Evidence};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AsyncElement, Bus, BusMessage, ByteStreamEncoding, Caps, Dim, MultiInputElement, Rate,
     RawVideoFormat, StreamType, SubPictureFormat,
@@ -141,8 +140,8 @@ fn reference_burn_in(mkv: &PathBuf, raw: &PathBuf) -> Vec<Vec<u8>> {
 // ---- g2g plumbing ----
 
 fn data(bytes: Vec<u8>, pts_ns: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        bytes,
         FrameTiming {
             pts_ns,
             dts_ns: pts_ns,

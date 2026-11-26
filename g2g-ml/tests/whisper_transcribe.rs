@@ -19,7 +19,6 @@ use std::path::PathBuf;
 
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{AudioFormat, Caps, ChannelLayout, G2gError, PropValue};
 use g2g_ml::whispertranscribe::{WhisperTranscribe, SAMPLE_RATE};
 
@@ -116,8 +115,8 @@ fn input_caps() -> Caps {
 
 fn audio_frame(samples: &[f32], pts_ns: u64, sequence: u64) -> Frame {
     let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
-    Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+    Frame::from_system_bytes(
+        bytes,
         FrameTiming {
             pts_ns,
             duration_ns: samples.len() as u64 * NS_PER_SECOND / u64::from(SAMPLE_RATE),

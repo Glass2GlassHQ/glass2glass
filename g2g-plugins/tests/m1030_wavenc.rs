@@ -12,20 +12,13 @@
 mod collect_sink;
 use collect_sink::CollectSink;
 
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, Frame, FrameTiming, MemoryDomain,
-    PipelinePacket,
+    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, Frame, FrameTiming, PipelinePacket,
 };
 use g2g_plugins::wavenc::WavEnc;
 
 fn frame(bytes: Vec<u8>) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: 0,
-        meta: Default::default(),
-    }
+    Frame::from_system_bytes(bytes, FrameTiming::default(), 0)
 }
 
 fn run(format: AudioFormat, channels: u8, rate: u32, samples: Vec<u8>) -> Vec<Vec<u8>> {

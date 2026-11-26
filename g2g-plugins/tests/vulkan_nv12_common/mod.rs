@@ -78,12 +78,7 @@ impl Collect {
 /// A system-memory frame carrying `bytes`, the domain both the encoded clip and
 /// a decoded NV12 picture travel in.
 pub(crate) fn system_frame(bytes: &[u8]) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: 0,
-        meta: Default::default(),
-    }
+    Frame::from_system_bytes(bytes.to_vec(), FrameTiming::default(), 0)
 }
 
 pub(crate) fn in_caps(codec: VideoCodec) -> Caps {

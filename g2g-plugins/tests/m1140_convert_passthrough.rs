@@ -14,10 +14,8 @@
 mod collect_sink;
 use collect_sink::CollectSink;
 
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, Colorimetry, Dim, Frame, FrameTiming, MemoryDomain, PipelinePacket, Rate,
-    RawVideoFormat,
+    AsyncElement, Caps, Colorimetry, Dim, Frame, FrameTiming, PipelinePacket, Rate, RawVideoFormat,
 };
 use g2g_plugins::videoconvert::VideoConvert;
 
@@ -40,12 +38,7 @@ fn raw(format: RawVideoFormat) -> Caps {
 }
 
 fn frame_of(bytes: Vec<u8>) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: 0,
-        meta: Default::default(),
-    }
+    Frame::from_system_bytes(bytes, FrameTiming::default(), 0)
 }
 
 fn system_bytes(frame: &Frame) -> &[u8] {

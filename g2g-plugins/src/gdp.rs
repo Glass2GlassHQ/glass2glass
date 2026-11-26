@@ -11,7 +11,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::{DomainSet, MemoryDomain, MemoryDomainKind, SystemSlice};
+use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::segment::Segment;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming,
@@ -216,14 +216,6 @@ const UNTIMED: FrameTiming = FrameTiming {
     end_discard_ns: 0,
 };
 
-fn system_frame(bytes: Vec<u8>, timing: FrameTiming, sequence: u64) -> Frame {
-    Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing,
-        sequence,
-    )
-}
-
 fn gdp_caps(original: Option<&Caps>) -> Caps {
     Caps::Gdp {
         original: original.map(|original| Box::new(original.clone())),
@@ -287,7 +279,7 @@ impl GdpPay {
             out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
             self.last_output_caps = Some(caps);
         }
-        let frame = system_frame(bytes, timing, self.emitted);
+        let frame = Frame::from_system_bytes(bytes, timing, self.emitted);
         self.emitted += 1;
         out.push(PipelinePacket::DataFrame(frame)).await?;
         Ok(())
@@ -585,7 +577,7 @@ impl GdpDepay {
                     keyframe: fields.flags & BUFFER_FLAG_DELTA_UNIT == 0,
                     ..FrameTiming::default()
                 };
-                let frame = system_frame(payload.to_vec(), timing, self.emitted);
+                let frame = Frame::from_system_bytes(payload.to_vec(), timing, self.emitted);
                 self.emitted += 1;
                 out.push(PipelinePacket::DataFrame(frame)).await?;
             }

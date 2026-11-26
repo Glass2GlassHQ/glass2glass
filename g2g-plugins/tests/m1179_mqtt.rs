@@ -23,7 +23,6 @@ use std::time::{Duration, Instant};
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AnalyticsMeta, BBox, BlobMeta, Caps, Colorimetry, Dim, G2gError, Interlace, ObjectDetection,
@@ -94,15 +93,14 @@ fn rgba_caps() -> Caps {
 }
 
 fn black_frame(pts_ns: u64) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(vec![0u8; 4].into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        vec![0u8; 4],
+        FrameTiming {
             pts_ns,
             ..FrameTiming::default()
         },
-        sequence: pts_ns,
-        meta: Default::default(),
-    }
+        pts_ns,
+    )
 }
 
 fn detected_frame() -> Frame {

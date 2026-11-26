@@ -60,10 +60,8 @@ impl SourceLoop for BitrateObservingSource {
             out.push(PipelinePacket::CapsChanged(caps())).await?;
             let frame_len = 16 * 16 * 3 / 2;
             for seq in 0..self.total {
-                let frame = g2g_core::frame::Frame::new(
-                    g2g_core::MemoryDomain::System(g2g_core::memory::SystemSlice::from_boxed(
-                        std::vec![0u8; frame_len].into_boxed_slice(),
-                    )),
+                let frame = g2g_core::frame::Frame::from_system_bytes(
+                    std::vec![0u8; frame_len],
                     g2g_core::FrameTiming {
                         pts_ns: seq * 33_000_000,
                         ..Default::default()

@@ -22,11 +22,10 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::log::short_type_name;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{ElementSeekRoute, SeekController};
 use g2g_core::{
     AsyncElement, BusHandle, BusMessage, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata,
-    G2gError, MemoryDomain, OutputSink, PipelinePacket, TagList,
+    G2gError, OutputSink, PipelinePacket, TagList,
 };
 
 use crate::id3::{parse_id3v1, LeadingId3v2, ID3V1_LEN};
@@ -110,11 +109,7 @@ impl Id3Demux {
         // Unstamped: a buffer here can carry bytes from two inputs, so neither
         // input's time describes it. The parser behind this stamps from the
         // frame headers.
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-            Default::default(),
-            self.sequence,
-        );
+        let frame = Frame::from_system_bytes(data, Default::default(), self.sequence);
         self.sequence += 1;
         out.push(PipelinePacket::DataFrame(frame)).await?;
         Ok(())

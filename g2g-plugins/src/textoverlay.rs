@@ -2561,7 +2561,7 @@ mod tests {
     use super::*;
     use alloc::vec;
     use g2g_core::frame::Frame;
-    use g2g_core::memory::SystemSlice;
+
     use g2g_core::{FrameTiming, PushOutcome};
 
     fn rgba_caps(w: u32, h: u32) -> Caps {
@@ -2589,10 +2589,8 @@ mod tests {
     }
 
     fn frame_at(w: u32, h: u32, pts_ns: u64) -> Frame {
-        Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(
-                black(w as usize, h as usize).into_boxed_slice(),
-            )),
+        Frame::from_system_bytes(
+            black(w as usize, h as usize),
             FrameTiming {
                 pts_ns,
                 ..FrameTiming::default()
@@ -3570,10 +3568,8 @@ mod tests {
     // -- TextOverlayN (M403): the two-input video + text-stream overlay. --------
 
     fn text_cue_frame(pts_ns: u64, duration_ns: u64, text: &str) -> Frame {
-        Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(
-                text.as_bytes().to_vec().into_boxed_slice(),
-            )),
+        Frame::from_system_bytes(
+            text.as_bytes().to_vec(),
             FrameTiming {
                 pts_ns,
                 duration_ns,

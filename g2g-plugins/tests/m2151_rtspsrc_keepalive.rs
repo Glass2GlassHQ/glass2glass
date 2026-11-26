@@ -12,10 +12,9 @@ use std::net::TcpListener as StdTcpListener;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, Dim, FrameTiming, G2gError, MemoryDomain, MultiOutputSink,
-    MultiOutputSource, PipelinePacket, PushOutcome, Rate, VideoCodec,
+    AsyncElement, Caps, Dim, FrameTiming, G2gError, MultiOutputSink, MultiOutputSource,
+    PipelinePacket, PushOutcome, Rate, VideoCodec,
 };
 use g2g_plugins::rtspserversink::RtspServerSink;
 use g2g_plugins::rtspsrcn::RtspSrcN;
@@ -99,17 +98,14 @@ async fn a_blocked_push_keeps_the_rtsp_session_alive() {
                 break;
             }
             let sequence = index as u64;
-            let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(
-                    au.clone().into_boxed_slice(),
-                )),
-                timing: FrameTiming {
+            let frame = Frame::from_system_bytes(
+                au.clone(),
+                FrameTiming {
                     pts_ns: sequence * FRAME_PERIOD.as_nanos() as u64,
                     ..FrameTiming::default()
                 },
                 sequence,
-                meta: Default::default(),
-            };
+            );
             if server
                 .process(PipelinePacket::DataFrame(frame), &mut out)
                 .await

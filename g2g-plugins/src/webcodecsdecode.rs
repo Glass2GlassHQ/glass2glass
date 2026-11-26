@@ -37,7 +37,6 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
     HardwareError, Interlace, MemoryDomain, OutputSink, OwnedWebGPUExternalTexture, PadTemplate,
@@ -228,17 +227,16 @@ impl WebCodecsDecode {
         let (bytes, w, h, pts_ns) = copy_out_rgba(&frame).await?;
         frame.close();
         self.announce_caps(w, h, out).await?;
-        let out_frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            timing: FrameTiming {
+        let out_frame = Frame::from_system_bytes(
+            bytes,
+            FrameTiming {
                 pts_ns,
                 dts_ns: pts_ns,
                 capture_ns: pts_ns,
                 ..FrameTiming::default()
             },
-            sequence: self.emitted,
-            meta: Default::default(),
-        };
+            self.emitted,
+        );
         self.emitted += 1;
         out.push(PipelinePacket::DataFrame(out_frame)).await?;
         Ok(())

@@ -10,11 +10,10 @@
 #![cfg(feature = "std")]
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PipelineClock, PipelinePacket, PushOutcome,
+    AsyncElement, AudioFormat, Caps, FrameTiming, G2gError, OutputSink, PipelineClock,
+    PipelinePacket, PushOutcome,
 };
 use g2g_plugins::audioreverse::AudioReverse;
 use g2g_plugins::registry::default_registry;
@@ -86,8 +85,8 @@ impl OutputSink for Collect {
 }
 
 fn frame(bytes: Vec<u8>, pts_ns: u64) -> Frame {
-    Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+    Frame::from_system_bytes(
+        bytes,
         FrameTiming {
             pts_ns,
             dts_ns: pts_ns,

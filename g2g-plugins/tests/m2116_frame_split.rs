@@ -12,7 +12,6 @@ use std::time::Duration;
 
 use g2g_core::fanout::MultiOutputSink;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{parse_launch, run_graph, LaunchFactory};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError,
@@ -146,15 +145,14 @@ async fn a_slow_branch_takes_some_frames_and_the_merge_restores_their_order() {
 }
 
 fn frame(pts_ns: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(vec![0u8; 4].into_boxed_slice())),
-        timing: FrameTiming {
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        vec![0u8; 4],
+        FrameTiming {
             pts_ns,
             ..FrameTiming::default()
         },
-        sequence: 0,
-        meta: Default::default(),
-    })
+        0,
+    ))
 }
 
 fn pts_of(packet: &PipelinePacket) -> Option<u64> {

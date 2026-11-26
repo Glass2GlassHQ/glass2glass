@@ -329,8 +329,8 @@ mod muxers {
         au[3] = (au[3] & 0xFC) | ((len >> 11) & 0x03) as u8;
         au[4] = ((len >> 3) & 0xFF) as u8;
         au[5] = (au[5] & 0x1F) | (((len & 0x07) << 5) as u8);
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            au,
             FrameTiming {
                 pts_ns,
                 dts_ns: pts_ns,
@@ -454,8 +454,8 @@ mod overlay_timing {
             buf.extend_from_slice(&px);
         }
         let pts = pts_ms * MS;
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(buf.into_boxed_slice())),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            buf,
             FrameTiming {
                 pts_ns: pts,
                 dts_ns: pts,
@@ -470,10 +470,8 @@ mod overlay_timing {
     /// canvas would blank the picture instead).
     fn clear(pts_ms: u64) -> PipelinePacket {
         let pts = pts_ms * MS;
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(
-                vec![0u8; (W * H * 4) as usize].into_boxed_slice(),
-            )),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            vec![0u8; (W * H * 4) as usize],
             FrameTiming {
                 pts_ns: pts,
                 dts_ns: pts,

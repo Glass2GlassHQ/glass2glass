@@ -61,15 +61,13 @@ use std::time::{Duration, Instant};
 
 use g2g_core::element::DynAsyncElement;
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{
     run_duplex_session, run_fanin_session, run_fanout_session, run_simple_pipeline,
     run_source_transform_sink, DynSourceLoop, SourceLoop,
 };
 use g2g_core::{
     AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, ConfigureOutcome, Dim,
-    FrameTiming, G2gError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate,
-    VideoCodec,
+    FrameTiming, G2gError, OutputSink, PipelineClock, PipelinePacket, Rate, VideoCodec,
 };
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::filesrc::FileSrc;
@@ -142,8 +140,8 @@ impl SourceLoop for PacedH264Src {
             while Instant::now().duration_since(start) < self.duration {
                 let nal = self.nals[idx % self.nals.len()].clone();
                 idx += 1;
-                let frame = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(nal.into_boxed_slice())),
+                let frame = Frame::from_system_bytes(
+                    nal,
                     FrameTiming {
                         pts_ns: seq * 5_000_000,
                         ..FrameTiming::default()
@@ -210,8 +208,8 @@ impl SourceLoop for PacedOpusSrc {
             while Instant::now().duration_since(start) < self.duration {
                 let pkt = self.packets[idx % self.packets.len()].clone();
                 idx += 1;
-                let frame = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(pkt.into_boxed_slice())),
+                let frame = Frame::from_system_bytes(
+                    pkt,
                     // Opus is 20 ms per packet; the session maps PTS to a 48 kHz
                     // RTP clock.
                     FrameTiming {

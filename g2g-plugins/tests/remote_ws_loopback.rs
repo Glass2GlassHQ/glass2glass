@@ -18,11 +18,10 @@ use core::pin::Pin;
 use std::net::TcpListener as StdTcpListener;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_simple_pipeline, LatencyProfile};
 use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PipelineClock, PipelinePacket, PushOutcome, Rate, RawVideoFormat,
+    AsyncElement, Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, OutputSink, PipelineClock,
+    PipelinePacket, PushOutcome, Rate, RawVideoFormat,
 };
 
 use g2g_plugins::remotewssink::RemoteWsSink;
@@ -130,18 +129,17 @@ async fn remote_ws_transport_carries_a_split_graph_edge() {
         for i in 0u8..N {
             let mut bytes = vec![i; FRAME_LEN];
             bytes[1] = 0xAB; // a second marker so a mis-framed read is obvious
-            let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                timing: FrameTiming {
+            let frame = Frame::from_system_bytes(
+                bytes,
+                FrameTiming {
                     pts_ns: i as u64 * 1_000_000,
                     dts_ns: i as u64 * 1_000_000,
                     duration_ns: 33_000,
                     keyframe: i == 0,
                     ..FrameTiming::default()
                 },
-                sequence: i as u64,
-                meta: Default::default(),
-            };
+                i as u64,
+            );
             if remote
                 .process(PipelinePacket::DataFrame(frame), &mut null)
                 .await

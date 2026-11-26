@@ -51,10 +51,8 @@ fn audio_caps() -> Caps {
 /// A buffer of PCM, byte-filled so a passthrough is distinguishable from an
 /// emitted payload.
 fn audio_frame() -> Frame {
-    Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(
-            vec![0xABu8; AUDIO_BYTES].into_boxed_slice(),
-        )),
+    Frame::from_system_bytes(
+        vec![0xABu8; AUDIO_BYTES],
         FrameTiming {
             pts_ns: 1_000,
             duration_ns: 500,

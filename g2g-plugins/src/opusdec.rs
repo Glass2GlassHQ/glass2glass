@@ -58,13 +58,11 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::time::{ns_to_ticks, ticks_to_ns};
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ChannelLayout, ConfigureOutcome,
-    ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Segment, ANY_CHANNELS,
-    ANY_SAMPLE_RATE,
+    ElementMetadata, FrameTiming, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, Segment, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
 use opusic_sys as ffi;
@@ -576,11 +574,7 @@ impl OpusDec {
                 .await?;
             self.last_out = Some(new_caps);
         }
-        let decoded = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(pcm.into_boxed_slice())),
-            timing,
-            self.sequence,
-        );
+        let decoded = Frame::from_system_bytes(pcm, timing, self.sequence);
         self.sequence += 1;
         out.push(PipelinePacket::DataFrame(decoded)).await?;
         Ok(())

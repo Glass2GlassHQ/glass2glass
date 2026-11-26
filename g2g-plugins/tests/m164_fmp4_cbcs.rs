@@ -14,9 +14,7 @@
 
 use aes::cipher::{block_padding::NoPadding, BlockEncryptMut, KeyIvInit};
 use g2g_core::element::AsyncElement;
-use g2g_core::{
-    ByteStreamEncoding, Caps, G2gError, MemoryDomain, OutputSink, PipelinePacket, PushOutcome,
-};
+use g2g_core::{ByteStreamEncoding, Caps, G2gError, OutputSink, PipelinePacket, PushOutcome};
 use g2g_plugins::fmp4demux::Fmp4Demux;
 use g2g_plugins::sampleaesdecrypt::{new_key_handle, SampleAesKey};
 
@@ -247,13 +245,8 @@ impl OutputSink for CaptureSink {
 
 fn data_frame(bytes: Vec<u8>) -> PipelinePacket {
     use g2g_core::frame::{Frame, FrameTiming};
-    use g2g_core::memory::SystemSlice;
-    PipelinePacket::DataFrame(Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: 0,
-        meta: Default::default(),
-    })
+
+    PipelinePacket::DataFrame(Frame::from_system_bytes(bytes, FrameTiming::default(), 0))
 }
 
 #[tokio::test]

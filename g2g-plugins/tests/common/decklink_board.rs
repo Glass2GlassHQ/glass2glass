@@ -9,10 +9,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AudioFormat, Caps, ChannelLayout, Colorimetry, Dim, FrameTiming, G2gError, Interlace,
-    MemoryDomain, OutputSink, PipelineClock, PipelinePacket, PushOutcome, Rate, RawVideoFormat,
+    OutputSink, PipelineClock, PipelinePacket, PushOutcome, Rate, RawVideoFormat,
 };
 use g2g_plugins::decklink::{
     display_mode, CapturedVideoFrame, DeckLinkInput, DeckLinkInputOpener, DeckLinkOpener,
@@ -299,15 +298,14 @@ impl OutputSink for NullOutput {
 }
 
 pub(crate) fn buffer(bytes: Vec<u8>, pts_ns: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        bytes,
+        FrameTiming {
             pts_ns,
             ..Default::default()
         },
-        sequence: 0,
-        meta: Default::default(),
-    })
+        0,
+    ))
 }
 
 pub(crate) fn video_caps(format: RawVideoFormat, mode: &DisplayMode, interlace: Interlace) -> Caps {

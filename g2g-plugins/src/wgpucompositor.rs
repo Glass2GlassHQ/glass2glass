@@ -1157,11 +1157,7 @@ mod tests {
     }
 
     fn frame_of(bytes: &[u8]) -> Frame {
-        Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        )
+        Frame::from_system_bytes(bytes.to_vec(), FrameTiming::default(), 0)
     }
 
     /// Drive an element to one composited frame: overlays first (so priming

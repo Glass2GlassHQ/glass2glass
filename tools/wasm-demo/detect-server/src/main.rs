@@ -90,12 +90,7 @@ fn tensor_caps(shape: &[u32]) -> Caps {
 }
 
 fn frame_from(bytes: Vec<u8>) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: 0,
-        meta: Default::default(),
-    })
+    PipelinePacket::DataFrame(Frame::from_system_bytes(bytes, FrameTiming::default(), 0))
 }
 
 /// Resize the RGBA frame whole-to-whole (nearest) into `[1,3,640,640]` NCHW f32

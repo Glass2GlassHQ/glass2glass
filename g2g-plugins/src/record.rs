@@ -311,11 +311,11 @@ static REPLAY_PROPS: &[PropertySpec] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use g2g_core::{ByteStreamEncoding, Frame, FrameTiming, MemoryDomain, SystemSlice};
+    use g2g_core::{ByteStreamEncoding, Frame, FrameTiming};
 
     fn frame(bytes: &[u8], seq: u64) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            bytes.to_vec(),
             FrameTiming::default(),
             seq,
         ))

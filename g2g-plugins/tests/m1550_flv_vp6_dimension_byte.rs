@@ -10,7 +10,6 @@ mod collect_sink;
 use collect_sink::CollectSink;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{AsyncElement, ByteStreamEncoding, Caps, Dim, MultiInputElement, Rate, VideoCodec};
 use g2g_plugins::flvdemux::{FlvDemux, FlvStream};
 use g2g_plugins::flvmuxn::FlvMuxN;
@@ -44,11 +43,7 @@ fn single_tag_flv(body: &[u8]) -> Vec<u8> {
 }
 
 fn system_frame(bytes: Vec<u8>, timing: FrameTiming) -> Frame {
-    Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing,
-        0,
-    )
+    Frame::from_system_bytes(bytes, timing, 0)
 }
 
 fn data_frames(sink: CollectSink) -> Vec<Frame> {

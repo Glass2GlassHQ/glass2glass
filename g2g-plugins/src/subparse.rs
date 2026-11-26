@@ -4079,8 +4079,8 @@ mod tests {
     // -- SubParse element: drive process() directly. --------------------------
 
     fn srt_bytes_frame(bytes: &[u8]) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            bytes.to_vec(),
             FrameTiming::default(),
             0,
         ))

@@ -629,7 +629,7 @@ mod tests {
     use crate::openh264dec::OpenH264Dec;
     use crate::testutil::run_packets;
     use g2g_core::frame::Frame;
-    use g2g_core::memory::{MemoryDomain, SystemSlice};
+
     use g2g_core::{PushOutcome, Reconfigure};
 
     const WIDTH: u32 = 64;
@@ -665,8 +665,8 @@ mod tests {
     }
 
     fn raw_frame(index: u64) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(gradient(index).into_boxed_slice())),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            gradient(index),
             FrameTiming {
                 pts_ns: index * FRAME_PERIOD_NS,
                 ..FrameTiming::default()
@@ -800,10 +800,8 @@ mod tests {
         };
         let frame_bytes = (SLICED_WIDTH * SLICED_HEIGHT * 3 / 2) as usize;
         let frames = (0..FRAME_COUNT).map(|index| {
-            PipelinePacket::DataFrame(Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(
-                    alloc::vec![(index * 20) as u8; frame_bytes].into_boxed_slice(),
-                )),
+            PipelinePacket::DataFrame(Frame::from_system_bytes(
+                alloc::vec![(index * 20) as u8; frame_bytes],
                 FrameTiming {
                     pts_ns: index * FRAME_PERIOD_NS,
                     ..FrameTiming::default()

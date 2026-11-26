@@ -22,12 +22,10 @@ use alloc::boxed::Box;
 use std::path::PathBuf;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError,
-    MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
-    TextFormat,
+    OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, TextFormat,
 };
 
 use crate::filesink::path_io_err;
@@ -164,11 +162,7 @@ impl SourceLoop for SubtitleSrc {
             }
             let bytes = std::fs::read(&self.path)
                 .map_err(|e| path_io_err(short_type_name::<Self>(), "read", &self.path, e))?;
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                FrameTiming::default(),
-                0,
-            );
+            let frame = Frame::from_system_bytes(bytes, FrameTiming::default(), 0);
             out.push(PipelinePacket::DataFrame(frame)).await?;
             out.push(PipelinePacket::Eos).await?;
             Ok(1)

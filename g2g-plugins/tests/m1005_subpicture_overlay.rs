@@ -26,11 +26,10 @@ use core::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use g2g_core::frame::{Frame, FrameTiming};
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_graph, GraphNode, SourceLoop};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, Graph, MemoryDomain,
-    OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, Graph, OutputSink,
+    PipelineClock, PipelinePacket, Rate, RawVideoFormat,
 };
 use g2g_plugins::subpictureoverlay::SubPictureOverlay;
 
@@ -61,8 +60,8 @@ fn rgba(w: u32, h: u32) -> Caps {
 }
 
 fn frame(pixels: Vec<u8>, pts_ns: u64) -> Frame {
-    Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(pixels.into_boxed_slice())),
+    Frame::from_system_bytes(
+        pixels,
         FrameTiming {
             pts_ns,
             dts_ns: pts_ns,

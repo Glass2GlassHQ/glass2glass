@@ -28,11 +28,10 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     pcm_caps_any_rate_and_channels, AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet,
-    ConfigureOutcome, ElementMetadata, G2gError, MemoryDomain, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, Segment, ANY_CHANNELS, ANY_SAMPLE_RATE,
+    ConfigureOutcome, ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, Segment, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
 use g2g_mcu::g711::Law;
@@ -283,11 +282,7 @@ impl<L: G711Law> AsyncElement for G711Enc<L> {
                             .await?;
                         self.last_out = Some(new_caps);
                     }
-                    let out_frame = Frame::new(
-                        MemoryDomain::System(SystemSlice::from_boxed(coded.into_boxed_slice())),
-                        frame.timing,
-                        frame.sequence,
-                    );
+                    let out_frame = Frame::from_system_bytes(coded, frame.timing, frame.sequence);
                     out.push(PipelinePacket::DataFrame(out_frame)).await?;
                 }
                 PipelinePacket::Flush => {
@@ -488,11 +483,7 @@ impl<L: G711Law> AsyncElement for G711Dec<L> {
                             .await?;
                         self.last_out = Some(new_caps);
                     }
-                    let out_frame = Frame::new(
-                        MemoryDomain::System(SystemSlice::from_boxed(pcm.into_boxed_slice())),
-                        timing,
-                        frame.sequence,
-                    );
+                    let out_frame = Frame::from_system_bytes(pcm, timing, frame.sequence);
                     out.push(PipelinePacket::DataFrame(out_frame)).await?;
                 }
                 PipelinePacket::CapsChanged(c) => match &c {

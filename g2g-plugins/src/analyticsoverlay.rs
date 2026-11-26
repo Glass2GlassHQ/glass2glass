@@ -1232,7 +1232,7 @@ mod tests {
     use super::*;
     use crate::pixel::frame_byte_size;
     use g2g_core::frame::Frame;
-    use g2g_core::memory::SystemSlice;
+
     use g2g_core::{FrameTiming, Mask, PushOutcome, Rate, Tracking};
 
     fn solid(w: usize, h: usize, rgba: [u8; 4]) -> Vec<u8> {
@@ -1662,11 +1662,7 @@ mod tests {
 
     fn rgba_frame_with_meta(w: u32, h: u32, meta: AnalyticsMeta) -> Frame {
         let bytes = solid(w as usize, h as usize, [0, 0, 0, 255]);
-        let mut frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let mut frame = Frame::from_system_bytes(bytes, FrameTiming::default(), 0);
         frame.meta.attach(meta);
         frame
     }
@@ -1748,11 +1744,7 @@ mod tests {
         let mut ov = AnalyticsOverlay::new();
         ov.configure_pipeline(&rgba_caps(4, 4)).unwrap();
         let bytes = solid(4, 4, [10, 20, 30, 255]);
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.clone().into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let frame = Frame::from_system_bytes(bytes.clone(), FrameTiming::default(), 0);
 
         let mut sink = PixelSink::default();
         ov.process(PipelinePacket::DataFrame(frame), &mut sink)
@@ -1901,11 +1893,7 @@ mod tests {
             frame_byte_size(RawVideoFormat::Nv12, SIDE, SIDE),
             NEUTRAL_CHROMA,
         );
-        let mut frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(pixels.into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let mut frame = Frame::from_system_bytes(pixels, FrameTiming::default(), 0);
         frame.meta.attach(meta);
 
         let mut sink = PixelSink::default();
@@ -1943,11 +1931,7 @@ mod tests {
         let meta = tracked_meta(det(0.25, 0.25, 0.5, 0.5, 0), 0);
         let pixels = alloc::vec![100; frame_byte_size(RawVideoFormat::Nv12, SIDE, SIDE)];
         let frame = |meta: &AnalyticsMeta| {
-            let mut frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(pixels.clone().into_boxed_slice())),
-                FrameTiming::default(),
-                0,
-            );
+            let mut frame = Frame::from_system_bytes(pixels.clone(), FrameTiming::default(), 0);
             frame.meta.attach(meta.clone());
             frame
         };

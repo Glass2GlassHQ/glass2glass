@@ -14,11 +14,10 @@ use core::future::Future;
 use core::pin::Pin;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_graph, GraphNode, GraphNodeRef, SourceLoop};
 use g2g_core::{
     ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError, Graph,
-    MemoryDomain, OutputSink, PipelineClock, PipelinePacket,
+    OutputSink, PipelineClock, PipelinePacket,
 };
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::mpegts::{STREAM_TYPE_AAC, STREAM_TYPE_H264, TS_PACKET_LEN};
@@ -235,11 +234,7 @@ impl SourceLoop for TsSource {
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
             let bytes = self.bytes.take().expect("run once");
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                Default::default(),
-                0,
-            );
+            let frame = Frame::from_system_bytes(bytes, Default::default(), 0);
             out.push(PipelinePacket::DataFrame(frame)).await?;
             out.push(PipelinePacket::Eos).await?;
             Ok(1)

@@ -254,10 +254,8 @@ impl SourceLoop for CountedSource {
             out.push(PipelinePacket::CapsChanged(session_caps()))
                 .await?;
             for seq in 0..self.n {
-                let frame = g2g_core::frame::Frame::new(
-                    g2g_core::MemoryDomain::System(g2g_core::memory::SystemSlice::from_boxed(
-                        vec![7u8; 2 * 2 * 4].into_boxed_slice(),
-                    )),
+                let frame = g2g_core::frame::Frame::from_system_bytes(
+                    vec![7u8; 2 * 2 * 4],
                     g2g_core::FrameTiming::default(),
                     seq,
                 );

@@ -1602,7 +1602,6 @@ macro_rules! assert_ts_broadcast_knobs {
 
 #[tokio::test]
 async fn tsmux_broadcast_knobs() {
-    use g2g_core::memory::{MemoryDomain, SystemSlice};
     use g2g_core::{Frame, FrameTiming, MultiInputElement, PipelinePacket};
     assert_ts_broadcast_knobs!(g2g_plugins::tsmuxn::TsMux::new(2));
 
@@ -1623,11 +1622,7 @@ async fn tsmux_broadcast_knobs() {
         )
         .unwrap();
     let idr = vec![0u8, 0, 0, 1, 0x65, 0xAA];
-    let frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(idr.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    );
+    let frame = Frame::from_system_bytes(idr, FrameTiming::default(), 0);
     built
         .process(
             0,

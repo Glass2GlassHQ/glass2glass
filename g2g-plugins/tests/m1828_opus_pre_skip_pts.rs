@@ -11,7 +11,6 @@
 mod collect_sink;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::time::ticks_to_ns;
 use g2g_core::{AsyncElement, AudioFormat, ByteStreamEncoding, Caps};
 use g2g_plugins::oggdemux::OggDemux;
@@ -25,11 +24,7 @@ const FIXTURE: &str = "opus_stereo_48k.opus";
 const BYTES_PER_SAMPLE: usize = 2;
 
 fn data_frame(data: Vec<u8>) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    ))
+    PipelinePacket::DataFrame(Frame::from_system_bytes(data, FrameTiming::default(), 0))
 }
 
 #[tokio::test]

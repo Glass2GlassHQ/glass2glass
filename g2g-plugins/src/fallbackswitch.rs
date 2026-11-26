@@ -473,10 +473,7 @@ static FALLBACKSWITCH_PROPS: &[PropertySpec] = fallbackswitch_props!([0 1 2 3 4 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use g2g_core::{
-        AudioFormat, Dim, Frame, FrameTiming, MemoryDomain, PushOutcome, Rate, RawVideoFormat,
-        SystemSlice,
-    };
+    use g2g_core::{AudioFormat, Dim, Frame, FrameTiming, PushOutcome, Rate, RawVideoFormat};
 
     /// Every packet reaching the output, in order: the frame sequences and the
     /// caps announced ahead of them.
@@ -501,12 +498,11 @@ mod tests {
     }
 
     fn frame(seq: u64) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(vec![0u8; 4].into_boxed_slice())),
-            timing: FrameTiming::default(),
-            sequence: seq,
-            meta: Default::default(),
-        })
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            vec![0u8; 4],
+            FrameTiming::default(),
+            seq,
+        ))
     }
 
     fn video(width: u32) -> Caps {

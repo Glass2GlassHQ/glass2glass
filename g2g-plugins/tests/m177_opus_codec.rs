@@ -12,10 +12,8 @@
 #![cfg(feature = "opus")]
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PipelinePacket, PushOutcome,
+    AsyncElement, AudioFormat, Caps, FrameTiming, G2gError, OutputSink, PipelinePacket, PushOutcome,
 };
 use g2g_plugins::opusdec::OpusDec;
 use g2g_plugins::opusenc::OpusEnc;
@@ -93,8 +91,8 @@ async fn encode(channels: u8, pcm: &[u8]) -> CaptureSink {
     let mut enc = OpusEnc::new().with_bitrate(96_000);
     enc.configure_pipeline(&pcm_caps(channels)).unwrap();
     let mut sink = CaptureSink::default();
-    let frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(pcm.to_vec().into_boxed_slice())),
+    let frame = Frame::from_system_bytes(
+        pcm.to_vec(),
         FrameTiming {
             pts_ns: 0,
             ..FrameTiming::default()
@@ -119,11 +117,7 @@ async fn decode(channels: u8, packets: &[Vec<u8>]) -> CaptureSink {
     .unwrap();
     let mut sink = CaptureSink::default();
     for data in packets {
-        let f = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(data.clone().into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let f = Frame::from_system_bytes(data.clone(), FrameTiming::default(), 0);
         dec.process(PipelinePacket::DataFrame(f), &mut sink)
             .await
             .unwrap();
@@ -165,11 +159,7 @@ async fn stereo_roundtrip_preserves_signal_energy() {
         .unwrap();
     let mut psink = CaptureSink::default();
     for data in &enc.frames {
-        let f = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(data.clone().into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let f = Frame::from_system_bytes(data.clone(), FrameTiming::default(), 0);
         parse
             .process(PipelinePacket::DataFrame(f), &mut psink)
             .await
@@ -267,19 +257,15 @@ async fn bitrate_feedback_retargets_the_live_encoder() {
         let mut cap = CaptureSink::default();
         // First batch carries the feedback back to the encoder...
         let pcm = sine_pcm(2, FRAME_SAMPLES * 5, 12_000);
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(pcm.into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let frame = Frame::from_system_bytes(pcm, FrameTiming::default(), 0);
         enc.process(PipelinePacket::DataFrame(frame), &mut sink)
             .await
             .unwrap();
         assert!(sink.frames > 0, "first batch emitted packets");
         // ...the second batch encodes at the new target.
         let pcm = sine_pcm(2, FRAME_SAMPLES * 20, 12_000);
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(pcm.into_boxed_slice())),
+        let frame = Frame::from_system_bytes(
+            pcm,
             FrameTiming {
                 pts_ns: 100_000_000,
                 ..FrameTiming::default()

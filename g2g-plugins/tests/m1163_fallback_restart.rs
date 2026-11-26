@@ -28,13 +28,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{
     parse_launch, run_graph, ParseError, RestartPolicy, SourceLoop, UriRebuild,
 };
-use g2g_core::{
-    Caps, ConfigureOutcome, G2gError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket,
-};
+use g2g_core::{Caps, ConfigureOutcome, G2gError, OutputSink, PipelineClock, PipelinePacket};
 use g2g_plugins::fallbacksrc::{RestartSrc, RETRY_DELAY};
 use g2g_plugins::filesrc::FileSrc;
 use g2g_plugins::registry::default_registry;
@@ -354,12 +351,7 @@ impl SourceLoop for StallSrc {
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
             let bytes = vec![0u8; (WIDTH * HEIGHT * 4) as usize];
-            let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                timing: Default::default(),
-                sequence: 0,
-                meta: Default::default(),
-            };
+            let frame = Frame::from_system_bytes(bytes, Default::default(), 0);
             out.push(PipelinePacket::DataFrame(frame)).await?;
             core::future::pending::<()>().await;
             Ok(1)

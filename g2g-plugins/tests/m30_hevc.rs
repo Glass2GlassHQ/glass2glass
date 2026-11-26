@@ -25,7 +25,6 @@ use collect_sink::CollectSink;
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{Caps, Dim, G2gError, Interlace, Rate, RawVideoFormat, VideoCodec};
 use g2g_plugins::mfdecode::MfDecode;
 use g2g_plugins::mfencode::MfEncode;
@@ -67,18 +66,17 @@ fn nv12_frame(index: usize) -> Frame {
             data[row * w + col] = ((row + col + index * 8) % 256) as u8;
         }
     }
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        data,
+        FrameTiming {
             pts_ns: index as u64 * FRAME_DURATION_NS,
             dts_ns: index as u64 * FRAME_DURATION_NS,
             duration_ns: FRAME_DURATION_NS,
             capture_ns: index as u64 * FRAME_DURATION_NS,
             ..FrameTiming::default()
         },
-        sequence: index as u64,
-        meta: Default::default(),
-    }
+        index as u64,
+    )
 }
 
 fn starts_with_annexb_start_code(data: &[u8]) -> bool {
@@ -159,14 +157,7 @@ async fn hevc_encode_decode_round_trip_or_skip() {
         let Some(slice) = f.domain.as_system_slice() else {
             unreachable!()
         };
-        let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(
-                slice.to_vec().into_boxed_slice(),
-            )),
-            timing: f.timing,
-            sequence: f.sequence,
-            meta: Default::default(),
-        };
+        let frame = Frame::from_system_bytes(slice.to_vec(), f.timing, f.sequence);
         dec.process(PipelinePacket::DataFrame(frame), &mut decoded)
             .await
             .expect("decode DataFrame");

@@ -28,13 +28,11 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
-use g2g_core::memory::SystemSlice;
 use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     g2g_warn, pcm_caps_any_rate_and_channels, AsyncElement, AudioFormat, ByteStreamEncoding, Caps,
-    CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec,
+    CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, OutputSink,
+    PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::audioconvert::{audio_format_from_str, audio_format_to_str};
@@ -181,8 +179,8 @@ impl RawAudioParse {
         let pts_ns = ns(self.samples);
         let duration_ns = ns(samples);
         self.samples += samples;
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+        let frame = Frame::from_system_bytes(
+            bytes,
             FrameTiming {
                 pts_ns,
                 dts_ns: pts_ns,
@@ -450,11 +448,7 @@ mod tests {
     }
 
     fn data_frame(bytes: Vec<u8>) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        ))
+        PipelinePacket::DataFrame(Frame::from_system_bytes(bytes, FrameTiming::default(), 0))
     }
 
     #[tokio::test]

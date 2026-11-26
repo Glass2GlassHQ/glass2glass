@@ -7,11 +7,8 @@
 #[path = "common/collect_sink.rs"]
 mod collect_sink;
 
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{parse_launch, run_graph};
-use g2g_core::{
-    AsyncElement, Caps, CapsSet, Frame, FrameTiming, MemoryDomain, PipelinePacket, Segment,
-};
+use g2g_core::{AsyncElement, Caps, CapsSet, Frame, FrameTiming, PipelinePacket, Segment};
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::segmentclip::{AudioSegmentClip, VideoSegmentClip};
 
@@ -20,8 +17,8 @@ use collect_sink::CollectSink;
 const MS: u64 = 1_000_000;
 
 fn frame(pts_ns: u64, duration_ns: u64, bytes: Vec<u8>) -> Frame {
-    Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+    Frame::from_system_bytes(
+        bytes,
         FrameTiming {
             pts_ns,
             duration_ns,

@@ -5,7 +5,6 @@
 #![allow(dead_code)] // not every test file uses every helper here
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, G2gError, MultiOutputElement, MultiOutputSink,
     PropValue, PushOutcome,
@@ -81,11 +80,7 @@ pub(crate) async fn demux_first_port(file: &[u8]) -> Demuxed {
         })
         .expect("configure");
     let mut out = Demuxed::default();
-    let frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(file.to_vec().into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    );
+    let frame = Frame::from_system_bytes(file.to_vec(), FrameTiming::default(), 0);
     demux
         .process(PipelinePacket::DataFrame(frame), &mut out)
         .await

@@ -19,7 +19,6 @@
 
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{run_simple_pipeline, SourceLoop};
 use g2g_core::{AudioFormat, Caps, ConfigureOutcome, G2gError, PipelineClock};
 use g2g_plugins::aaudio::{AAudioSink, AAudioSrc};
@@ -114,12 +113,7 @@ async fn aaudio_sink_renders_pcm() {
     let mut nil = Discard;
     for seq in 0..50 {
         let pcm = sine_buffer(rate, channels, seq);
-        let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(pcm.into_boxed_slice())),
-            timing: FrameTiming::default(),
-            sequence: seq,
-            meta: Default::default(),
-        };
+        let frame = Frame::from_system_bytes(pcm, FrameTiming::default(), seq);
         sink.process(PipelinePacket::DataFrame(frame), &mut nil)
             .await
             .expect("render buffer");

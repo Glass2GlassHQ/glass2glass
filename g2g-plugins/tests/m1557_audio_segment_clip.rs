@@ -16,7 +16,6 @@ mod collect_sink;
 use std::path::PathBuf;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::time::{ns_to_ticks, ticks_to_ns};
 use g2g_core::{
     AsyncElement, AudioFormat, ByteStreamEncoding, Caps, PropValue, Segment, ANY_CHANNELS,
@@ -50,11 +49,7 @@ fn fixture(name: &str) -> Vec<u8> {
 }
 
 fn data_frame(data: Vec<u8>) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    ))
+    PipelinePacket::DataFrame(Frame::from_system_bytes(data, FrameTiming::default(), 0))
 }
 
 async fn decode(packets: Vec<PipelinePacket>) -> Decoded {

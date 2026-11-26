@@ -7,7 +7,6 @@
 #![cfg(feature = "std")]
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::{
     AsyncElement, Caps, Dim, G2gError, Interlace, OutputSink, PipelineClock, PushOutcome, Rate,
@@ -84,11 +83,7 @@ async fn the_stream_header_leads_the_first_frame_packet() {
         .expect("planar YUV is accepted");
     let mut sink = CaptureSink::default();
     for bytes in &planes {
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.clone().into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let frame = Frame::from_system_bytes(bytes.clone(), FrameTiming::default(), 0);
         element
             .process(PipelinePacket::DataFrame(frame), &mut sink)
             .await

@@ -14,12 +14,11 @@ use std::boxed::Box;
 use std::sync::{Arc, Mutex};
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_graph, GraphNode, SourceLoop};
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
-    FrameTiming, G2gError, Graph, MemoryDomain, MultiInputElement, OutputSink, PipelineClock,
-    PipelinePacket, Rate, RawVideoFormat,
+    FrameTiming, G2gError, Graph, MultiInputElement, OutputSink, PipelineClock, PipelinePacket,
+    Rate, RawVideoFormat,
 };
 
 struct NullClock;
@@ -119,12 +118,11 @@ impl SourceLoop for ScriptedSource {
 }
 
 fn frame(seq: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(vec![seq as u8].into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: seq,
-        meta: Default::default(),
-    })
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        vec![seq as u8],
+        FrameTiming::default(),
+        seq,
+    ))
 }
 
 /// Pass-through transform that records every `configure_allocation` size it

@@ -5,7 +5,6 @@
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AudioFormat, Caps, CapsSet, ChannelLayout, FrameTiming, G2gError, OutputSink, PipelinePacket,
     Segment, ANY_CHANNELS, ANY_SAMPLE_RATE,
@@ -131,11 +130,7 @@ impl PcmOutput {
             out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
             self.announced_caps = Some(caps);
         }
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(pcm.into_boxed_slice())),
-            timing,
-            self.sequence,
-        );
+        let frame = Frame::from_system_bytes(pcm, timing, self.sequence);
         self.sequence += 1;
         out.push(PipelinePacket::DataFrame(frame)).await?;
         Ok(())

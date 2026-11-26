@@ -15,13 +15,12 @@ use core::future::Future;
 use core::pin::Pin;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{
     parse_launch, run_graph, DynSourceLoop, LaunchFactory, Registry, SourceFactory, SourceLoop,
 };
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    MemoryDomain, NodeKind, OutputSink, PipelineClock, PipelinePacket, Rate, VideoCodec,
+    NodeKind, OutputSink, PipelineClock, PipelinePacket, Rate, VideoCodec,
 };
 use g2g_plugins::registry::default_registry;
 
@@ -78,8 +77,8 @@ impl SourceLoop for AuSrc {
         Box::pin(async move {
             assert!(configured, "runner configures before run");
             for (i, (au, pts)) in aus.iter().enumerate() {
-                let frame = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(au.clone().into_boxed_slice())),
+                let frame = Frame::from_system_bytes(
+                    au.clone(),
                     FrameTiming {
                         pts_ns: *pts,
                         ..FrameTiming::default()

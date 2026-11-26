@@ -30,7 +30,7 @@ use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::LlamaToken;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::{DomainSet, MemoryDomain, MemoryDomainKind, SystemSlice};
+use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError,
     HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
@@ -485,13 +485,7 @@ impl LlamaChat {
                 .await?;
             self.caps_emitted = true;
         }
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(
-                reply.into_bytes().into_boxed_slice(),
-            )),
-            frame.timing,
-            self.sequence,
-        );
+        let frame = Frame::from_system_bytes(reply.into_bytes(), frame.timing, self.sequence);
         self.sequence += 1;
         out.push(PipelinePacket::DataFrame(frame)).await.map(|_| ())
     }

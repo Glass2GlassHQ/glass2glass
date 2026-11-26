@@ -8,10 +8,8 @@
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
-    PushOutcome,
+    AsyncElement, Caps, FrameTiming, G2gError, OutputSink, PipelinePacket, PushOutcome,
 };
 
 #[cfg(feature = "st2110")]
@@ -69,12 +67,7 @@ pub(crate) fn frame(bytes: Vec<u8>) -> Frame {
 }
 
 pub(crate) fn frame_with_bytes(sequence: u64, bytes: Vec<u8>) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence,
-        meta: Default::default(),
-    }
+    Frame::from_system_bytes(bytes, FrameTiming::default(), sequence)
 }
 
 pub(crate) fn data_bytes(packets: &[PipelinePacket]) -> Vec<u8> {

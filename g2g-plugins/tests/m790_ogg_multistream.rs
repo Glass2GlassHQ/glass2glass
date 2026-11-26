@@ -21,7 +21,6 @@ use std::process::Command;
 
 use g2g_core::conformance::{ConformanceDimension, Evidence};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::parse_launch;
 use g2g_core::{
     AudioFormat, Bus, BusMessage, ByteStreamEncoding, Caps, G2gError, MultiInputElement,
@@ -105,11 +104,7 @@ impl OutputSink for ByteSink {
 }
 
 fn frame(data: Vec<u8>, timing: FrameTiming) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-        timing,
-        0,
-    ))
+    PipelinePacket::DataFrame(Frame::from_system_bytes(data, timing, 0))
 }
 
 fn ogg_caps() -> Caps {

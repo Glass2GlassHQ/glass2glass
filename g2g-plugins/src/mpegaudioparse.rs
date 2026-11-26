@@ -36,12 +36,11 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{ElementSeekRoute, SeekController};
 use g2g_core::{
     g2g_error, g2g_warn, AsyncElement, AudioFormat, BusHandle, BusMessage, Caps, CapsConstraint,
-    ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PadTemplate, PadTemplates, PipelinePacket, Segment, TagList,
+    ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, OutputSink, PadTemplate,
+    PadTemplates, PipelinePacket, Segment, TagList,
 };
 
 use crate::audioframe::{
@@ -275,8 +274,8 @@ impl MpegAudioParse {
             .await?;
             self.presented = Some(presented);
         }
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+        let frame = Frame::from_system_bytes(
+            data,
             FrameTiming {
                 pts_ns,
                 dts_ns: pts_ns,
@@ -574,11 +573,7 @@ mod tests {
         let mut parser = MpegAudioParse::new();
         parser.configure_pipeline(&mp3_caps()).expect("mp3 caps");
         let mut sink = RecordingSink::default();
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let frame = Frame::from_system_bytes(bytes, FrameTiming::default(), 0);
         parser
             .process(PipelinePacket::DataFrame(frame), &mut sink)
             .await
@@ -680,11 +675,7 @@ mod tests {
         let mut sink = RecordingSink::default();
         let mut stream = frame.clone();
         stream.extend(frame);
-        let data = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(stream.into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let data = Frame::from_system_bytes(stream, FrameTiming::default(), 0);
         let err = parser
             .process(PipelinePacket::DataFrame(data), &mut sink)
             .await

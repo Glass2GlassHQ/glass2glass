@@ -11,7 +11,6 @@
 //! external fixture or any system dependency (no libdav1d, no NASM).
 
 use g2g_core::frame::{Frame, FrameTiming};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AsyncElement, Caps, Dim, G2gError, OutputSink, PipelinePacket, PushOutcome, Rate,
     RawVideoFormat,
@@ -79,8 +78,8 @@ async fn av1_encode_then_rav1d_decode_round_trips_i420() {
     enc.configure_pipeline(&i420_caps(W, H)).unwrap();
     let mut encoded = CaptureSink::default();
     for i in 0..6u64 {
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(i420_grey(W, H).into_boxed_slice())),
+        let frame = Frame::from_system_bytes(
+            i420_grey(W, H),
             FrameTiming {
                 pts_ns: i * 33_000_000,
                 ..FrameTiming::default()
@@ -104,11 +103,7 @@ async fn av1_encode_then_rav1d_decode_round_trips_i420() {
     dec.configure_pipeline(&encoded.caps[0]).unwrap();
     let mut decoded = CaptureSink::default();
     for data in &encoded.frames {
-        let f = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(data.clone().into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let f = Frame::from_system_bytes(data.clone(), FrameTiming::default(), 0);
         dec.process(PipelinePacket::DataFrame(f), &mut decoded)
             .await
             .unwrap();
@@ -193,10 +188,8 @@ async fn roundtrip_chroma(format: RawVideoFormat) {
     enc.configure_pipeline(&raw_caps(format, W, H)).unwrap();
     let mut encoded = CaptureSink::default();
     for i in 0..6u64 {
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(
-                planar_grey(format, W, H).into_boxed_slice(),
-            )),
+        let frame = Frame::from_system_bytes(
+            planar_grey(format, W, H),
             FrameTiming {
                 pts_ns: i * 33_000_000,
                 ..FrameTiming::default()
@@ -219,11 +212,7 @@ async fn roundtrip_chroma(format: RawVideoFormat) {
     dec.configure_pipeline(&encoded.caps[0]).unwrap();
     let mut decoded = CaptureSink::default();
     for data in &encoded.frames {
-        let f = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(data.clone().into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let f = Frame::from_system_bytes(data.clone(), FrameTiming::default(), 0);
         dec.process(PipelinePacket::DataFrame(f), &mut decoded)
             .await
             .unwrap();
@@ -289,10 +278,8 @@ async fn roundtrip_high_depth(format: RawVideoFormat) {
     enc.configure_pipeline(&raw_caps(format, W, H)).unwrap();
     let mut encoded = CaptureSink::default();
     for i in 0..6u64 {
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(
-                planar_grey16(format, W, H, grey).into_boxed_slice(),
-            )),
+        let frame = Frame::from_system_bytes(
+            planar_grey16(format, W, H, grey),
             FrameTiming {
                 pts_ns: i * 33_000_000,
                 ..FrameTiming::default()
@@ -315,11 +302,7 @@ async fn roundtrip_high_depth(format: RawVideoFormat) {
     dec.configure_pipeline(&encoded.caps[0]).unwrap();
     let mut decoded = CaptureSink::default();
     for data in &encoded.frames {
-        let f = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(data.clone().into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let f = Frame::from_system_bytes(data.clone(), FrameTiming::default(), 0);
         dec.process(PipelinePacket::DataFrame(f), &mut decoded)
             .await
             .unwrap();

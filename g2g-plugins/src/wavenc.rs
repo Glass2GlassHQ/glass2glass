@@ -30,11 +30,10 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     pcm_formats, AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
-    ConfigureOutcome, ElementMetadata, G2gError, MemoryDomain, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    ConfigureOutcome, ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use g2g_mcu::adpcm::BLOCK_HEADER;
@@ -153,12 +152,11 @@ impl WavEnc {
 
     fn frame(&mut self, bytes: Vec<u8>) -> PipelinePacket {
         self.emitted += 1;
-        PipelinePacket::DataFrame(Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            timing: Default::default(),
-            sequence: self.emitted,
-            meta: Default::default(),
-        })
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            bytes,
+            Default::default(),
+            self.emitted,
+        ))
     }
 }
 

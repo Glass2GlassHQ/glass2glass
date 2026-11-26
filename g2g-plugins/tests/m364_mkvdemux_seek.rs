@@ -17,7 +17,7 @@ use core::pin::Pin;
 
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
+use g2g_core::memory::MemoryDomain;
 use g2g_core::runtime::{SeekController, SeekOutcome, SourceLoop};
 use g2g_core::{ByteStreamEncoding, Caps, G2gError, Seek, SeekFlags};
 use g2g_plugins::filesrc::FileSrc;
@@ -188,8 +188,8 @@ impl OutputSink for Capture {
 }
 
 fn data_frame(bytes: &[u8]) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        bytes.to_vec(),
         FrameTiming::default(),
         0,
     ))

@@ -12,7 +12,6 @@ use collect_sink::CollectSink;
 use std::path::PathBuf;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::{AsyncElement, Caps, CapsSet, FrameTiming, PipelineClock, PipelinePacket};
 use g2g_plugins::bayer::{Bayer2Rgb, Rgb2Bayer};
@@ -196,13 +195,7 @@ async fn convert<E: AsyncElement>(mut element: E, case: &Case) -> Vec<u8> {
     element
         .configure_output(&caps(case.output_caps))
         .unwrap_or_else(|e| panic!("{} output: {e:?}", case.expected));
-    let frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(
-            read_fixture(case.input).into_boxed_slice(),
-        )),
-        FrameTiming::default(),
-        0,
-    );
+    let frame = Frame::from_system_bytes(read_fixture(case.input), FrameTiming::default(), 0);
     let mut out = CollectSink::default();
     element
         .process(PipelinePacket::DataFrame(frame), &mut out)
@@ -305,11 +298,8 @@ async fn bayer2rgb_keeps_a_flat_colour_at_any_size() {
                     "video/x-raw,format=RGBA,width={width},height={height}"
                 )))
                 .expect("RGBA output");
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(
-                    bayer_frame_with_one_value_per_colour(pattern, width, height, rgb)
-                        .into_boxed_slice(),
-                )),
+            let frame = Frame::from_system_bytes(
+                bayer_frame_with_one_value_per_colour(pattern, width, height, rgb),
                 FrameTiming::default(),
                 0,
             );
@@ -367,11 +357,7 @@ async fn rgb2bayer_pads_rows_to_four_pixels() {
     element
         .configure_output(&caps("video/x-bayer,format=rggb,width=6,height=2"))
         .expect("Bayer output");
-    let frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(argb.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    );
+    let frame = Frame::from_system_bytes(argb, FrameTiming::default(), 0);
     let mut out = CollectSink::default();
     element
         .process(PipelinePacket::DataFrame(frame), &mut out)

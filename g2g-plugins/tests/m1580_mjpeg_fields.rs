@@ -9,10 +9,9 @@
 #![cfg(all(feature = "mjpeg-encode", feature = "mjpeg"))]
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, Dim, FrameTiming, G2gError, Interlace, MemoryDomain, OutputSink,
-    PipelinePacket, PushOutcome, Rate, RawVideoFormat, VideoCodec,
+    AsyncElement, Caps, Dim, FrameTiming, G2gError, Interlace, OutputSink, PipelinePacket,
+    PushOutcome, Rate, RawVideoFormat, VideoCodec,
 };
 use g2g_plugins::mjpegdec::MjpegDec;
 use g2g_plugins::mjpegenc::MjpegEnc;
@@ -53,11 +52,7 @@ impl OutputSink for CaptureSink {
 }
 
 fn frame(bytes: Vec<u8>) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    ))
+    PipelinePacket::DataFrame(Frame::from_system_bytes(bytes, FrameTiming::default(), 0))
 }
 
 fn mjpeg_caps(width: Dim, height: Dim) -> Caps {

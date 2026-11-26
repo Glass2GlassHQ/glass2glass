@@ -26,7 +26,6 @@ use std::pin::Pin;
 
 use g2g_core::element::{AsyncElement, BoxFuture, DynAsyncElement, OutputSink};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{run_linear_chain, SourceLoop};
 use g2g_core::{
     AnalyticsMeta, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError, PipelineClock,
@@ -92,12 +91,7 @@ impl SourceLoop for TensorSource {
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
             let data = self.data.take().ok_or(G2gError::NotConfigured)?;
-            let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-                timing: FrameTiming::default(),
-                sequence: 0,
-                meta: Default::default(),
-            };
+            let frame = Frame::from_system_bytes(data, FrameTiming::default(), 0);
             out.push(PipelinePacket::DataFrame(frame)).await?;
             out.push(PipelinePacket::Eos).await?;
             Ok(1)

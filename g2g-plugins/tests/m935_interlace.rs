@@ -23,8 +23,7 @@ mod collect_sink;
 use collect_sink::CollectSink;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::SystemSlice;
-use g2g_core::{AsyncElement, Caps, Dim, Interlace, MemoryDomain, PropValue, Rate, RawVideoFormat};
+use g2g_core::{AsyncElement, Caps, Dim, Interlace, PropValue, Rate, RawVideoFormat};
 use g2g_plugins::capsfilter::parse_caps;
 use g2g_plugins::deinterlace::{Deinterlace, DeinterlaceMode};
 
@@ -66,8 +65,8 @@ fn raw_caps(format: RawVideoFormat, interlace: Interlace) -> Caps {
 }
 
 fn frame(bytes: &[u8], i: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        bytes.to_vec(),
         FrameTiming {
             pts_ns: i * 40_000_000,
             ..Default::default()

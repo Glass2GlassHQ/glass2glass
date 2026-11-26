@@ -24,11 +24,10 @@ use std::vec::Vec;
 
 use g2g_core::clock::ClockSync;
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::rtp::{CaptureTimeExtensionIds, RtpHeader};
 use g2g_core::{
-    BitstreamAlignment, Caps, Colorimetry, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, VideoCodec,
+    BitstreamAlignment, Caps, Colorimetry, Dim, FrameTiming, G2gError, OutputSink, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, Rate, VideoCodec,
 };
 
 use crate::filesink::io_err;
@@ -591,9 +590,9 @@ impl<'a> AccessUnitEmitter<'a> {
         } else {
             [announced, au.data].concat()
         };
-        let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-            timing: FrameTiming {
+        let frame = Frame::from_system_bytes(
+            data,
+            FrameTiming {
                 pts_ns: pts,
                 dts_ns: pts,
                 duration_ns: 0,
@@ -602,9 +601,8 @@ impl<'a> AccessUnitEmitter<'a> {
                 keyframe,
                 ..FrameTiming::default()
             },
-            sequence: self.seq,
-            meta: Default::default(),
-        };
+            self.seq,
+        );
         #[cfg(feature = "metadata")]
         let frame = {
             let mut frame = frame;

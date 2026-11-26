@@ -17,7 +17,6 @@
 
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{Caps, Dim, G2gError, Rate, RawVideoFormat, TensorDType, TensorLayout, TensorShape};
 use g2g_ml::executorchinfer::ExecutorchInference;
 
@@ -75,12 +74,7 @@ fn output_caps() -> Caps {
 }
 
 fn system_frame(bytes: Vec<u8>) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: 0,
-        meta: Default::default(),
-    }
+    Frame::from_system_bytes(bytes, FrameTiming::default(), 0)
 }
 
 fn f32_values(frame: &Frame) -> Vec<f32> {

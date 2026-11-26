@@ -30,11 +30,10 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use g2g_core::frame::{Frame, PipelinePacket};
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    AsyncElement, ByteStreamEncoding, Caps, FrameTiming, MemoryDomain, MultiInputElement,
-    PropValue, PropertySpec, SubPictureFormat,
+    AsyncElement, ByteStreamEncoding, Caps, FrameTiming, MultiInputElement, PropValue,
+    PropertySpec, SubPictureFormat,
 };
 
 use g2g_plugins::dvbsub::{page_id_blob, parse_page_ids, segment_span, PageIds};
@@ -90,11 +89,7 @@ fn caps(format: SubPictureFormat) -> Caps {
 }
 
 fn frame(data: Vec<u8>, timing: FrameTiming) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-        timing,
-        0,
-    ))
+    PipelinePacket::DataFrame(Frame::from_system_bytes(data, timing, 0))
 }
 
 fn at(pts_ns: u64, duration_ns: u64) -> FrameTiming {

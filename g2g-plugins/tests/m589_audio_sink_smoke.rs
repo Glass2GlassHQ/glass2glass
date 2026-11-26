@@ -23,11 +23,9 @@
 ))]
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::block_on;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PipelinePacket, PushOutcome,
+    AsyncElement, AudioFormat, Caps, FrameTiming, G2gError, OutputSink, PipelinePacket, PushOutcome,
 };
 
 const RATE: u32 = 48_000;
@@ -102,15 +100,14 @@ fn tone(format: AudioFormat, channels: u8, frames: usize, phase0: usize) -> Vec<
 }
 
 fn pcm_frame(bytes: Vec<u8>, seq: u64) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        bytes,
+        FrameTiming {
             pts_ns: seq,
             ..Default::default()
         },
-        sequence: seq,
-        meta: Default::default(),
-    }
+        seq,
+    )
 }
 
 /// Configure `sink`, feed the tone in 10 ms chunks, and drain on `Eos`. Returns

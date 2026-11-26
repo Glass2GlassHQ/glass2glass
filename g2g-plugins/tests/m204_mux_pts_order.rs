@@ -12,11 +12,10 @@ use std::pin::Pin;
 use core::future::Future;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_muxer_sink, DynSourceLoop, SourceLoop};
 use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PipelineClock, PipelinePacket, Rate, RawVideoFormat,
+    AsyncElement, Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, OutputSink, PipelineClock,
+    PipelinePacket, Rate, RawVideoFormat,
 };
 
 use g2g_plugins::mux::InterleaveMux;
@@ -66,17 +65,14 @@ impl SourceLoop for PtsSrc {
         Box::pin(async move {
             assert!(configured, "runner configures the source before run");
             for p in &pts {
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(
-                        vec![0u8; 4].into_boxed_slice(),
-                    )),
-                    timing: FrameTiming {
+                let frame = Frame::from_system_bytes(
+                    vec![0u8; 4],
+                    FrameTiming {
                         pts_ns: *p,
                         ..FrameTiming::default()
                     },
-                    sequence: *p,
-                    meta: Default::default(),
-                };
+                    *p,
+                );
                 out.push(PipelinePacket::DataFrame(frame)).await?;
                 // Yield so the two sources actually interleave their delivery.
                 tokio::task::yield_now().await;

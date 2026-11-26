@@ -19,11 +19,10 @@ use futures_util::StreamExt;
 use tokio_tungstenite::tungstenite::Message;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::wire::decode_packet;
 use g2g_core::{
-    AsyncElement, Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
-    PropValue, PushOutcome, Rate, RawVideoFormat,
+    AsyncElement, Caps, Dim, FrameTiming, G2gError, OutputSink, PipelinePacket, PropValue,
+    PushOutcome, Rate, RawVideoFormat,
 };
 
 use g2g_plugins::remotewssink::RemoteWsSink;
@@ -56,20 +55,17 @@ fn test_caps() -> Caps {
 }
 
 fn frame(index: u8) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(
-            vec![index; FRAME_LEN].into_boxed_slice(),
-        )),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        vec![index; FRAME_LEN],
+        FrameTiming {
             pts_ns: u64::from(index) * 1_000_000,
             dts_ns: u64::from(index) * 1_000_000,
             duration_ns: 33_000,
             keyframe: index == 0,
             ..FrameTiming::default()
         },
-        sequence: u64::from(index),
-        meta: Default::default(),
-    }
+        u64::from(index),
+    )
 }
 
 /// A free port to serve on: bound, read back, and dropped so the sink can bind

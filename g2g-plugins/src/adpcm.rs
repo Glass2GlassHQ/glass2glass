@@ -31,11 +31,10 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Segment, ANY_CHANNELS, ANY_SAMPLE_RATE,
+    FrameTiming, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec, Segment, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
 use g2g_mcu::adpcm::{
@@ -240,8 +239,8 @@ impl AdpcmEnc {
             let pts_ns = self.next_pts_ns.unwrap_or(0);
             let duration_ns = self.block_duration_ns();
             self.next_pts_ns = Some(pts_ns + duration_ns);
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(block.into_boxed_slice())),
+            let frame = Frame::from_system_bytes(
+                block,
                 FrameTiming {
                     pts_ns,
                     dts_ns: pts_ns,
@@ -523,11 +522,7 @@ impl AdpcmDec {
                     .await?;
                 self.last_out = Some(new_caps);
             }
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(pcm.into_boxed_slice())),
-                timing,
-                self.sequence,
-            );
+            let frame = Frame::from_system_bytes(pcm, timing, self.sequence);
             self.sequence += 1;
             out.push(PipelinePacket::DataFrame(frame)).await?;
         }

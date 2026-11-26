@@ -2242,7 +2242,7 @@ mod ffi {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use g2g_core::memory::SystemSlice;
+
     use g2g_core::query::LatencyReport;
 
     fn h264(w: u32, h: u32) -> Caps {
@@ -2888,8 +2888,8 @@ mod tests {
 
     /// A system-memory frame carrying one access unit.
     fn au_frame(au: &[u8], pts_ns: u64) -> g2g_core::frame::Frame {
-        g2g_core::frame::Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(au.to_vec().into_boxed_slice())),
+        g2g_core::frame::Frame::from_system_bytes(
+            au.to_vec(),
             g2g_core::FrameTiming {
                 pts_ns,
                 ..Default::default()
@@ -3579,11 +3579,7 @@ mod tests {
         }
         let mut cuda_sink = CudaSink::default();
         for au in &au_sink.aus {
-            let f = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(au.clone().into_boxed_slice())),
-                FrameTiming::default(),
-                0,
-            );
+            let f = Frame::from_system_bytes(au.clone(), FrameTiming::default(), 0);
             dec.process(PipelinePacket::DataFrame(f), &mut cuda_sink)
                 .await
                 .expect("decode AU");

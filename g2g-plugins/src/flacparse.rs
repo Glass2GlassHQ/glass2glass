@@ -32,13 +32,12 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{ElementSeekRoute, SeekController};
 use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     AsyncElement, AudioFormat, BusHandle, BusMessage, Caps, CapsConstraint, ConfigureOutcome,
-    ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, Tag, TagList,
+    ElementMetadata, FrameTiming, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    Tag, TagList,
 };
 
 use crate::demuxseek::DemuxSeek;
@@ -181,8 +180,8 @@ impl FlacParse {
             // The header block (no frame header) rides at time zero.
             _ => (0, 0),
         };
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+        let frame = Frame::from_system_bytes(
+            data,
             FrameTiming {
                 pts_ns,
                 dts_ns: pts_ns,

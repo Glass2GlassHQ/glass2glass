@@ -11,7 +11,6 @@
 use std::process::Command;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AspectRatio, AsyncElement, Caps, Dim, G2gError, OutputSink, PixelAspect, PushOutcome, Rate,
     VideoCodec,
@@ -87,11 +86,7 @@ async fn parsed(stream: Vec<u8>) -> Vec<PipelinePacket> {
     let mut parse = H264Parse::reframing();
     parse.configure_pipeline(&h264_caps()).unwrap();
     let mut sink = CollectPackets::default();
-    let frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(stream.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    );
+    let frame = Frame::from_system_bytes(stream, FrameTiming::default(), 0);
     parse
         .process(PipelinePacket::DataFrame(frame), &mut sink)
         .await

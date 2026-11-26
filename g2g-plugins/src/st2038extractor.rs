@@ -10,11 +10,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::log::{short_type_name, LogName, LogSource};
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     g2g_warn, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    Frame, G2gError, MemoryDomain, MultiOutputElement, MultiOutputSink, OutputSink, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Rate, St2038Alignment,
+    Frame, G2gError, MultiOutputElement, MultiOutputSink, OutputSink, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec, Rate, St2038Alignment,
 };
 
 use crate::st2038::{framerate_period_ns, write_st2038};
@@ -251,11 +250,7 @@ impl St2038ExtractorN {
     ) -> Result<(), G2gError> {
         let payload = self.st2038_payload(frame);
         let st2038_frame = (!payload.is_empty()).then(|| {
-            let mut st2038_frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
-                frame.timing,
-                self.sequence,
-            );
+            let mut st2038_frame = Frame::from_system_bytes(payload, frame.timing, self.sequence);
             st2038_frame.domain.make_shareable();
             st2038_frame
         });

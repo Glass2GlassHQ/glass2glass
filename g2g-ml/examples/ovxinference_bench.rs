@@ -13,7 +13,7 @@ mod bench {
 
     use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
     use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-    use g2g_core::memory::{MemoryDomain, SystemSlice};
+
     use g2g_core::{
         Caps, Colorimetry, Dim, G2gError, Interlace, PixelAspect, PropValue, Rate, RawVideoFormat,
     };
@@ -99,14 +99,7 @@ mod bench {
             .expect("tokio runtime");
         let mut sequence = 0;
         let element = timed(|| {
-            let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(
-                    input.clone().into_boxed_slice(),
-                )),
-                timing: FrameTiming::default(),
-                sequence,
-                meta: Default::default(),
-            };
+            let frame = Frame::from_system_bytes(input.clone(), FrameTiming::default(), sequence);
             sequence += 1;
             runtime
                 .block_on(inference.process(PipelinePacket::DataFrame(frame), &mut Discard))

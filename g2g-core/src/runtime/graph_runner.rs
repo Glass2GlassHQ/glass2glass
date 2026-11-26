@@ -7328,20 +7328,16 @@ pub(crate) fn try_clone_packet(packet: &PipelinePacket) -> Result<PipelinePacket
 mod tests {
     use super::*;
     use crate::frame::FrameTiming;
-    use crate::memory::{MemoryDomain, SystemSlice};
 
     fn system_frame(bytes: &[u8], seq: u64) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(
-                bytes.to_vec().into_boxed_slice(),
-            )),
-            timing: FrameTiming {
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            bytes.to_vec(),
+            FrameTiming {
                 pts_ns: 7,
                 ..FrameTiming::default()
             },
-            sequence: seq,
-            meta: Default::default(),
-        })
+            seq,
+        ))
     }
 
     #[test]

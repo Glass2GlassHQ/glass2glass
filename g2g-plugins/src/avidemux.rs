@@ -28,7 +28,6 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
     CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameMetaSet, G2gError, MultiOutputElement,
@@ -549,12 +548,7 @@ fn forwards(streams: &[AviStream], selected: &[usize], stream: usize) -> bool {
 }
 
 fn frame_of(data: Vec<u8>, timing: FrameTiming, sequence: u64) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-        timing,
-        sequence,
-        meta: Default::default(),
-    }
+    Frame::from_system_bytes(data, timing, sequence)
 }
 
 /// The `StreamCollection` a parsed file publishes, or `None` when it carries no

@@ -34,11 +34,10 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     g2g_warn, AsyncElement, BitstreamAlignment, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    Dim, ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, Rate, VideoCodec,
+    Dim, ElementMetadata, FrameTiming, G2gError, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, Rate, VideoCodec,
 };
 
 use crate::compositor::frame_period_ns;
@@ -285,8 +284,8 @@ impl<F: StillImageFormat> StillImageParse<F> {
         };
         let pts_ns = self.base_ns + self.since_base.saturating_mul(period_ns);
         self.since_base += 1;
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(access_unit.into_boxed_slice())),
+        let frame = Frame::from_system_bytes(
+            access_unit,
             FrameTiming {
                 pts_ns,
                 dts_ns: pts_ns,
@@ -557,8 +556,8 @@ mod tests {
     }
 
     fn data_frame(bytes: &[u8], pts_ns: u64) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            bytes.to_vec(),
             FrameTiming {
                 pts_ns,
                 ..FrameTiming::default()

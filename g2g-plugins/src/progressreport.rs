@@ -196,7 +196,7 @@ impl LogSource for ProgressReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use g2g_core::{Frame, FrameTiming, MemoryDomain, PushOutcome, SystemSlice};
+    use g2g_core::{Frame, FrameTiming, PushOutcome};
 
     struct NullSink;
     impl OutputSink for NullSink {
@@ -215,14 +215,7 @@ mod tests {
             pts_ns,
             ..FrameTiming::default()
         };
-        PipelinePacket::DataFrame(Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(
-                alloc::vec![0u8; bytes].into_boxed_slice(),
-            )),
-            timing,
-            sequence: 0,
-            meta: Default::default(),
-        })
+        PipelinePacket::DataFrame(Frame::from_system_bytes(alloc::vec![0u8; bytes], timing, 0))
     }
 
     #[tokio::test]

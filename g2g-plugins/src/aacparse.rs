@@ -48,12 +48,10 @@ use crate::annexb::{BitReader, BitWriter};
 
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{ElementSeekRoute, SeekController};
 use g2g_core::{
     g2g_error, g2g_warn, AsyncElement, AudioFormat, Caps, CapsConstraint, ConfigureOutcome,
-    ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket,
+    ElementMetadata, FrameTiming, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
 };
 
 use crate::audioframe::{locate_frame, Located, SyncFrameHeader};
@@ -783,8 +781,8 @@ impl AacParse {
         let (start_discard_ns, end_discard_ns) = self
             .clock
             .discards(start_offset..start_offset + data.len() as u64);
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+        let frame = Frame::from_system_bytes(
+            data,
             FrameTiming {
                 pts_ns,
                 dts_ns: pts_ns,
@@ -1597,8 +1595,8 @@ mod tests {
     // -- Element-level tests (drive AacParse::process directly) -------------
 
     use g2g_core::frame::Frame;
-    use g2g_core::memory::SystemSlice;
-    use g2g_core::{FrameTiming, MemoryDomain};
+
+    use g2g_core::FrameTiming;
 
     fn aac_caps() -> Caps {
         // Sentinel pre-parse caps: format pinned, channels/rate unknown.
@@ -1800,8 +1798,8 @@ mod tests {
         let mut sink = CollectSink::default();
         let mut stream = adts_frame(2, 4, 16);
         stream.extend(adts_frame(2, 4, 16));
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(stream.into_boxed_slice())),
+        let frame = Frame::from_system_bytes(
+            stream,
             FrameTiming {
                 pts_ns: DEMUXER_PTS_NS,
                 ..FrameTiming::default()

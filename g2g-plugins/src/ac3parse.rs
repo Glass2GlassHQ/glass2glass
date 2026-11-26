@@ -29,13 +29,11 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{ElementSeekRoute, SeekController};
 use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     g2g_error, g2g_warn, AsyncElement, AudioFormat, Caps, CapsConstraint, ConfigureOutcome,
-    ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket,
+    ElementMetadata, FrameTiming, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
 };
 
 use crate::audioframe::{
@@ -133,8 +131,8 @@ impl Ac3Parse {
             .clock
             .frame_pts(start_offset, frame_samples, header.sample_rate);
         let duration_ns = ticks_to_ns(frame_samples, header.sample_rate);
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+        let frame = Frame::from_system_bytes(
+            data,
             FrameTiming {
                 pts_ns,
                 dts_ns: pts_ns,
@@ -347,11 +345,7 @@ mod tests {
     }
 
     fn data_frame(bytes: Vec<u8>) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        ))
+        PipelinePacket::DataFrame(Frame::from_system_bytes(bytes, FrameTiming::default(), 0))
     }
 
     /// Push `bytes` as one buffer, then end the stream.
@@ -498,8 +492,8 @@ mod tests {
         let mut parser = Ac3Parse::new();
         parser.configure_pipeline(&ac3_caps()).expect("AC-3 caps");
         let mut sink = RecordingSink::default();
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(stream(2).into_boxed_slice())),
+        let frame = Frame::from_system_bytes(
+            stream(2),
             FrameTiming {
                 pts_ns: DEMUXER_PTS_NS,
                 ..FrameTiming::default()
@@ -526,8 +520,8 @@ mod tests {
         let mut sink = RecordingSink::default();
         let expected: Vec<u64> = (0..3).map(|i| FIRST_PTS_NS + i * FRAME_NS).collect();
         for &pts_ns in &expected {
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(stream(1).into_boxed_slice())),
+            let frame = Frame::from_system_bytes(
+                stream(1),
                 FrameTiming {
                     pts_ns,
                     ..FrameTiming::default()

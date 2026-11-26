@@ -145,12 +145,7 @@ async fn decode_all(dec: &mut FfmpegVideoDec, access_units: &[Vec<u8>]) -> (Vec<
     ));
     let mut out = CollectSink::default();
     for (seq, au) in access_units.iter().enumerate() {
-        let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(au.clone().into_boxed_slice())),
-            timing: FrameTiming::default(),
-            sequence: seq as u64,
-            meta: Default::default(),
-        };
+        let frame = Frame::from_system_bytes(au.clone(), FrameTiming::default(), seq as u64);
         dec.process(PipelinePacket::DataFrame(frame), &mut out)
             .await
             .expect("decode");

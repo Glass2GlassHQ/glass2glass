@@ -54,10 +54,8 @@ impl SourceLoop for CountedSource {
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
             for seq in 0..self.n {
-                let frame = g2g_core::frame::Frame::new(
-                    g2g_core::MemoryDomain::System(g2g_core::memory::SystemSlice::from_boxed(
-                        std::vec![0u8; 4].into_boxed_slice(),
-                    )),
+                let frame = g2g_core::frame::Frame::from_system_bytes(
+                    std::vec![0u8; 4],
                     g2g_core::FrameTiming {
                         pts_ns: seq,
                         ..Default::default()

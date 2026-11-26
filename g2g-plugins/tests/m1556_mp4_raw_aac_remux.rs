@@ -14,7 +14,6 @@ mod audio_mp4;
 mod collect_sink;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{AsyncElement, AudioFormat, ByteStreamEncoding, Caps, MultiInputElement, PropValue};
 use g2g_plugins::mp4demux::Mp4Demux;
 use g2g_plugins::mp4muxn::Mp4MuxN;
@@ -58,11 +57,7 @@ async fn demux_eld() -> Vec<PipelinePacket> {
     let mut sink = CollectSink::default();
     demux
         .process(
-            PipelinePacket::DataFrame(Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(file.into_boxed_slice())),
-                FrameTiming::default(),
-                0,
-            )),
+            PipelinePacket::DataFrame(Frame::from_system_bytes(file, FrameTiming::default(), 0)),
             &mut sink,
         )
         .await

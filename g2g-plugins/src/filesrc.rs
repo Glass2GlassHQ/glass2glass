@@ -32,14 +32,13 @@ use std::io::{Read, Seek as _, SeekFrom};
 use std::path::PathBuf;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{
     eos_then_wait_for_seek, flushing_only, SeekController, SeekFormat, SourceLoop,
 };
 use g2g_core::{
     ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, VideoCodec,
+    FrameTiming, G2gError, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, VideoCodec,
 };
 
 use crate::filesink::{io_err, path_io_err};
@@ -344,17 +343,16 @@ impl SourceLoop for FileSrc {
                 }
                 buf.truncate(filled);
 
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(buf.into_boxed_slice())),
-                    timing: FrameTiming {
+                let frame = Frame::from_system_bytes(
+                    buf,
+                    FrameTiming {
                         // Stamped so downstream sinks can record
                         // glass-to-glass latency; this module implies std.
                         arrival_ns: g2g_core::metrics::monotonic_ns(),
                         ..FrameTiming::default()
                     },
                     sequence,
-                    meta: Default::default(),
-                };
+                );
                 sequence += 1;
                 out.push(PipelinePacket::DataFrame(frame)).await?;
             }

@@ -1054,7 +1054,7 @@ mod tests {
     use crate::safetensors::f16_to_f32;
     use crate::tensor_bytes::f32_le_bytes;
     use g2g_core::frame::Frame;
-    use g2g_core::memory::{MemoryDomain, SystemSlice};
+
     use g2g_core::{FrameTiming, PushOutcome, TensorLayout, TensorShape};
 
     /// Capturing sink that records the AnalyticsMeta of the last frame pushed.
@@ -1091,12 +1091,7 @@ mod tests {
     /// Channel-major [1, ch, a] tensor from per-channel rows, as LE f32 bytes.
     fn tensor_frame(channels: &[[f32; 3]]) -> Frame {
         let bytes = f32_le_bytes(channels.as_flattened().iter().copied());
-        Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            timing: FrameTiming::default(),
-            sequence: 0,
-            meta: Default::default(),
-        }
+        Frame::from_system_bytes(bytes, FrameTiming::default(), 0)
     }
 
     /// The same `[1, ch, 3]` payload as `tensor_frame`, but riding on an RGBA
@@ -1104,14 +1099,7 @@ mod tests {
     /// delivers it.
     fn video_frame_with_tensor(channels: &[[f32; 3]], pixels: usize) -> Frame {
         let bytes = f32_le_bytes(channels.as_flattened().iter().copied());
-        let mut frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(
-                vec![7u8; pixels * 4].into_boxed_slice(),
-            )),
-            timing: FrameTiming::default(),
-            sequence: 0,
-            meta: Default::default(),
-        };
+        let mut frame = Frame::from_system_bytes(vec![7u8; pixels * 4], FrameTiming::default(), 0);
         let mut tensors = g2g_core::TensorMeta::new();
         tensors.push(named_tensor("", channels.len() as u32, bytes));
         frame.meta.attach(tensors);
@@ -1248,14 +1236,7 @@ mod tests {
             [0.01, 0.01, 0.01],
         ]);
         let build = || {
-            let mut frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(
-                    vec![7u8; 64].into_boxed_slice(),
-                )),
-                timing: FrameTiming::default(),
-                sequence: 0,
-                meta: Default::default(),
-            };
+            let mut frame = Frame::from_system_bytes(vec![7u8; 64], FrameTiming::default(), 0);
             let mut tensors = g2g_core::TensorMeta::new();
             tensors.push(named_tensor("people", 6, strong.clone()));
             tensors.push(named_tensor("ball", 6, weak.clone()));
@@ -1308,12 +1289,7 @@ mod tests {
     async fn a_video_frame_without_a_tensor_is_rejected() {
         let mut det = DetectionPostprocess::new(0.5, 0.5);
         det.configure_pipeline(&rgba_caps(4, 4)).unwrap();
-        let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(vec![0u8; 64].into_boxed_slice())),
-            timing: FrameTiming::default(),
-            sequence: 0,
-            meta: Default::default(),
-        };
+        let frame = Frame::from_system_bytes(vec![0u8; 64], FrameTiming::default(), 0);
         let mut sink = MetaSink::default();
         assert!(matches!(
             det.process(PipelinePacket::DataFrame(frame), &mut sink)
@@ -1421,12 +1397,7 @@ mod tests {
         let mut det = DetectionPostprocess::new(0.5, 0.5);
         det.configure_pipeline(&tensor_caps(u32::MAX, u32::MAX))
             .unwrap();
-        let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(vec![0u8; 16].into_boxed_slice())),
-            timing: FrameTiming::default(),
-            sequence: 0,
-            meta: Default::default(),
-        };
+        let frame = Frame::from_system_bytes(vec![0u8; 16], FrameTiming::default(), 0);
         let mut sink = MetaSink::default();
         let err = det
             .process(PipelinePacket::DataFrame(frame), &mut sink)
@@ -1687,12 +1658,7 @@ mod tests {
         )
         .unwrap();
         det.configure_pipeline(&rgba_caps(256, 256)).unwrap();
-        let mut frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(vec![0u8; 4].into_boxed_slice())),
-            timing: FrameTiming::default(),
-            sequence: 0,
-            meta: Default::default(),
-        };
+        let mut frame = Frame::from_system_bytes(vec![0u8; 4], FrameTiming::default(), 0);
         frame.meta.attach(tensors);
         let mut sink = PixelAndMetaSink::default();
         det.process(PipelinePacket::DataFrame(frame), &mut sink)

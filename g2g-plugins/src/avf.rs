@@ -752,9 +752,9 @@ impl SourceLoop for AvfAudioSrc {
                 }
                 let pts_ns = ticks_to_ns(total_frames, self.sample_rate);
                 let end_ns = ticks_to_ns(total_frames + frames, self.sample_rate);
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(chunk.into_boxed_slice())),
-                    timing: FrameTiming {
+                let frame = Frame::from_system_bytes(
+                    chunk,
+                    FrameTiming {
                         pts_ns,
                         dts_ns: pts_ns,
                         duration_ns: end_ns - pts_ns,
@@ -763,9 +763,8 @@ impl SourceLoop for AvfAudioSrc {
                         keyframe: false,
                         ..FrameTiming::default()
                     },
-                    sequence: seq,
-                    meta: Default::default(),
-                };
+                    seq,
+                );
                 total_frames += frames;
                 seq += 1;
                 out.push(PipelinePacket::DataFrame(frame)).await?;

@@ -11,10 +11,9 @@
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
-    PushOutcome, Rate, VideoCodec,
+    AsyncElement, Caps, Dim, FrameTiming, G2gError, OutputSink, PipelinePacket, PushOutcome, Rate,
+    VideoCodec,
 };
 
 use g2g_plugins::rtpdepay::RtpH264Depayloader;
@@ -154,15 +153,14 @@ async fn serve(listener: StdTcpListener, count: u8) -> u64 {
     let mut null = NullOut;
     for i in 0u8..count {
         let au = access_unit(i);
-        let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-            timing: FrameTiming {
+        let frame = Frame::from_system_bytes(
+            au,
+            FrameTiming {
                 pts_ns: i as u64 * 33_000_000,
                 ..FrameTiming::default()
             },
-            sequence: i as u64,
-            meta: Default::default(),
-        };
+            i as u64,
+        );
         sink.process(PipelinePacket::DataFrame(frame), &mut null)
             .await
             .expect("process");

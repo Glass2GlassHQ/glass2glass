@@ -12,7 +12,7 @@
 
 use g2g_core::element::PushOutcome;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
+use g2g_core::memory::MemoryDomain;
 use g2g_core::{
     AsyncElement, Caps, Dim, G2gError, OutputSink, Rate, RawVideoFormat, TensorDType, TensorLayout,
     TensorShape,
@@ -66,16 +66,15 @@ fn frame_f32(f: &Frame) -> Vec<f32> {
 }
 
 fn nv12_frame(bytes: Vec<u8>, pts_ns: u64, sequence: u64) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        bytes,
+        FrameTiming {
             pts_ns,
             dts_ns: pts_ns,
             ..FrameTiming::default()
         },
         sequence,
-        meta: Default::default(),
-    }
+    )
 }
 
 // parallel per-test device creation intermittently segfaults in the NVIDIA

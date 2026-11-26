@@ -14,10 +14,7 @@ use collect_sink::CollectSink;
 use core::f64::consts::TAU;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::SystemSlice;
-use g2g_core::{
-    AsyncElement, AudioFormat, Caps, G2gError, MemoryDomain, PropError, PropValue, PropertySpec,
-};
+use g2g_core::{AsyncElement, AudioFormat, Caps, G2gError, PropError, PropValue, PropertySpec};
 use g2g_plugins::gst_compat::{gst_equivalent, GstEquivalent};
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::webrtcdsp::{WebrtcDsp, WebrtcEchoProbe};
@@ -93,8 +90,8 @@ fn frame(samples: &[f32], pts_ns: u64) -> PipelinePacket {
         let quantized = (sample.clamp(-1.0, 1.0) * (I16_SCALE - 1.0)).round() as i16;
         bytes.extend_from_slice(&quantized.to_le_bytes());
     }
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        bytes,
         FrameTiming {
             pts_ns,
             dts_ns: pts_ns,

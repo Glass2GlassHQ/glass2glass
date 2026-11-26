@@ -11,7 +11,6 @@ use std::path::PathBuf;
 
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{AnalyticsMeta, Caps, G2gError, PropValue, TensorDType, TensorLayout, TensorShape};
 use g2g_ml::detect::DetectionPostprocess;
 use g2g_ml::ortinfer::OrtInference;
@@ -53,12 +52,7 @@ impl OutputSink for LastFrame {
 }
 
 fn packet(bytes: Vec<u8>) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: 0,
-        meta: Default::default(),
-    })
+    PipelinePacket::DataFrame(Frame::from_system_bytes(bytes, FrameTiming::default(), 0))
 }
 
 fn tensor_caps(shape: &[u32]) -> Caps {

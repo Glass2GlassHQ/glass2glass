@@ -1100,19 +1100,15 @@ mod tests {
     use alloc::vec::Vec;
     use g2g_core::bus::Bus;
     use g2g_core::frame::Frame;
-    use g2g_core::memory::{MemoryDomain, SystemSlice};
 
     const BYTES_PER_SECOND: u64 = 48_000 * 4;
 
     fn samples(bytes: usize) -> DeviceCmd {
-        DeviceCmd::Samples(Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(
-                alloc::vec![0u8; bytes].into_boxed_slice(),
-            )),
-            timing: Default::default(),
-            sequence: 0,
-            meta: Default::default(),
-        })
+        DeviceCmd::Samples(Frame::from_system_bytes(
+            alloc::vec![0u8; bytes],
+            Default::default(),
+            0,
+        ))
     }
 
     // the device boundary: records which device each buffer reached, and refuses names starting with "missing"

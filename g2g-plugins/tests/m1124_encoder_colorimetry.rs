@@ -28,7 +28,6 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AsyncElement, Caps, Colorimetry, Dim, G2gError, Interlace, OutputSink, PushOutcome, Rate,
     RawVideoFormat, VideoCodec,
@@ -105,8 +104,8 @@ async fn encode_with(backend: Backend, colorimetry: Colorimetry) -> Option<Captu
     encoder.configure_pipeline(&raw_caps(colorimetry)).ok()?;
     let mut sink = CaptureSink::default();
     for seq in 0..FRAMES {
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(i420_frame(seq).into_boxed_slice())),
+        let frame = Frame::from_system_bytes(
+            i420_frame(seq),
             FrameTiming {
                 pts_ns: seq * FRAME_PERIOD_NS,
                 ..FrameTiming::default()
@@ -333,10 +332,8 @@ async fn encoded_colorimetry_comes_back_through_h264parse() {
         .expect("configure h264parse");
     let mut parsed = CaptureSink::default();
     for (seq, access_unit) in sink.access_units.iter().enumerate() {
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(
-                access_unit.clone().into_boxed_slice(),
-            )),
+        let frame = Frame::from_system_bytes(
+            access_unit.clone(),
             FrameTiming {
                 pts_ns: seq as u64 * FRAME_PERIOD_NS,
                 ..FrameTiming::default()

@@ -19,12 +19,10 @@ use core::pin::Pin;
 use std::boxed::Box;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
-    FrameTiming, G2gError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate,
-    RawVideoFormat,
+    FrameTiming, G2gError, OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
 };
 use g2g_plugins::poolstage::PoolStage;
 
@@ -90,14 +88,8 @@ impl SourceLoop for ScriptedSource {
                     out.push(PipelinePacket::CapsChanged(switch_to.clone()))
                         .await?;
                 }
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(
-                        vec![i as u8; 64].into_boxed_slice(),
-                    )),
-                    timing: FrameTiming::default(),
-                    sequence: i as u64,
-                    meta: Default::default(),
-                };
+                let frame =
+                    Frame::from_system_bytes(vec![i as u8; 64], FrameTiming::default(), i as u64);
                 out.push(PipelinePacket::DataFrame(frame)).await?;
             }
             out.push(PipelinePacket::Eos).await?;

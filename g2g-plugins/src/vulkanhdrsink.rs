@@ -1406,10 +1406,8 @@ mod tests {
         }
 
         // A CPU frame is not presentable by an HDR swapchain sink.
-        let cpu = g2g_core::frame::Frame::new(
-            MemoryDomain::System(g2g_core::memory::SystemSlice::from_boxed(
-                alloc::vec![0u8; 64].into_boxed_slice(),
-            )),
+        let cpu = g2g_core::frame::Frame::from_system_bytes(
+            alloc::vec![0u8; 64],
             g2g_core::FrameTiming::default(),
             0,
         );

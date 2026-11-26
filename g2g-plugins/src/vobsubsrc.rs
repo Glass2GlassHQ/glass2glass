@@ -30,12 +30,10 @@ use alloc::string::{String, ToString};
 use std::path::{Path, PathBuf};
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError,
-    MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
-    SubPictureFormat,
+    OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, SubPictureFormat,
 };
 
 use crate::filesink::path_io_err;
@@ -116,11 +114,7 @@ fn select<'a>(
 }
 
 fn frame(bytes: alloc::vec::Vec<u8>, timing: FrameTiming, seq: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing,
-        seq,
-    ))
+    PipelinePacket::DataFrame(Frame::from_system_bytes(bytes, timing, seq))
 }
 
 impl SourceLoop for VobSubSrc {

@@ -5,7 +5,6 @@
 #![cfg(feature = "vello-overlay")]
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AnalyticsMeta, AsyncElement, BBox, Caps, Dim, FrameTiming, G2gError, MemoryDomain,
     ObjectDetection, OutputSink, PipelinePacket, PropValue, PushOutcome, Rate, RawVideoFormat,
@@ -42,11 +41,7 @@ fn frame(class_names: Option<&[&str]>) -> Frame {
     for _ in 0..W * H {
         bytes.extend_from_slice(&BACKDROP);
     }
-    let mut frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    );
+    let mut frame = Frame::from_system_bytes(bytes, FrameTiming::default(), 0);
     let mut analytics = AnalyticsMeta::new();
     if let Some(names) = class_names {
         analytics.set_class_names(names.iter().copied());

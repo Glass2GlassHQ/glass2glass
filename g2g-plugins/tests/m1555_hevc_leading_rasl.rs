@@ -5,7 +5,6 @@
 #![cfg(feature = "std")]
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AsyncElement, Caps, Dim, G2gError, OutputSink, PushOutcome, Rate, Seek, Segment, VideoCodec,
 };
@@ -61,11 +60,7 @@ fn slice_tags(bytes: &[u8]) -> Vec<u8> {
 }
 
 fn data(stream: Vec<u8>) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(stream.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    ))
+    PipelinePacket::DataFrame(Frame::from_system_bytes(stream, FrameTiming::default(), 0))
 }
 
 async fn parse_packets(packets: Vec<PipelinePacket>) -> Vec<u8> {

@@ -30,7 +30,6 @@ use android_binder::start_binder_threadpool;
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{Caps, ConfigureOutcome, Dim, OutputSink, Rate, RawVideoFormat};
 use g2g_plugins::mediacodecenc::MediaCodecEnc;
 
@@ -99,17 +98,16 @@ async fn encode_into(mut enc: MediaCodecEnc, sink: &mut dyn OutputSink) {
     let mut pts_ns = 0u64;
     for t in 0..FRAMES_IN {
         let nv12 = nv12_frame(w as usize, h as usize, t);
-        let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(nv12.into_boxed_slice())),
-            timing: FrameTiming {
+        let frame = Frame::from_system_bytes(
+            nv12,
+            FrameTiming {
                 pts_ns,
                 dts_ns: pts_ns,
                 capture_ns: pts_ns,
                 ..FrameTiming::default()
             },
-            sequence: t as u64,
-            meta: Default::default(),
-        };
+            t as u64,
+        );
         enc.process(PipelinePacket::DataFrame(frame), sink)
             .await
             .expect("encode frame");

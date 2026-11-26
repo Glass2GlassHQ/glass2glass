@@ -12,10 +12,9 @@
 #![cfg(all(feature = "std", feature = "metadata"))]
 
 use g2g_core::frame::{Frame, FrameTiming};
-use g2g_core::memory::SystemSlice;
 use g2g_core::meta::TimecodeMeta;
 use g2g_core::{
-    AsyncElement, Caps, Dim, G2gError, MemoryDomain, OutputSink, PipelinePacket, PushOutcome, Rate,
+    AsyncElement, Caps, Dim, G2gError, OutputSink, PipelinePacket, PushOutcome, Rate,
     RawVideoFormat, VideoCodec,
 };
 use g2g_plugins::h265parse::H265Parse;
@@ -98,11 +97,7 @@ fn h265_caps() -> Caps {
 }
 
 fn au_frame(bytes: Vec<u8>) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    ))
+    PipelinePacket::DataFrame(Frame::from_system_bytes(bytes, FrameTiming::default(), 0))
 }
 
 /// Push one `time_code`-carrying access unit through the parser and return the
@@ -162,13 +157,8 @@ async fn timeoverlay_burns_in_the_carried_timecode() {
         async move {
             let mut ov = TimeOverlay::new();
             ov.configure_pipeline(&caps).unwrap();
-            let mut f = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(
-                    vec![255u8; 96 * 32 * 4].into_boxed_slice(),
-                )),
-                FrameTiming::default(),
-                0,
-            );
+            let mut f =
+                Frame::from_system_bytes(vec![255u8; 96 * 32 * 4], FrameTiming::default(), 0);
             if let Some(m) = meta {
                 f.meta.attach(m);
             }

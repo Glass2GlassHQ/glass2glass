@@ -39,11 +39,10 @@ use alloc::vec::Vec;
 use g2g_core::caps::{framerate_q16_from_fraction, framerate_q16_to_fraction};
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogSource};
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     g2g_error, AspectRatio, AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
-    ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError, Interlace, MemoryDomain,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PixelAspect, Rate, RawVideoFormat,
+    ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError, Interlace, OutputSink,
+    PadTemplate, PadTemplates, PipelinePacket, PixelAspect, Rate, RawVideoFormat,
 };
 
 /// Signature every y4m stream opens with, the separating space included so a
@@ -360,8 +359,8 @@ impl Y4mDec {
             self.pending_frame = None;
             let period_ns = header.frame_period_ns();
             let pts_ns = self.emitted.saturating_mul(period_ns);
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(planes.into_boxed_slice())),
+            let frame = Frame::from_system_bytes(
+                planes,
                 FrameTiming {
                     pts_ns,
                     dts_ns: pts_ns,
@@ -558,8 +557,8 @@ impl Y4mEnc {
     }
 
     fn frame(&mut self, bytes: Vec<u8>) -> PipelinePacket {
-        let packet = PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+        let packet = PipelinePacket::DataFrame(Frame::from_system_bytes(
+            bytes,
             FrameTiming::default(),
             self.emitted,
         ));
@@ -743,10 +742,8 @@ mod tests {
         block_on(async {
             element
                 .process(
-                    PipelinePacket::DataFrame(Frame::new(
-                        MemoryDomain::System(SystemSlice::from_boxed(
-                            stream.to_vec().into_boxed_slice(),
-                        )),
+                    PipelinePacket::DataFrame(Frame::from_system_bytes(
+                        stream.to_vec(),
                         FrameTiming::default(),
                         0,
                     )),

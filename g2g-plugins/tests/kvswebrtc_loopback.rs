@@ -23,10 +23,9 @@ use tokio_tungstenite::tungstenite::handshake::server::{
 use tokio_tungstenite::tungstenite::Message;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, FrameTiming, G2gError, MemoryDomain, MultiOutputSource,
-    OutputSink, PipelinePacket, PushOutcome, VideoCodec,
+    AsyncElement, AudioFormat, Caps, FrameTiming, G2gError, MultiOutputSource, OutputSink,
+    PipelinePacket, PushOutcome, VideoCodec,
 };
 use g2g_plugins::kvswebrtcsink::KvsWebRtcSink;
 use g2g_plugins::kvswebrtcsrc::KvsWebRtcSrc;
@@ -302,8 +301,8 @@ fn frame(sequence: usize, unit: &[u8], interval: Duration) -> PipelinePacket {
         pts_ns: sequence as u64 * interval.as_nanos() as u64,
         ..FrameTiming::default()
     };
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(unit.to_vec().into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        unit.to_vec(),
         timing,
         sequence as u64,
     ))

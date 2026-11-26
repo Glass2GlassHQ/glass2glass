@@ -30,7 +30,7 @@ use collect_sink::CollectSink;
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
+use g2g_core::memory::MemoryDomain;
 use g2g_core::{Caps, ConfigureOutcome, Dim, Rate, RawVideoFormat, VideoCodec};
 use g2g_plugins::ffmpegdec::{Backend, FfmpegVideoDec, OutputFormat};
 
@@ -125,12 +125,7 @@ async fn decode_fixture_with(
     // bookkeeping that h264 expects to see alongside the first slice. This
     // smoke test just validates that the path produces a decoded frame; a
     // multi-frame test belongs alongside the real `H264Parse` element.
-    let frame = Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bitstream.into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: 0,
-        meta: Default::default(),
-    };
+    let frame = Frame::from_system_bytes(bitstream, FrameTiming::default(), 0);
     dec.process(PipelinePacket::DataFrame(frame), &mut sink)
         .await
         .expect("process DataFrame");

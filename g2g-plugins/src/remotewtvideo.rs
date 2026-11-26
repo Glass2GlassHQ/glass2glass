@@ -233,21 +233,20 @@ mod tests {
     use super::*;
     use alloc::string::String;
     use alloc::vec;
-    use g2g_core::memory::{MemoryDomain, SystemSlice};
+
     use g2g_core::FrameTiming;
 
     const TIMEOUT: Duration = Duration::from_millis(33);
 
     fn frame(sequence: u64, keyframe: bool) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(vec![0u8; 4].into_boxed_slice())),
-            timing: FrameTiming {
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            vec![0u8; 4],
+            FrameTiming {
                 keyframe,
                 ..FrameTiming::default()
             },
             sequence,
-            meta: Default::default(),
-        })
+        ))
     }
 
     fn order(frames_before: u64, controls_before: u64) -> PacketOrder {

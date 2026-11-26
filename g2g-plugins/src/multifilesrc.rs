@@ -29,12 +29,10 @@ use std::io::Read;
 
 use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError,
-    MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
-    VideoCodec,
+    OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, VideoCodec,
 };
 
 use crate::filesink::{io_err, path_io_err};
@@ -193,9 +191,9 @@ impl SourceLoop for MultiFileSrc {
                     .rate_q16()
                     .map_or(0, crate::compositor::frame_period_ns);
                 let pts_ns = sequence.saturating_mul(period_ns);
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(buf.into_boxed_slice())),
-                    timing: FrameTiming {
+                let frame = Frame::from_system_bytes(
+                    buf,
+                    FrameTiming {
                         pts_ns,
                         dts_ns: pts_ns,
                         duration_ns: period_ns,
@@ -203,8 +201,7 @@ impl SourceLoop for MultiFileSrc {
                         ..FrameTiming::default()
                     },
                     sequence,
-                    meta: Default::default(),
-                };
+                );
                 sequence += 1;
                 index += 1;
                 out.push(PipelinePacket::DataFrame(frame)).await?;

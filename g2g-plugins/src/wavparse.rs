@@ -28,13 +28,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{ElementSeekRoute, SeekController};
 use g2g_core::{
     pcm_formats, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps,
     CapsConstraint, CapsSet, ChannelLayout, ConfigureOutcome, ElementMetadata, FrameTiming,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, TagList, ANY_CHANNELS, ANY_SAMPLE_RATE,
+    G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, TagList, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
 use crate::codectag::{audio_from_stream_name, audio_stream_name};
@@ -568,11 +567,7 @@ impl WavParse {
     }
 
     fn next_frame(&mut self, bytes: Vec<u8>, timing: FrameTiming) -> Frame {
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            timing,
-            self.emitted,
-        );
+        let frame = Frame::from_system_bytes(bytes, timing, self.emitted);
         self.emitted += 1;
         frame
     }

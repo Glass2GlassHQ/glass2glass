@@ -18,7 +18,6 @@
 
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     Caps, ConfigureOutcome, Dim, G2gError, Rate, RawVideoFormat, TensorDType, TensorLayout,
     TensorShape,
@@ -65,12 +64,7 @@ fn rgba_caps(w: u32, h: u32) -> Caps {
 }
 
 fn rgba_frame(bytes: Vec<u8>, sequence: u64) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence,
-        meta: Default::default(),
-    }
+    Frame::from_system_bytes(bytes, FrameTiming::default(), sequence)
 }
 
 #[test]

@@ -20,18 +20,14 @@
 
 mod common {
     use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-    use g2g_core::memory::{MemoryDomain, SystemSlice};
+
     use g2g_core::{Caps, Colorimetry, G2gError, OutputSink, PushOutcome};
 
     pub(crate) const WIDTH: u32 = 320;
     pub(crate) const HEIGHT: u32 = 240;
 
     pub(crate) fn system_frame(pixels: Vec<u8>, seq: u64) -> Frame {
-        Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(pixels.into_boxed_slice())),
-            FrameTiming::default(),
-            seq,
-        )
+        Frame::from_system_bytes(pixels, FrameTiming::default(), seq)
     }
 
     #[derive(Default)]

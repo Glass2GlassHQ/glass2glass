@@ -142,7 +142,7 @@ mod tests {
     use super::*;
     use alloc::vec;
     use alloc::vec::Vec;
-    use g2g_core::{Frame, FrameTiming, MemoryDomain, PushOutcome, SystemSlice};
+    use g2g_core::{Frame, FrameTiming, PushOutcome};
 
     #[derive(Default)]
     struct CollectSink {
@@ -176,12 +176,11 @@ mod tests {
     }
 
     fn frame(seq: u64) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(vec![0u8; 4].into_boxed_slice())),
-            timing: FrameTiming::default(),
-            sequence: seq,
-            meta: Default::default(),
-        })
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            vec![0u8; 4],
+            FrameTiming::default(),
+            seq,
+        ))
     }
 
     #[tokio::test]

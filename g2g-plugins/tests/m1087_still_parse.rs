@@ -23,7 +23,6 @@ use collect_sink::CollectSink;
 use std::path::PathBuf;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{AsyncElement, Caps, Dim, FrameTiming, PipelinePacket, Rate, VideoCodec};
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::stillparse::{JpegParse, PngParse};
@@ -128,11 +127,7 @@ fn multipart_bodies(file: &[u8]) -> Vec<Vec<u8>> {
 async fn drive<E: AsyncElement>(element: &mut E, bytes: &[u8]) -> CollectSink {
     let mut out = CollectSink::default();
     for piece in bytes.chunks(CHUNK_LEN) {
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(piece.to_vec().into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let frame = Frame::from_system_bytes(piece.to_vec(), FrameTiming::default(), 0);
         element
             .process(PipelinePacket::DataFrame(frame), &mut out)
             .await

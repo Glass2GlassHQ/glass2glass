@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use collect_sink::CollectSink;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{GpuVendor, MemoryDomain, SystemSlice};
+use g2g_core::memory::GpuVendor;
 use g2g_core::meta::Orientation;
 use g2g_core::runtime::block_on;
 use g2g_core::{
@@ -122,11 +122,7 @@ fn cpu_convert(input: &Caps, bytes: &[u8], output: &Caps) -> Vec<u8> {
     convert.configure_pipeline(input).unwrap();
     convert.configure_output(output).unwrap();
     let mut sink = CollectSink::default();
-    let frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    );
+    let frame = Frame::from_system_bytes(bytes.to_vec(), FrameTiming::default(), 0);
     block_on(convert.process(PipelinePacket::DataFrame(frame), &mut sink)).unwrap();
     sink.packets
         .into_iter()

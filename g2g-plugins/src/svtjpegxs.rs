@@ -1110,12 +1110,7 @@ mod tests {
     }
 
     fn data_frame(bytes: Vec<u8>) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            timing: Default::default(),
-            sequence: 0,
-            meta: Default::default(),
-        })
+        PipelinePacket::DataFrame(Frame::from_system_bytes(bytes, Default::default(), 0))
     }
 
     /// A smooth planar I422p10 test frame (16-bit LE samples, low 10 bits): a

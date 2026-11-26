@@ -24,12 +24,11 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{ElementSeekRoute, SeekController};
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
-    ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, Rate, VideoCodec,
+    ElementMetadata, FrameTiming, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    Rate, VideoCodec,
 };
 
 use crate::cenc::CencTrack;
@@ -333,11 +332,9 @@ impl Fmp4Demux {
                                 annexb = prepend_param_sets(&annexb, &param_sets, codec);
                             }
                             self.need_param_sets = false;
-                            let frame = Frame {
-                                domain: MemoryDomain::System(SystemSlice::from_boxed(
-                                    annexb.into_boxed_slice(),
-                                )),
-                                timing: FrameTiming {
+                            let frame = Frame::from_system_bytes(
+                                annexb,
+                                FrameTiming {
                                     pts_ns: s.pts_ns,
                                     dts_ns: s.pts_ns,
                                     duration_ns: s.duration_ns,
@@ -346,9 +343,8 @@ impl Fmp4Demux {
                                     keyframe: s.keyframe, // fMP4 trun keyframe flag
                                     ..FrameTiming::default()
                                 },
-                                sequence: self.sequence,
-                                meta: Default::default(),
-                            };
+                                self.sequence,
+                            );
                             self.sequence += 1;
                             out.push(PipelinePacket::DataFrame(frame)).await?;
                         }
@@ -507,12 +503,7 @@ pub fn fuzz_parse(data: &[u8]) {
     {
         return;
     }
-    let frame = Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(data.to_vec().into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: 0,
-        meta: Default::default(),
-    };
+    let frame = Frame::from_system_bytes(data.to_vec(), FrameTiming::default(), 0);
     let _ = crate::fuzz_process(&mut demux, PipelinePacket::DataFrame(frame));
 }
 

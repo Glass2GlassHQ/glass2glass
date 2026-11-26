@@ -17,8 +17,8 @@ use g2g_core::runtime::{
 };
 use g2g_core::{
     g2g_error, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    Frame, G2gError, MemoryDomain, NodeKind, OutputSink, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, RawVideoFormat, Seek, Segment, SystemSlice,
+    Frame, G2gError, NodeKind, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, RawVideoFormat, Seek, Segment,
 };
 
 use crate::clock::WallClock;
@@ -370,13 +370,8 @@ fn clip_audio_to_segment(
         sample_bytes * usize::from(*channels),
         *sample_rate,
     )?;
-    Ok(clipped.map(|(timing, pcm)| {
-        Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(pcm.into_boxed_slice())),
-            timing,
-            frame_at_stream_time.sequence,
-        )
-    }))
+    Ok(clipped
+        .map(|(timing, pcm)| Frame::from_system_bytes(pcm, timing, frame_at_stream_time.sequence)))
 }
 
 #[derive(Debug, Default)]

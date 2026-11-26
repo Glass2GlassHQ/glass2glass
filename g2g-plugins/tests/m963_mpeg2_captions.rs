@@ -17,7 +17,6 @@
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     Caps, CapsConstraint, Dim, G2gError, OutputSink, PushOutcome, Rate, TextFormat, VideoCodec,
 };
@@ -79,8 +78,8 @@ fn mpeg2_caps() -> Caps {
 }
 
 fn data_frame(au: Vec<u8>, pts_ns: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        au,
         FrameTiming {
             pts_ns,
             ..FrameTiming::default()

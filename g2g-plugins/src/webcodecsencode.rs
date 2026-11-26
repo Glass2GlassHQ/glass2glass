@@ -24,11 +24,10 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    HardwareError, Interlace, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    Rate, RawVideoFormat, VideoCodec,
+    HardwareError, Interlace, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate,
+    RawVideoFormat, VideoCodec,
 };
 
 use wasm_bindgen::prelude::*;
@@ -114,12 +113,7 @@ impl WebCodecsEncode {
     async fn drain_ready(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         while let Some(bytes) = self.inbox.as_ref().and_then(|i| i.try_pop()) {
             self.announce_caps(out).await?;
-            let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                timing: FrameTiming::default(),
-                sequence: self.emitted,
-                meta: Default::default(),
-            };
+            let frame = Frame::from_system_bytes(bytes, FrameTiming::default(), self.emitted);
             self.emitted += 1;
             out.push(PipelinePacket::DataFrame(frame)).await?;
         }

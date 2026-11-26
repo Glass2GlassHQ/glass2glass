@@ -43,16 +43,14 @@ use alloc::vec::Vec;
 use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::frame::Frame;
 use g2g_core::log::Target;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{ElementSeekRoute, SeekController, StreamSelectController};
 use g2g_core::CodecTag;
 use g2g_core::{
     g2g_error, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps,
     CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
-    MemoryDomain, MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, ProResVariant, PropError, PropKind, PropValue, PropertySpec, Rate,
-    RawVideoFormat, Segment, Stream, StreamCollection, StreamType, SubPictureFormat, TagList,
-    TextFormat, VideoCodec,
+    MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    ProResVariant, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, Segment,
+    Stream, StreamCollection, StreamType, SubPictureFormat, TagList, TextFormat, VideoCodec,
 };
 
 use crate::avidemux::pcm_alternatives;
@@ -763,10 +761,8 @@ impl MkvDemux {
                 if !self.config_sent {
                     self.config_sent = true;
                     for header in config_headers(&self.demux, f.codec, f.track) {
-                        let frame = Frame::new(
-                            MemoryDomain::System(SystemSlice::from_boxed(
-                                header.into_boxed_slice(),
-                            )),
+                        let frame = Frame::from_system_bytes(
+                            header,
                             FrameTiming {
                                 pts_ns: f.pts_ns,
                                 dts_ns: f.pts_ns,
@@ -782,11 +778,7 @@ impl MkvDemux {
                 let Some(payload) = deframe_block(&self.demux, f) else {
                     continue;
                 };
-                let frame = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
-                    timing,
-                    self.emitted,
-                );
+                let frame = Frame::from_system_bytes(payload, timing, self.emitted);
                 self.emitted += 1;
                 out.push(PipelinePacket::DataFrame(frame)).await?;
             }
@@ -1866,8 +1858,8 @@ impl MkvDemuxN {
         if !self.config_sent[port] {
             self.config_sent[port] = true;
             for header in config_headers(&self.demux, f.codec, f.track) {
-                let lead = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(header.into_boxed_slice())),
+                let lead = Frame::from_system_bytes(
+                    header,
                     FrameTiming {
                         pts_ns: f.pts_ns,
                         dts_ns: f.pts_ns,
@@ -1883,11 +1875,7 @@ impl MkvDemuxN {
         let Some(payload) = deframe_block(&self.demux, f) else {
             return Ok(());
         };
-        let out_frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
-            timing,
-            self.emitted,
-        );
+        let out_frame = Frame::from_system_bytes(payload, timing, self.emitted);
         self.emitted += 1;
         out.push_to(port, PipelinePacket::DataFrame(out_frame))
             .await?;
@@ -2201,11 +2189,7 @@ mod tests {
     async fn run(stream: MkvStream, bytes: &[u8], sink: &mut CaptureSink) {
         let mut d = MkvDemux::new().with_stream(stream);
         d.configure_pipeline(&MkvDemux::input_caps()).unwrap();
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let frame = Frame::from_system_bytes(bytes.to_vec(), FrameTiming::default(), 0);
         d.process(PipelinePacket::DataFrame(frame), sink)
             .await
             .unwrap();
@@ -2579,11 +2563,7 @@ mod tests {
         let mut d = MkvDemux::new().with_stream(MkvStream::Vp9).with_bus(handle);
         d.configure_pipeline(&MkvDemux::input_caps()).unwrap();
         let mut sink = CaptureSink::default();
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(webm_with_tags().into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let frame = Frame::from_system_bytes(webm_with_tags(), FrameTiming::default(), 0);
         d.process(PipelinePacket::DataFrame(frame), &mut sink)
             .await
             .unwrap();
@@ -2697,11 +2677,7 @@ mod tests {
         let mut demux = MkvDemuxN::new(alloc::vec![MkvStream::Aac]);
         demux.configure_pipeline(&MkvDemux::input_caps()).unwrap();
         let mut sink = OnePortSink(CaptureSink::default());
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(two_aac_tracks().into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let frame = Frame::from_system_bytes(two_aac_tracks(), FrameTiming::default(), 0);
         demux
             .process(PipelinePacket::DataFrame(frame), &mut sink)
             .await
@@ -2829,11 +2805,7 @@ mod tests {
         let mut demux = MkvDemux::new().with_stream(MkvStream::Pcm(AudioFormat::PcmS16Le));
         demux.configure_pipeline(&MkvDemux::input_caps()).unwrap();
         let file = pcm_file(b"A_PCM/INT/LIT", &encodings, b"lzo bytes");
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(file.into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let frame = Frame::from_system_bytes(file, FrameTiming::default(), 0);
         let mut sink = CaptureSink::default();
         assert_eq!(
             demux

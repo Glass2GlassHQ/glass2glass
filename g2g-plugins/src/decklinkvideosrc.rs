@@ -11,13 +11,12 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{bounded, Receiver, SourceLoop};
 use g2g_core::{
     g2g_error, Caps, CaptureAnchor, ClockCandidate, ClockPriority, ClockSync, ConfigureOutcome,
     DeviceClockOffset, DriftClock, ElementMetadata, FrameTiming, G2gError, HardwareError,
-    LatencyReport, MemoryDomain, MonotonicClock, OutputSink, PadTemplate, PadTemplates,
-    PipelineClock, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, RawVideoFormat,
+    LatencyReport, MonotonicClock, OutputSink, PadTemplate, PadTemplates, PipelineClock,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, RawVideoFormat,
 };
 
 use crate::decklink::{
@@ -312,11 +311,9 @@ impl DeckLinkVideoSrc {
                 Some(sync) => anchor.stamp(sync, elapsed_ns, period_ns),
                 None => elapsed_ns,
             };
-            let mut frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(
-                    captured.pixels.into_boxed_slice(),
-                )),
-                timing: FrameTiming {
+            let mut frame = Frame::from_system_bytes(
+                captured.pixels,
+                FrameTiming {
                     pts_ns,
                     dts_ns: pts_ns,
                     duration_ns: period_ns,
@@ -326,8 +323,7 @@ impl DeckLinkVideoSrc {
                     ..FrameTiming::default()
                 },
                 sequence,
-                meta: Default::default(),
-            };
+            );
             crate::paddedrows::declare_padded_rows(
                 &mut frame,
                 captured.format,

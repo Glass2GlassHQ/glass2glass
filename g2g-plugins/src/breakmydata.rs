@@ -22,10 +22,9 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, MemoryDomain,
-    OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, OutputSink,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::random::{next_random, next_unit, XORSHIFT_BASE_STATE};
@@ -160,11 +159,7 @@ impl AsyncElement for BreakMyData {
                         .ok_or(G2gError::UnsupportedDomain)?
                         .to_vec();
                     self.corrupt(&mut bytes);
-                    let broken = Frame::new(
-                        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                        frame.timing,
-                        frame.sequence,
-                    );
+                    let broken = Frame::from_system_bytes(bytes, frame.timing, frame.sequence);
                     out.push(PipelinePacket::DataFrame(broken)).await?;
                 }
                 other => {

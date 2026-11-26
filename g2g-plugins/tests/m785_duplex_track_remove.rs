@@ -30,11 +30,10 @@ use std::time::{Duration, Instant};
 
 use g2g_core::element::DynAsyncElement;
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_duplex_session, DynSourceLoop, SourceLoop};
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate, VideoCodec,
+    OutputSink, PipelineClock, PipelinePacket, Rate, VideoCodec,
 };
 use g2g_plugins::webrtcduplex::{SdpChannel, SignalRole, WebRtcDuplexSession};
 
@@ -114,8 +113,8 @@ impl SourceLoop for PacedSrc {
                 let step_ns = self.interval.as_nanos() as u64;
                 while start.elapsed() < self.duration {
                     let payload = self.payloads[seq as usize % self.payloads.len()].clone();
-                    let frame = Frame::new(
-                        MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
+                    let frame = Frame::from_system_bytes(
+                        payload,
                         FrameTiming {
                             pts_ns: seq * step_ns,
                             ..FrameTiming::default()

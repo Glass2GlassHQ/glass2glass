@@ -9,7 +9,6 @@ mod collect_sink;
 
 use collect_sink::CollectSink;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{AsyncElement, ByteStreamEncoding, Caps, G2gError};
 use g2g_plugins::iv8demux::Iv8Demux;
 use g2g_plugins::typefind::sniff;
@@ -53,8 +52,8 @@ fn pts_ns(pts_90khz: u32) -> u64 {
 }
 
 fn data_frame(bytes: &[u8]) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        bytes.to_vec(),
         FrameTiming::default(),
         0,
     ))

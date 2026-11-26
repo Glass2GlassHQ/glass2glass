@@ -16,7 +16,6 @@
 
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{AudioFormat, Caps, G2gError};
 use g2g_plugins::mfaacdecode::MfAacDecode;
 use g2g_plugins::mfaacencode::MfAacEncode;
@@ -59,12 +58,7 @@ fn pcm_buffer(index: usize) -> Frame {
             data.extend_from_slice(&v.to_le_bytes());
         }
     }
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: index as u64,
-        meta: Default::default(),
-    }
+    Frame::from_system_bytes(data, FrameTiming::default(), index as u64)
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -104,12 +98,7 @@ async fn pcm_aac_pcm_round_trip_recovers_the_stream() {
         let Some(s) = f.domain.as_system_slice() else {
             unreachable!()
         };
-        let au = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(s.to_vec().into_boxed_slice())),
-            timing: f.timing,
-            sequence: f.sequence,
-            meta: Default::default(),
-        };
+        let au = Frame::from_system_bytes(s.to_vec(), f.timing, f.sequence);
         dec.process(PipelinePacket::DataFrame(au), &mut decoded)
             .await
             .expect("decode");

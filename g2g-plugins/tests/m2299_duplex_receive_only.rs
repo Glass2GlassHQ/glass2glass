@@ -15,11 +15,10 @@ use std::time::Duration;
 
 use g2g_core::element::DynAsyncElement;
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_duplex_session, DynSourceLoop, SourceLoop};
 use g2g_core::{
-    Caps, ConfigureOutcome, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelineClock,
-    PipelinePacket, PushOutcome, Reconfigure,
+    Caps, ConfigureOutcome, FrameTiming, G2gError, OutputSink, PipelineClock, PipelinePacket,
+    PushOutcome, Reconfigure,
 };
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::webrtc_codec::WebRtcVideoCodec;
@@ -197,8 +196,8 @@ impl SourceLoop for KeyframeOnRequestSrc {
                 } else {
                     &self.delta
                 };
-                let frame = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(unit.clone().into_boxed_slice())),
+                let frame = Frame::from_system_bytes(
+                    unit.clone(),
                     FrameTiming {
                         pts_ns: seq * FRAME_INTERVAL.as_nanos() as u64,
                         ..FrameTiming::default()

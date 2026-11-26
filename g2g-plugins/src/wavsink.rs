@@ -308,7 +308,7 @@ mod tests {
 
     #[tokio::test]
     async fn float_wav_patches_fact_and_data_sizes() {
-        use g2g_core::{Frame, FrameTiming, MemoryDomain, PushOutcome, SystemSlice};
+        use g2g_core::{Frame, FrameTiming, PushOutcome};
         struct NullSink;
         impl OutputSink for NullSink {
             fn poll_push(
@@ -336,11 +336,7 @@ mod tests {
             .into_iter()
             .flat_map(|v| v.to_le_bytes())
             .collect();
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let frame = Frame::from_system_bytes(data, FrameTiming::default(), 0);
         sink.process(PipelinePacket::DataFrame(frame), &mut out)
             .await
             .unwrap();

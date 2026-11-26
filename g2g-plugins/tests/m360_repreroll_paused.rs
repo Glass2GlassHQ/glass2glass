@@ -21,13 +21,12 @@ use core::future::Future;
 
 use g2g_core::element::{AsyncElement, BoxFuture, ConfigureOutcome, OutputSink};
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{
     run_simple_pipeline_stateful, SeekController, SourceLoop, StateController,
 };
 use g2g_core::{
-    Caps, Dim, FrameTiming, G2gError, MemoryDomain, PipelineClock, PipelinePacket, PipelineState,
-    Rate, RawVideoFormat, Seek, Segment, StateChangeReturn,
+    Caps, Dim, FrameTiming, G2gError, PipelineClock, PipelinePacket, PipelineState, Rate,
+    RawVideoFormat, Seek, Segment, StateChangeReturn,
 };
 
 struct ZeroClock;
@@ -85,17 +84,14 @@ impl SourceLoop for SeekableSrc {
                         let _ = out.push(PipelinePacket::Segment(seg)).await?;
                     }
                 }
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(
-                        vec![0u8; 4].into_boxed_slice(),
-                    )),
-                    timing: FrameTiming {
+                let frame = Frame::from_system_bytes(
+                    vec![0u8; 4],
+                    FrameTiming {
                         pts_ns: self.position,
                         ..FrameTiming::default()
                     },
-                    sequence: self.sequence,
-                    meta: Default::default(),
-                };
+                    self.sequence,
+                );
                 let _ = out.push(PipelinePacket::DataFrame(frame)).await?;
                 self.position += self.step_ns;
                 self.sequence += 1;

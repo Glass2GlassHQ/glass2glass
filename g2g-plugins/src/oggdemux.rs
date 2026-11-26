@@ -62,14 +62,13 @@ use alloc::vec::Vec;
 use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource, Target};
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{ElementSeekRoute, PadKind, SeekController};
 use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     g2g_debug, g2g_error, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding,
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
-    LatencyReport, MemoryDomain, MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Segment, Stream,
+    LatencyReport, MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Segment, Stream,
     StreamCollection, StreamType, TagList, VideoCodec,
 };
 
@@ -607,11 +606,7 @@ impl OggDemux {
                     out.push(PipelinePacket::Segment(seg)).await?;
                 }
                 for (payload, timing) in admitted {
-                    let frame = Frame::new(
-                        MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
-                        timing,
-                        self.emitted,
-                    );
+                    let frame = Frame::from_system_bytes(payload, timing, self.emitted);
                     self.emitted += 1;
                     out.push(PipelinePacket::DataFrame(frame)).await?;
                 }
@@ -1888,13 +1883,7 @@ impl MultiOutputElement for OggDemuxN {
                         }
                     }
                     for (payload, timing) in admitted {
-                        let frame = Frame::new(
-                            MemoryDomain::System(SystemSlice::from_boxed(
-                                payload.into_boxed_slice(),
-                            )),
-                            timing,
-                            self.emitted,
-                        );
+                        let frame = Frame::from_system_bytes(payload, timing, self.emitted);
                         self.emitted += 1;
                         out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
                     }
@@ -2086,11 +2075,7 @@ mod tests {
             .unwrap();
         d.configure_pipeline(&OggDemux::input_caps()).unwrap();
         let mut sink = CaptureSink::default();
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(stream.into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let frame = Frame::from_system_bytes(stream, FrameTiming::default(), 0);
         d.process(PipelinePacket::DataFrame(frame), &mut sink)
             .await
             .unwrap();
@@ -2182,11 +2167,7 @@ mod tests {
             .unwrap();
         d.configure_pipeline(&OggDemux::input_caps()).unwrap();
         let mut sink = CaptureSink::default();
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(stream.into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let frame = Frame::from_system_bytes(stream, FrameTiming::default(), 0);
         d.process(PipelinePacket::DataFrame(frame), &mut sink)
             .await
             .unwrap();
@@ -2257,11 +2238,7 @@ mod tests {
         let mut d = OggDemux::new();
         d.configure_pipeline(&OggDemux::input_caps()).unwrap();
         let mut sink = CaptureSink::default();
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(stream.into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let frame = Frame::from_system_bytes(stream, FrameTiming::default(), 0);
         d.process(PipelinePacket::DataFrame(frame), &mut sink)
             .await
             .unwrap();
@@ -2359,11 +2336,7 @@ mod tests {
         let mut d = OggDemux::new().with_bus(handle);
         d.configure_pipeline(&OggDemux::input_caps()).unwrap();
         let mut sink = CaptureSink::default();
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(stream.into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let frame = Frame::from_system_bytes(stream, FrameTiming::default(), 0);
         d.process(PipelinePacket::DataFrame(frame), &mut sink)
             .await
             .unwrap();

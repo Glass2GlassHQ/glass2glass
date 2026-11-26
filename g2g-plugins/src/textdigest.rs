@@ -22,7 +22,6 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming,
     G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
@@ -106,10 +105,8 @@ impl TextDigest {
                 .await?;
             self.caps_emitted = true;
         }
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(
-                digest.into_bytes().into_boxed_slice(),
-            )),
+        let frame = Frame::from_system_bytes(
+            digest.into_bytes(),
             FrameTiming {
                 pts_ns: (start * NS_PER_SECOND) as u64,
                 duration_ns: (self.window_seconds * NS_PER_SECOND) as u64,

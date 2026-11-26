@@ -15,10 +15,9 @@
 mod collect_sink;
 use collect_sink::CollectSink;
 
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, Colorimetry, Dim, Frame, FrameTiming, MemoryDomain, PipelinePacket,
-    PropValue, Rate, RawVideoFormat, TransferCharacteristics,
+    AsyncElement, Caps, Colorimetry, Dim, Frame, FrameTiming, PipelinePacket, PropValue, Rate,
+    RawVideoFormat, TransferCharacteristics,
 };
 use g2g_plugins::colorspace::{Colorspace, DEFAULT_HDR_PEAK_NITS, MINIMUM_HDR_PEAK_NITS};
 
@@ -173,9 +172,9 @@ fn raw(colorimetry: Colorimetry) -> Caps {
 }
 
 fn frame(bytes: Vec<u8>) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        bytes,
+        FrameTiming {
             pts_ns: 0,
             dts_ns: 0,
             duration_ns: 0,
@@ -184,9 +183,8 @@ fn frame(bytes: Vec<u8>) -> Frame {
             keyframe: true,
             ..FrameTiming::default()
         },
-        sequence: 0,
-        meta: Default::default(),
-    }
+        0,
+    )
 }
 
 /// One RGBA frame, `codes[index]` at pixel `index`.

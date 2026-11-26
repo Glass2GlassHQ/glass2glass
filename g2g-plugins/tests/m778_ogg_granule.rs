@@ -15,7 +15,6 @@
 use std::process::Command;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, G2gError, OutputSink, PropValue, PushOutcome,
 };
@@ -45,8 +44,8 @@ impl OutputSink for CaptureSink {
 }
 
 fn chunk(data: &[u8]) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(data.to_vec().into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        data.to_vec(),
         FrameTiming::default(),
         0,
     ))

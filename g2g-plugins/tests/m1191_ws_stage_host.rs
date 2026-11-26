@@ -19,7 +19,7 @@ use core::future::Future;
 use core::pin::Pin;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::{MemoryDomain, SystemSlice};
+use g2g_core::memory::MemoryDomain;
 use g2g_core::runtime::{run_source_transform_sink, GraphNodeRef, LatencyProfile, SourceLoop};
 use g2g_core::{
     AsyncElement, Bin, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
@@ -82,10 +82,8 @@ impl SourceLoop for CountSrc {
         Box::pin(async move {
             out.push(PipelinePacket::CapsChanged(test_caps())).await?;
             for i in 0..FRAMES {
-                out.push(PipelinePacket::DataFrame(Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(
-                        vec![i; FRAME_LEN].into_boxed_slice(),
-                    )),
+                out.push(PipelinePacket::DataFrame(Frame::from_system_bytes(
+                    vec![i; FRAME_LEN],
                     FrameTiming {
                         pts_ns: u64::from(i) * 1_000_000,
                         ..FrameTiming::default()

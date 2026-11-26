@@ -22,10 +22,9 @@ use std::net::TcpListener as StdTcpListener;
 use std::process::Command;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
-    PushOutcome, Rate, VideoCodec,
+    AsyncElement, Caps, Dim, FrameTiming, G2gError, OutputSink, PipelinePacket, PushOutcome, Rate,
+    VideoCodec,
 };
 use g2g_plugins::rtspserversink::RtspServerSink;
 
@@ -101,15 +100,14 @@ async fn ffmpeg_plays_interleaved_from_rtspserversink() {
         let mut null = NullOut;
         for i in 0u64..200 {
             let au = aus[(i as usize) % aus.len()].clone();
-            let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-                timing: FrameTiming {
+            let frame = Frame::from_system_bytes(
+                au,
+                FrameTiming {
                     pts_ns: i * 33_000_000,
                     ..FrameTiming::default()
                 },
-                sequence: i,
-                meta: Default::default(),
-            };
+                i,
+            );
             if sink
                 .process(PipelinePacket::DataFrame(frame), &mut null)
                 .await

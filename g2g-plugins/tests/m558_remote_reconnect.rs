@@ -16,11 +16,10 @@ use std::net::TcpListener as StdTcpListener;
 use std::time::Duration;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_simple_pipeline, LatencyProfile};
 use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PipelineClock, PipelinePacket, PushOutcome, Rate, RawVideoFormat,
+    AsyncElement, Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, OutputSink, PipelineClock,
+    PipelinePacket, PushOutcome, Rate, RawVideoFormat,
 };
 
 use g2g_plugins::remotesink::RemoteSink;
@@ -93,17 +92,14 @@ fn test_caps() -> Caps {
 }
 
 fn frame(seq: u64) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(
-            vec![seq as u8; 16].into_boxed_slice(),
-        )),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        vec![seq as u8; 16],
+        FrameTiming {
             pts_ns: seq * 1_000_000,
             ..FrameTiming::default()
         },
-        sequence: seq,
-        meta: Default::default(),
-    }
+        seq,
+    )
 }
 
 /// A: the sink retries the connect until the far side comes up.

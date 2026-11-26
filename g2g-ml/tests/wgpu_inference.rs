@@ -12,7 +12,7 @@
 
 use g2g_core::element::PushOutcome;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
+use g2g_core::memory::MemoryDomain;
 use g2g_core::{
     AsyncElement, Caps, Dim, G2gError, OutputSink, Rate, RawVideoFormat, TensorDType, TensorLayout,
     TensorShape,
@@ -82,16 +82,15 @@ impl OutputSink for Collect {
 }
 
 fn nv12_frame(bytes: Vec<u8>, pts_ns: u64, sequence: u64) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        bytes,
+        FrameTiming {
             pts_ns,
             dts_ns: pts_ns,
             ..FrameTiming::default()
         },
         sequence,
-        meta: Default::default(),
-    }
+    )
 }
 
 fn nv12_texture_frame(domain: MemoryDomain) -> Frame {
@@ -531,12 +530,7 @@ async fn rejects_system_memory_input() {
         .expect("configure");
 
     let mut out = Collect::default();
-    let sys = Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(vec![0u8; K * 4].into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: 0,
-        meta: Default::default(),
-    };
+    let sys = Frame::from_system_bytes(vec![0u8; K * 4], FrameTiming::default(), 0);
     assert_eq!(
         infer
             .process(PipelinePacket::DataFrame(sys), &mut out)

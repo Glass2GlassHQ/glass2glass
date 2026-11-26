@@ -10,7 +10,6 @@ use collect_sink::CollectSink;
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::meta::{RelationKind, Tracking};
 use g2g_core::{
     AnalyticsMeta, AnalyticsNode, BBox, Caps, Colorimetry, Dim, Interlace, ObjectDetection, Rate,
@@ -22,15 +21,14 @@ const FRAME_SIZE: u32 = 100;
 const TRACK_ID: u64 = 7;
 
 fn frame_at(pts_ns: u64) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(vec![0u8; 4].into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        vec![0u8; 4],
+        FrameTiming {
             pts_ns,
             ..FrameTiming::default()
         },
-        sequence: pts_ns,
-        meta: Default::default(),
-    }
+        pts_ns,
+    )
 }
 
 fn detection() -> ObjectDetection {

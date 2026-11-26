@@ -19,12 +19,11 @@ use core::pin::Pin;
 use std::time::Duration;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{parse_launch, run_graph, run_source_transform_sink, SourceLoop};
 use g2g_core::{
     AsyncElement, Bus, BusMessage, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelineClock,
-    PipelinePacket, PropValue, Tag,
+    ElementMetadata, FrameTiming, G2gError, OutputSink, PipelineClock, PipelinePacket, PropValue,
+    Tag,
 };
 use g2g_plugins::capsfilter::parse_caps;
 use g2g_plugins::capssetter::CapsSetter;
@@ -79,8 +78,8 @@ impl CollectSink {
 }
 
 fn byte_frame(bytes: Vec<u8>, pts_ns: u64, sequence: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        bytes,
         FrameTiming {
             pts_ns,
             dts_ns: pts_ns,

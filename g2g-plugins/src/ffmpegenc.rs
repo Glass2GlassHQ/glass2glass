@@ -1446,7 +1446,7 @@ mod tests {
     use super::*;
     use crate::ffmpegdec::FfmpegVideoDec;
     use g2g_core::frame::Frame;
-    use g2g_core::memory::{MemoryDomain, SystemSlice};
+
     use g2g_core::{FrameTiming, PushOutcome};
 
     const W: u32 = 320;
@@ -1564,8 +1564,8 @@ mod tests {
         }
         let mut sink = CaptureSink::default();
         for i in 0..10u64 {
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(i420_frame(i).into_boxed_slice())),
+            let frame = Frame::from_system_bytes(
+                i420_frame(i),
                 FrameTiming {
                     pts_ns: i * 33_000_000,
                     ..FrameTiming::default()
@@ -1594,8 +1594,8 @@ mod tests {
                 enc.process(PipelinePacket::Flush, &mut sink).await.unwrap();
             }
             for i in 0..FRAMES {
-                let frame = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(i420_frame(i).into_boxed_slice())),
+                let frame = Frame::from_system_bytes(
+                    i420_frame(i),
                     FrameTiming {
                         pts_ns: i * 33_000_000,
                         ..FrameTiming::default()
@@ -1674,10 +1674,8 @@ mod tests {
                 frames: Vec::new(),
             };
             for i in 0..60u64 {
-                let frame = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(
-                        noise_frame(i).into_boxed_slice(),
-                    )),
+                let frame = Frame::from_system_bytes(
+                    noise_frame(i),
                     FrameTiming {
                         pts_ns: i * 33_000_000,
                         ..FrameTiming::default()
@@ -1723,10 +1721,8 @@ mod tests {
             };
             for i in 0..n {
                 let seq = base + i;
-                let frame = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(
-                        i420_frame(seq).into_boxed_slice(),
-                    )),
+                let frame = Frame::from_system_bytes(
+                    i420_frame(seq),
                     FrameTiming {
                         pts_ns: seq * 33_000_000,
                         ..FrameTiming::default()
@@ -1814,11 +1810,7 @@ mod tests {
         .expect("open H.264 decoder");
         let mut dsink = CaptureSink::default();
         for au in &sink.frames {
-            let f = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(au.clone().into_boxed_slice())),
-                FrameTiming::default(),
-                0,
-            );
+            let f = Frame::from_system_bytes(au.clone(), FrameTiming::default(), 0);
             dec.process(PipelinePacket::DataFrame(f), &mut dsink)
                 .await
                 .expect("decode AU");
@@ -1862,8 +1854,8 @@ mod tests {
         enc.configure_pipeline(&raw_caps(format, W, H)).ok()?;
         let mut sink = CaptureSink::default();
         for (i, raw) in frames.into_iter().enumerate() {
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(raw.into_boxed_slice())),
+            let frame = Frame::from_system_bytes(
+                raw,
                 FrameTiming {
                     pts_ns: i as u64 * 33_000_000,
                     ..FrameTiming::default()
@@ -1898,11 +1890,7 @@ mod tests {
         .expect("open decoder");
         let mut sink = CaptureSink::default();
         for au in aus {
-            let f = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(au.clone().into_boxed_slice())),
-                FrameTiming::default(),
-                0,
-            );
+            let f = Frame::from_system_bytes(au.clone(), FrameTiming::default(), 0);
             dec.process(PipelinePacket::DataFrame(f), &mut sink)
                 .await
                 .expect("decode AU");
@@ -2211,10 +2199,8 @@ mod tests {
             range: core::ops::Range<u64>,
         ) {
             for i in range {
-                let frame = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(
-                        noise_frame(i).into_boxed_slice(),
-                    )),
+                let frame = Frame::from_system_bytes(
+                    noise_frame(i),
                     FrameTiming {
                         pts_ns: i * 33_000_000,
                         ..FrameTiming::default()
@@ -2287,8 +2273,8 @@ mod tests {
             .collect();
         let mut sink = CaptureSink::default();
         for (seq, raw) in frames.iter().enumerate() {
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(raw.clone().into_boxed_slice())),
+            let frame = Frame::from_system_bytes(
+                raw.clone(),
                 FrameTiming {
                     pts_ns: seq as u64 * 33_000_000,
                     ..FrameTiming::default()

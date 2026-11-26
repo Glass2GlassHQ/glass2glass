@@ -7,7 +7,7 @@
 use core::task::{Context, Poll};
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
+use g2g_core::memory::MemoryDomain;
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, G2gError, MultiOutputElement, MultiOutputSink,
     PushOutcome, Segment,
@@ -56,8 +56,8 @@ const READ_CHUNK_LEN: usize = 4096;
 
 fn file_chunks(file: &[u8]) -> impl Iterator<Item = PipelinePacket> + '_ {
     file.chunks(READ_CHUNK_LEN).map(|chunk| {
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(chunk.to_vec().into_boxed_slice())),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            chunk.to_vec(),
             FrameTiming::default(),
             0,
         ))

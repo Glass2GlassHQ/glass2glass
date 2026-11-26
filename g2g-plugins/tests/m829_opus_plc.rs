@@ -15,10 +15,9 @@
 #![cfg(feature = "opus")]
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PipelinePacket, PropError, PropValue, PushOutcome,
+    AsyncElement, AudioFormat, Caps, FrameTiming, G2gError, OutputSink, PipelinePacket, PropError,
+    PropValue, PushOutcome,
 };
 use g2g_plugins::opusdec::OpusDec;
 use g2g_plugins::opusenc::{OpusEnc, OpusFrameSize};
@@ -134,11 +133,7 @@ async fn encode(frame_size: OpusFrameSize, count: usize) -> Vec<Vec<u8>> {
     let pcm = tone_pcm(frame_size.samples() * count);
     let mut sink = Capture::default();
     enc.process(
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(pcm.into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        )),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(pcm, FrameTiming::default(), 0)),
         &mut sink,
     )
     .await
@@ -177,8 +172,8 @@ async fn decode(plc: bool, packets: &[Pkt]) -> Vec<Out> {
     dec.configure_pipeline(&opus_caps()).unwrap();
     let mut sink = PcmSink::default();
     for p in packets {
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(p.data.clone().into_boxed_slice())),
+        let frame = Frame::from_system_bytes(
+            p.data.clone(),
             FrameTiming {
                 pts_ns: p.pts_ns,
                 duration_ns: p.dur_ns,

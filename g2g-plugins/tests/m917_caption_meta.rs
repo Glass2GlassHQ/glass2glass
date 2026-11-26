@@ -98,8 +98,8 @@ impl SourceLoop for CaptionedSrc {
                     ));
                 }
                 au.extend_from_slice(&PLAIN_AU);
-                let f = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
+                let f = Frame::from_system_bytes(
+                    au,
                     FrameTiming {
                         pts_ns: i * FRAME_DUR,
                         keyframe: true,

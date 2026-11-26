@@ -9,7 +9,6 @@ mod collect_sink;
 
 use collect_sink::CollectSink;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{AsyncElement, ByteStreamEncoding, Caps};
 use g2g_plugins::mpegts::{TsMuxer, MUX_PMT_PID, STREAM_TYPE_H264, TS_PACKET_LEN};
 use g2g_plugins::tsdemux::{TsDemux, TsStream};
@@ -83,11 +82,7 @@ async fn units_sent_before_the_pmt_are_emitted() {
         })
         .unwrap();
     let mut sink = CollectSink::default();
-    let frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(ts.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    );
+    let frame = Frame::from_system_bytes(ts, FrameTiming::default(), 0);
     demux
         .process(PipelinePacket::DataFrame(frame), &mut sink)
         .await

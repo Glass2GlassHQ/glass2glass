@@ -31,7 +31,6 @@ use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName};
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, FrameTiming, G2gError, MemoryDomain, MultiOutputSink,
@@ -129,11 +128,7 @@ async fn publish(
             pts_ns: sequence as u64 * interval.as_nanos() as u64,
             ..FrameTiming::default()
         };
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(unit.clone().into_boxed_slice())),
-            timing,
-            sequence as u64,
-        );
+        let frame = Frame::from_system_bytes(unit.clone(), timing, sequence as u64);
         sink.process(PipelinePacket::DataFrame(frame), &mut Discard)
             .await
             .unwrap();
@@ -489,11 +484,7 @@ async fn send_unit(sink: &mut WebRtcSink, sequence: u64, unit: &[u8]) {
         pts_ns: sequence * interval.as_nanos() as u64,
         ..FrameTiming::default()
     };
-    let frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(unit.to_vec().into_boxed_slice())),
-        timing,
-        sequence,
-    );
+    let frame = Frame::from_system_bytes(unit.to_vec(), timing, sequence);
     sink.process(PipelinePacket::DataFrame(frame), &mut Discard)
         .await
         .unwrap();

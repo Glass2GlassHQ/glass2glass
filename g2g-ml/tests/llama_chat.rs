@@ -19,7 +19,6 @@ use std::path::PathBuf;
 
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{G2gError, PropError, PropValue};
 use g2g_ml::llamachat::{Exchange, LlamaChat, RAW_PROMPT_SEPARATOR};
 
@@ -68,10 +67,8 @@ impl OutputSink for Collect {
 }
 
 fn text_frame(text: &str, pts_ns: u64) -> Frame {
-    Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(
-            text.as_bytes().to_vec().into_boxed_slice(),
-        )),
+    Frame::from_system_bytes(
+        text.as_bytes().to_vec(),
         FrameTiming {
             pts_ns,
             ..FrameTiming::default()

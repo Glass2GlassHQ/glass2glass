@@ -345,18 +345,11 @@ mod tests {
     }
 
     fn frame(bytes: &[u8], keyframe: bool) -> PipelinePacket {
-        use g2g_core::{Frame, FrameTiming, MemoryDomain, SystemSlice};
+        use g2g_core::{Frame, FrameTiming};
         let timing = FrameTiming {
             keyframe,
             ..FrameTiming::default()
         };
-        PipelinePacket::DataFrame(Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(
-                bytes.to_vec().into_boxed_slice(),
-            )),
-            timing,
-            sequence: 0,
-            meta: Default::default(),
-        })
+        PipelinePacket::DataFrame(Frame::from_system_bytes(bytes.to_vec(), timing, 0))
     }
 }

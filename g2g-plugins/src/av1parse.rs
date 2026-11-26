@@ -42,11 +42,9 @@ use alloc::vec::Vec;
 use g2g_core::caps::framerate_q16_from_fraction;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
-    FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    Rate, VideoCodec,
+    FrameTiming, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec,
 };
 
 use crate::access_unit::CapsRefinement;
@@ -134,11 +132,7 @@ impl Av1Parse {
         #[cfg(feature = "metadata")]
         let info = metadata_obu_info(&temporal_unit);
         #[allow(unused_mut)]
-        let mut frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(temporal_unit.into_boxed_slice())),
-            timing,
-            self.reframed_sequence,
-        );
+        let mut frame = Frame::from_system_bytes(temporal_unit, timing, self.reframed_sequence);
         #[cfg(feature = "metadata")]
         {
             frame.meta = self.input_stamps.take(timing.pts_ns).meta;

@@ -11,7 +11,6 @@
 #![allow(dead_code)] // no one test file uses every fixture here
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{Caps, G2gError, OutputSink, PushOutcome};
 use g2g_plugins::mpegts::{TsDemuxer, TS_PACKET_LEN};
 
@@ -176,8 +175,8 @@ impl OutputSink for CaptureSink {
 }
 
 pub(crate) fn data_frame(bytes: &[u8]) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        bytes.to_vec(),
         FrameTiming::default(),
         0,
     ))

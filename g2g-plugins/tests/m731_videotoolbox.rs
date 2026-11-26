@@ -24,7 +24,6 @@ use keyframe_request_sink::KeyframeRequestSink;
 
 use g2g_core::conformance::{ConformanceDimension, Evidence};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{AsyncElement, Caps, ConfigureOutcome, Dim, Rate, RawVideoFormat, VideoCodec};
 use g2g_plugins::vtdecode::VtDecode;
 
@@ -70,11 +69,7 @@ fn platform_tag() -> String {
 
 async fn drive<E: AsyncElement>(el: &mut E, es: &[u8], sink: &mut CollectSink) {
     for (i, chunk) in es.chunks(4096).enumerate() {
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(chunk.to_vec().into_boxed_slice())),
-            FrameTiming::default(),
-            i as u64,
-        );
+        let frame = Frame::from_system_bytes(chunk.to_vec(), FrameTiming::default(), i as u64);
         el.process(PipelinePacket::DataFrame(frame), sink)
             .await
             .expect("parse chunk");
@@ -286,18 +281,17 @@ mod encode {
             RawVideoFormat::Bgra8 => bgra_picture(index),
             other => panic!("no test picture for {other:?}"),
         };
-        Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-            timing: FrameTiming {
+        Frame::from_system_bytes(
+            data,
+            FrameTiming {
                 pts_ns: index as u64 * FRAME_DURATION_NS,
                 dts_ns: index as u64 * FRAME_DURATION_NS,
                 duration_ns: FRAME_DURATION_NS,
                 capture_ns: index as u64 * FRAME_DURATION_NS,
                 ..FrameTiming::default()
             },
-            sequence: index as u64,
-            meta: Default::default(),
-        }
+            index as u64,
+        )
     }
 
     fn input_caps(format: RawVideoFormat) -> Caps {

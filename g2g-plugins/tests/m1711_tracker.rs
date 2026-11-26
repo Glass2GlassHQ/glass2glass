@@ -14,12 +14,11 @@ use core::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use g2g_core::frame::{Frame, FrameTiming};
-use g2g_core::memory::SystemSlice;
 use g2g_core::meta::{AnalyticsMeta, AnalyticsNode, BBox, ObjectDetection, RelationKind};
 use g2g_core::runtime::{run_graph, GraphNode, SourceLoop};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, Graph, MemoryDomain,
-    OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, Graph, OutputSink,
+    PipelineClock, PipelinePacket, Rate, RawVideoFormat,
 };
 use g2g_plugins::analyticsoverlay::AnalyticsOverlay;
 use g2g_plugins::tracker::Tracker;
@@ -98,10 +97,8 @@ impl SourceLoop for DetectionSrc {
             let mut step = 0;
             let total = DETECTED_FRAMES + 1;
             for index in 0..total {
-                let mut frame = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(
-                        vec![0u8; (WIDTH * HEIGHT * 4) as usize].into_boxed_slice(),
-                    )),
+                let mut frame = Frame::from_system_bytes(
+                    vec![0u8; (WIDTH * HEIGHT * 4) as usize],
                     FrameTiming::default(),
                     index as u64,
                 );

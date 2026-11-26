@@ -35,12 +35,10 @@ const MAX_PLANES: usize = 4;
 use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     g2g_warn, AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    Dim, ElementMetadata, FrameTiming, G2gError, Interlace, MemoryDomain, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
-    RawVideoFormat,
+    Dim, ElementMetadata, FrameTiming, G2gError, Interlace, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
 use crate::compositor::frame_period_ns;
@@ -365,8 +363,8 @@ impl RawVideoParse {
             };
             let pts_ns = self.emitted.saturating_mul(period_ns);
             #[allow(unused_mut)]
-            let mut frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
+            let mut frame = Frame::from_system_bytes(
+                payload,
                 FrameTiming {
                     pts_ns,
                     dts_ns: pts_ns,
@@ -656,11 +654,7 @@ mod tests {
     }
 
     fn data_frame(bytes: Vec<u8>) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        ))
+        PipelinePacket::DataFrame(Frame::from_system_bytes(bytes, FrameTiming::default(), 0))
     }
 
     #[tokio::test]

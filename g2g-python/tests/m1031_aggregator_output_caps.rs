@@ -41,9 +41,9 @@ impl OutputSink for CollectSink {
 }
 
 fn frame_2x1_rgba() -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(vec![0u8; 8].into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        vec![0u8; 8],
+        FrameTiming {
             pts_ns: 0,
             dts_ns: 0,
             duration_ns: 0,
@@ -52,9 +52,8 @@ fn frame_2x1_rgba() -> Frame {
             keyframe: false,
             ..FrameTiming::default()
         },
-        sequence: 0,
-        meta: Default::default(),
-    }
+        0,
+    )
 }
 
 fn rgba_2x1() -> Caps {

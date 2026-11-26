@@ -58,12 +58,7 @@ fn caps() -> Caps {
 /// A frame carrying one blob tagged `header`.
 fn frame_carrying(header: &str, sequence: u64) -> Frame {
     let bytes = vec![0u8; (WIDTH * HEIGHT * 4) as usize];
-    let mut frame = Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence,
-        meta: Default::default(),
-    };
+    let mut frame = Frame::from_system_bytes(bytes, FrameTiming::default(), sequence);
     let mut blobs = BlobMeta::new();
     blobs.push(header, Vec::from(b"x".as_slice()));
     frame.meta.attach(blobs);

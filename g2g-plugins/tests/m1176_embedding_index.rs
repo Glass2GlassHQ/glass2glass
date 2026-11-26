@@ -10,7 +10,6 @@
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{BlobMeta, ByteStreamEncoding, Caps, G2gError, OutputSink, PushOutcome};
 use g2g_plugins::embeddingsink::EmbeddingSink;
 
@@ -55,15 +54,14 @@ fn framed_payload(model_name: &str) -> Vec<u8> {
 }
 
 fn embedded_frame(pts_ns: u64, payload: Vec<u8>) -> Frame {
-    let mut frame = Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(Vec::new().into_boxed_slice())),
-        timing: FrameTiming {
+    let mut frame = Frame::from_system_bytes(
+        Vec::new(),
+        FrameTiming {
             pts_ns,
             ..FrameTiming::default()
         },
-        sequence: pts_ns,
-        meta: Default::default(),
-    };
+        pts_ns,
+    );
     let mut blobs = BlobMeta::new();
     blobs.push("GST-EMBEDDING:", payload);
     frame.meta.attach(blobs);
@@ -110,15 +108,14 @@ async fn stores_both_payload_shapes_and_refuses_a_second_model() {
 
     // A frame with no embedding is not a row.
     sink.process(
-        PipelinePacket::DataFrame(Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(Vec::new().into_boxed_slice())),
-            timing: FrameTiming {
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            Vec::new(),
+            FrameTiming {
                 pts_ns: SECOND_PTS_NS,
                 ..FrameTiming::default()
             },
-            sequence: 0,
-            meta: Default::default(),
-        }),
+            0,
+        )),
         &mut out,
     )
     .await

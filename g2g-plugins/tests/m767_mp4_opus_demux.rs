@@ -16,7 +16,6 @@
 use std::process::Command;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AudioFormat, ByteStreamEncoding, Caps, G2gError, MultiInputElement, MultiOutputElement,
     MultiOutputSink, OutputSink, PushOutcome,
@@ -88,8 +87,8 @@ impl MultiOutputSink for PortCapture {
 }
 
 fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        data,
         FrameTiming {
             pts_ns,
             dts_ns: pts_ns,

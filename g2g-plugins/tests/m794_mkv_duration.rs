@@ -41,7 +41,6 @@ use std::process::Command;
 use g2g_core::conformance::{ConformanceDimension, Evidence};
 use g2g_core::fanout::MultiOutputSink;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AudioFormat, ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement, MultiOutputElement,
     OutputSink, PushOutcome, Rate, VideoCodec,
@@ -112,11 +111,7 @@ impl MultiOutputSink for PortCapture {
 type PortFrames = Vec<(Vec<u8>, FrameTiming)>;
 
 fn frame(data: Vec<u8>, timing: FrameTiming) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-        timing,
-        0,
-    ))
+    PipelinePacket::DataFrame(Frame::from_system_bytes(data, timing, 0))
 }
 
 fn temp_path(name: &str) -> PathBuf {

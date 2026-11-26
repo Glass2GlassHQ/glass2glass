@@ -27,7 +27,6 @@ use std::path::PathBuf;
 
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{AnalyticsMeta, Caps, Dim, G2gError, Rate, RawVideoFormat, Segmentation};
 use g2g_ml::ortsegment::OrtSegmentation;
 use g2g_plugins::analyticsoverlay::AnalyticsOverlay;
@@ -89,12 +88,7 @@ fn rgba_caps() -> Caps {
 }
 
 fn frame(bytes: Vec<u8>) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: 0,
-        meta: Default::default(),
-    })
+    PipelinePacket::DataFrame(Frame::from_system_bytes(bytes, FrameTiming::default(), 0))
 }
 
 /// The configured element plus the sample RGBA frame, or `None` when the
@@ -359,12 +353,7 @@ async fn the_overlay_paints_the_real_mask_onto_the_frame() {
     overlay
         .configure_pipeline(&rgba_caps())
         .expect("the overlay configures");
-    let mut painted_frame = Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(input.clone().into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: 0,
-        meta: Default::default(),
-    };
+    let mut painted_frame = Frame::from_system_bytes(input.clone(), FrameTiming::default(), 0);
     painted_frame.meta.attach(analytics);
     let mut sink = MetaSink::default();
     overlay

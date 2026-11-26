@@ -10,11 +10,10 @@ mod collect_sink;
 use collect_sink::CollectSink;
 
 use g2g_core::caps_parse::parse_raw_format;
-use g2g_core::memory::SystemSlice;
 use g2g_core::wire::{raw_format_from_u8, raw_format_to_u8};
 use g2g_core::{
-    AsyncElement, Caps, CapsSet, Colorimetry, Dim, Frame, FrameTiming, MemoryDomain,
-    PipelinePacket, Rate, RawVideoFormat,
+    AsyncElement, Caps, CapsSet, Colorimetry, Dim, Frame, FrameTiming, PipelinePacket, Rate,
+    RawVideoFormat,
 };
 use g2g_plugins::videoconvert::{convert, VideoConvert};
 
@@ -59,12 +58,7 @@ async fn convert_with_element(target: RawVideoFormat, input: Vec<u8>) -> Vec<u8>
         .configure_pipeline(&raw(RawVideoFormat::A420))
         .expect("videoconvert takes A420");
     let mut sink = CollectSink::default();
-    let frame = Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(input.into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: 0,
-        meta: Default::default(),
-    };
+    let frame = Frame::from_system_bytes(input, FrameTiming::default(), 0);
     element
         .process(PipelinePacket::DataFrame(frame), &mut sink)
         .await

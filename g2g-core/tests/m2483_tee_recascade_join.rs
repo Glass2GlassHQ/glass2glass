@@ -9,12 +9,12 @@ use core::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::{DomainSet, MemoryDomainKind, SystemSlice};
+use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::runtime::{block_on, run_graph, GraphNode, SourceLoop};
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
-    FrameTiming, G2gError, Graph, MemoryDomain, MultiInputElement, OutputSink, PipelineClock,
-    PipelinePacket, Rate, RawVideoFormat,
+    FrameTiming, G2gError, Graph, MultiInputElement, OutputSink, PipelineClock, PipelinePacket,
+    Rate, RawVideoFormat,
 };
 
 struct NullClock;
@@ -37,14 +37,11 @@ fn nv12(frames_per_second: u32) -> Caps {
 }
 
 fn frame(sequence: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(
-            vec![sequence as u8].into_boxed_slice(),
-        )),
-        timing: FrameTiming::default(),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        vec![sequence as u8],
+        FrameTiming::default(),
         sequence,
-        meta: Default::default(),
-    })
+    ))
 }
 
 type DomainLog = Arc<Mutex<Vec<MemoryDomainKind>>>;

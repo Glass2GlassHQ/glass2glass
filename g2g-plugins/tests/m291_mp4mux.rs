@@ -15,7 +15,6 @@
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement, OutputSink, PushOutcome, Rate,
     VideoCodec,
@@ -63,17 +62,16 @@ impl OutputSink for CaptureSink {
 }
 
 fn frame(bytes: Vec<u8>, pts_ns: u64, sequence: u64) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        bytes,
+        FrameTiming {
             pts_ns,
             dts_ns: pts_ns,
             duration_ns: 33_333_333,
             ..FrameTiming::default()
         },
         sequence,
-        meta: Default::default(),
-    }
+    )
 }
 
 /// First AU carries SPS+PPS+IDR (so the moov gets its parameter sets); the rest

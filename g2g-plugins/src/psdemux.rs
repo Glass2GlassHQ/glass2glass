@@ -34,15 +34,14 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::log::Target;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{ElementSeekRoute, SeekController, StreamSelectController};
 use g2g_core::time::{ns_to_ticks, ticks_to_ns};
 use g2g_core::{
     g2g_error, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps,
     CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
-    LatencyReport, MemoryDomain, MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, Seek,
-    Segment, Stream, StreamCollection, StreamType, SubPictureFormat, VideoCodec,
+    LatencyReport, MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, Seek, Segment, Stream,
+    StreamCollection, StreamType, SubPictureFormat, VideoCodec,
 };
 
 use crate::avidemux::{audio_caps, pcm_alternatives};
@@ -1601,8 +1600,8 @@ impl PsDemux {
             }
             let duration_ns = u.duration_ns(self.stream);
             let keyframe = unit_is_keyframe(self.stream, &u.data);
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(u.data.into_boxed_slice())),
+            let frame = Frame::from_system_bytes(
+                u.data,
                 FrameTiming {
                     pts_ns,
                     dts_ns,
@@ -1702,8 +1701,8 @@ fn ns_from_90khz(t: Option<u64>) -> Option<u64> {
 }
 
 fn config_frame(blob: Vec<u8>, pts_ns: u64, seq: u64) -> Frame {
-    Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(blob.into_boxed_slice())),
+    Frame::from_system_bytes(
+        blob,
         FrameTiming {
             pts_ns,
             dts_ns: pts_ns,
@@ -2287,8 +2286,8 @@ impl PsDemuxN {
         }
         let duration_ns = u.duration_ns(kind);
         let keyframe = unit_is_keyframe(kind, &u.data);
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(u.data.into_boxed_slice())),
+        let frame = Frame::from_system_bytes(
+            u.data,
             FrameTiming {
                 pts_ns,
                 dts_ns,

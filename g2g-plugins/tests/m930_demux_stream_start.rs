@@ -31,7 +31,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, G2gError, MultiOutputElement, MultiOutputSink,
     PushOutcome, Segment,
@@ -91,11 +90,7 @@ fn ffmpeg(args: &[&str]) {
 }
 
 fn data_frame(bytes: Vec<u8>) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    ))
+    PipelinePacket::DataFrame(Frame::from_system_bytes(bytes, FrameTiming::default(), 0))
 }
 
 fn bytes(frame: &Frame) -> Vec<u8> {

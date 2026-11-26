@@ -16,7 +16,6 @@
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AudioFormat, Bus, BusMessage, ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement,
     OutputSink, PushOutcome, Rate, StreamType, VideoCodec,
@@ -68,8 +67,8 @@ impl OutputSink for CollectSink {
 }
 
 fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        data,
         FrameTiming {
             pts_ns,
             dts_ns: pts_ns,
@@ -143,8 +142,8 @@ async fn mkvdemux_announces_a_stream_collection_for_all_tracks() {
     let mut sink = CollectSink::default();
     demux
         .process(
-            PipelinePacket::DataFrame(Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(file.clone().into_boxed_slice())),
+            PipelinePacket::DataFrame(Frame::from_system_bytes(
+                file.clone(),
                 FrameTiming::default(),
                 0,
             )),
@@ -199,11 +198,7 @@ async fn mkvdemux_announces_a_stream_collection_for_all_tracks() {
     // Feeding more data does not re-announce the (unchanged) collection.
     demux
         .process(
-            PipelinePacket::DataFrame(Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(file.into_boxed_slice())),
-                FrameTiming::default(),
-                0,
-            )),
+            PipelinePacket::DataFrame(Frame::from_system_bytes(file, FrameTiming::default(), 0)),
             &mut sink,
         )
         .await

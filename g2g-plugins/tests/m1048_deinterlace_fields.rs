@@ -25,8 +25,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::SystemSlice;
-use g2g_core::{AsyncElement, Caps, Dim, MemoryDomain, Rate};
+use g2g_core::{AsyncElement, Caps, Dim, Rate};
 use g2g_core::{Interlace, PropValue, RawVideoFormat};
 
 use g2g_plugins::deinterlace::{
@@ -121,8 +120,8 @@ async fn run_configured(mut element: Deinterlace, caps: &Caps, input: &[Vec<u8>]
     element.configure_pipeline(caps).unwrap();
     let mut out = CollectSink::default();
     for (i, bytes) in input.iter().enumerate() {
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.clone().into_boxed_slice())),
+        let frame = Frame::from_system_bytes(
+            bytes.clone(),
             FrameTiming {
                 pts_ns: i as u64 * FRAME_NS,
                 dts_ns: i as u64 * FRAME_NS,

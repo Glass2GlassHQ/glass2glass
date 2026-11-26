@@ -10,11 +10,11 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::log::{short_type_name, LogName, LogSource};
-use g2g_core::memory::{DomainSet, MemoryDomainKind, SystemSlice};
+use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::{
     g2g_warn, st2038_any_alignment, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    ElementMetadata, Frame, FrameTiming, G2gError, MemoryDomain, MultiOutputElement,
-    MultiOutputSink, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, St2038Alignment,
+    ElementMetadata, Frame, FrameTiming, G2gError, MultiOutputElement, MultiOutputSink, OutputSink,
+    PadTemplate, PadTemplates, PipelinePacket, Rate, St2038Alignment,
 };
 
 use crate::st2038::{parse_st2038, write_st2038};
@@ -54,11 +54,7 @@ fn split_packets(payload: &[u8]) -> Option<Vec<(AncPacket, Vec<u8>)>> {
 }
 
 fn packet_frame(bytes: Vec<u8>, timing: FrameTiming, sequence: u64) -> Frame {
-    Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing,
-        sequence,
-    )
+    Frame::from_system_bytes(bytes, timing, sequence)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

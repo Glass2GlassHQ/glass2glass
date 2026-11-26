@@ -329,10 +329,8 @@ mod tests {
         })
         .unwrap();
         for pts_ns in [100, 200, 300] {
-            let frame = g2g_core::Frame::new(
-                g2g_core::memory::MemoryDomain::System(g2g_core::memory::SystemSlice::from_boxed(
-                    vec![0, 0, 0, 1, 0x26, 1].into_boxed_slice(),
-                )),
+            let frame = g2g_core::Frame::from_system_bytes(
+                vec![0, 0, 0, 1, 0x26, 1],
                 g2g_core::FrameTiming {
                     pts_ns,
                     ..Default::default()

@@ -22,11 +22,10 @@ use alloc::vec::Vec;
 use std::path::PathBuf;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming, G2gError,
-    MemoryDomain, OutputSink, PipelinePacket,
+    OutputSink, PipelinePacket,
 };
 
 use crate::filesink::path_io_err;
@@ -128,9 +127,9 @@ impl SourceLoop for Mp4AudioSrc {
 
             let mut sequence = 0u64;
             for s in samples {
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(s.au.into_boxed_slice())),
-                    timing: FrameTiming {
+                let frame = Frame::from_system_bytes(
+                    s.au,
+                    FrameTiming {
                         pts_ns: s.pts_ns,
                         dts_ns: s.pts_ns,
                         duration_ns: s.duration_ns,
@@ -140,8 +139,7 @@ impl SourceLoop for Mp4AudioSrc {
                         ..FrameTiming::default()
                     },
                     sequence,
-                    meta: Default::default(),
-                };
+                );
                 sequence += 1;
                 out.push(PipelinePacket::DataFrame(frame)).await?;
             }

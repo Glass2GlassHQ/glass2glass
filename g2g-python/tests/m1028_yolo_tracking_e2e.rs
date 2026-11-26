@@ -161,9 +161,9 @@ fn hosted_yolo_tracking_lands_as_related_tracking_nodes() {
         .build()
         .unwrap();
     for (sequence, rgba) in frames.into_iter().enumerate() {
-        let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(rgba.into_boxed_slice())),
-            timing: FrameTiming {
+        let frame = Frame::from_system_bytes(
+            rgba,
+            FrameTiming {
                 pts_ns: sequence as u64 * 33_000_000,
                 dts_ns: 0,
                 duration_ns: 33_000_000,
@@ -172,9 +172,8 @@ fn hosted_yolo_tracking_lands_as_related_tracking_nodes() {
                 keyframe: sequence == 0,
                 ..FrameTiming::default()
             },
-            sequence: sequence as u64,
-            meta: Default::default(),
-        };
+            sequence as u64,
+        );
         rt.block_on(el.process(PipelinePacket::DataFrame(frame), &mut sink))
             .expect("hosted yolo should run inference without error");
     }

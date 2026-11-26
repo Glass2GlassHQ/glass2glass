@@ -20,8 +20,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::SystemSlice;
-use g2g_core::{AsyncElement, Caps, Dim, G2gError, MemoryDomain, OutputSink, PushOutcome, Rate};
+use g2g_core::{AsyncElement, Caps, Dim, G2gError, OutputSink, PushOutcome, Rate};
 use g2g_core::{PropValue, RawVideoFormat};
 
 use g2g_plugins::deinterlace::{Deinterlace, DeinterlaceMethod};
@@ -96,8 +95,8 @@ async fn run(
     el.configure_pipeline(&caps(format, w, h)).unwrap();
     let mut out = Collect::default();
     for (i, bytes) in input.iter().enumerate() {
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.clone().into_boxed_slice())),
+        let frame = Frame::from_system_bytes(
+            bytes.clone(),
             FrameTiming {
                 pts_ns: i as u64 * 40_000_000,
                 ..Default::default()
@@ -563,7 +562,7 @@ fn graph_dot(path: &std::path::Path) -> String {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_padded_dma_buf_weaves_like_the_same_picture_in_system_memory() {
-    use g2g_core::memory::OwnedDmaBuf;
+    use g2g_core::memory::{MemoryDomain, OwnedDmaBuf, SystemSlice};
     use g2g_core::meta::{Plane, PlaneLayout};
     use g2g_plugins::deinterlace::DeinterlaceMode;
     use std::os::unix::io::IntoRawFd;

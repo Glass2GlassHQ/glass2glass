@@ -20,12 +20,11 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     g2g_info, AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    ElementMetadata, FrameTiming, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::mathf;
@@ -185,9 +184,9 @@ impl SourceLoop for DtmfSrc {
                 let arrival_ns = g2g_core::metrics::monotonic_ns();
                 #[cfg(not(feature = "std"))]
                 let arrival_ns: u64 = 0;
-                out.push(PipelinePacket::DataFrame(Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                    timing: FrameTiming {
+                out.push(PipelinePacket::DataFrame(Frame::from_system_bytes(
+                    bytes,
+                    FrameTiming {
                         pts_ns: pts,
                         dts_ns: pts,
                         duration_ns,
@@ -196,9 +195,8 @@ impl SourceLoop for DtmfSrc {
                         keyframe: false,
                         ..FrameTiming::default()
                     },
-                    sequence: seq,
-                    meta: Default::default(),
-                }))
+                    seq,
+                )))
                 .await?;
             }
             out.push(PipelinePacket::Eos).await?;

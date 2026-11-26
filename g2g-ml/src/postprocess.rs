@@ -21,10 +21,9 @@ use core::pin::Pin;
 use crate::tensor_bytes::{f32_le_bytes, finite_f32_from_le_bytes};
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError, MemoryDomain,
-    OutputSink, PipelinePacket, TensorDType, TensorLayout, TensorShape,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError, OutputSink,
+    PipelinePacket, TensorDType, TensorLayout, TensorShape,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,14 +177,7 @@ impl AsyncElement for TensorPostprocess {
                         self.last_caps = Some(new_caps);
                     }
                     let out_bytes = f32_le_bytes(result.iter().copied());
-                    let out_frame = Frame {
-                        domain: MemoryDomain::System(SystemSlice::from_boxed(
-                            out_bytes.into_boxed_slice(),
-                        )),
-                        timing: frame.timing,
-                        sequence: self.emitted,
-                        meta: Default::default(),
-                    };
+                    let out_frame = Frame::from_system_bytes(out_bytes, frame.timing, self.emitted);
                     self.emitted += 1;
                     out.push(PipelinePacket::DataFrame(out_frame)).await?;
                 }

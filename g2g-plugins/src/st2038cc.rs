@@ -283,11 +283,7 @@ impl AsyncElement for CcToSt2038Anc {
                         out.push(PipelinePacket::CapsChanged(output_caps)).await?;
                         self.caps_emitted = true;
                     }
-                    let st2038 = Frame::new(
-                        MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
-                        frame.timing,
-                        frame.sequence,
-                    );
+                    let st2038 = Frame::from_system_bytes(payload, frame.timing, frame.sequence);
                     out.push(PipelinePacket::DataFrame(st2038))
                         .await
                         .map(|_| ())

@@ -18,10 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
-use g2g_core::{
-    FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket, PushOutcome, WallClockMeta,
-};
+use g2g_core::{FrameTiming, G2gError, OutputSink, PipelinePacket, PushOutcome, WallClockMeta};
 
 // 2026-10-20, a capture time no clock in the path would produce by itself
 const CAPTURE_BASE_UNIX_NS: i64 = 1_792_454_400_000_000_000;
@@ -33,8 +30,8 @@ fn capture_unix_ns(pts_ns: u64) -> i64 {
 }
 
 fn stamped_frame(data: Vec<u8>, pts_ns: u64) -> Frame {
-    let mut frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+    let mut frame = Frame::from_system_bytes(
+        data,
         FrameTiming {
             pts_ns,
             ..FrameTiming::default()

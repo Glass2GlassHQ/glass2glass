@@ -209,9 +209,7 @@ impl PadTemplates for FileSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use g2g_core::{
-        ByteStreamEncoding, Frame, FrameTiming, MemoryDomain, PushOutcome, SystemSlice,
-    };
+    use g2g_core::{ByteStreamEncoding, Frame, FrameTiming, PushOutcome};
 
     struct NullSink;
     impl OutputSink for NullSink {
@@ -226,8 +224,8 @@ mod tests {
     }
 
     fn frame(bytes: &[u8]) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            bytes.to_vec(),
             FrameTiming::default(),
             0,
         ))
@@ -256,11 +254,7 @@ mod tests {
     fn overwrite(offset: u64, bytes: &[u8]) -> PipelinePacket {
         PipelinePacket::Overwrite {
             offset,
-            frame: Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
-                FrameTiming::default(),
-                0,
-            ),
+            frame: Frame::from_system_bytes(bytes.to_vec(), FrameTiming::default(), 0),
         }
     }
 

@@ -16,7 +16,7 @@ use collect_sink::CollectSink;
 
 use g2g_core::conformance::{ConformanceDimension, Evidence};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
+use g2g_core::memory::MemoryDomain;
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::{
     AsyncElement, Caps, ConfigureOutcome, Dim, Interlace, PipelineClock, Rate, RawVideoFormat,
@@ -64,11 +64,7 @@ async fn access_units(es: &[u8]) -> Vec<Frame> {
     parse.configure_pipeline(&caps).expect("configure parser");
     let mut sink = CollectSink::default();
     for (i, chunk) in es.chunks(4096).enumerate() {
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(chunk.to_vec().into_boxed_slice())),
-            FrameTiming::default(),
-            i as u64,
-        );
+        let frame = Frame::from_system_bytes(chunk.to_vec(), FrameTiming::default(), i as u64);
         parse
             .process(PipelinePacket::DataFrame(frame), &mut sink)
             .await

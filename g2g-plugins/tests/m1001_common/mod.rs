@@ -17,7 +17,6 @@ use std::path::PathBuf;
 
 use g2g_core::conformance::Evidence;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{Caps, G2gError, OutputSink, PushOutcome};
 use g2g_plugins::conformance::persist;
 
@@ -56,8 +55,8 @@ impl CaptureSink {
 
 /// One `DataFrame` carrying `data` at `pts_ns`.
 pub(crate) fn data_frame(data: Vec<u8>, pts_ns: u64, sequence: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        data,
         FrameTiming {
             pts_ns,
             dts_ns: pts_ns,

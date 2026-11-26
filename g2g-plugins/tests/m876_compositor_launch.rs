@@ -16,11 +16,10 @@ use core::pin::Pin;
 use std::sync::{Mutex, OnceLock};
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{parse_launch, run_graph, LaunchFactory, ParseError, Registry, SourceLoop};
 use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, MemoryDomain, OutputSink, PipelineClock,
-    PipelinePacket, Rate, RawVideoFormat,
+    AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, OutputSink, PipelineClock, PipelinePacket,
+    Rate, RawVideoFormat,
 };
 use g2g_plugins::registry::default_registry;
 
@@ -81,8 +80,8 @@ impl SourceLoop for ColorSrc {
                 for px in buf.as_chunks_mut::<4>().0 {
                     px.copy_from_slice(&self.color);
                 }
-                out.push(PipelinePacket::DataFrame(Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(buf.into_boxed_slice())),
+                out.push(PipelinePacket::DataFrame(Frame::from_system_bytes(
+                    buf,
                     Default::default(),
                     sequence,
                 )))

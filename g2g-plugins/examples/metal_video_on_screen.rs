@@ -42,7 +42,7 @@ mod demo {
     use std::time::{Duration, Instant};
 
     use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-    use g2g_core::memory::{MemoryDomain, OwnedCvPixelBuffer, SystemSlice};
+    use g2g_core::memory::{MemoryDomain, OwnedCvPixelBuffer};
     use g2g_core::runtime::block_on;
     use g2g_core::{
         AsyncElement, Caps, Dim, G2gError, Interlace, OutputSink, PushOutcome, Rate,
@@ -125,11 +125,7 @@ mod demo {
         parse.configure_pipeline(&caps).expect("configure parser");
         let mut sink = Collect::default();
         for (i, chunk) in clip.chunks(4096).enumerate() {
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(chunk.to_vec().into_boxed_slice())),
-                FrameTiming::default(),
-                i as u64,
-            );
+            let frame = Frame::from_system_bytes(chunk.to_vec(), FrameTiming::default(), i as u64);
             parse
                 .process(PipelinePacket::DataFrame(frame), &mut sink)
                 .await

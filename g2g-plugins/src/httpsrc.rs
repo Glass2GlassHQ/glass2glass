@@ -41,14 +41,13 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, Target};
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{
     eos_then_wait_for_seek, flushing_only, SeekController, SeekFormat, SourceLoop,
 };
 use g2g_core::{
     g2g_error, BusHandle, BusMessage, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    ElementMetadata, FrameTiming, G2gError, HardwareError, HttpTransportFailure, MemoryDomain,
-    OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    ElementMetadata, FrameTiming, G2gError, HardwareError, HttpTransportFailure, OutputSink,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 use reqwest::cookie::Jar;
 use reqwest::header::{CONTENT_RANGE, RANGE};
@@ -299,15 +298,14 @@ impl HttpSrc {
         bytes: Vec<u8>,
         sequence: &mut u64,
     ) -> Result<(), G2gError> {
-        let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            timing: FrameTiming {
+        let frame = Frame::from_system_bytes(
+            bytes,
+            FrameTiming {
                 arrival_ns: g2g_core::metrics::monotonic_ns(),
                 ..FrameTiming::default()
             },
-            sequence: *sequence,
-            meta: Default::default(),
-        };
+            *sequence,
+        );
         *sequence += 1;
         out.push(PipelinePacket::DataFrame(frame)).await?;
         Ok(())

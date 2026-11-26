@@ -21,8 +21,8 @@ use std::time::Duration;
 use g2g_core::rtp::{RtpHeader, RTP_HEADER_LEN};
 use g2g_core::runtime::{parse_launch, run_simple_pipeline, LatencyProfile, SourceLoop};
 use g2g_core::{
-    AsyncElement, Frame, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
-    PropValue, PropertySpec, PushOutcome, SystemSlice,
+    AsyncElement, Frame, FrameTiming, G2gError, OutputSink, PipelinePacket, PropValue,
+    PropertySpec, PushOutcome,
 };
 
 use g2g_plugins::bytestream::{mpegts_caps, TS_DATAGRAM_PAYLOAD, TS_PACKET_SIZE};
@@ -642,8 +642,8 @@ async fn a_mid_stream_caps_change_keeps_the_rtp_sequence_going() {
     let mut sequences = Vec::new();
     for _ in 0..2 {
         sink.configure_pipeline(&mpegts_caps()).unwrap();
-        let datagram = PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(synthetic_ts(1).into_boxed_slice())),
+        let datagram = PipelinePacket::DataFrame(Frame::from_system_bytes(
+            synthetic_ts(1),
             FrameTiming::default(),
             0,
         ));

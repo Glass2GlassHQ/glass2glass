@@ -18,11 +18,10 @@ use core::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use g2g_core::frame::{Frame, FrameTiming};
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_graph, GraphNode, SourceLoop};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, Graph, MemoryDomain,
-    OutputSink, PipelineClock, PipelinePacket, Rate, VideoCodec,
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, Graph, OutputSink,
+    PipelineClock, PipelinePacket, Rate, VideoCodec,
 };
 use g2g_plugins::cea::{build_cc_sei, extract_cc_data, CcTriple};
 use g2g_plugins::misptime::{
@@ -91,8 +90,8 @@ impl SourceLoop for AuSrc {
         Box::pin(async move {
             let n = self.aus.len() as u64;
             for (i, au) in self.aus.iter().enumerate() {
-                let f = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(au.clone().into_boxed_slice())),
+                let f = Frame::from_system_bytes(
+                    au.clone(),
                     FrameTiming {
                         pts_ns: i as u64 * FRAME_DUR_NS,
                         keyframe: true,

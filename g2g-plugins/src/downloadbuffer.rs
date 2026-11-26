@@ -41,7 +41,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{flushing_only, SeekController};
 use g2g_core::{
     BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
@@ -305,15 +304,14 @@ impl DownloadBuffer {
             file.read_exact(&mut buf).map_err(io_err)?;
             self.read_pos = self.read_pos.saturating_add(n as u64);
 
-            let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(buf.into_boxed_slice())),
-                timing: FrameTiming {
+            let frame = Frame::from_system_bytes(
+                buf,
+                FrameTiming {
                     arrival_ns: g2g_core::metrics::monotonic_ns(),
                     ..FrameTiming::default()
                 },
-                sequence: self.sequence,
-                meta: Default::default(),
-            };
+                self.sequence,
+            );
             self.sequence += 1;
             out.push(PipelinePacket::DataFrame(frame)).await?;
         }

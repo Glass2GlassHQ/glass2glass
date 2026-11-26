@@ -114,11 +114,7 @@ impl SourceLoop for SrtTextSrc {
         Box::pin(async move {
             // One cue covering [1s, 3s).
             let doc = b"1\n00:00:01,000 --> 00:00:03,000\nHELLO\n";
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(doc.to_vec().into_boxed_slice())),
-                FrameTiming::default(),
-                0,
-            );
+            let frame = Frame::from_system_bytes(doc.to_vec(), FrameTiming::default(), 0);
             out.push(PipelinePacket::DataFrame(frame)).await?;
             out.push(PipelinePacket::Eos).await?;
             Ok(1)

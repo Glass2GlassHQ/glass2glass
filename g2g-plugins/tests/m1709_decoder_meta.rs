@@ -111,16 +111,15 @@ async fn demux<E: AsyncElement>(
 }
 
 fn stamped_unit(unit: CodedUnit, sequence: u64) -> Frame {
-    let mut frame = Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(unit.bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    let mut frame = Frame::from_system_bytes(
+        unit.bytes,
+        FrameTiming {
             pts_ns: unit.pts_ns,
             arrival_ns: arrival_for(unit.pts_ns),
             ..FrameTiming::default()
         },
         sequence,
-        meta: Default::default(),
-    };
+    );
     frame.meta.attach(WallClockMeta {
         unix_nanos: wall_clock_for(unit.pts_ns),
     });

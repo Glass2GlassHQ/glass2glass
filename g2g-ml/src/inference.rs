@@ -770,14 +770,11 @@ mod tests {
 
     #[cfg(any(feature = "offload", feature = "analytics"))]
     fn rgba_frame() -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(
-                vec![0u8; (SIDE * SIDE * 4) as usize].into_boxed_slice(),
-            )),
-            timing: g2g_core::FrameTiming::default(),
-            sequence: 0,
-            meta: Default::default(),
-        })
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            vec![0u8; (SIDE * SIDE * 4) as usize],
+            g2g_core::FrameTiming::default(),
+            0,
+        ))
     }
 
     #[cfg(feature = "analytics")]
@@ -909,14 +906,7 @@ mod tests {
         const OTHER: &str = "embedding";
 
         fn frame_carrying(header: &str) -> Frame {
-            let mut frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(
-                    vec![0u8; 4].into_boxed_slice(),
-                )),
-                timing: FrameTiming::default(),
-                sequence: 7,
-                meta: Default::default(),
-            };
+            let mut frame = Frame::from_system_bytes(vec![0u8; 4], FrameTiming::default(), 7);
             let mut blobs = BlobMeta::new();
             blobs.push(header, Vec::from(b"x".as_slice()));
             frame.meta.attach(blobs);

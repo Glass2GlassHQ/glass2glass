@@ -9,7 +9,6 @@
 #![cfg(all(target_os = "macos", feature = "coreaudio"))]
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{parse_launch, run_graph, SourceLoop};
 use g2g_core::{AsyncElement, AudioFormat, Caps, G2gError, OutputSink, PipelineClock, PushOutcome};
 use g2g_plugins::coreaudio::{CoreAudioSink, CoreAudioSrc};
@@ -69,18 +68,17 @@ fn sine_frame(index: usize) -> Frame {
         }
     }
     let dur = 1_000_000_000u64 * FRAMES_PER_BUF as u64 / RATE as u64;
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(pcm.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        pcm,
+        FrameTiming {
             pts_ns: index as u64 * dur,
             dts_ns: index as u64 * dur,
             duration_ns: dur,
             capture_ns: index as u64 * dur,
             ..FrameTiming::default()
         },
-        sequence: index as u64,
-        meta: Default::default(),
-    }
+        index as u64,
+    )
 }
 
 #[tokio::test(flavor = "current_thread")]

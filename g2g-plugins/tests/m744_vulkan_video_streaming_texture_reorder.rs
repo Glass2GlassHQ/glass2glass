@@ -143,15 +143,14 @@ fn split_temporal_units(stream: &[u8]) -> Vec<Vec<u8>> {
 }
 
 fn au_frame(bytes: Vec<u8>, seq: u64) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        bytes,
+        FrameTiming {
             pts_ns: seq * 33_000_000,
             ..Default::default()
         },
-        sequence: seq,
-        meta: Default::default(),
-    }
+        seq,
+    )
 }
 
 fn planes(f: &Nv12Frame) -> Vec<u8> {

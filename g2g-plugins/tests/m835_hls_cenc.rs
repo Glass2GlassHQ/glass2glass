@@ -89,11 +89,7 @@ impl MultiOutputSink for PortCapture {
 fn byte_frame(bytes: Vec<u8>) -> PipelinePacket {
     use g2g_core::frame::{Frame, FrameTiming};
     use g2g_core::memory::SystemSlice;
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    ))
+    PipelinePacket::DataFrame(Frame::from_system_bytes(bytes, FrameTiming::default(), 0))
 }
 
 /// Demux a whole fMP4 through `Mp4DemuxN`, returning each port's samples.

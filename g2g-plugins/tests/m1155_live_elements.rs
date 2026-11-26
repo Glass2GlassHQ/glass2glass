@@ -365,10 +365,8 @@ const LIVESYNC_LAUNCH_BUFFERS: u64 = 4;
 const PCM_S16LE_SAMPLE_BYTES: usize = 2;
 
 fn livesync_video_frame(pts_ns: u64, fill: u8) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(
-            vec![fill; LIVESYNC_VIDEO_BYTES].into_boxed_slice(),
-        )),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        vec![fill; LIVESYNC_VIDEO_BYTES],
         FrameTiming {
             pts_ns,
             dts_ns: pts_ns,
@@ -400,8 +398,8 @@ fn audio_buffer_bytes() -> usize {
 }
 
 fn livesync_audio_buffer(pts_ns: u64, bytes: &[u8]) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        bytes.to_vec(),
         FrameTiming {
             pts_ns,
             dts_ns: pts_ns,

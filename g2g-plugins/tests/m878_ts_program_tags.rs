@@ -20,7 +20,6 @@ use std::process::Command;
 use g2g_core::conformance::{ConformanceDimension, Evidence};
 use g2g_core::fanout::MultiOutputSink;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AudioFormat, Bus, BusMessage, ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement,
     MultiOutputElement, OutputSink, PushOutcome, Rate, Tag, TagList, VideoCodec,
@@ -102,8 +101,8 @@ impl MultiOutputSink for PortTap {
 }
 
 fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        data,
         FrameTiming {
             pts_ns,
             dts_ns: pts_ns,
@@ -213,8 +212,8 @@ async fn mux_two_programs(whole: Option<TagList>, per_program: &[(u16, TagList)]
 }
 
 fn data_frame(bytes: &[u8]) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        bytes.to_vec(),
         FrameTiming::default(),
         0,
     ))

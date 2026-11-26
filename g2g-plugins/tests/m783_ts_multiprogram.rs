@@ -12,9 +12,8 @@ use std::process::Command;
 
 use g2g_core::conformance::{ConformanceDimension, Evidence};
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, Dim, FrameTiming, G2gError, MemoryDomain,
+    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, Dim, FrameTiming, G2gError,
     MultiInputElement, OutputSink, PipelinePacket, PropValue, PushOutcome, Rate, VideoCodec,
 };
 use g2g_plugins::conformance::persist;
@@ -72,8 +71,8 @@ impl OutputSink for CaptureSink {
 }
 
 fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        data,
         FrameTiming {
             pts_ns,
             dts_ns: pts_ns,
@@ -158,11 +157,7 @@ async fn demux(ts: &[u8], program: u16, stream: TsStream) -> Vec<Vec<u8>> {
         .expect("program-number accepted");
     demux.configure_pipeline(&ts_caps()).unwrap();
     let mut sink = CaptureSink::default();
-    let f = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(ts.to_vec().into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    );
+    let f = Frame::from_system_bytes(ts.to_vec(), FrameTiming::default(), 0);
     demux
         .process(PipelinePacket::DataFrame(f), &mut sink)
         .await

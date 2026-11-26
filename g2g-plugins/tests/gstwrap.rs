@@ -354,8 +354,8 @@ async fn hosts_a_real_gstreamer_videoflip() {
         .expect("gst pipeline builds (needs host GStreamer + gst-plugins-good videoflip)");
 
     let input: Vec<u8> = vec![0xFF, 0xFF, 0xFF, 0xFF, 0x10, 0x20, 0x30, 0x40];
-    let frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(input.into_boxed_slice())),
+    let frame = Frame::from_system_bytes(
+        input,
         FrameTiming {
             pts_ns: 0,
             dts_ns: 0,

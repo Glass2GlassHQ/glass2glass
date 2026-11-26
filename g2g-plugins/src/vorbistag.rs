@@ -38,11 +38,10 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::log::short_type_name;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropValue,
-    PropertySpec, TagList,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropValue, PropertySpec,
+    TagList,
 };
 
 use crate::tagproperty::TagsProperty;
@@ -139,11 +138,8 @@ impl AsyncElement for VorbisTag {
                         return Ok(());
                     }
                     let rewritten = self.rewritten(slice);
-                    let replacement = Frame::new(
-                        MemoryDomain::System(SystemSlice::from_boxed(rewritten.into_boxed_slice())),
-                        frame.timing,
-                        self.sequence,
-                    );
+                    let replacement =
+                        Frame::from_system_bytes(rewritten, frame.timing, self.sequence);
                     self.sequence += 1;
                     out.push(PipelinePacket::DataFrame(replacement)).await?;
                 }
@@ -241,11 +237,7 @@ mod tests {
         element.configure_pipeline(&vorbis_caps()).expect("vorbis");
         let mut out = RecordingSink::default();
         for packet in packets {
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(packet.clone().into_boxed_slice())),
-                FrameTiming::default(),
-                0,
-            );
+            let frame = Frame::from_system_bytes(packet.clone(), FrameTiming::default(), 0);
             element
                 .process(PipelinePacket::DataFrame(frame), &mut out)
                 .await

@@ -27,7 +27,6 @@ use collect_sink::CollectSink;
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{ByteStreamEncoding, Caps, Dim, Rate, RawVideoFormat, VideoCodec};
 use g2g_plugins::ffmpegdec::{FfmpegVideoDec, OutputFormat};
 use g2g_plugins::mp4demux::Mp4Demux;
@@ -64,12 +63,7 @@ impl CollectSink {
 }
 
 fn data_frame(bytes: Vec<u8>) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: 0,
-        meta: Default::default(),
-    })
+    PipelinePacket::DataFrame(Frame::from_system_bytes(bytes, FrameTiming::default(), 0))
 }
 
 #[tokio::test]

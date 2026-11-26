@@ -30,7 +30,6 @@ use parsed_access_units::parsed_access_unit_bytes;
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{Caps, Dim, G2gError, Rate, RawVideoFormat, VideoCodec};
 use g2g_plugins::ffmpegdec::{FfmpegVideoDec, OutputFormat};
 
@@ -73,12 +72,7 @@ fn h264_caps() -> Caps {
 }
 
 fn data_frame(bytes: Vec<u8>) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: 0,
-        meta: Default::default(),
-    })
+    PipelinePacket::DataFrame(Frame::from_system_bytes(bytes, FrameTiming::default(), 0))
 }
 
 async fn access_units() -> Vec<Vec<u8>> {

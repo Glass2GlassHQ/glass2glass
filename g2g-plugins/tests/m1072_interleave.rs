@@ -15,7 +15,6 @@ use std::sync::Mutex;
 
 use g2g_core::fanout::MultiOutputSink;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::{
     AudioFormat, Caps, G2gError, MultiInputElement, MultiOutputElement, OutputSink, PipelineClock,
@@ -249,11 +248,7 @@ fn pcm(format: AudioFormat, channels: u8, sample_rate: u32) -> Caps {
 
 fn s16_frame(samples: &[i16]) -> PipelinePacket {
     let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    ))
+    PipelinePacket::DataFrame(Frame::from_system_bytes(bytes, FrameTiming::default(), 0))
 }
 
 fn samples_of(bytes: &[u8]) -> Vec<i16> {

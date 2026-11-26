@@ -15,12 +15,12 @@ use core::pin::Pin;
 use std::boxed::Box;
 use std::sync::{Arc, Mutex};
 
-use g2g_core::memory::{DomainSet, GpuDevice, GpuVendor, SystemSlice};
+use g2g_core::memory::{DomainSet, GpuDevice, GpuVendor};
 use g2g_core::runtime::{auto_plug_domain_converters, run_graph, GraphNode, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, Frame, FrameTiming,
-    G2gError, Graph, MemoryDomain, MemoryDomainKind, NodeId, OutputSink, PipelineClock,
-    PipelinePacket, Rate, RawVideoFormat,
+    G2gError, Graph, MemoryDomainKind, NodeId, OutputSink, PipelineClock, PipelinePacket, Rate,
+    RawVideoFormat,
 };
 use g2g_plugins::capsfilter::CapsFilter;
 use g2g_plugins::deinterlace::{Deinterlace, DeinterlaceMode};
@@ -57,12 +57,11 @@ fn nv12_any() -> CapsSet {
 }
 
 fn frame(seq: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(vec![seq as u8].into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: seq,
-        meta: Default::default(),
-    })
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        vec![seq as u8],
+        FrameTiming::default(),
+        seq,
+    ))
 }
 
 /// Fake source emitting `count` frames, advertising `domains` as what it can
@@ -473,17 +472,14 @@ async fn auto_plugs_cuda_upload_before_nvenc() {
                     for (i, b) in buf[..(W * H) as usize].iter_mut().enumerate() {
                         *b = ((i as u64 + seq) & 0xff) as u8;
                     }
-                    out.push(PipelinePacket::DataFrame(Frame {
-                        domain: MemoryDomain::System(SystemSlice::from_boxed(
-                            buf.into_boxed_slice(),
-                        )),
-                        timing: FrameTiming {
+                    out.push(PipelinePacket::DataFrame(Frame::from_system_bytes(
+                        buf,
+                        FrameTiming {
                             pts_ns: seq * 33_000_000,
                             ..FrameTiming::default()
                         },
-                        sequence: seq,
-                        meta: Default::default(),
-                    }))
+                        seq,
+                    )))
                     .await?;
                 }
                 out.push(PipelinePacket::Eos).await?;

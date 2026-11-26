@@ -20,12 +20,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::{
-    AsyncClock, AsyncElement, Caps, ClockSync, DynAsyncClock, FrameTiming, G2gError, MemoryDomain,
-    OutputSink, PipelineClock, PipelinePacket, PropValue, PropertySpec, PushOutcome,
-    RawVideoFormat,
+    AsyncClock, AsyncElement, Caps, ClockSync, DynAsyncClock, FrameTiming, G2gError, OutputSink,
+    PipelineClock, PipelinePacket, PropValue, PropertySpec, PushOutcome, RawVideoFormat,
 };
 use g2g_plugins::clocksync::ClockSyncTransform;
 use g2g_plugins::registry::default_registry;
@@ -96,8 +94,8 @@ fn caps() -> Caps {
 }
 
 fn frame(pts_ns: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(vec![0u8; 16].into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        vec![0u8; 16],
         FrameTiming {
             pts_ns,
             ..FrameTiming::default()

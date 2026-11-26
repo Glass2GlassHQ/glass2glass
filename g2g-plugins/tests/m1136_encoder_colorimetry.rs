@@ -32,7 +32,7 @@ mod common {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-    use g2g_core::memory::{MemoryDomain, SystemSlice};
+
     use g2g_core::{Caps, G2gError, OutputSink, PushOutcome};
 
     pub(crate) const WIDTH: u32 = 320;
@@ -58,8 +58,8 @@ mod common {
     }
 
     pub(crate) fn system_frame(pixels: Vec<u8>, seq: u64) -> Frame {
-        Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(pixels.into_boxed_slice())),
+        Frame::from_system_bytes(
+            pixels,
             FrameTiming {
                 pts_ns: seq * FRAME_PERIOD_NS,
                 ..FrameTiming::default()

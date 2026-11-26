@@ -407,7 +407,7 @@ impl PadTemplates for SplitMuxSink {
 mod tests {
     use super::*;
     use alloc::format;
-    use g2g_core::{Frame, FrameTiming, MemoryDomain, SystemSlice};
+    use g2g_core::{Frame, FrameTiming};
 
     struct NullSink;
     impl OutputSink for NullSink {
@@ -454,17 +454,16 @@ mod tests {
 
     fn keyframe_of(pts_ns: u64, nals: &[&[u8]]) -> PipelinePacket {
         let bytes = au(nals);
-        PipelinePacket::DataFrame(Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            timing: FrameTiming {
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            bytes,
+            FrameTiming {
                 pts_ns,
                 keyframe: true,
                 duration_ns: 40_000_000,
                 ..FrameTiming::default()
             },
-            sequence: 0,
-            meta: Default::default(),
-        })
+            0,
+        ))
     }
 
     #[tokio::test]

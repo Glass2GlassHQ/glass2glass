@@ -19,11 +19,10 @@ use std::boxed::Box;
 use std::sync::{Arc, Mutex};
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_graph, run_source_transform_sink, GraphNode, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    Graph, MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
+    Graph, OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
 };
 
 struct NullClock;
@@ -46,12 +45,11 @@ fn rgba(w: u32, h: u32) -> Caps {
 }
 
 fn frame(seq: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(vec![seq as u8].into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: seq,
-        meta: Default::default(),
-    })
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        vec![seq as u8],
+        FrameTiming::default(),
+        seq,
+    ))
 }
 
 /// Scripted source: `before` frames under `initial`, then a mid-stream

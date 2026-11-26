@@ -11,10 +11,9 @@
 use std::net::TcpListener as StdTcpListener;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
-    PushOutcome, Rate, VideoCodec,
+    AsyncElement, Caps, Dim, FrameTiming, G2gError, OutputSink, PipelinePacket, PushOutcome, Rate,
+    VideoCodec,
 };
 
 use g2g_plugins::rtcp::{self, RtcpPacket};
@@ -123,15 +122,14 @@ async fn rtsp_player_handshakes_then_receives_rtp() {
         let mut null = NullOut;
         for i in 0u8..(N * 6) {
             let au = access_unit(i);
-            let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-                timing: FrameTiming {
+            let frame = Frame::from_system_bytes(
+                au,
+                FrameTiming {
                     pts_ns: i as u64 * 33_000_000,
                     ..FrameTiming::default()
                 },
-                sequence: i as u64,
-                meta: Default::default(),
-            };
+                i as u64,
+            );
             match sink
                 .process(PipelinePacket::DataFrame(frame), &mut null)
                 .await
@@ -285,10 +283,8 @@ async fn sender_reports_name_the_instant_of_their_rtp_timestamp() {
         let mut null = NullOut;
         let mut i = 0u64;
         while !client_done.load(std::sync::atomic::Ordering::Relaxed) {
-            let mut frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(
-                    access_unit((i % 8) as u8).into_boxed_slice(),
-                )),
+            let mut frame = Frame::from_system_bytes(
+                access_unit((i % 8) as u8),
                 FrameTiming {
                     pts_ns: i * FRAME_PERIOD_NS + PAST_TICK_NS,
                     ..FrameTiming::default()
@@ -398,17 +394,14 @@ async fn sender_reports_flow_and_a_silent_player_is_reaped() {
         let started = std::time::Instant::now();
         let mut i = 0u64;
         while started.elapsed().as_millis() < END_MS as u128 {
-            let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(
-                    access_unit((i % 8) as u8).into_boxed_slice(),
-                )),
-                timing: FrameTiming {
+            let frame = Frame::from_system_bytes(
+                access_unit((i % 8) as u8),
+                FrameTiming {
                     pts_ns: i * 33_000_000,
                     ..FrameTiming::default()
                 },
-                sequence: i,
-                meta: Default::default(),
-            };
+                i,
+            );
             sink.process(PipelinePacket::DataFrame(frame), &mut null)
                 .await
                 .expect("stream frame");
@@ -566,15 +559,14 @@ async fn rtsp_player_receives_interleaved_rtp_over_control() {
         let mut null = NullOut;
         for i in 0u8..(N * 6) {
             let au = access_unit(i);
-            let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-                timing: FrameTiming {
+            let frame = Frame::from_system_bytes(
+                au,
+                FrameTiming {
                     pts_ns: i as u64 * 33_000_000,
                     ..FrameTiming::default()
                 },
-                sequence: i as u64,
-                meta: Default::default(),
-            };
+                i as u64,
+            );
             match sink
                 .process(PipelinePacket::DataFrame(frame), &mut null)
                 .await

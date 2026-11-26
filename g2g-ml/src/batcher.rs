@@ -28,10 +28,9 @@ use core::future::Future;
 use core::pin::Pin;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError, InputAggregator, MemoryDomain,
-    MultiInputElement, OutputSink, PipelinePacket,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError, InputAggregator, MultiInputElement,
+    OutputSink, PipelinePacket,
 };
 
 /// # Example
@@ -155,12 +154,7 @@ impl TensorBatcher {
                 }
             }
 
-            let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                timing,
-                sequence: self.emitted,
-                meta: Default::default(),
-            };
+            let frame = Frame::from_system_bytes(bytes, timing, self.emitted);
             self.emitted += 1;
             out.push(PipelinePacket::DataFrame(frame)).await?;
         }

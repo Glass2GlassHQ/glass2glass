@@ -14,11 +14,10 @@ use core::future::Future;
 
 use g2g_core::element::{AsyncElement, BoxFuture, PushOutcome};
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_muxer_sink, DynSourceLoop, SourceLoop};
 use g2g_core::{
-    ByteStreamEncoding, Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain,
-    OutputSink, PipelineClock, PipelinePacket, Rate, VideoCodec,
+    ByteStreamEncoding, Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, OutputSink,
+    PipelineClock, PipelinePacket, Rate, VideoCodec,
 };
 
 use g2g_plugins::klv::{split_klv_packets, KlvDecode, UasDatalink};
@@ -91,8 +90,8 @@ impl SourceLoop for AuSrc {
         Box::pin(async move {
             assert!(configured, "runner configures before run");
             for (i, (au, pts)) in aus.iter().enumerate() {
-                let frame = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(au.clone().into_boxed_slice())),
+                let frame = Frame::from_system_bytes(
+                    au.clone(),
                     FrameTiming {
                         pts_ns: *pts,
                         ..FrameTiming::default()
@@ -201,11 +200,7 @@ async fn demux_stream(ts: &[u8], stream: TsStream) -> Vec<(Vec<u8>, u64)> {
     let mut demux = TsDemux::new().with_stream(stream);
     demux.configure_pipeline(&ts_caps()).unwrap();
     let mut sink = CaptureSinkAus::default();
-    let frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(ts.to_vec().into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    );
+    let frame = Frame::from_system_bytes(ts.to_vec(), FrameTiming::default(), 0);
     demux
         .process(PipelinePacket::DataFrame(frame), &mut sink)
         .await
@@ -274,8 +269,8 @@ async fn klvdecode_emits_text_lines() {
     for (bytes, pts) in &klv_frames {
         // Sanity: what the demux emits is splittable KLV.
         assert_eq!(split_klv_packets(bytes).len(), 1);
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.clone().into_boxed_slice())),
+        let frame = Frame::from_system_bytes(
+            bytes.clone(),
             FrameTiming {
                 pts_ns: *pts,
                 ..FrameTiming::default()

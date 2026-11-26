@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::{
-    MemoryDomain, MemoryDomainKind, OwnedDmaBuf, SyncFile, SystemSlice, DRM_FORMAT_MOD_LINEAR,
+    MemoryDomain, MemoryDomainKind, OwnedDmaBuf, SyncFile, DRM_FORMAT_MOD_LINEAR,
 };
 use g2g_core::meta::{Plane, PlaneLayout};
 use g2g_core::runtime::{parse_launch, run_graph, RunStats, SourceLoop};
@@ -144,11 +144,7 @@ fn timing(index: u64) -> FrameTiming {
 }
 
 fn system_packet(bytes: Vec<u8>, index: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing(index),
-        index,
-    ))
+    PipelinePacket::DataFrame(Frame::from_system_bytes(bytes, timing(index), index))
 }
 
 fn system_frame(index: u64) -> PipelinePacket {

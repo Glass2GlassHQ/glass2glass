@@ -250,7 +250,7 @@ impl g2g_core::OutputSink for OrdinalSink {
 
 #[tokio::test]
 async fn nvdec_stamps_the_configured_device_on_every_frame() {
-    use g2g_core::{Frame, FrameTiming, MemoryDomain, PipelinePacket};
+    use g2g_core::{Frame, FrameTiming, PipelinePacket};
 
     let mut dec = NvDec::new();
     dec.set_property(PROP, PropValue::Int(DEFAULT_DEVICE_ID as i64))
@@ -262,17 +262,14 @@ async fn nvdec_stamps_the_configured_device_on_every_frame() {
 
     let mut sink = OrdinalSink::default();
     for (seq, au) in fixture_access_units().into_iter().enumerate() {
-        let frame = Frame {
-            domain: MemoryDomain::System(g2g_core::memory::SystemSlice::from_boxed(
-                au.into_boxed_slice(),
-            )),
-            timing: FrameTiming {
+        let frame = Frame::from_system_bytes(
+            au,
+            FrameTiming {
                 pts_ns: seq as u64 * 33_000_000,
                 ..FrameTiming::default()
             },
-            sequence: seq as u64,
-            meta: Default::default(),
-        };
+            seq as u64,
+        );
         dec.process(PipelinePacket::DataFrame(frame), &mut sink)
             .await
             .expect("decode");
@@ -449,17 +446,14 @@ async fn ffmpegdec_nvdec_cuda_stamps_the_configured_device() {
     let mut sink = OrdinalSink::default();
     let mut fed = 0usize;
     for (seq, au) in fixture_access_units().into_iter().enumerate() {
-        let frame = Frame {
-            domain: MemoryDomain::System(g2g_core::memory::SystemSlice::from_boxed(
-                au.into_boxed_slice(),
-            )),
-            timing: FrameTiming {
+        let frame = Frame::from_system_bytes(
+            au,
+            FrameTiming {
                 pts_ns: seq as u64 * 33_000_000,
                 ..FrameTiming::default()
             },
-            sequence: seq as u64,
-            meta: Default::default(),
-        };
+            seq as u64,
+        );
         // The hwdevice is created lazily on the first access unit, so a bad
         // ordinal surfaces here rather than at configure.
         if let Err(e) = dec
@@ -496,14 +490,7 @@ async fn ffmpegdec_nvdec_cuda_fails_on_a_device_the_host_does_not_have() {
     use g2g_plugins::ffmpegdec::{Backend, FfmpegVideoDec};
 
     let first_au = fixture_access_units().into_iter().next().expect("an AU");
-    let au_frame = || Frame {
-        domain: MemoryDomain::System(g2g_core::memory::SystemSlice::from_boxed(
-            first_au.clone().into_boxed_slice(),
-        )),
-        timing: FrameTiming::default(),
-        sequence: 0,
-        meta: Default::default(),
-    };
+    let au_frame = || Frame::from_system_bytes(first_au.clone(), FrameTiming::default(), 0);
 
     // Only meaningful where the CUDA hwdevice works at all on device 0.
     let mut ok = FfmpegVideoDec::new().with_backend(Backend::NvdecCuda);

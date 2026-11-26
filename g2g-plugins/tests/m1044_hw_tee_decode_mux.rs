@@ -39,7 +39,6 @@ use std::path::PathBuf;
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{run_graph, GraphNodeRef, LatencyProfile, LinkCapacity};
 use g2g_core::{
     ByteStreamEncoding, Caps, G2gError, Graph, OutputSink, PipelineClock, PipelinePacket,
@@ -117,12 +116,7 @@ async fn demux_recording(bytes: Vec<u8>) -> CaptureSink {
         .expect("fmp4 demux accepts an ISO-BMFF byte stream");
 
     let mut sink = CaptureSink::default();
-    let frame = Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: 0,
-        meta: Default::default(),
-    };
+    let frame = Frame::from_system_bytes(bytes, FrameTiming::default(), 0);
     demux
         .process(PipelinePacket::DataFrame(frame), &mut sink)
         .await

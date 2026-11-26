@@ -27,12 +27,12 @@ use core::pin::Pin;
 use std::boxed::Box;
 use std::sync::{Arc, Mutex};
 
-use g2g_core::memory::{DomainSet, SystemSlice};
+use g2g_core::memory::DomainSet;
 use g2g_core::runtime::{run_graph, GraphNode, SourceLoop};
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, Frame,
-    FrameTiming, G2gError, Graph, MemoryDomain, MemoryDomainKind, OutputSink, PipelineClock,
-    PipelinePacket, Rate, RawVideoFormat, VideoCodec,
+    FrameTiming, G2gError, Graph, MemoryDomainKind, OutputSink, PipelineClock, PipelinePacket,
+    Rate, RawVideoFormat, VideoCodec,
 };
 use g2g_plugins::nvdec::NvDec;
 
@@ -148,15 +148,14 @@ impl SourceLoop for H264Replay {
             let aus = core::mem::take(&mut self.aus);
             let mut seq = 0u64;
             for au in aus {
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-                    timing: FrameTiming {
+                let frame = Frame::from_system_bytes(
+                    au,
+                    FrameTiming {
                         pts_ns: seq * 33_000_000,
                         ..FrameTiming::default()
                     },
-                    sequence: seq,
-                    meta: Default::default(),
-                };
+                    seq,
+                );
                 out.push(PipelinePacket::DataFrame(frame)).await?;
                 seq += 1;
             }

@@ -196,7 +196,7 @@ pub(crate) use framed::{send_framed, FramedRead};
 mod tests {
     use super::*;
     use g2g_core::frame::Frame;
-    use g2g_core::memory::{MemoryDomain, SystemSlice};
+    use g2g_core::memory::MemoryDomain;
     use g2g_core::{FrameTiming, PipelinePacket};
 
     // forces partial writes and reads, so every frame boundary is crossed mid-call
@@ -204,12 +204,11 @@ mod tests {
 
     fn frame(len: usize, sequence: u64) -> PipelinePacket {
         let bytes: alloc::vec::Vec<u8> = (0..len).map(|i| i as u8).collect();
-        PipelinePacket::DataFrame(Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            timing: FrameTiming::default(),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            bytes,
+            FrameTiming::default(),
             sequence,
-            meta: Default::default(),
-        })
+        ))
     }
 
     #[test]

@@ -13,7 +13,6 @@
 use std::process::Command;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::time::ticks_to_ns;
 use g2g_core::{AsyncElement, AudioFormat, Caps, G2gError, OutputSink, PushOutcome};
 use g2g_plugins::flacparse::FlacParse;
@@ -46,8 +45,8 @@ impl OutputSink for CaptureSink {
 }
 
 fn chunk(data: &[u8], pts_ns: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(data.to_vec().into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        data.to_vec(),
         FrameTiming {
             pts_ns,
             ..FrameTiming::default()

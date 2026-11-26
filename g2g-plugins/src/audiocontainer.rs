@@ -12,10 +12,9 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming,
-    G2gError, MemoryDomain, OutputSink, PipelinePacket, ANY_CHANNELS, ANY_SAMPLE_RATE,
+    G2gError, OutputSink, PipelinePacket, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
 use crate::pcmendian::{convert_wire_layout, PcmWire, CARRIED};
@@ -140,11 +139,7 @@ pub(crate) async fn emit_pcm(
         buf.clear();
     }
     convert_wire_layout(&mut samples, wire.format, wire.big_endian);
-    let frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(samples.into_boxed_slice())),
-        FrameTiming::default(),
-        *sequence,
-    );
+    let frame = Frame::from_system_bytes(samples, FrameTiming::default(), *sequence);
     *sequence += 1;
     out.push(PipelinePacket::DataFrame(frame)).await?;
     Ok(())
@@ -192,12 +187,11 @@ impl PcmMux {
 
     fn frame(&mut self, bytes: Vec<u8>) -> PipelinePacket {
         self.emitted += 1;
-        PipelinePacket::DataFrame(Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            timing: Default::default(),
-            sequence: self.emitted,
-            meta: Default::default(),
-        })
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            bytes,
+            Default::default(),
+            self.emitted,
+        ))
     }
 
     async fn emit_header(

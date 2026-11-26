@@ -22,11 +22,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_simple_pipeline, SourceLoop};
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, ConfigureOutcome, FrameTiming,
-    G2gError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket,
+    G2gError, OutputSink, PipelineClock, PipelinePacket,
 };
 use g2g_plugins::webrtcdata::{WebRtcDataSink, WebRtcDataSrc, MAX_MESSAGE_SIZE};
 use g2g_plugins::webrtcduplex::{SdpChannel, SignalRole};
@@ -83,8 +82,8 @@ impl SourceLoop for PayloadSrc {
             out.push(PipelinePacket::CapsChanged(caps())).await?;
             let mut seq = 0u64;
             for msg in &self.msgs {
-                let frame = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(msg.clone().into_boxed_slice())),
+                let frame = Frame::from_system_bytes(
+                    msg.clone(),
                     FrameTiming {
                         pts_ns: seq,
                         ..FrameTiming::default()

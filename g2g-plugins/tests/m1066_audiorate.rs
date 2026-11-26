@@ -13,9 +13,8 @@ mod collect_sink;
 use collect_sink::CollectSink;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{parse_launch, run_graph};
-use g2g_core::{AsyncElement, AudioFormat, Caps, G2gError, MemoryDomain, PipelineClock, PropValue};
+use g2g_core::{AsyncElement, AudioFormat, Caps, G2gError, PipelineClock, PropValue};
 use g2g_plugins::audiorate::AudioRate;
 use g2g_plugins::registry::default_registry;
 
@@ -57,8 +56,8 @@ fn caps(format: AudioFormat, channels: u8, sample_rate: u32) -> Caps {
 /// re-stamped or trimmed payload is identifiable.
 fn frame(pts: u64, samples: u64, bytes_per_frame: usize, fill: u8) -> PipelinePacket {
     let bytes = vec![fill; samples as usize * bytes_per_frame];
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        bytes,
         FrameTiming {
             pts_ns: pts,
             dts_ns: pts,
@@ -276,11 +275,8 @@ async fn ragged_buffer_fails_loud() {
     let mut out = CollectSink::default();
     // 3 bytes is not a whole s16 stereo sample frame (4 bytes).
     let bytes = vec![0u8; 3];
-    let packet = PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    ));
+    let packet =
+        PipelinePacket::DataFrame(Frame::from_system_bytes(bytes, FrameTiming::default(), 0));
     assert_eq!(
         element.process(packet, &mut out).await.unwrap_err(),
         G2gError::CapsMismatch

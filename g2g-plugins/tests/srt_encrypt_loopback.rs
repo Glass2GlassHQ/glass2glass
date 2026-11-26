@@ -18,11 +18,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_simple_pipeline, LatencyProfile};
 use g2g_core::{
-    AsyncElement, ByteStreamEncoding, Caps, ConfigureOutcome, FrameTiming, G2gError, MemoryDomain,
-    OutputSink, PipelineClock, PipelinePacket, PushOutcome,
+    AsyncElement, ByteStreamEncoding, Caps, ConfigureOutcome, FrameTiming, G2gError, OutputSink,
+    PipelineClock, PipelinePacket, PushOutcome,
 };
 
 use g2g_plugins::srt;
@@ -123,15 +122,14 @@ async fn drive_caller(mut sink: SrtSink, n: u8) -> u64 {
     let mut null = NullOut;
     for i in 0u8..(n * 2) {
         let payload = vec![i % n; 100];
-        let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
-            timing: FrameTiming {
+        let frame = Frame::from_system_bytes(
+            payload,
+            FrameTiming {
                 pts_ns: i as u64 * 10_000_000,
                 ..FrameTiming::default()
             },
-            sequence: i as u64,
-            meta: Default::default(),
-        };
+            i as u64,
+        );
         if sink
             .process(PipelinePacket::DataFrame(frame), &mut null)
             .await
@@ -274,15 +272,14 @@ async fn key_rotation_rolls_the_cipher_mid_stream() {
         let mut null = NullOut;
         for i in 0u8..(N * 2) {
             let payload = vec![i % N; 100];
-            let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
-                timing: FrameTiming {
+            let frame = Frame::from_system_bytes(
+                payload,
+                FrameTiming {
                     pts_ns: i as u64 * 10_000_000,
                     ..FrameTiming::default()
                 },
-                sequence: i as u64,
-                meta: Default::default(),
-            };
+                i as u64,
+            );
             if sink
                 .process(PipelinePacket::DataFrame(frame), &mut null)
                 .await
@@ -398,15 +395,14 @@ async fn drive_rotating_caller(mut sink: SrtSink, n: u8) -> SrtSink {
     let mut null = NullOut;
     for i in 0u8..(n * 2) {
         let payload = vec![i % n; 100];
-        let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
-            timing: FrameTiming {
+        let frame = Frame::from_system_bytes(
+            payload,
+            FrameTiming {
                 pts_ns: i as u64 * 10_000_000,
                 ..FrameTiming::default()
             },
-            sequence: i as u64,
-            meta: Default::default(),
-        };
+            i as u64,
+        );
         if sink
             .process(PipelinePacket::DataFrame(frame), &mut null)
             .await

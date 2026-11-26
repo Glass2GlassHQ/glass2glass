@@ -227,14 +227,10 @@ fn hexdump(bytes: &[u8]) -> Value {
 mod tests {
     use super::*;
     use alloc::vec;
-    use g2g_core::{Dim, Frame, FrameTiming, MemoryDomain, Rate, SystemSlice};
+    use g2g_core::{Dim, Frame, FrameTiming, Rate};
 
     fn frame(bytes: Vec<u8>) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        ))
+        PipelinePacket::DataFrame(Frame::from_system_bytes(bytes, FrameTiming::default(), 0))
     }
 
     #[test]

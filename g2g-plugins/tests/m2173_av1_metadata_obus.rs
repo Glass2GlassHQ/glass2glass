@@ -12,7 +12,6 @@ use std::collections::BTreeMap;
 use std::process::Command;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::meta::HdrStaticMeta;
 use g2g_core::{AsyncElement, Caps, Dim, G2gError, OutputSink, PushOutcome, Rate, VideoCodec};
 use g2g_plugins::av1parse::Av1Parse;
@@ -116,11 +115,7 @@ async fn svt_av1_hdr_metadata_matches_ffprobe() {
         })
         .expect("configure");
     let mut sink = CaptureSink::default();
-    let chunk = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(stream.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    );
+    let chunk = Frame::from_system_bytes(stream, FrameTiming::default(), 0);
     parse
         .process(PipelinePacket::DataFrame(chunk), &mut sink)
         .await

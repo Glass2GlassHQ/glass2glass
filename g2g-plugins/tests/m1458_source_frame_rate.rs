@@ -9,7 +9,6 @@ use core::pin::Pin;
 use std::sync::Mutex;
 
 use g2g_core::frame::{Frame, FrameTiming};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{run_graph, GraphNode, LatencyProfile};
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, ConfigureOutcome, G2gError, Graph,
@@ -117,11 +116,7 @@ async fn fmp4demux_reads_the_frame_rate_from_the_fragment() {
         })
         .expect("fmp4demux accepts an ISO-BMFF byte stream");
     let bytes = std::fs::read(FRAGMENTED).expect("reads the fixture");
-    let frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    );
+    let frame = Frame::from_system_bytes(bytes, FrameTiming::default(), 0);
     let mut sink = CapsCapture::default();
     demux
         .process(PipelinePacket::DataFrame(frame), &mut sink)

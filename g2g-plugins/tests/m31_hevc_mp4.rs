@@ -12,7 +12,6 @@
 
 use g2g_core::element::{OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{Caps, Dim, G2gError, MultiInputElement, Rate, VideoCodec};
 use g2g_plugins::mp4muxn::Mp4MuxN;
@@ -65,18 +64,17 @@ fn delta_au(index: usize) -> Vec<u8> {
 }
 
 fn frame(bytes: Vec<u8>, index: usize) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        bytes,
+        FrameTiming {
             pts_ns: index as u64 * FRAME_DURATION_NS,
             dts_ns: index as u64 * FRAME_DURATION_NS,
             duration_ns: FRAME_DURATION_NS,
             capture_ns: index as u64 * FRAME_DURATION_NS,
             ..FrameTiming::default()
         },
-        sequence: index as u64,
-        meta: Default::default(),
-    }
+        index as u64,
+    )
 }
 
 fn hevc_caps() -> Caps {

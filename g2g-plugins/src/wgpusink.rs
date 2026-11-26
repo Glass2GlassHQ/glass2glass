@@ -2229,13 +2229,7 @@ mod tests {
 
     /// A system-memory frame carrying `bytes`.
     fn system_frame(bytes: Vec<u8>) -> Frame {
-        Frame::new(
-            MemoryDomain::System(g2g_core::memory::SystemSlice::from_boxed(
-                bytes.into_boxed_slice(),
-            )),
-            FrameTiming::default(),
-            0,
-        )
+        Frame::from_system_bytes(bytes, FrameTiming::default(), 0)
     }
 
     /// Assert `out` (packed RGBA8, `w` wide) is red on top and blue at the
@@ -2718,7 +2712,7 @@ mod tests {
     async fn overlay_to_sink_presents_boxes_on_shared_device() {
         let _gpu = crate::GPU_TEST_LOCK.lock().await;
         use crate::vellooverlay::VelloAnalyticsOverlay;
-        use g2g_core::memory::SystemSlice;
+
         use g2g_core::{AnalyticsMeta, BBox, Dim, ObjectDetection, Rate, RawVideoFormat};
 
         let Some(ctx) = shared_ctx().await else {
@@ -2750,11 +2744,7 @@ mod tests {
         for _ in 0..w * h {
             bytes.extend_from_slice(&[20, 20, 20, 255]);
         }
-        let mut frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let mut frame = Frame::from_system_bytes(bytes, FrameTiming::default(), 0);
         let mut a = AnalyticsMeta::new();
         a.add_detection(ObjectDetection {
             bbox: BBox {

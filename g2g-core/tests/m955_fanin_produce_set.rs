@@ -14,15 +14,14 @@ use std::sync::{Arc, Mutex};
 
 use g2g_core::fanout::Merger;
 use g2g_core::frame::{Frame, FrameTiming};
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{
     block_on, run_aggregator_dynamic, run_duplex_session, run_fanin_session, run_fanin_sink,
     DynSourceLoop, SourceLoop,
 };
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, DuplexInbound, G2gError,
-    MemoryDomain, MultiDuplexSession, MultiInputElement, MultiOutputSink, OutputSink,
-    PipelineClock, PipelinePacket, Rate, RawVideoFormat, VideoCodec,
+    MultiDuplexSession, MultiInputElement, MultiOutputSink, OutputSink, PipelineClock,
+    PipelinePacket, Rate, RawVideoFormat, VideoCodec,
 };
 
 const FRAMES: u64 = 3;
@@ -104,11 +103,8 @@ impl SourceLoop for TwoFormatSource {
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
             for seq in 0..FRAMES {
-                let frame = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(std::vec![0u8; 4].into())),
-                    FrameTiming::default(),
-                    seq,
-                );
+                let frame =
+                    Frame::from_system_bytes(std::vec![0u8; 4], FrameTiming::default(), seq);
                 out.push(PipelinePacket::DataFrame(frame)).await?;
             }
             out.push(PipelinePacket::Eos).await?;

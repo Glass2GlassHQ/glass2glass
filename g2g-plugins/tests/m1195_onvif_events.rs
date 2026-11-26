@@ -317,8 +317,8 @@ impl CollectSink {
 /// A metadata document as `RtspSrcN` hands it over, with the sender's wall
 /// clock when a sender report has arrived.
 fn metadata_packet(document: Vec<u8>, pts_ns: u64, wall_nanos: Option<i64>) -> PipelinePacket {
-    let mut frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(document.into_boxed_slice())),
+    let mut frame = Frame::from_system_bytes(
+        document,
         FrameTiming {
             pts_ns,
             ..Default::default()

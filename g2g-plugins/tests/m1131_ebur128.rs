@@ -10,11 +10,10 @@
 #![cfg(feature = "std")]
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PipelineClock, PipelinePacket, PushOutcome,
+    AsyncElement, AudioFormat, Caps, FrameTiming, G2gError, OutputSink, PipelineClock,
+    PipelinePacket, PushOutcome,
 };
 use g2g_plugins::ebur128::Ebur128;
 use g2g_plugins::registry::default_registry;
@@ -100,11 +99,7 @@ fn sine(frames: usize, start_frame: usize, amplitude: f64) -> Vec<u8> {
 }
 
 fn frame(bytes: Vec<u8>) -> Frame {
-    Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    )
+    Frame::from_system_bytes(bytes, FrameTiming::default(), 0)
 }
 
 /// Push `bytes` through the meter in 100 ms buffers, then `Eos`.

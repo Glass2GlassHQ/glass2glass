@@ -20,7 +20,6 @@ use core::pin::Pin;
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::PipelinePacket;
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{parse_launch, ElementFactory, LaunchFactory, Registry};
 use g2g_core::{
     AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, OutputSink,
@@ -153,8 +152,8 @@ fn temp_uri(tag: &str, bytes: &[u8]) -> (std::path::PathBuf, String) {
 
 // --- A/V mux fixture: a real two-track (H.264 + AAC) Matroska file ---
 fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(g2g_core::frame::Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+    PipelinePacket::DataFrame(g2g_core::frame::Frame::from_system_bytes(
+        data,
         g2g_core::frame::FrameTiming {
             pts_ns,
             dts_ns: pts_ns,

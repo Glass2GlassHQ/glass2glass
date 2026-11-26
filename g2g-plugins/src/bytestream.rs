@@ -168,18 +168,17 @@ pub fn datagram_chunk(encoding: ByteStreamEncoding, max_payload: usize) -> usize
 #[cfg(any(feature = "tcp", feature = "udp-ingress", feature = "rist"))]
 pub(crate) fn byte_frame(bytes: Vec<u8>, sequence: u64) -> g2g_core::frame::Frame {
     use g2g_core::frame::Frame;
-    use g2g_core::memory::SystemSlice;
-    use g2g_core::{FrameTiming, MemoryDomain};
 
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    use g2g_core::FrameTiming;
+
+    Frame::from_system_bytes(
+        bytes,
+        FrameTiming {
             arrival_ns: g2g_core::metrics::monotonic_ns(),
             ..FrameTiming::default()
         },
         sequence,
-        meta: Default::default(),
-    }
+    )
 }
 
 #[cfg(test)]

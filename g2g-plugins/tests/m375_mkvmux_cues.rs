@@ -13,7 +13,7 @@
 
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
+use g2g_core::memory::MemoryDomain;
 use g2g_core::runtime::SeekController;
 use g2g_core::{
     ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement, Rate, Seek, VideoCodec,
@@ -71,8 +71,8 @@ fn vp9_key(tag: u8) -> Vec<u8> {
 }
 
 fn data_frame(bytes: &[u8], pts_ns: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        bytes.to_vec(),
         FrameTiming {
             pts_ns,
             ..FrameTiming::default()

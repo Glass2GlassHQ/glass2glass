@@ -24,13 +24,12 @@ use core::future::Future;
 use core::pin::Pin;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::meta::{MetaRequests, PlaneLayout};
 use g2g_core::runtime::{run_simple_pipeline, LatencyProfile};
 use g2g_core::HostAllocator;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, G2gError, MemoryDomain, OutputSink,
-    PipelineClock, PipelinePacket, PushOutcome, RawVideoFormat,
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, G2gError, OutputSink, PipelineClock,
+    PipelinePacket, PushOutcome, RawVideoFormat,
 };
 use g2g_plugins::capturepixelformat::CapturePixelFormat;
 use g2g_plugins::v4l2src::{row_handling, take_rows, RowHandling, V4l2Src};
@@ -299,11 +298,7 @@ async fn a_padded_capture_declares_its_rows_and_converts_identically() {
     for y in 0..HEIGHT as usize {
         packed.extend_from_slice(&bytes[layout.row_range(0, y, row).expect("a row")]);
     }
-    let packed_frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(packed.into_boxed_slice())),
-        frame.timing,
-        frame.sequence,
-    );
+    let packed_frame = Frame::from_system_bytes(packed, frame.timing, frame.sequence);
     let (Some(from_declared), Some(from_packed)) = (
         convert_to_i420(frame, &caps).await,
         convert_to_i420(packed_frame, &caps).await,

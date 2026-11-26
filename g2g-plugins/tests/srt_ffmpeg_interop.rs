@@ -22,11 +22,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use g2g_core::frame::{Frame, FrameTiming};
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    AsyncElement, ByteStreamEncoding, Caps, G2gError, MemoryDomain, OutputSink, PipelinePacket,
-    PushOutcome,
+    AsyncElement, ByteStreamEncoding, Caps, G2gError, OutputSink, PipelinePacket, PushOutcome,
 };
 
 use g2g_plugins::srt;
@@ -332,17 +330,14 @@ async fn run_reverse_interop(listening: Listening, crypto: Option<(&str, u32)>) 
     .expect("configure SrtSink");
     let mut null = NullOut;
     for (i, chunk) in ts_bytes.chunks(1316).enumerate() {
-        let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(
-                chunk.to_vec().into_boxed_slice(),
-            )),
-            timing: FrameTiming {
+        let frame = Frame::from_system_bytes(
+            chunk.to_vec(),
+            FrameTiming {
                 pts_ns: i as u64 * 1_000_000,
                 ..FrameTiming::default()
             },
-            sequence: i as u64,
-            meta: Default::default(),
-        };
+            i as u64,
+        );
         sink.process(PipelinePacket::DataFrame(frame), &mut null)
             .await
             .expect("send TS chunk");
@@ -487,17 +482,14 @@ async fn srtsink_streamid_reaches_the_ffmpeg_listener() {
     let _ = std::fs::remove_file(&path);
     let mut null = NullOut;
     for (i, chunk) in ts_bytes.chunks(1316).enumerate() {
-        let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(
-                chunk.to_vec().into_boxed_slice(),
-            )),
-            timing: FrameTiming {
+        let frame = Frame::from_system_bytes(
+            chunk.to_vec(),
+            FrameTiming {
                 pts_ns: i as u64 * 1_000_000,
                 ..FrameTiming::default()
             },
-            sequence: i as u64,
-            meta: Default::default(),
-        };
+            i as u64,
+        );
         sink.process(PipelinePacket::DataFrame(frame), &mut null)
             .await
             .expect("send TS chunk");
@@ -960,15 +952,14 @@ async fn libsrt_measures_rtt_from_srtsink_ackacks() {
         packet[0] = MPEGTS_SYNC_BYTE;
     }
     for i in 0..CHUNKS {
-        let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(chunk.clone().into_boxed_slice())),
-            timing: FrameTiming {
+        let frame = Frame::from_system_bytes(
+            chunk.clone(),
+            FrameTiming {
                 pts_ns: i * CHUNK_SPACING_MS * 1_000_000,
                 ..FrameTiming::default()
             },
-            sequence: i,
-            meta: Default::default(),
-        };
+            i,
+        );
         sink.process(PipelinePacket::DataFrame(frame), &mut null)
             .await
             .expect("send TS chunk");
@@ -1244,17 +1235,14 @@ async fn run_rendezvous_srtsink(crypto: Option<(&str, u32)>) {
         if gst.try_wait().expect("poll gst").is_some() {
             break;
         }
-        let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(
-                chunk.to_vec().into_boxed_slice(),
-            )),
-            timing: FrameTiming {
+        let frame = Frame::from_system_bytes(
+            chunk.to_vec(),
+            FrameTiming {
                 pts_ns: i as u64 * 10_000_000,
                 ..FrameTiming::default()
             },
-            sequence: i as u64,
-            meta: Default::default(),
-        };
+            i as u64,
+        );
         sink.process(PipelinePacket::DataFrame(frame), &mut NullOut)
             .await
             .expect("send TS chunk");

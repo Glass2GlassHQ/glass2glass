@@ -16,7 +16,6 @@
 use std::process::Command;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{AsyncElement, AudioFormat, Caps, G2gError, OutputSink, PushOutcome};
 use g2g_plugins::ffmpegaacenc::FfmpegAacEnc;
 
@@ -71,8 +70,8 @@ async fn encodes_a_tone_ffmpeg_can_decode() {
     let pcm = tone(TOTAL);
     let mut sink = CaptureSink::default();
     for (i, chunk) in pcm.chunks(480 * 4).enumerate() {
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(chunk.to_vec().into_boxed_slice())),
+        let frame = Frame::from_system_bytes(
+            chunk.to_vec(),
             FrameTiming {
                 pts_ns: (i as u64) * 10_000_000,
                 ..FrameTiming::default()

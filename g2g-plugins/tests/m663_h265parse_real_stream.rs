@@ -13,7 +13,6 @@
 use std::process::Command;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{AsyncElement, Caps, Dim, G2gError, OutputSink, PushOutcome, Rate, VideoCodec};
 use g2g_plugins::h265parse::H265Parse;
 
@@ -107,11 +106,7 @@ async fn recovers_geometry_and_vui_framerate_from_a_libx265_stream() {
     parse.configure_pipeline(&caps).unwrap();
     let mut sink = CaptureSink::default();
     for (i, chunk) in es.chunks(4096).enumerate() {
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(chunk.to_vec().into_boxed_slice())),
-            FrameTiming::default(),
-            i as u64,
-        );
+        let frame = Frame::from_system_bytes(chunk.to_vec(), FrameTiming::default(), i as u64);
         parse
             .process(PipelinePacket::DataFrame(frame), &mut sink)
             .await

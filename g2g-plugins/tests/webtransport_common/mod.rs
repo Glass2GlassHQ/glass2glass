@@ -10,11 +10,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    MemoryDomain, OutputSink, PipelineClock, PipelinePacket, PushOutcome, Rate, RawVideoFormat,
+    OutputSink, PipelineClock, PipelinePacket, PushOutcome, Rate, RawVideoFormat,
 };
 
 // ---------------------------------------------------------------- test scaffold
@@ -140,18 +139,17 @@ pub(crate) fn test_caps() -> Caps {
 pub(crate) fn test_frame(i: u8, len: usize) -> Frame {
     let mut bytes = vec![i; len];
     bytes[1] = 0xAB;
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        bytes,
+        FrameTiming {
             pts_ns: i as u64 * 1_000_000,
             dts_ns: i as u64 * 1_000_000,
             duration_ns: 33_000,
             keyframe: i == 0,
             ..FrameTiming::default()
         },
-        sequence: i as u64,
-        meta: Default::default(),
-    }
+        i as u64,
+    )
 }
 
 // ------------------------------------------------------------------------ TLS

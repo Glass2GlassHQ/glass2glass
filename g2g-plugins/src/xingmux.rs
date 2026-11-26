@@ -38,10 +38,9 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     g2g_warn, AsyncElement, AudioFormat, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
 };
 
 use crate::audioframe::{
@@ -204,11 +203,7 @@ impl XingMux {
             None => g2g_warn!(self, "no MPEG audio frame in the stream: nothing to index"),
         }
         written.extend_from_slice(audio);
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(written.into_boxed_slice())),
-            Default::default(),
-            0,
-        );
+        let frame = Frame::from_system_bytes(written, Default::default(), 0);
         out.push(PipelinePacket::DataFrame(frame)).await?;
         Ok(())
     }
@@ -345,11 +340,7 @@ mod tests {
         let mut out = CollectSink::default();
         element.configure_pipeline(&mp3_caps()).expect("mp3 in");
         for piece in input.chunks(chunk) {
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(Vec::from(piece).into_boxed_slice())),
-                Default::default(),
-                0,
-            );
+            let frame = Frame::from_system_bytes(Vec::from(piece), Default::default(), 0);
             element
                 .process(PipelinePacket::DataFrame(frame), &mut out)
                 .await

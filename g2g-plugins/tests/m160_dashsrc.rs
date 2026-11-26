@@ -17,12 +17,11 @@ use std::thread;
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming};
-use g2g_core::memory::SystemSlice;
 use g2g_core::query::LatencyReport;
 use g2g_core::runtime::{SeekController, SeekOutcome, SeekTicket, SourceLoop};
 use g2g_core::{
-    ByteStreamEncoding, Caps, Dim, G2gError, MemoryDomain, MultiInputElement, OutputSink,
-    PipelinePacket, PushOutcome, Rate, Seek, VideoCodec,
+    ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement, OutputSink, PipelinePacket,
+    PushOutcome, Rate, Seek, VideoCodec,
 };
 use g2g_plugins::dashsrc::DashSrc;
 use g2g_plugins::fmp4demux::Fmp4Demux;
@@ -79,17 +78,16 @@ impl OutputSink for CaptureSink {
 }
 
 fn au_frame(bytes: Vec<u8>, pts_ns: u64, seq: u64) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        bytes,
+        FrameTiming {
             pts_ns,
             dts_ns: pts_ns,
             duration_ns: AU_DURATION_NS,
             ..FrameTiming::default()
         },
-        sequence: seq,
-        meta: Default::default(),
-    }
+        seq,
+    )
 }
 
 fn access_units() -> Vec<Vec<u8>> {

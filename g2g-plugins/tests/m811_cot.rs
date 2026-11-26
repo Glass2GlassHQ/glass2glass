@@ -149,7 +149,7 @@ mod sink {
 
     use g2g_core::element::AsyncElement;
     use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-    use g2g_core::memory::{MemoryDomain, SystemSlice};
+
     use g2g_core::{Caps, G2gError, PropValue};
     use g2g_plugins::cotsink::CotSink;
 
@@ -176,12 +176,7 @@ mod sink {
             };
             buf.extend_from_slice(&ls.encode());
         }
-        Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(buf.into_boxed_slice())),
-            timing: FrameTiming::default(),
-            sequence: 0,
-            meta: Default::default(),
-        }
+        Frame::from_system_bytes(buf, FrameTiming::default(), 0)
     }
 
     async fn recv_n(sock: &tokio::net::UdpSocket, n: usize) -> Vec<String> {
@@ -245,12 +240,7 @@ mod sink {
         let mut bytes = sample().encode();
         let mid = bytes.len() / 2;
         bytes[mid] ^= 0x01;
-        let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            timing: FrameTiming::default(),
-            sequence: 0,
-            meta: Default::default(),
-        };
+        let frame = Frame::from_system_bytes(bytes, FrameTiming::default(), 0);
 
         let mut out = NullOut;
         sink.process(PipelinePacket::DataFrame(frame), &mut out)

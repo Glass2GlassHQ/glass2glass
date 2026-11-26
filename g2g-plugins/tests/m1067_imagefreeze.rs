@@ -11,11 +11,10 @@ mod collect_sink;
 use collect_sink::CollectSink;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::{
-    AsyncElement, Caps, Dim, G2gError, Interlace, MemoryDomain, OutputSink, PipelineClock,
-    PushOutcome, Rate, RawVideoFormat,
+    AsyncElement, Caps, Dim, G2gError, Interlace, OutputSink, PipelineClock, PushOutcome, Rate,
+    RawVideoFormat,
 };
 use g2g_plugins::imagefreeze::ImageFreeze;
 use g2g_plugins::registry::default_registry;
@@ -86,11 +85,7 @@ fn caps(framerate: Rate) -> Caps {
 
 fn still() -> PipelinePacket {
     let bytes = vec![0x7f_u8; (WIDTH * HEIGHT * 4) as usize];
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    ))
+    PipelinePacket::DataFrame(Frame::from_system_bytes(bytes, FrameTiming::default(), 0))
 }
 
 #[tokio::test]

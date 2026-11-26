@@ -1002,7 +1002,7 @@ fn create_surface_on(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use g2g_core::{Dim, MemoryDomain, PushOutcome, Rate, VideoCodec};
+    use g2g_core::{Dim, PushOutcome, Rate, VideoCodec};
 
     struct NullSink;
     impl OutputSink for NullSink {
@@ -1042,13 +1042,8 @@ mod tests {
     #[tokio::test]
     async fn a_frame_before_configure_opens_no_window() {
         let mut sink = WgpuPresentSink::new();
-        let frame = Frame::new(
-            MemoryDomain::System(g2g_core::memory::SystemSlice::from_boxed(
-                alloc::vec![0u8; 16].into_boxed_slice(),
-            )),
-            g2g_core::FrameTiming::default(),
-            0,
-        );
+        let frame =
+            Frame::from_system_bytes(alloc::vec![0u8; 16], g2g_core::FrameTiming::default(), 0);
         assert!(matches!(
             sink.process(PipelinePacket::DataFrame(frame), &mut NullSink)
                 .await,

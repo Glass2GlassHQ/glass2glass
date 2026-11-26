@@ -84,8 +84,8 @@ fn backdrop_frame(pts_ns: u64) -> Frame {
     for _ in 0..W * H {
         bytes.extend_from_slice(&BACKDROP);
     }
-    Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+    Frame::from_system_bytes(
+        bytes,
         FrameTiming {
             pts_ns,
             ..FrameTiming::default()

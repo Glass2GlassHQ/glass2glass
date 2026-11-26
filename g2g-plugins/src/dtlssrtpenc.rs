@@ -26,12 +26,11 @@ use std::time::Instant;
 
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::log::LogSource;
-use g2g_core::memory::{DomainSet, MemoryDomainKind, SystemSlice};
+use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::runtime::{PadKind, PadRequest};
 use g2g_core::{
     ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError,
-    MemoryDomain, MultiInputElement, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec,
+    MultiInputElement, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::dtlssrtp::{
@@ -222,11 +221,7 @@ impl DtlsSrtpEnc {
             records
         };
         for record in records {
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(record.into_boxed_slice())),
-                FrameTiming::default(),
-                self.records_sent,
-            );
+            let frame = Frame::from_system_bytes(record, FrameTiming::default(), self.records_sent);
             self.records_sent += 1;
             out.push(PipelinePacket::DataFrame(frame)).await?;
         }

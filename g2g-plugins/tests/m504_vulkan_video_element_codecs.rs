@@ -83,15 +83,14 @@ fn declared_colour(codec: VideoCodec, clip: &[u8]) -> (u8, u8, u8, bool) {
 }
 
 fn au_frame(bytes: &[u8]) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        bytes.to_vec(),
+        FrameTiming {
             pts_ns: 0,
             ..Default::default()
         },
-        sequence: 0,
-        meta: Default::default(),
-    }
+        0,
+    )
 }
 
 /// Configure the element for `codec`, feed the whole elementary stream through

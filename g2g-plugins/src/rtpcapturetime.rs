@@ -144,10 +144,8 @@ mod tests {
     fn unstamped_frames_step_by_their_pts_however_fast_they_arrive() {
         const FRAME_PERIOD_NS: u64 = 33_333_333;
         let frame = |pts_ns| {
-            g2g_core::Frame::new(
-                g2g_core::MemoryDomain::System(g2g_core::SystemSlice::from_boxed(
-                    alloc::vec![0u8; 1].into_boxed_slice(),
-                )),
+            g2g_core::Frame::from_system_bytes(
+                alloc::vec![0u8; 1],
                 g2g_core::FrameTiming {
                     pts_ns,
                     ..g2g_core::FrameTiming::default()

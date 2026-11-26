@@ -136,9 +136,9 @@ fn hosted_objectdetector_loads_model_and_detects() {
     };
     el.configure_pipeline(&caps).unwrap();
 
-    let frame = Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(rgba.into_boxed_slice())),
-        timing: FrameTiming {
+    let frame = Frame::from_system_bytes(
+        rgba,
+        FrameTiming {
             pts_ns: 0,
             dts_ns: 0,
             duration_ns: 0,
@@ -147,9 +147,8 @@ fn hosted_objectdetector_loads_model_and_detects() {
             keyframe: true,
             ..FrameTiming::default()
         },
-        sequence: 0,
-        meta: Default::default(),
-    };
+        0,
+    );
 
     let mut sink = CollectSink::default();
     let rt = tokio::runtime::Builder::new_current_thread()

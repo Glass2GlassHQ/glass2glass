@@ -11,10 +11,9 @@
 use alloc::string::String;
 
 use g2g_core::frame::{Frame, FrameTiming};
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    Caps, G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, TextFormat,
+    Caps, G2gError, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    TextFormat,
 };
 
 use crate::subparse::write_cue_block;
@@ -147,13 +146,7 @@ impl CueWriter {
             out.push(PipelinePacket::CapsChanged(caps)).await?;
             self.caps_emitted = true;
         }
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(
-                text.into_bytes().into_boxed_slice(),
-            )),
-            timing,
-            sequence,
-        );
+        let frame = Frame::from_system_bytes(text.into_bytes(), timing, sequence);
         out.push(PipelinePacket::DataFrame(frame)).await.map(|_| ())
     }
 

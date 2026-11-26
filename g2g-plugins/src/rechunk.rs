@@ -10,8 +10,7 @@
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
-use g2g_core::{FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket};
+use g2g_core::{FrameTiming, G2gError, OutputSink, PipelinePacket};
 
 /// Bytes waiting to be cut, plus the timing the cut buffers inherit.
 #[derive(Debug, Default)]
@@ -90,8 +89,8 @@ impl Rechunker {
         bytes: Vec<u8>,
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+        let frame = Frame::from_system_bytes(
+            bytes,
             FrameTiming {
                 pts_ns: self.pts_ns,
                 dts_ns: self.pts_ns,

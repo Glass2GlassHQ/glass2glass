@@ -19,7 +19,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::{
     AspectRatio, AsyncElement, ByteStreamEncoding, Caps, G2gError, OutputSink, PipelineClock,
@@ -143,11 +142,8 @@ async fn demuxed_pixel_aspect<E: AsyncElement>(
         .expect("the demuxer takes the container");
     let mut sink = CapsSink::default();
     for (sequence, chunk) in file.chunks(CHUNK_LEN).enumerate() {
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(chunk.to_vec().into_boxed_slice())),
-            FrameTiming::default(),
-            sequence as u64,
-        );
+        let frame =
+            Frame::from_system_bytes(chunk.to_vec(), FrameTiming::default(), sequence as u64);
         demux
             .process(PipelinePacket::DataFrame(frame), &mut sink)
             .await
@@ -202,11 +198,7 @@ async fn x264enc_writes_the_vui_sample_aspect() {
         .configure_pipeline(&h264)
         .expect("h264parse takes H.264");
     let mut sink = CapsSink::default();
-    let frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(stream.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    );
+    let frame = Frame::from_system_bytes(stream, FrameTiming::default(), 0);
     parse
         .process(PipelinePacket::DataFrame(frame), &mut sink)
         .await

@@ -36,7 +36,6 @@ use android_binder::start_binder_threadpool;
 
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{Caps, G2gError, TensorDType, TensorLayout, TensorShape};
 use g2g_ml::ortinfer::OrtInference;
 use g2g_ml::postprocess::TensorPostprocess;
@@ -124,12 +123,7 @@ impl OutputSink for OneFrame {
 }
 
 fn frame(bytes: Vec<u8>) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: 0,
-        meta: Default::default(),
-    })
+    PipelinePacket::DataFrame(Frame::from_system_bytes(bytes, FrameTiming::default(), 0))
 }
 
 fn tensor_caps(dtype: TensorDType, shape: &[u32]) -> Caps {

@@ -28,7 +28,6 @@ use android_binder::start_binder_threadpool;
 
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{Caps, Dim, G2gError, Interlace, Rate, RawVideoFormat};
 use g2g_ml::ortinfer::OrtInference;
 
@@ -70,12 +69,7 @@ fn rgba_caps(w: u32, h: u32) -> Caps {
 }
 
 fn rgba_frame(bytes: Vec<u8>, sequence: u64) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence,
-        meta: Default::default(),
-    }
+    Frame::from_system_bytes(bytes, FrameTiming::default(), sequence)
 }
 
 /// The Android edge EP stack (NNAPI -> XNNPACK -> CPU) loads, registers, and runs
@@ -104,9 +98,7 @@ async fn android_ep_stack_infers_identically() {
         .iter()
         .find_map(|p| match p {
             PipelinePacket::DataFrame(f) => {
-                let Some(slice) = f.domain.as_system_slice() else {
-                    return None;
-                };
+                let slice = f.domain.as_system_slice()?;
                 Some(
                     slice
                         .as_chunks::<4>()

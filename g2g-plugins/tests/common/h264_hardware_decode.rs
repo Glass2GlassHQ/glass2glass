@@ -5,12 +5,12 @@
 #![allow(dead_code)] // no one test file uses every helper here
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::{DomainSet, MemoryDomainKind, SystemSlice};
+use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::runtime::block_on;
 use g2g_core::{
     AllocationParams, AsyncElement, BitstreamAlignment, Caps, Colorimetry, Dim, FrameTiming,
-    G2gError, MemoryDomain, OutputSink, PipelinePacket, PixelAspect, PushOutcome, Rate,
-    RawVideoFormat, Reconfigure, VideoCodec,
+    G2gError, OutputSink, PipelinePacket, PixelAspect, PushOutcome, Rate, RawVideoFormat,
+    Reconfigure, VideoCodec,
 };
 use g2g_plugins::h264hardwaredec::{H264HardwareDec, H264HardwareDecoder};
 
@@ -108,12 +108,7 @@ pub(crate) fn h264_caps((width, height): (u32, u32)) -> Caps {
 }
 
 pub(crate) fn system_frame(bytes: &[u8]) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: 0,
-        meta: Default::default(),
-    }
+    Frame::from_system_bytes(bytes.to_vec(), FrameTiming::default(), 0)
 }
 
 pub(crate) fn decode<B: H264HardwareDecoder>(

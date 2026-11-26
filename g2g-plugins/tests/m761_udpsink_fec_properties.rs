@@ -12,11 +12,10 @@
 use std::net::UdpSocket as StdUdpSocket;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::parse_launch;
 use g2g_core::{
-    AsyncElement, Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
-    PropValue, PushOutcome, Rate, VideoCodec,
+    AsyncElement, Caps, Dim, FrameTiming, G2gError, OutputSink, PipelinePacket, PropValue,
+    PushOutcome, Rate, VideoCodec,
 };
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::udpsink::UdpSink;
@@ -72,15 +71,14 @@ async fn run_and_split(frames: u8, set_props: impl FnOnce(&mut UdpSink)) -> (usi
     let mut null = NullOut;
     for i in 0u8..frames {
         let au = alloc_au(i);
-        let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-            timing: FrameTiming {
+        let frame = Frame::from_system_bytes(
+            au,
+            FrameTiming {
                 pts_ns: i as u64 * 33_000_000,
                 ..FrameTiming::default()
             },
-            sequence: i as u64,
-            meta: Default::default(),
-        };
+            i as u64,
+        );
         sink.process(PipelinePacket::DataFrame(frame), &mut null)
             .await
             .expect("send");

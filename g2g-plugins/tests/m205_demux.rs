@@ -14,11 +14,10 @@ use core::future::Future;
 
 use g2g_core::element::DynAsyncElement;
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_source_fanout, SourceLoop};
 use g2g_core::{
     AsyncElement, AudioFormat, ByteStreamEncoding, Caps, ConfigureOutcome, Dim, FrameTiming,
-    G2gError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate, VideoCodec,
+    G2gError, OutputSink, PipelineClock, PipelinePacket, Rate, VideoCodec,
 };
 
 use g2g_plugins::streamdemux::StreamDemux;
@@ -93,15 +92,14 @@ impl SourceLoop for MuxedSrc {
                 // Frame payload: [stream-id, sequence]. The demux classifier
                 // reads the leading stream-id byte.
                 let bytes = vec![tag, i as u8];
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                    timing: FrameTiming {
+                let frame = Frame::from_system_bytes(
+                    bytes,
+                    FrameTiming {
                         pts_ns: i as u64 * 1000,
                         ..FrameTiming::default()
                     },
-                    sequence: i as u64,
-                    meta: Default::default(),
-                };
+                    i as u64,
+                );
                 out.push(PipelinePacket::DataFrame(frame)).await?;
                 tokio::task::yield_now().await;
             }

@@ -25,7 +25,6 @@ use parsed_access_units::parsed_access_unit_bytes;
 use std::path::{Path, PathBuf};
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{SeekController, SourceLoop};
 use g2g_core::{
     AsyncClock, AsyncElement, Caps, Dim, G2gError, MultiInputElement, OutputSink, PipelineClock,
@@ -118,17 +117,16 @@ async fn access_units() -> Vec<Vec<u8>> {
 }
 
 fn au_frame(bytes: Vec<u8>, index: usize) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        bytes,
+        FrameTiming {
             pts_ns: index as u64 * FRAME_NS,
             dts_ns: index as u64 * FRAME_NS,
             duration_ns: FRAME_NS,
             ..FrameTiming::default()
         },
-        sequence: index as u64,
-        meta: Default::default(),
-    })
+        index as u64,
+    ))
 }
 
 #[derive(Default)]

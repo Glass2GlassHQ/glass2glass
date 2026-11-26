@@ -171,10 +171,8 @@ impl MultiOutputSink for RecordingFanout {
 }
 
 fn described_frame(index: u64, access_unit: &[u8]) -> Frame {
-    let mut frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(
-            access_unit.to_vec().into_boxed_slice(),
-        )),
+    let mut frame = Frame::from_system_bytes(
+        access_unit.to_vec(),
         FrameTiming {
             pts_ns: index * FRAME_PERIOD.as_nanos() as u64,
             ..FrameTiming::default()

@@ -15,7 +15,6 @@ mod collect_sink;
 mod ffprobe;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AsyncElement, AudioFormat, ByteStreamEncoding, Caps, PropValue, Segment, ANY_CHANNELS,
 };
@@ -40,8 +39,8 @@ struct Decoded {
 }
 
 fn data_frame(data: &[u8]) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(data.to_vec().into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        data.to_vec(),
         FrameTiming::default(),
         0,
     ))

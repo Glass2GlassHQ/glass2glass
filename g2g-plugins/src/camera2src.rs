@@ -38,13 +38,12 @@ use ndk::native_window::NativeWindow;
 
 use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, HardwareError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, RawVideoFormat,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, Rate, RawVideoFormat,
 };
 
 use alloc::borrow::ToOwned;
@@ -499,9 +498,9 @@ impl SourceLoop for Camera2Src {
                 let arrival_ns = g2g_core::metrics::monotonic_ns();
                 #[cfg(not(feature = "std"))]
                 let arrival_ns: u64 = 0;
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                    timing: FrameTiming {
+                let frame = Frame::from_system_bytes(
+                    bytes,
+                    FrameTiming {
                         pts_ns,
                         dts_ns: pts_ns,
                         duration_ns: 0,
@@ -510,9 +509,8 @@ impl SourceLoop for Camera2Src {
                         keyframe: true, // raw frames are independent
                         ..FrameTiming::default()
                     },
-                    sequence: seq,
-                    meta: Default::default(),
-                };
+                    seq,
+                );
                 self.emitted += 1;
                 seq += 1;
                 out.push(PipelinePacket::DataFrame(frame)).await?;

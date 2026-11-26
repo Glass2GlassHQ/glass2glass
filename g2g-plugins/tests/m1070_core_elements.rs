@@ -143,10 +143,10 @@ async fn fakesrc_fills_each_buffer_with_the_pattern() {
 /// packets. `forward-sticky-events` lets caps and segment through while the
 /// data is dropped; `drop-all` holds them back until the valve reopens.
 mod control_packets {
-    use g2g_core::memory::SystemSlice;
+
     use g2g_core::{
-        AsyncElement, ByteStreamEncoding, Caps, Frame, FrameTiming, G2gError, MemoryDomain,
-        OutputSink, PipelinePacket, PropValue, PushOutcome, Segment,
+        AsyncElement, ByteStreamEncoding, Caps, Frame, FrameTiming, G2gError, OutputSink,
+        PipelinePacket, PropValue, PushOutcome, Segment,
     };
     use g2g_plugins::valve::Valve;
 
@@ -174,8 +174,8 @@ mod control_packets {
     }
 
     fn data_frame() -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(vec![1u8, 2, 3].into_boxed_slice())),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            vec![1u8, 2, 3],
             FrameTiming::default(),
             0,
         ))

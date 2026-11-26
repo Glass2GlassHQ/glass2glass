@@ -18,7 +18,7 @@ use core::pin::Pin;
 
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
+use g2g_core::memory::MemoryDomain;
 use g2g_core::runtime::{SeekController, SourceLoop};
 use g2g_core::{
     ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement, Rate, Seek, SeekFlags, Segment,
@@ -47,17 +47,16 @@ fn h264_caps() -> Caps {
 }
 
 fn au_frame(bytes: Vec<u8>, pts_ns: u64, seq: u64) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        bytes,
+        FrameTiming {
             pts_ns,
             dts_ns: pts_ns,
             duration_ns: 33_333_333,
             ..FrameTiming::default()
         },
-        sequence: seq,
-        meta: Default::default(),
-    }
+        seq,
+    )
 }
 
 #[derive(Default)]

@@ -11,7 +11,6 @@
 mod collect_sink;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     AsyncElement, AudioFormat, ByteStreamEncoding, Caps, PropValue, ANY_CHANNELS, ANY_SAMPLE_RATE,
@@ -68,8 +67,8 @@ async fn laced_vorbis_in_matroska_takes_the_packet_timestamps() {
         &Caps::ByteStream {
             encoding: ByteStreamEncoding::Matroska,
         },
-        vec![PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(file.into_boxed_slice())),
+        vec![PipelinePacket::DataFrame(Frame::from_system_bytes(
+            file,
             FrameTiming::default(),
             0,
         ))],

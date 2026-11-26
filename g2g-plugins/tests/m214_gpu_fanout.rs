@@ -21,10 +21,9 @@ use core::future::Future;
 use core::pin::Pin;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_graph, GraphNode, SourceLoop};
 use g2g_core::{
-    AnalyticsMeta, BBox, Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, Graph, MemoryDomain,
+    AnalyticsMeta, BBox, Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, Graph,
     ObjectDetection, OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
 };
 use g2g_plugins::gpu::GpuContext;
@@ -76,11 +75,7 @@ impl SourceLoop for DetectionSrc {
             for _ in 0..W * H {
                 bytes.extend_from_slice(&[20, 20, 20, 255]);
             }
-            let mut frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                FrameTiming::default(),
-                0,
-            );
+            let mut frame = Frame::from_system_bytes(bytes, FrameTiming::default(), 0);
             let mut a = AnalyticsMeta::new();
             a.add_detection(ObjectDetection {
                 bbox: BBox {

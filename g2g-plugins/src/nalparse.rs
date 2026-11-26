@@ -25,7 +25,6 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::{Frame, FrameTiming};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AsyncElement, BitstreamAlignment, Caps, CapsConstraint, CapsSet, Colorimetry, ConfigureOutcome,
     Dim, ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
@@ -412,11 +411,7 @@ impl<C: NalCodec> NalParse<C> {
         // for it (no-op at interval 0 or when the AU already carries them).
         let au = self.apply_config_interval(au, timing.pts_ns, timing.keyframe);
         #[allow(unused_mut)]
-        let mut frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-            timing,
-            self.seq,
-        );
+        let mut frame = Frame::from_system_bytes(au, timing, self.seq);
         #[cfg(feature = "metadata")]
         {
             frame.meta = self.input_stamps.take(input_pts_ns).meta;

@@ -10,11 +10,10 @@
 #![cfg(feature = "std")]
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::{
-    AsyncElement, Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelineClock,
-    PipelinePacket, PropValue, PushOutcome, Rate, RawVideoFormat, VideoCodec,
+    AsyncElement, Caps, Dim, FrameTiming, G2gError, OutputSink, PipelineClock, PipelinePacket,
+    PropValue, PushOutcome, Rate, RawVideoFormat, VideoCodec,
 };
 use g2g_plugins::debugspy::DebugSpy;
 use g2g_plugins::pnm::{PnmDec, PnmEnc};
@@ -73,9 +72,9 @@ fn raw_rgba(w: u32, h: u32) -> Caps {
 }
 
 fn frame(bytes: Vec<u8>) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        bytes,
+        FrameTiming {
             pts_ns: 0,
             dts_ns: 0,
             duration_ns: 0,
@@ -84,9 +83,8 @@ fn frame(bytes: Vec<u8>) -> Frame {
             keyframe: false,
             ..FrameTiming::default()
         },
-        sequence: 0,
-        meta: Default::default(),
-    }
+        0,
+    )
 }
 
 fn push<E: AsyncElement>(element: &mut E, bytes: Vec<u8>) -> Collect {

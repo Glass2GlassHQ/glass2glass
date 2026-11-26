@@ -22,13 +22,11 @@ use rumqttc::{AsyncClient, Event, EventLoop, Packet, QoS};
 
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     g2g_error, g2g_info, g2g_warn, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    ElementMetadata, FrameTiming, G2gError, HardwareError, LatencyReport, MemoryDomain, OutputSink,
-    PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
-    TextFormat,
+    ElementMetadata, FrameTiming, G2gError, HardwareError, LatencyReport, OutputSink, PadTemplate,
+    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, TextFormat,
 };
 
 use crate::mqtt::{
@@ -162,8 +160,8 @@ impl MqttSrc {
 /// A frame carrying one message's payload, stamped with its arrival time and
 /// no presentation time.
 fn text_frame(payload: Vec<u8>, sequence: u64) -> Frame {
-    Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
+    Frame::from_system_bytes(
+        payload,
         FrameTiming {
             arrival_ns: g2g_core::metrics::monotonic_ns(),
             ..FrameTiming::default()

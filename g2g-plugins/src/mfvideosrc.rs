@@ -57,13 +57,12 @@ use crate::mfcommon::{mf_err, mf_ticks_to_ns, unpack_u32_pair, with_media_founda
 use g2g_core::frame::Frame;
 use g2g_core::g2g_error;
 use g2g_core::log::Target;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, CaptureAnchor, ClockSync, ConfigureOutcome, Dim,
-    ElementMetadata, FrameTiming, G2gError, HardwareError, Interlace, LatencyReport, MemoryDomain,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, Rate, RawVideoFormat,
+    ElementMetadata, FrameTiming, G2gError, HardwareError, Interlace, LatencyReport, OutputSink,
+    PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
+    RawVideoFormat,
 };
 
 /// First video stream index for the Source Reader, as a `u32` (the constant is
@@ -389,9 +388,9 @@ impl SourceLoop for MfVideoSrc {
                     Some(sync) => anchor.stamp(sync, elapsed, pts_step_ns),
                     None => elapsed,
                 };
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                    timing: FrameTiming {
+                let frame = Frame::from_system_bytes(
+                    bytes,
+                    FrameTiming {
                         pts_ns: pts,
                         dts_ns: pts,
                         duration_ns: pts_step_ns,
@@ -400,9 +399,8 @@ impl SourceLoop for MfVideoSrc {
                         keyframe: true, // raw frames are each independently presentable
                         ..FrameTiming::default()
                     },
-                    sequence: seq,
-                    meta: Default::default(),
-                };
+                    seq,
+                );
                 if out.push(PipelinePacket::DataFrame(frame)).await.is_err() {
                     downstream_open = false;
                     break;

@@ -644,11 +644,8 @@ mod tests {
                 label: 0,
             }));
         }
-        let mut frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(vec![0u8; 4].into_boxed_slice())),
-            g2g_core::frame::FrameTiming::default(),
-            0,
-        );
+        let mut frame =
+            Frame::from_system_bytes(vec![0u8; 4], g2g_core::frame::FrameTiming::default(), 0);
         frame.timing.pts_ns = pts_ns;
         frame.meta.attach(meta);
         frame

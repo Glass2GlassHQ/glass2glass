@@ -154,11 +154,7 @@ fn parse_access_units() -> Result<Vec<Vec<u8>>, G2gError> {
     let mut sink = Collect::default();
     block_on(async {
         for (i, chunk) in H264.chunks(4096).enumerate() {
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(chunk.to_vec().into_boxed_slice())),
-                FrameTiming::default(),
-                i as u64,
-            );
+            let frame = Frame::from_system_bytes(chunk.to_vec(), FrameTiming::default(), i as u64);
             parse
                 .process(PipelinePacket::DataFrame(frame), &mut sink)
                 .await?;
@@ -249,17 +245,12 @@ impl Presenter {
         }
         self.last_feed = Instant::now();
         let au = self.aus[self.au_idx].clone();
-        let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-            timing: FrameTiming {
+        let frame = Frame::from_system_bytes(au, FrameTiming {
                 pts_ns: self.pts_ns,
                 dts_ns: self.pts_ns,
                 capture_ns: self.pts_ns,
                 ..FrameTiming::default()
-            },
-            sequence: 0,
-            meta: Default::default(),
-        };
+            }, 0);
         self.pts_ns += FRAME_DURATION_NS;
         let mut relay = PresentRelay {
             sink: &mut self.sink,

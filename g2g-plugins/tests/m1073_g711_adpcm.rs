@@ -28,11 +28,10 @@ use collect_sink::CollectSink;
 
 use std::path::PathBuf;
 
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{is_raw_audio, parse_launch, run_graph};
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, Frame, FrameTiming, MemoryDomain, PadCaps, PadDirection,
-    PadTemplates, PipelineClock, PipelinePacket, ANY_CHANNELS, ANY_SAMPLE_RATE,
+    AsyncElement, AudioFormat, Caps, Frame, FrameTiming, PadCaps, PadDirection, PadTemplates,
+    PipelineClock, PipelinePacket, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 use g2g_mcu::adpcm::samples_per_block_channels;
 use g2g_plugins::adpcm::DEFAULT_BLOCK_ALIGN;
@@ -241,11 +240,7 @@ async fn a_decoder_on_sentinel_caps_announces_the_telephony_layout() {
         })
         .expect("the sentinel layout is accepted");
     let mut sink = CollectSink::default();
-    let frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(vec![0xFFu8; 4].into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    );
+    let frame = Frame::from_system_bytes(vec![0xFFu8; 4], FrameTiming::default(), 0);
     decoder
         .process(PipelinePacket::DataFrame(frame), &mut sink)
         .await

@@ -16,11 +16,10 @@ use core::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use g2g_core::frame::{Frame, FrameTiming};
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_graph, GraphNode, SourceLoop};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, Graph, MemoryDomain,
-    OutputSink, PipelineClock, PipelinePacket, Rate, VideoCodec,
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, Graph, OutputSink,
+    PipelineClock, PipelinePacket, Rate, VideoCodec,
 };
 use g2g_plugins::ccinsert::CcInsert;
 use g2g_plugins::cea::{extract_cc_data, Cea608};
@@ -73,8 +72,8 @@ impl SourceLoop for H264Src {
             let frame_dur = 33_000_000u64;
             for i in 0..self.count {
                 let au = [0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x00];
-                let f = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(au.to_vec().into_boxed_slice())),
+                let f = Frame::from_system_bytes(
+                    au.to_vec(),
                     FrameTiming {
                         pts_ns: i * frame_dur,
                         keyframe: true,

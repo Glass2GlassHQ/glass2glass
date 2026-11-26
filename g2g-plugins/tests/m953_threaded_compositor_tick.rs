@@ -19,14 +19,13 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{
     parse_launch, run_graph_threaded_with_progress, LaunchFactory, PipelineProgress, Registry,
     SourceFactory, SourceLoop,
 };
 use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, MemoryDomain, OutputSink, PipelineClock,
-    PipelinePacket, Rate, RawVideoFormat,
+    AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, OutputSink, PipelineClock, PipelinePacket,
+    Rate, RawVideoFormat,
 };
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::registry::default_registry;
@@ -78,8 +77,8 @@ fn solid(w: u32, h: u32, color: [u8; 4], pts_ns: u64) -> PipelinePacket {
     for px in buf.as_chunks_mut::<4>().0 {
         *px = color;
     }
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(buf.into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        buf,
         g2g_core::FrameTiming {
             pts_ns,
             dts_ns: pts_ns,

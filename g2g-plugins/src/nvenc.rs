@@ -2210,7 +2210,7 @@ pub(crate) mod tests {
         // NvEnc is the device-resident encoder: a System frame is the wrong
         // domain (FfmpegVideoEnc handles that path). No GPU needed for this.
         use g2g_core::frame::Frame;
-        use g2g_core::memory::SystemSlice;
+
         use g2g_core::FrameTiming;
 
         struct NullSink;
@@ -2227,10 +2227,8 @@ pub(crate) mod tests {
 
         let mut enc = NvEnc::new();
         enc.configure_pipeline(&nv12(320, 240)).unwrap();
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(
-                alloc::vec![0u8; 320 * 240 * 3 / 2].into_boxed_slice(),
-            )),
+        let frame = Frame::from_system_bytes(
+            alloc::vec![0u8; 320 * 240 * 3 / 2],
             FrameTiming::default(),
             0,
         );
@@ -2540,7 +2538,7 @@ pub(crate) mod tests {
     #[cfg(feature = "ffmpeg")]
     async fn gpu_round_trip() {
         use g2g_core::frame::Frame;
-        use g2g_core::memory::SystemSlice;
+
         use g2g_core::FrameTiming;
 
         let _lock = encode_session_lock().await;
@@ -2626,11 +2624,7 @@ pub(crate) mod tests {
         .expect("open H.264 decoder");
         let mut dsink = CaptureSink::default();
         for au in &sink.frames {
-            let f = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(au.clone().into_boxed_slice())),
-                FrameTiming::default(),
-                0,
-            );
+            let f = Frame::from_system_bytes(au.clone(), FrameTiming::default(), 0);
             dec.process(PipelinePacket::DataFrame(f), &mut dsink)
                 .await
                 .expect("decode AU");
@@ -2788,7 +2782,7 @@ pub(crate) mod tests {
         reply: g2g_core::PushOutcome,
     ) -> Option<FrameAfterLoss> {
         use g2g_core::frame::Frame;
-        use g2g_core::memory::SystemSlice;
+
         use g2g_core::FrameTiming;
         const W: u32 = 320;
         const H: u32 = 240;
@@ -2835,13 +2829,7 @@ pub(crate) mod tests {
             .enumerate()
             .filter(|(i, _)| !LOST.contains(i))
         {
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(
-                    access_unit.clone().into_boxed_slice(),
-                )),
-                FrameTiming::default(),
-                0,
-            );
+            let frame = Frame::from_system_bytes(access_unit.clone(), FrameTiming::default(), 0);
             dec.process(PipelinePacket::DataFrame(frame), &mut decoded)
                 .await
                 .unwrap();
@@ -2979,10 +2967,8 @@ pub(crate) mod tests {
                 count: &mut decoded,
             };
             for au in &sink.frames {
-                let f = g2g_core::frame::Frame::new(
-                    MemoryDomain::System(g2g_core::memory::SystemSlice::from_boxed(
-                        au.clone().into_boxed_slice(),
-                    )),
+                let f = g2g_core::frame::Frame::from_system_bytes(
+                    au.clone(),
                     g2g_core::FrameTiming::default(),
                     0,
                 );

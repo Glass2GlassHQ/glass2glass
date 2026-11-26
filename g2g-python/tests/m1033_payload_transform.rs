@@ -84,11 +84,7 @@ fn anchor_timing() -> FrameTiming {
 }
 
 fn payload_frame(bytes: Vec<u8>) -> Frame {
-    Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        anchor_timing(),
-        3,
-    )
+    Frame::from_system_bytes(bytes, anchor_timing(), 3)
 }
 
 fn audio_frame() -> Frame {

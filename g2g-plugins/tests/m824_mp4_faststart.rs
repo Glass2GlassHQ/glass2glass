@@ -27,7 +27,6 @@ use std::process::Command;
 
 use g2g_core::conformance::{ConformanceDimension, Evidence};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{
     parse_launch, run_graph, DynSourceLoop, Registry, SourceFactory, SourceLoop,
 };
@@ -114,11 +113,7 @@ struct MuxTrack {
 }
 
 fn frame(data: Vec<u8>, timing: FrameTiming) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-        timing,
-        0,
-    ))
+    PipelinePacket::DataFrame(Frame::from_system_bytes(data, timing, 0))
 }
 
 fn temp_path(name: &str) -> PathBuf {
@@ -516,8 +511,8 @@ impl SourceLoop for AuSrc {
         let aus = self.aus.clone();
         Box::pin(async move {
             for (i, (au, pts)) in aus.iter().enumerate() {
-                let f = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(au.clone().into_boxed_slice())),
+                let f = Frame::from_system_bytes(
+                    au.clone(),
                     FrameTiming {
                         pts_ns: *pts,
                         ..FrameTiming::default()

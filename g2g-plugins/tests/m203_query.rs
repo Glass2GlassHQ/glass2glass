@@ -15,13 +15,12 @@ use std::pin::Pin;
 use core::future::Future;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{
     run_graph_with_bus, run_graph_with_progress, GraphNode, PipelineProgress, SourceLoop,
 };
 use g2g_core::{
-    Bus, BusMessage, Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, Graph, MemoryDomain,
-    OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
+    Bus, BusMessage, Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, Graph, OutputSink,
+    PipelineClock, PipelinePacket, Rate, RawVideoFormat,
 };
 
 use g2g_plugins::fakesink::FakeSink;
@@ -80,17 +79,14 @@ impl SourceLoop for ProgressSrc {
         Box::pin(async move {
             let _ = out.push(PipelinePacket::CapsChanged(caps())).await?;
             for i in 0..self.total {
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(
-                        vec![0u8; 4].into_boxed_slice(),
-                    )),
-                    timing: FrameTiming {
+                let frame = Frame::from_system_bytes(
+                    vec![0u8; 4],
+                    FrameTiming {
                         pts_ns: i * self.step_ns,
                         ..FrameTiming::default()
                     },
-                    sequence: self.sequence,
-                    meta: Default::default(),
-                };
+                    self.sequence,
+                );
                 let _ = out.push(PipelinePacket::DataFrame(frame)).await?;
                 self.sequence += 1;
                 tokio::task::yield_now().await;

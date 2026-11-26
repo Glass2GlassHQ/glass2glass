@@ -22,7 +22,6 @@ use std::process::Command;
 
 use g2g_core::conformance::{ConformanceDimension, Evidence};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AsyncElement, AudioFormat, ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement,
     OutputSink, PushOutcome, Rate, VideoCodec,
@@ -112,11 +111,7 @@ async fn demux(flv: &[u8], stream: FlvStream) -> CaptureSink {
     })
     .unwrap();
     let mut sink = CaptureSink::default();
-    let frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(flv.to_vec().into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    );
+    let frame = Frame::from_system_bytes(flv.to_vec(), FrameTiming::default(), 0);
     d.process(PipelinePacket::DataFrame(frame), &mut sink)
         .await
         .unwrap();
@@ -265,11 +260,7 @@ async fn flvmux_output_probes_as_playable_h264_flv() {
     let mut mux = FlvMuxN::new(1);
     mux.configure_pipeline(0, &caps).unwrap();
     let mut sink = CaptureSink::default();
-    let frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(es.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    );
+    let frame = Frame::from_system_bytes(es, FrameTiming::default(), 0);
     mux.process(0, PipelinePacket::DataFrame(frame), &mut sink)
         .await
         .unwrap();

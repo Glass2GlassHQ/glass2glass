@@ -19,12 +19,10 @@ use std::sync::{Arc, Mutex};
 
 use g2g_core::element::{BoxFuture, DynAsyncElement};
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_graph, GraphNode, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, ElementSlot, FrameTiming, G2gError,
-    Graph, MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
-    SwapHandle,
+    Graph, OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat, SwapHandle,
 };
 
 /// The (handle, replacement element) a slotted element holds to swap itself out
@@ -70,14 +68,11 @@ impl SourceLoop for CountedSource {
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
             for seq in 0..self.n {
-                out.push(PipelinePacket::DataFrame(Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(
-                        vec![seq as u8].into_boxed_slice(),
-                    )),
-                    timing: FrameTiming::default(),
-                    sequence: seq,
-                    meta: Default::default(),
-                }))
+                out.push(PipelinePacket::DataFrame(Frame::from_system_bytes(
+                    vec![seq as u8],
+                    FrameTiming::default(),
+                    seq,
+                )))
                 .await?;
             }
             out.push(PipelinePacket::Eos).await?;

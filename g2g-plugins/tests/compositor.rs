@@ -12,12 +12,11 @@ use core::future::Future;
 use core::pin::Pin;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_graph, run_muxer_sink, DynSourceLoop, GraphNode, SourceLoop};
 use g2g_core::Graph;
 use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, MemoryDomain, OutputSink, PipelineClock,
-    PipelinePacket, Rate, RawVideoFormat,
+    AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, OutputSink, PipelineClock, PipelinePacket,
+    Rate, RawVideoFormat,
 };
 use g2g_plugins::compositor::{Compositor, CompositorPad};
 use g2g_plugins::videoscale::VideoScale;
@@ -78,12 +77,7 @@ impl SourceLoop for ColorSrc {
                 for px in buf.as_chunks_mut::<4>().0 {
                     px.copy_from_slice(&self.color);
                 }
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(buf.into_boxed_slice())),
-                    timing: Default::default(),
-                    sequence: seq,
-                    meta: Default::default(),
-                };
+                let frame = Frame::from_system_bytes(buf, Default::default(), seq);
                 out.push(PipelinePacket::DataFrame(frame)).await?;
             }
             out.push(PipelinePacket::Eos).await?;
@@ -352,12 +346,7 @@ impl SourceLoop for Nv12ColorSrc {
                     self.yuv[1],
                     self.yuv[2],
                 );
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(buf.into_boxed_slice())),
-                    timing: Default::default(),
-                    sequence: seq,
-                    meta: Default::default(),
-                };
+                let frame = Frame::from_system_bytes(buf, Default::default(), seq);
                 out.push(PipelinePacket::DataFrame(frame)).await?;
             }
             out.push(PipelinePacket::Eos).await?;
@@ -567,14 +556,11 @@ async fn geometry_change_drops_stale_startup_frames() {
         }
     }
     fn solid_frame(w: usize, h: usize) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(
-                vec![0xFFu8; w * h * 4].into_boxed_slice(),
-            )),
-            timing: FrameTiming::default(),
-            sequence: 0,
-            meta: Default::default(),
-        })
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            vec![0xFFu8; w * h * 4],
+            FrameTiming::default(),
+            0,
+        ))
     }
 
     let mut comp = Compositor::new(

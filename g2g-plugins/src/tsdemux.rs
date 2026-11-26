@@ -33,14 +33,13 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::log::Target;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{ElementSeekRoute, SeekController, StreamSelectController};
 use g2g_core::{
     g2g_error, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps,
     CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
-    LatencyReport, MemoryDomain, MultiOutputElement, MultiOutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, Segment, St2038Alignment,
-    Stream, StreamCollection, StreamType, SubPictureFormat, Tag, TagList, VideoCodec,
+    LatencyReport, MultiOutputElement, MultiOutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, Rate, Segment, St2038Alignment, Stream,
+    StreamCollection, StreamType, SubPictureFormat, Tag, TagList, VideoCodec,
 };
 
 use crate::demuxseek::{DemuxSeek, TailRead};
@@ -1407,8 +1406,8 @@ impl TsDemuxN {
         for section in core::mem::take(&mut self.splice_sections) {
             let section = crate::scte35::shift_pts_adjustment(&section, offset_ticks)
                 .expect("the demuxer keeps only well-formed splice sections");
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(section.into_boxed_slice())),
+            let frame = Frame::from_system_bytes(
+                section,
                 FrameTiming {
                     pts_ns,
                     ..FrameTiming::default()
@@ -1523,8 +1522,8 @@ impl TsDemuxN {
             _ => alloc::vec![data],
         };
         for unit in units {
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(unit.into_boxed_slice())),
+            let frame = Frame::from_system_bytes(
+                unit,
                 FrameTiming {
                     pts_ns,
                     dts_ns,
@@ -1594,8 +1593,8 @@ fn in_band_config(demux: &TsDemuxer, pid: u16, stream: TsStream) -> Option<Vec<u
 }
 
 fn config_frame(blob: Vec<u8>, pts_ns: u64, seq: u64) -> Frame {
-    Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(blob.into_boxed_slice())),
+    Frame::from_system_bytes(
+        blob,
         FrameTiming {
             pts_ns,
             dts_ns: pts_ns,
@@ -2189,11 +2188,7 @@ mod tests {
 
         let mut sink = CaptureSink::default();
         // Feed the whole stream as one System frame.
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(stream.into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let frame = Frame::from_system_bytes(stream, FrameTiming::default(), 0);
         d.process(PipelinePacket::DataFrame(frame), &mut sink)
             .await
             .unwrap();
@@ -2213,11 +2208,7 @@ mod tests {
 
     /// Feed the whole stream as one frame, then EOS, capturing the output.
     async fn run_demux(d: &mut TsDemux, stream: &[u8], sink: &mut CaptureSink) {
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(stream.to_vec().into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let frame = Frame::from_system_bytes(stream.to_vec(), FrameTiming::default(), 0);
         d.process(PipelinePacket::DataFrame(frame), sink)
             .await
             .unwrap();
@@ -2240,11 +2231,7 @@ mod tests {
             let pts = start_ticks + frame * RESTART_FRAME_TICKS;
             stream.extend(muxer.push_au(au, Some(pts), None, true));
         }
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(stream.into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        ))
+        PipelinePacket::DataFrame(Frame::from_system_bytes(stream, FrameTiming::default(), 0))
     }
 
     fn h264_session(start_ticks: u64, frames: u64) -> PipelinePacket {
@@ -2536,8 +2523,8 @@ mod tests {
         let ran = run_ports(
             &mut d,
             [
-                PipelinePacket::DataFrame(Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(stream.into_boxed_slice())),
+                PipelinePacket::DataFrame(Frame::from_system_bytes(
+                    stream,
                     FrameTiming::default(),
                     0,
                 )),
@@ -2568,11 +2555,7 @@ mod tests {
         for unit in units {
             stream.extend_from_slice(&ts_packet(pid, true, &pes_id(stream_id, unit)));
         }
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(stream.into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        ))
+        PipelinePacket::DataFrame(Frame::from_system_bytes(stream, FrameTiming::default(), 0))
     }
 
     const H264_AU: [u8; 5] = [0, 0, 0, 1, 0x65];
@@ -2840,8 +2823,8 @@ mod tests {
         mux.configure_pipeline(0, &jpeg_xs_caps()).unwrap();
         let mut sink = CaptureSink::default();
         for (index, codestream) in jpeg_xs_frames().into_iter().enumerate() {
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(codestream.into_boxed_slice())),
+            let frame = Frame::from_system_bytes(
+                codestream,
                 FrameTiming {
                     pts_ns: index as u64 * FRAME_NS,
                     keyframe: true,
@@ -2895,8 +2878,8 @@ mod tests {
         mux.configure_pipeline(0, &Caps::Id3).unwrap();
         let mut sink = CaptureSink::default();
         for (index, tag) in id3_tags().into_iter().enumerate() {
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(tag.into_boxed_slice())),
+            let frame = Frame::from_system_bytes(
+                tag,
                 FrameTiming {
                     pts_ns: index as u64 * TAG_INTERVAL_NS,
                     keyframe: true,

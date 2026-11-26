@@ -96,10 +96,8 @@ impl SourceLoop for SwitchingSrc {
                 out.push(PipelinePacket::CapsChanged(rgba(w, h))).await?;
                 for _ in 0..2 {
                     let buf = vec![0u8; (w * h * 4) as usize];
-                    let frame = g2g_core::frame::Frame::new(
-                        g2g_core::MemoryDomain::System(g2g_core::memory::SystemSlice::from_boxed(
-                            buf.into_boxed_slice(),
-                        )),
+                    let frame = g2g_core::frame::Frame::from_system_bytes(
+                        buf,
                         g2g_core::FrameTiming::default(),
                         seq,
                     );

@@ -37,14 +37,13 @@ use alloc::vec::Vec;
 
 use alloc::string::String;
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 
 use g2g_core::runtime::{ElementSeekRoute, SeekController};
 use g2g_core::{
     AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
-    CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, MemoryDomain,
-    MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Tag, TagList, VideoCodec,
+    CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, MultiOutputElement,
+    MultiOutputSink, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, Tag, TagList, VideoCodec,
 };
 
 use crate::aacparse::{adts_from_asc, audio_specific_config_info, is_raw_aac_config};
@@ -464,11 +463,7 @@ impl FlvDemux {
                     out.push(PipelinePacket::CapsChanged(caps)).await?;
                 }
                 for (payload, timing) in emitted.payloads {
-                    let frame = Frame::new(
-                        MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
-                        timing,
-                        self.emitted,
-                    );
+                    let frame = Frame::from_system_bytes(payload, timing, self.emitted);
                     self.emitted += 1;
                     out.push(PipelinePacket::DataFrame(frame)).await?;
                 }
@@ -759,11 +754,7 @@ impl FlvDemuxN {
             out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
         }
         for (payload, timing) in emitted.payloads {
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
-                timing,
-                self.emitted,
-            );
+            let frame = Frame::from_system_bytes(payload, timing, self.emitted);
             self.emitted += 1;
             out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
         }
@@ -1258,11 +1249,7 @@ mod tests {
     }
 
     async fn run_demux(d: &mut FlvDemux, stream: &[u8], sink: &mut CaptureSink) {
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(stream.to_vec().into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let frame = Frame::from_system_bytes(stream.to_vec(), FrameTiming::default(), 0);
         d.process(PipelinePacket::DataFrame(frame), sink)
             .await
             .unwrap();

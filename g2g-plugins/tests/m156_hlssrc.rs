@@ -17,15 +17,14 @@ use std::thread;
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming};
-use g2g_core::memory::SystemSlice;
 use g2g_core::query::LatencyReport;
 use g2g_core::runtime::{
     Registry, SeekController, SeekOutcome, SeekRefusal, SeekTicket, SourceLoop,
 };
 use g2g_core::time::ticks_to_ns;
 use g2g_core::{
-    ByteStreamEncoding, Caps, CapsConstraint, Dim, G2gError, MemoryDomain, MultiInputElement,
-    OutputSink, PipelinePacket, PushOutcome, Rate, Seek, SeekFlags, VideoCodec,
+    ByteStreamEncoding, Caps, CapsConstraint, Dim, G2gError, MultiInputElement, OutputSink,
+    PipelinePacket, PushOutcome, Rate, Seek, SeekFlags, VideoCodec,
 };
 use g2g_plugins::fmp4demux::Fmp4Demux;
 use g2g_plugins::hlssrc::HlsSrc;
@@ -900,17 +899,16 @@ async fn abr_switch_resumes_at_the_next_sequence_when_the_new_window_has_moved()
 // --- fMP4 / CMAF over HLS (EXT-X-MAP) -------------------------------------
 
 fn au_frame(bytes: Vec<u8>, pts_ns: u64, seq: u64) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        bytes,
+        FrameTiming {
             pts_ns,
             dts_ns: pts_ns,
             duration_ns: 33_333_333,
             ..FrameTiming::default()
         },
-        sequence: seq,
-        meta: Default::default(),
-    }
+        seq,
+    )
 }
 
 fn access_units() -> Vec<Vec<u8>> {

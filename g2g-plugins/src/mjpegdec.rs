@@ -44,12 +44,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, BitstreamAlignment, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
-    ElementMetadata, G2gError, Interlace, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, Segment,
-    VideoCodec,
+    ElementMetadata, G2gError, Interlace, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, Segment, VideoCodec,
 };
 
 use zune_jpeg::zune_core::bytestream::ZCursor;
@@ -660,13 +658,8 @@ impl AsyncElement for MjpegDec {
                         out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
                         self.declared_caps = Some(caps);
                     }
-                    let mut decoded = Frame::new(
-                        MemoryDomain::System(SystemSlice::from_boxed(
-                            picture.pixels.into_boxed_slice(),
-                        )),
-                        frame.timing,
-                        self.sequence,
-                    );
+                    let mut decoded =
+                        Frame::from_system_bytes(picture.pixels, frame.timing, self.sequence);
                     decoded.meta = frame.meta;
                     self.sequence += 1;
                     out.push(PipelinePacket::DataFrame(decoded)).await?;

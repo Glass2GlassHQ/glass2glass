@@ -21,12 +21,11 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{ElementSeekRoute, SeekController};
 use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CodecTag, ConfigureOutcome, ElementMetadata,
-    FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    FrameTiming, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
 };
 
 use crate::audioframe::{locate_frame, Located, SyncFrameHeader};
@@ -210,13 +209,8 @@ impl AmrParse {
         band: AmrBand,
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
-        let entry = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(
-                band.sample_entry().into_boxed_slice(),
-            )),
-            FrameTiming::default(),
-            self.sequence,
-        );
+        let entry =
+            Frame::from_system_bytes(band.sample_entry(), FrameTiming::default(), self.sequence);
         self.sequence += 1;
         out.push(PipelinePacket::DataFrame(entry)).await?;
         Ok(())
@@ -289,8 +283,8 @@ impl AmrParse {
         let pts_ns = self
             .clock
             .frame_pts(start_offset, samples, band.sample_rate());
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+        let frame = Frame::from_system_bytes(
+            data,
             FrameTiming {
                 pts_ns,
                 dts_ns: pts_ns,

@@ -10,7 +10,6 @@ use std::path::Path;
 
 use g2g_core::fanout::MultiOutputSink;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, G2gError, MultiOutputElement, OutputSink, PushOutcome,
 };
@@ -64,8 +63,8 @@ fn fixture(name: &str) -> Vec<u8> {
 }
 
 fn file_packet(name: &str) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(fixture(name).into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        fixture(name),
         FrameTiming::default(),
         0,
     ))

@@ -9,7 +9,7 @@ mod collect_sink;
 
 use collect_sink::CollectSink;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{DomainSet, GpuVendor, MemoryDomain, MemoryDomainKind, SystemSlice};
+use g2g_core::memory::{DomainSet, GpuVendor, MemoryDomain, MemoryDomainKind};
 use g2g_core::runtime::block_on;
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, Colorimetry, Dim, Interlace, PropValue, Rate,
@@ -68,8 +68,8 @@ fn only_frame(packets: Vec<PipelinePacket>) -> Frame {
 }
 
 fn system_frame(bytes: Vec<u8>, sequence: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        bytes,
         FrameTiming::default(),
         sequence,
     ))

@@ -48,15 +48,14 @@ impl OutputSink for Capture {
 }
 
 fn data_frame(bytes: Vec<u8>, pts_ns: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: g2g_core::FrameTiming {
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        bytes,
+        g2g_core::FrameTiming {
             pts_ns,
             ..Default::default()
         },
-        sequence: 0,
-        meta: Default::default(),
-    })
+        0,
+    ))
 }
 
 /// A smooth I422p10 ramp (10-bit samples in 16-bit LE): compresses cleanly.

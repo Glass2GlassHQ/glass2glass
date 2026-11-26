@@ -60,13 +60,7 @@ fn a_dmabuf_maps_to_the_bytes_its_exporter_wrote() {
 #[test]
 fn the_sink_payload_reader_takes_either_domain() {
     let bytes = pattern();
-    let system = Frame::new(
-        MemoryDomain::System(g2g_core::memory::SystemSlice::from_boxed(
-            bytes.clone().into_boxed_slice(),
-        )),
-        FrameTiming::default(),
-        0,
-    );
+    let system = Frame::from_system_bytes(bytes.clone(), FrameTiming::default(), 0);
     assert_eq!(
         frame_bytes(&system, "test")
             .expect("system frames read")

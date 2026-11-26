@@ -19,11 +19,10 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, Rate, RawVideoFormat, VideoCodec,
 };
 
 use png::{ColorType, DeflateCompression, Encoder};
@@ -282,11 +281,7 @@ impl AsyncElement for PngEnc {
                             .await?;
                         self.caps_sent = true;
                     }
-                    let encoded = Frame::new(
-                        MemoryDomain::System(SystemSlice::from_boxed(png.into_boxed_slice())),
-                        frame.timing,
-                        self.sequence,
-                    );
+                    let encoded = Frame::from_system_bytes(png, frame.timing, self.sequence);
                     self.sequence += 1;
                     out.push(PipelinePacket::DataFrame(encoded)).await?;
                 }

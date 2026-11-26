@@ -43,7 +43,6 @@ use std::pin::Pin;
 
 use g2g_core::element::{AsyncElement, BoxFuture, DynAsyncElement, OutputSink};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{run_linear_chain, SourceLoop};
 use g2g_core::{
     AnalyticsMeta, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, PipelineClock,
@@ -216,12 +215,7 @@ impl SourceLoop for TensorSource {
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
             let data = self.data.take().ok_or(G2gError::NotConfigured)?;
-            let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-                timing: FrameTiming::default(),
-                sequence: 0,
-                meta: Default::default(),
-            };
+            let frame = Frame::from_system_bytes(data, FrameTiming::default(), 0);
             out.push(PipelinePacket::DataFrame(frame)).await?;
             out.push(PipelinePacket::Eos).await?;
             Ok(1)
@@ -376,20 +370,17 @@ impl SourceLoop for ImageSource {
             let pts_step_ns: u64 = (1_000_000_000u64 << 16) / u64::from(self.fps << 16);
             let mut pushed = 0u64;
             for seq in 0..self.frames {
-                let mut frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(
-                        self.rgba.clone().into_boxed_slice(),
-                    )),
-                    timing: FrameTiming {
+                let mut frame = Frame::from_system_bytes(
+                    self.rgba.clone(),
+                    FrameTiming {
                         pts_ns: seq * pts_step_ns,
                         dts_ns: seq * pts_step_ns,
                         duration_ns: pts_step_ns,
                         keyframe: true,
                         ..Default::default()
                     },
-                    sequence: seq,
-                    meta: Default::default(),
-                };
+                    seq,
+                );
                 // Carry the detections on the frame; the overlay reads and draws
                 // them (the M214 meta-on-frame fan-out contract).
                 frame.meta.attach(self.meta.clone());

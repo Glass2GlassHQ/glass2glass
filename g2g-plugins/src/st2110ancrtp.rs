@@ -562,8 +562,8 @@ mod tests {
     }
 
     fn video_frame(au: Vec<u8>, pts: u64) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            au,
             FrameTiming {
                 pts_ns: pts,
                 ..FrameTiming::default()

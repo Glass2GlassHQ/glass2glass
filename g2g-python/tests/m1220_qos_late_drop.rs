@@ -60,15 +60,14 @@ fn caps() -> Caps {
 
 fn frame(pts_ns: u64, sequence: u64) -> Frame {
     let bytes = vec![0u8; (WIDTH * HEIGHT * 4) as usize];
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        bytes,
+        FrameTiming {
             pts_ns,
             ..FrameTiming::default()
         },
         sequence,
-        meta: Default::default(),
-    }
+    )
 }
 
 fn calls(packet: &PipelinePacket) -> u8 {

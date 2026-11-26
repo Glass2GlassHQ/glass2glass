@@ -21,7 +21,6 @@
 #![cfg(all(feature = "std", feature = "metadata"))]
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::meta::Hdr10PlusMeta;
 use g2g_core::{AsyncElement, Caps, Dim, G2gError, OutputSink, PushOutcome, Rate, VideoCodec};
 use g2g_plugins::av1parse::Av1Parse;
@@ -67,11 +66,7 @@ fn compressed_caps(codec: VideoCodec) -> Caps {
 }
 
 fn system_frame(bytes: Vec<u8>) -> Frame {
-    Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    )
+    Frame::from_system_bytes(bytes, FrameTiming::default(), 0)
 }
 
 fn bytes(frame: &Frame) -> &[u8] {

@@ -27,7 +27,6 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::{Frame, FrameTiming};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AspectRatio, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
     ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PixelAspect,
@@ -347,11 +346,7 @@ impl<C: StartCodeCodec> StartCodeParse<C> {
         timing.pts_ns = self.stream_pts.stamp(C::CODEC, &au, timing.pts_ns);
         let au = self.apply_config_interval(au, timing.pts_ns, timing.keyframe);
         #[allow(unused_mut)]
-        let mut frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-            timing,
-            self.seq,
-        );
+        let mut frame = Frame::from_system_bytes(au, timing, self.seq);
         #[cfg(feature = "metadata")]
         {
             frame.meta = self.input_stamps.take(input_pts_ns).meta;

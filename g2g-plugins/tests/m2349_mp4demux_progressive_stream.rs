@@ -5,7 +5,6 @@
 #![cfg(feature = "std")]
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{block_on, SeekController};
 use g2g_core::{G2gError, MultiOutputElement, MultiOutputSink, PushOutcome, Seek};
 use g2g_plugins::mp4demuxn::{forwardable_streams, Mp4DemuxN, Mp4Port};
@@ -108,11 +107,7 @@ fn seekable_demuxer(file: &[u8]) -> (Mp4DemuxN, SeekController, SeekController) 
 
 async fn feed(demux: &mut Mp4DemuxN, bytes: &[u8], ports: &mut Ports) {
     for chunk in bytes.chunks(CHUNK_LEN) {
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(chunk.to_vec().into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
+        let frame = Frame::from_system_bytes(chunk.to_vec(), FrameTiming::default(), 0);
         demux
             .process(PipelinePacket::DataFrame(frame), ports)
             .await

@@ -159,8 +159,8 @@ impl SourceLoop for PacedH264Src {
             while Instant::now().duration_since(start) < self.duration {
                 let nal = self.nals[idx % self.nals.len()].clone();
                 idx += 1;
-                let frame = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(nal.into_boxed_slice())),
+                let frame = Frame::from_system_bytes(
+                    nal,
                     FrameTiming {
                         pts_ns: seq * 5_000_000,
                         ..FrameTiming::default()
@@ -224,8 +224,8 @@ impl SourceLoop for PacedOpusSrc {
             while Instant::now().duration_since(start) < self.duration {
                 let pkt = self.packets[idx % self.packets.len()].clone();
                 idx += 1;
-                let frame = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(pkt.into_boxed_slice())),
+                let frame = Frame::from_system_bytes(
+                    pkt,
                     FrameTiming {
                         pts_ns: seq * 20_000_000,
                         ..FrameTiming::default()
@@ -1122,8 +1122,8 @@ mod fan_graph {
                         let end = (bar + w / 8).min(w);
                         row[bar..end].fill(235);
                     }
-                    let frame = Frame::new(
-                        MemoryDomain::System(SystemSlice::from_boxed(buf.into_boxed_slice())),
+                    let frame = Frame::from_system_bytes(
+                        buf,
                         FrameTiming {
                             pts_ns: seq * 33_333_333,
                             ..FrameTiming::default()

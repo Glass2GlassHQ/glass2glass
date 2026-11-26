@@ -22,11 +22,10 @@ use std::sync::{Arc, Mutex};
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming};
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{SeekController, SeekOutcome, SeekRefusal, SeekTicket, SourceLoop};
 use g2g_core::{
-    stream_time_ns, ByteStreamEncoding, Caps, Dim, G2gError, MemoryDomain, MultiInputElement,
-    OutputSink, PipelinePacket, PropValue, PushOutcome, Rate, Seek, SeekFlags, Segment, VideoCodec,
+    stream_time_ns, ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement, OutputSink,
+    PipelinePacket, PropValue, PushOutcome, Rate, Seek, SeekFlags, Segment, VideoCodec,
 };
 use g2g_plugins::dashsrc::DashSrc;
 use g2g_plugins::fmp4demux::Fmp4Demux;
@@ -471,17 +470,16 @@ const PERIOD_B_START_NS: u64 = 3_000_000_000;
 const SEGMENT_DURATION_NS: u64 = 1_000_000_000;
 
 fn au_frame(bytes: Vec<u8>, pts_ns: u64, seq: u64) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        bytes,
+        FrameTiming {
             pts_ns,
             dts_ns: pts_ns,
             duration_ns: AU_DURATION_NS,
             ..FrameTiming::default()
         },
-        sequence: seq,
-        meta: Default::default(),
-    }
+        seq,
+    )
 }
 
 /// Three access units whose payload bytes are keyed by `mark`, so the two

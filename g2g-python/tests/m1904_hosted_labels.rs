@@ -52,12 +52,7 @@ fn caps() -> Caps {
 
 fn frame(analytics: Option<AnalyticsMeta>) -> Frame {
     let bytes = vec![0u8; (WIDTH * HEIGHT * 4) as usize];
-    let mut frame = Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: 0,
-        meta: Default::default(),
-    };
+    let mut frame = Frame::from_system_bytes(bytes, FrameTiming::default(), 0);
     if let Some(analytics) = analytics {
         frame.meta.attach(analytics);
     }

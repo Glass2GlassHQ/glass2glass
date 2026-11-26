@@ -149,12 +149,7 @@ async fn cudagl_sink_presents_nvdec_cuda_frames() {
 
     let mut decoded = CollectSink::default();
     for (seq, au) in access_units.into_iter().enumerate() {
-        let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-            timing: FrameTiming::default(),
-            sequence: seq as u64,
-            meta: Default::default(),
-        };
+        let frame = Frame::from_system_bytes(au, FrameTiming::default(), seq as u64);
         dec.process(PipelinePacket::DataFrame(frame), &mut decoded)
             .await
             .expect("decode");

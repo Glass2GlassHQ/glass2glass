@@ -15,7 +15,6 @@ use collect_sink::CollectSink;
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{ByteStreamEncoding, Caps, PropValue, TextFormat};
 use g2g_plugins::textdigest::TextDigest;
 use g2g_plugins::trim::Trim;
@@ -41,16 +40,15 @@ impl CollectSink {
 }
 
 fn frame(bytes: &[u8], pts_ns: u64) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        bytes.to_vec(),
+        FrameTiming {
             pts_ns,
             dts_ns: pts_ns,
             ..FrameTiming::default()
         },
-        sequence: pts_ns,
-        meta: Default::default(),
-    }
+        pts_ns,
+    )
 }
 
 /// The stream `trim` is fed: one frame every tenth of a second, each holding its

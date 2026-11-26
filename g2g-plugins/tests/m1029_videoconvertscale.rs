@@ -12,10 +12,9 @@
 mod collect_sink;
 use collect_sink::CollectSink;
 
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AspectRatio, AsyncElement, Caps, Dim, Frame, FrameTiming, MemoryDomain, PipelinePacket,
-    PixelAspect, PropError, PropValue, Rate, RawVideoFormat,
+    AspectRatio, AsyncElement, Caps, Dim, Frame, FrameTiming, PipelinePacket, PixelAspect,
+    PropError, PropValue, Rate, RawVideoFormat,
 };
 use g2g_plugins::videoconvertscale::VideoConvertScale;
 
@@ -32,9 +31,9 @@ fn raw(format: RawVideoFormat, w: u32, h: u32) -> Caps {
 }
 
 fn frame(bytes: Vec<u8>) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        bytes,
+        FrameTiming {
             pts_ns: 0,
             dts_ns: 0,
             duration_ns: 0,
@@ -43,9 +42,8 @@ fn frame(bytes: Vec<u8>) -> Frame {
             keyframe: false,
             ..FrameTiming::default()
         },
-        sequence: 0,
-        meta: Default::default(),
-    }
+        0,
+    )
 }
 
 /// One 8x8 RGBA frame with a per-pixel gradient, so a resample that reads the

@@ -26,7 +26,6 @@ use std::process::Command;
 
 use g2g_core::conformance::{ConformanceDimension, Evidence};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AsyncElement, AudioFormat, ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement,
     OutputSink, PushOutcome, Rate, VideoCodec,
@@ -157,11 +156,7 @@ async fn demux(flv: &[u8], stream: FlvStream) -> CaptureSink {
     })
     .unwrap();
     let mut sink = CaptureSink::default();
-    let frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(flv.to_vec().into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    );
+    let frame = Frame::from_system_bytes(flv.to_vec(), FrameTiming::default(), 0);
     d.process(PipelinePacket::DataFrame(frame), &mut sink)
         .await
         .unwrap();
@@ -170,8 +165,8 @@ async fn demux(flv: &[u8], stream: FlvStream) -> CaptureSink {
 }
 
 fn frame_at(au: &[u8], pts_ns: u64, keyframe: bool) -> Frame {
-    Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(au.to_vec().into_boxed_slice())),
+    Frame::from_system_bytes(
+        au.to_vec(),
         FrameTiming {
             pts_ns,
             keyframe,
@@ -677,8 +672,8 @@ mod decode {
         dec.configure_pipeline(&caps).unwrap();
         let mut sink = CaptureSink::default();
         for (i, au) in units.frames.iter().enumerate() {
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(au.clone().into_boxed_slice())),
+            let frame = Frame::from_system_bytes(
+                au.clone(),
                 FrameTiming {
                     pts_ns: i as u64 * 40_000_000,
                     ..FrameTiming::default()
@@ -741,11 +736,7 @@ mod decode {
         .unwrap();
         let mut sink = CaptureSink::default();
         for au in &units.frames {
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(au.clone().into_boxed_slice())),
-                FrameTiming::default(),
-                0,
-            );
+            let frame = Frame::from_system_bytes(au.clone(), FrameTiming::default(), 0);
             dec.process(PipelinePacket::DataFrame(frame), &mut sink)
                 .await
                 .unwrap();

@@ -28,7 +28,6 @@ use std::process::Command;
 
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{parse_launch, run_graph, SourceLoop};
 use g2g_core::{Caps, Dim, G2gError, PipelineClock, PropError, PropValue, Rate, VideoCodec};
 use g2g_plugins::gst_compat::{gst_equivalent, GstEquivalent};
@@ -118,11 +117,7 @@ async fn access_units() -> Vec<(bool, Vec<u8>)> {
         .configure_pipeline(&h264_caps())
         .expect("h264parse accepts the stream");
     let mut sink = Collect::default();
-    let whole = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(FIXTURE.to_vec().into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    );
+    let whole = Frame::from_system_bytes(FIXTURE.to_vec(), FrameTiming::default(), 0);
     parse
         .process(PipelinePacket::DataFrame(whole), &mut sink)
         .await
@@ -199,8 +194,8 @@ async fn round_trip(muxer: &str, extension: &str) {
     let mut discard = Collect::default();
     for (index, (keyframe, bytes)) in access_units.iter().enumerate() {
         let pts_ns = index as u64 * FRAME_NS;
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.clone().into_boxed_slice())),
+        let frame = Frame::from_system_bytes(
+            bytes.clone(),
             FrameTiming {
                 pts_ns,
                 dts_ns: pts_ns,

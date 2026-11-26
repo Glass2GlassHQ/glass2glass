@@ -9,12 +9,11 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, VideoCodec,
+    ElementMetadata, FrameTiming, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    VideoCodec,
 };
 
 use crate::fifobuffer::FifoBuffer;
@@ -101,8 +100,8 @@ impl Iv8Demux {
     async fn emit_frame(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         let data = core::mem::take(&mut self.assembly.data);
         let pts_ns = ticks_to_ns(u64::from(self.assembly.pts_90khz), IV8_CLOCK_HZ);
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+        let frame = Frame::from_system_bytes(
+            data,
             FrameTiming {
                 pts_ns,
                 dts_ns: pts_ns,

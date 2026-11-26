@@ -11,10 +11,9 @@
 use std::process::Command;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    ByteStreamEncoding, Caps, ConfigureOutcome, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PipelinePacket, PushOutcome,
+    ByteStreamEncoding, Caps, ConfigureOutcome, FrameTiming, G2gError, OutputSink, PipelinePacket,
+    PushOutcome,
 };
 
 use g2g_core::element::AsyncElement;
@@ -93,11 +92,7 @@ async fn g2g_demux_klv(ts: &[u8]) -> Vec<Vec<u8>> {
         Ok(ConfigureOutcome::Accepted)
     ));
     let mut sink = CaptureSink::default();
-    let frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(ts.to_vec().into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    );
+    let frame = Frame::from_system_bytes(ts.to_vec(), FrameTiming::default(), 0);
     demux
         .process(PipelinePacket::DataFrame(frame), &mut sink)
         .await

@@ -16,12 +16,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use g2g_core::frame::{Frame, FrameTiming};
-use g2g_core::memory::SystemSlice;
 use g2g_core::rtp::RtpHeader;
 use g2g_core::runtime::{run_graph, run_source_transform_sink, GraphNodeRef, SourceLoop};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, G2gError, Graph, MemoryDomain,
-    OutputSink, PipelineClock, PipelinePacket,
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, G2gError, Graph, OutputSink,
+    PipelineClock, PipelinePacket,
 };
 
 use g2g_plugins::srtp::{SrtpFlow, SrtpMasterKey, SrtpPolicy};
@@ -160,11 +159,7 @@ impl SourceLoop for PacketSource {
                 if let Some(gap) = self.pacing {
                     tokio::time::sleep(gap).await;
                 }
-                let frame = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(packet.into_boxed_slice())),
-                    FrameTiming::default(),
-                    pushed,
-                );
+                let frame = Frame::from_system_bytes(packet, FrameTiming::default(), pushed);
                 out.push(PipelinePacket::DataFrame(frame)).await?;
                 pushed += 1;
             }

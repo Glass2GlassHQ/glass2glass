@@ -14,11 +14,9 @@
 mod collect_sink;
 use collect_sink::CollectSink;
 
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, ColorRange, Colorimetry, Dim, Frame, FrameTiming, G2gError,
-    MatrixCoefficients, MemoryDomain, PipelinePacket, PropValue, Rate, RawVideoFormat,
-    TransferCharacteristics,
+    MatrixCoefficients, PipelinePacket, PropValue, Rate, RawVideoFormat, TransferCharacteristics,
 };
 use g2g_plugins::colorspace::Colorspace;
 use g2g_plugins::videoconvert::convert;
@@ -48,9 +46,9 @@ fn raw_sized(
 }
 
 fn frame(bytes: Vec<u8>) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        bytes,
+        FrameTiming {
             pts_ns: 0,
             dts_ns: 0,
             duration_ns: 0,
@@ -59,9 +57,8 @@ fn frame(bytes: Vec<u8>) -> Frame {
             keyframe: true,
             ..FrameTiming::default()
         },
-        sequence: 0,
-        meta: Default::default(),
-    }
+        0,
+    )
 }
 
 /// A 4x4 picture whose every pixel is a different colour, built from RGB so

@@ -7,7 +7,6 @@
 
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{Caps, G2gError, TensorDType, TensorLayout, TensorShape};
 use g2g_ml::postprocess::TensorPostprocess;
 
@@ -43,12 +42,7 @@ fn f32_frame(values: &[f32], sequence: u64) -> Frame {
     for v in values {
         bytes.extend_from_slice(&v.to_le_bytes());
     }
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence,
-        meta: Default::default(),
-    }
+    Frame::from_system_bytes(bytes, FrameTiming::default(), sequence)
 }
 
 fn frame_values(f: &Frame) -> Vec<f32> {
@@ -171,12 +165,7 @@ async fn real_inference_into_argmax_finds_the_peak() {
     // pixel 3's red channel (offset 12) is the global maximum.
     let mut pixels = vec![10u8; 16];
     pixels[12] = 250;
-    let frame = Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(pixels.into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: 0,
-        meta: Default::default(),
-    };
+    let frame = Frame::from_system_bytes(pixels, FrameTiming::default(), 0);
 
     let mut tensors = Collect::default();
     inf.process(PipelinePacket::DataFrame(frame), &mut tensors)

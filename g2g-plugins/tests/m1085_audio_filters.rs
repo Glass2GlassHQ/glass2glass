@@ -16,12 +16,9 @@ mod collect_sink;
 use collect_sink::CollectSink;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::parse_launch;
 use g2g_core::segment::Segment;
-use g2g_core::{
-    AsyncElement, AudioFormat, Bus, BusMessage, Caps, G2gError, MemoryDomain, PropValue,
-};
+use g2g_core::{AsyncElement, AudioFormat, Bus, BusMessage, Caps, G2gError, PropValue};
 use g2g_plugins::audiobuffersplit::AudioBufferSplit;
 use g2g_plugins::audiochannelmix::AudioChannelMix;
 use g2g_plugins::audiofirfilter::AudioFirFilter;
@@ -92,8 +89,8 @@ fn to_frame(samples: &[f32], channels: usize, pts_ns: u64) -> PipelinePacket {
         bytes.extend_from_slice(&s.to_le_bytes());
     }
     let frames = (samples.len() / channels) as u64;
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        bytes,
         FrameTiming {
             pts_ns,
             dts_ns: pts_ns,

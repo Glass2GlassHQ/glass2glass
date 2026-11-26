@@ -62,16 +62,15 @@ fn negotiates_each_input_against_accept() {
 #[cfg(not(feature = "python"))]
 #[test]
 fn incomplete_round_emits_nothing() {
-    use g2g_core::memory::SystemSlice;
-    use g2g_core::{Frame, FrameTiming, MemoryDomain};
+    use g2g_core::{Frame, FrameTiming};
 
     let mut agg = PyAggregator::new("echo_element", "EchoTransform", 2);
     agg.configure_pipeline(0, &rgba_2x1()).unwrap();
     agg.configure_pipeline(1, &rgba_2x1()).unwrap();
 
-    let frame = Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(vec![1u8; 8].into_boxed_slice())),
-        timing: FrameTiming {
+    let frame = Frame::from_system_bytes(
+        vec![1u8; 8],
+        FrameTiming {
             pts_ns: 0,
             dts_ns: 0,
             duration_ns: 0,
@@ -80,9 +79,8 @@ fn incomplete_round_emits_nothing() {
             keyframe: false,
             ..FrameTiming::default()
         },
-        sequence: 0,
-        meta: Default::default(),
-    };
+        0,
+    );
     let mut sink = CollectSink::default();
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()

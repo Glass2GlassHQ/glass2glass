@@ -19,7 +19,6 @@ use std::path::PathBuf;
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{parse_launch, ElementFactory, LaunchFactory, Registry};
 use g2g_core::{
     AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, MultiInputElement,
@@ -243,8 +242,8 @@ fn av_ts() -> Vec<u8> {
 
 // --- Matroska A/V builder (for the dispatch cross-check) ---
 fn frame(data: Vec<u8>, pts_ns: u64) -> g2g_core::PipelinePacket {
-    g2g_core::PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+    g2g_core::PipelinePacket::DataFrame(Frame::from_system_bytes(
+        data,
         FrameTiming {
             pts_ns,
             dts_ns: pts_ns,

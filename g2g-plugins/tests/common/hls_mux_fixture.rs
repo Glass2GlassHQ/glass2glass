@@ -5,7 +5,6 @@
 #![allow(dead_code)] // each test file uses a different part of this
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement, OutputSink, PushOutcome, Rate,
     VideoCodec,
@@ -60,11 +59,7 @@ impl OutputSink for NullSink {
 }
 
 pub(crate) fn frame(bytes: Vec<u8>, timing: FrameTiming) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing,
-        0,
-    ))
+    PipelinePacket::DataFrame(Frame::from_system_bytes(bytes, timing, 0))
 }
 
 pub(crate) fn h264_caps() -> Caps {

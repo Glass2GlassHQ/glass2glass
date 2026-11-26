@@ -46,13 +46,12 @@ use tokio::net::{UnixListener, UnixStream};
 
 use g2g_core::frame::Frame;
 use g2g_core::log::io_err;
-use g2g_core::memory::SystemSlice;
 use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome, ElementMetadata,
-    FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec,
+    FrameTiming, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec,
 };
 
 use crate::arrivalstamp::ArrivalStamp;
@@ -104,15 +103,14 @@ fn protocol_error(reason: &'static str) -> G2gError {
 /// A frame carrying `bytes`, stamped and sequenced the way the other byte
 /// sources stamp a chunk.
 fn byte_frame(bytes: Vec<u8>, sequence: u64) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        bytes,
+        FrameTiming {
             arrival_ns: g2g_core::metrics::monotonic_ns(),
             ..FrameTiming::default()
         },
         sequence,
-        meta: Default::default(),
-    }
+    )
 }
 
 /// Bind `path`, taking over a socket file left behind by a process that is gone.

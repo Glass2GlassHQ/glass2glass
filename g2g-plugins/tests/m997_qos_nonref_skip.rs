@@ -39,7 +39,6 @@ use std::sync::Arc;
 
 use g2g_core::element::{AsyncElement, BoxFuture, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{run_graph, GraphNodeRef, SourceLoop};
 use g2g_core::{
     AsyncClock, Caps, ConfigureOutcome, Dim, G2gError, Graph, PipelineClock, PropValue, QosMessage,
@@ -72,15 +71,14 @@ fn h264_caps() -> Caps {
 }
 
 fn data_frame(bytes: Vec<u8>, pts_ns: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        bytes,
+        FrameTiming {
             pts_ns,
             ..FrameTiming::default()
         },
-        sequence: 0,
-        meta: Default::default(),
-    })
+        0,
+    ))
 }
 
 /// Collects frames, and reports lateness on every push while `pressure` is set:

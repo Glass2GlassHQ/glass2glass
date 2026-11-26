@@ -133,11 +133,7 @@ fn ns_to_90k(ns: u64) -> u64 {
 }
 
 fn data(bytes: Vec<u8>) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    ))
+    PipelinePacket::DataFrame(Frame::from_system_bytes(bytes, FrameTiming::default(), 0))
 }
 
 /// Demux and decode the fixture with the real elements:
@@ -362,8 +358,8 @@ impl SourceLoop for TeletextPesSrc {
                 ),
             ];
             for (pts_ns, payload) in payloads {
-                let frame = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
+                let frame = Frame::from_system_bytes(
+                    payload,
                     FrameTiming {
                         pts_ns,
                         dts_ns: pts_ns,

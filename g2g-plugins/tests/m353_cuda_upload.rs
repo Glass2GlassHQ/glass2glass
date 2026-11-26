@@ -14,7 +14,6 @@
 mod collect_sink;
 use collect_sink::CollectSink;
 
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, Dim, Frame, FrameTiming, G2gError, MemoryDomain, MemoryDomainKind,
     PipelinePacket, Rate, RawVideoFormat,
@@ -52,15 +51,14 @@ fn system_nv12_frame(seq: u64) -> Frame {
     for b in &mut buf[(W * H) as usize..] {
         *b = 128;
     }
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(buf.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        buf,
+        FrameTiming {
             pts_ns: seq * 33_000_000,
             ..FrameTiming::default()
         },
-        sequence: seq,
-        meta: Default::default(),
-    }
+        seq,
+    )
 }
 
 fn skip_if_no_gpu(err: &G2gError) -> bool {
@@ -120,11 +118,7 @@ async fn an_odd_size_nv12_frame_round_trips_through_cuda() {
         .unpadded_frame_bytes(ODD_W, ODD_H)
         .unwrap() as usize;
     let bytes: Vec<u8> = (0..len).map(|i| i as u8).collect();
-    let frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.clone().into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    );
+    let frame = Frame::from_system_bytes(bytes.clone(), FrameTiming::default(), 0);
     let mut uploaded = CollectSink::default();
     up.process(PipelinePacket::DataFrame(frame), &mut uploaded)
         .await

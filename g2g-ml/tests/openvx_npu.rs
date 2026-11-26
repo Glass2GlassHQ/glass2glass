@@ -8,7 +8,6 @@
 
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AnalyticsMeta, Caps, Colorimetry, Dim, G2gError, Interlace, PixelAspect, PropValue, Rate,
     RawVideoFormat,
@@ -81,12 +80,7 @@ fn rgb_caps(width: u32, height: u32) -> Caps {
 
 fn picture_frame(variable: &str) -> PipelinePacket {
     let picture = std::fs::read(env_value(variable)).expect("read the picture");
-    PipelinePacket::DataFrame(Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(picture.into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: 0,
-        meta: Default::default(),
-    })
+    PipelinePacket::DataFrame(Frame::from_system_bytes(picture, FrameTiming::default(), 0))
 }
 
 async fn infer(inference: &mut OvxInference, picture: PipelinePacket) -> Frame {

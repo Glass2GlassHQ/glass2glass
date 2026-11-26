@@ -19,7 +19,6 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::meta::{SeiUserData, SeiUserDataMeta};
 use g2g_core::{AsyncElement, Caps, Dim, Rate, VideoCodec};
 use g2g_plugins::h264parse::H264Parse;
@@ -94,11 +93,7 @@ fn expected_trace() -> Vec<Traced> {
 }
 
 fn system_frame(bytes: &[u8]) -> Frame {
-    Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    )
+    Frame::from_system_bytes(bytes.to_vec(), FrameTiming::default(), 0)
 }
 
 fn data_frames(sink: CollectSink) -> Vec<Frame> {

@@ -37,7 +37,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{block_on, parse_launch, run_graph};
 use g2g_core::{
     AudioFormat, Caps, Dim, G2gError, MultiOutputElement, MultiOutputSink, PipelineClock,
@@ -243,11 +242,7 @@ impl MultiOutputSink for PortCapture {
 }
 
 fn byte_frame(bytes: Vec<u8>) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    ))
+    PipelinePacket::DataFrame(Frame::from_system_bytes(bytes, FrameTiming::default(), 0))
 }
 
 /// Run the real multi-output demuxer over a whole AVI and capture every port.

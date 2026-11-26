@@ -58,13 +58,7 @@ impl OutputSink for NothingDownstream {
 }
 
 fn text_frame(text: &str) -> Frame {
-    Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(
-            text.as_bytes().to_vec().into_boxed_slice(),
-        )),
-        FrameTiming::default(),
-        0,
-    )
+    Frame::from_system_bytes(text.as_bytes().to_vec(), FrameTiming::default(), 0)
 }
 
 fn text_sink(class: &str, location: &Path) -> PySink {

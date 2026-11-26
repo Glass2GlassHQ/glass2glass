@@ -360,16 +360,13 @@ mod tests {
     use super::*;
     use alloc::vec;
     use g2g_core::frame::Frame;
-    use g2g_core::memory::SystemSlice;
-    use g2g_core::MemoryDomain;
 
     fn frame(sequence: u64) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(vec![0u8; 4].into_boxed_slice())),
-            timing: Default::default(),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            vec![0u8; 4],
+            Default::default(),
             sequence,
-            meta: Default::default(),
-        })
+        ))
     }
 
     fn sequence(packet: Option<PipelinePacket>) -> Option<u64> {

@@ -33,12 +33,12 @@ use ffprobe_tool::have_ffprobe;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use g2g_core::frame::FrameTiming;
 use g2g_core::frame::{Frame, PipelinePacket};
-use g2g_core::{frame::FrameTiming, memory::SystemSlice};
 use g2g_core::{
-    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, Dim, G2gError, MemoryDomain,
-    MultiInputElement, MultiOutputElement, PadDirection, PadTemplates, PropValue, PushOutcome,
-    Rate, SubPictureFormat, VideoCodec,
+    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement,
+    MultiOutputElement, PadDirection, PadTemplates, PropValue, PushOutcome, Rate, SubPictureFormat,
+    VideoCodec,
 };
 /// A multi-output sink recording each port's packets in order.
 struct PortTap {
@@ -133,11 +133,7 @@ fn ffmpeg(args: &[&str]) {
 }
 
 fn data_frame(bytes: Vec<u8>) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    ))
+    PipelinePacket::DataFrame(Frame::from_system_bytes(bytes, FrameTiming::default(), 0))
 }
 
 fn ps_caps() -> Caps {
@@ -611,11 +607,7 @@ async fn a_demuxed_subpicture_renders_on_the_default_palette() {
             let timing = f.timing;
             let data = bytes(&f);
             dec.process(
-                PipelinePacket::DataFrame(Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-                    timing,
-                    0,
-                )),
+                PipelinePacket::DataFrame(Frame::from_system_bytes(data, timing, 0)),
                 &mut sink,
             )
             .await
@@ -1177,11 +1169,7 @@ async fn a_stream_cut_mid_subpicture_yields_only_whole_frames() {
             let timing = f.timing;
             let data = bytes(&f);
             dec.process(
-                PipelinePacket::DataFrame(Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-                    timing,
-                    0,
-                )),
+                PipelinePacket::DataFrame(Frame::from_system_bytes(data, timing, 0)),
                 &mut sink,
             )
             .await
@@ -1557,11 +1545,7 @@ async fn composited_frames_carry_the_cue_only_inside_its_window_and_rectangle() 
             let timing = f.timing;
             let data = bytes(&f);
             dec.process(
-                PipelinePacket::DataFrame(Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-                    timing,
-                    0,
-                )),
+                PipelinePacket::DataFrame(Frame::from_system_bytes(data, timing, 0)),
                 &mut cues,
             )
             .await
@@ -1601,8 +1585,8 @@ async fn composited_frames_carry_the_cue_only_inside_its_window_and_rectangle() 
         for _ in 0..VOB_W * VOB_H {
             buf.extend_from_slice(&FLAT);
         }
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(buf.into_boxed_slice())),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            buf,
             FrameTiming {
                 pts_ns: pts,
                 dts_ns: pts,
@@ -1614,11 +1598,7 @@ async fn composited_frames_carry_the_cue_only_inside_its_window_and_rectangle() 
     let mut out = CollectSink::default();
     comp.process(
         1,
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes(painted).into_boxed_slice())),
-            painted.timing,
-            0,
-        )),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(bytes(painted), painted.timing, 0)),
         &mut out,
     )
     .await
@@ -1653,11 +1633,7 @@ async fn composited_frames_carry_the_cue_only_inside_its_window_and_rectangle() 
     let mut out2 = CollectSink::default();
     comp.process(
         1,
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes(clear).into_boxed_slice())),
-            clear.timing,
-            0,
-        )),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(bytes(clear), clear.timing, 0)),
         &mut out2,
     )
     .await

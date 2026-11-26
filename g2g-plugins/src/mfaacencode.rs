@@ -43,12 +43,11 @@ use crate::mfcommon::{
     read_sample_bytes, send_drain_command, OutputPull,
 };
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     pcm_caps_any_rate_and_channels, AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet,
-    ConfigureOutcome, FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    ConfigureOutcome, FrameTiming, G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 /// Samples per AAC-LC access unit.
@@ -384,18 +383,17 @@ impl AsyncElement for MfAacEncode {
                     self.last_caps = Some(aac_caps.clone());
                 }
                 let pts_ns = self.emitted * ns_per_frame;
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-                    timing: FrameTiming {
+                let frame = Frame::from_system_bytes(
+                    au,
+                    FrameTiming {
                         pts_ns,
                         dts_ns: pts_ns,
                         duration_ns: ns_per_frame,
                         capture_ns: pts_ns,
                         ..FrameTiming::default()
                     },
-                    sequence: self.emitted,
-                    meta: Default::default(),
-                };
+                    self.emitted,
+                );
                 self.emitted += 1;
                 out.push(PipelinePacket::DataFrame(frame)).await?;
             }

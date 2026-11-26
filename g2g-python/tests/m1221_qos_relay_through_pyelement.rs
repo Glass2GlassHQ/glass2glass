@@ -61,15 +61,14 @@ impl SourceLoop for DeafSource {
         Box::pin(async move {
             for sequence in 0..FRAME_COUNT {
                 let bytes = vec![0u8; (WIDTH * HEIGHT * 4) as usize];
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                    timing: FrameTiming {
+                let frame = Frame::from_system_bytes(
+                    bytes,
+                    FrameTiming {
                         pts_ns: sequence * FRAME_PERIOD_NS,
                         ..FrameTiming::default()
                     },
                     sequence,
-                    meta: Default::default(),
-                };
+                );
                 out.push(PipelinePacket::DataFrame(frame)).await?;
             }
             out.push(PipelinePacket::Eos).await?;

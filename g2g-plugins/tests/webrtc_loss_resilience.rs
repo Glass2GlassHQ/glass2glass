@@ -40,12 +40,11 @@ use tokio::sync::mpsc;
 
 use g2g_core::element::DynAsyncElement;
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::rtp::RtpHeader;
 use g2g_core::runtime::{run_duplex_session, DynSourceLoop, SourceLoop};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain,
-    OutputSink, PipelineClock, PipelinePacket, Rate, VideoCodec,
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, FrameTiming, G2gError, OutputSink,
+    PipelineClock, PipelinePacket, Rate, VideoCodec,
 };
 use g2g_plugins::sdp::SdpMedia;
 use g2g_plugins::webrtcduplex::{SdpChannel, SignalRole, WebRtcDuplexSession};
@@ -103,8 +102,8 @@ impl SourceLoop for SyntheticH264Src {
             while Instant::now().duration_since(start) < self.duration {
                 let au = self.aus[idx % self.aus.len()].clone();
                 idx += 1;
-                let frame = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
+                let frame = Frame::from_system_bytes(
+                    au,
                     FrameTiming {
                         pts_ns: seq * 33_000_000,
                         ..FrameTiming::default()

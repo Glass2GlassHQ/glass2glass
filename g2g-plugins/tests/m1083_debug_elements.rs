@@ -21,11 +21,10 @@ use std::time::Duration;
 
 use g2g_core::frame::Frame;
 use g2g_core::log::ClockTime;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, Bus, BusMessage, ByteStreamEncoding, Caps, Dim, FrameTiming,
-    G2gError, HardwareError, Interlace, MemoryDomain, OutputSink, PipelinePacket, PropValue,
-    PushOutcome, Rate, RawVideoFormat, VideoCodec,
+    G2gError, HardwareError, Interlace, OutputSink, PipelinePacket, PropValue, PushOutcome, Rate,
+    RawVideoFormat, VideoCodec,
 };
 use g2g_plugins::breakmydata::BreakMyData;
 use g2g_plugins::checksumsink::ChecksumSink;
@@ -82,8 +81,8 @@ impl OutputSink for FailingSink {
 }
 
 fn byte_frame(bytes: Vec<u8>, pts_ns: u64, sequence: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        bytes,
         FrameTiming {
             pts_ns,
             dts_ns: pts_ns,

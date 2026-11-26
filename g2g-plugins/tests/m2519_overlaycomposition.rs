@@ -10,8 +10,8 @@ mod collect_sink;
 use g2g_core::meta::PlaneLayout;
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::{
-    AllocationParams, AsyncElement, Caps, CapsSet, Frame, FrameTiming, MemoryDomain,
-    OverlayCompositionMeta, OverlayPlacement, OverlayRectangle, PipelinePacket,
+    AllocationParams, AsyncElement, Caps, CapsSet, Frame, FrameTiming, OverlayCompositionMeta,
+    OverlayPlacement, OverlayRectangle, PipelinePacket,
 };
 use g2g_plugins::overlaycomposition::OverlayComposition;
 use g2g_plugins::registry::default_registry;
@@ -28,10 +28,8 @@ fn caps(format: &str) -> Caps {
 }
 
 fn frame(bytes: Vec<u8>) -> Frame {
-    Frame::new(
-        MemoryDomain::System(g2g_core::memory::SystemSlice::from_boxed(
-            bytes.into_boxed_slice(),
-        )),
+    Frame::from_system_bytes(
+        bytes,
         FrameTiming {
             pts_ns: 17,
             ..FrameTiming::default()

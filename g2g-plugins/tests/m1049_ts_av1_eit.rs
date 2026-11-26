@@ -21,7 +21,6 @@
 use std::process::Command;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AsyncElement, AudioFormat, Bus, BusMessage, ByteStreamEncoding, Caps, Dim, MultiInputElement,
     PropValue, Rate, Tag, VideoCodec,
@@ -110,8 +109,8 @@ fn gstreamer_av1_ts(tag: &str) -> Option<Vec<u8>> {
 }
 
 fn timed_frame(bytes: &[u8], pts_ns: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        bytes.to_vec(),
         FrameTiming {
             pts_ns,
             dts_ns: pts_ns,

@@ -27,11 +27,10 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use g2g_core::frame::{Frame, PipelinePacket};
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{parse_launch, run_graph, SourceLoop};
 use g2g_core::{
-    AsyncElement, ByteStreamEncoding, Caps, FrameTiming, MemoryDomain, MultiInputElement,
-    PipelineClock, PropValue, PropertySpec, SubPictureFormat, TextFormat,
+    AsyncElement, ByteStreamEncoding, Caps, FrameTiming, MultiInputElement, PipelineClock,
+    PropValue, PropertySpec, SubPictureFormat, TextFormat,
 };
 
 use g2g_plugins::dvbsub::{page_id_blob, parse_page_ids, PageIds};
@@ -80,11 +79,7 @@ fn temp_path(name: &str) -> PathBuf {
 }
 
 fn frame(data: Vec<u8>, timing: FrameTiming) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-        timing,
-        0,
-    ))
+    PipelinePacket::DataFrame(Frame::from_system_bytes(data, timing, 0))
 }
 
 fn at(pts_ns: u64, duration_ns: u64) -> FrameTiming {

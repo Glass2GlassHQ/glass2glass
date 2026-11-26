@@ -472,13 +472,8 @@ mod tests {
         // 2026-10-20 plus a sub-microsecond tail
         const UNIX_NANOS: i64 = 1_792_454_400_123_456_789;
         let stamped = |unix_nanos| {
-            let mut frame = Frame::new(
-                g2g_core::MemoryDomain::System(g2g_core::SystemSlice::from_boxed(
-                    alloc::vec![0u8; 1].into_boxed_slice(),
-                )),
-                g2g_core::FrameTiming::default(),
-                0,
-            );
+            let mut frame =
+                Frame::from_system_bytes(alloc::vec![0u8; 1], g2g_core::FrameTiming::default(), 0);
             frame.meta.attach(g2g_core::WallClockMeta { unix_nanos });
             frame
         };

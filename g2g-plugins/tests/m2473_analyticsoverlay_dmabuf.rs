@@ -19,7 +19,7 @@ mod udmabuf;
 use core::future::Future;
 use core::pin::Pin;
 
-use g2g_core::memory::{MemoryDomain, SystemSlice};
+use g2g_core::memory::MemoryDomain;
 use g2g_core::{
     AnalyticsMeta, AsyncElement, BBox, Caps, Dim, Frame, FrameTiming, G2gError, ObjectDetection,
     OutputSink, PipelinePacket, PushOutcome, Rate, RawVideoFormat,
@@ -127,11 +127,7 @@ async fn draw(rows: &FrameRows, frame: Frame) -> Frame {
 }
 
 async fn drawn_on_system_memory(rows: &FrameRows) -> Vec<u8> {
-    let frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(tight(rows).into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    );
+    let frame = Frame::from_system_bytes(tight(rows), FrameTiming::default(), 0);
     let drawn = draw(rows, frame).await;
     let reference = drawn
         .domain

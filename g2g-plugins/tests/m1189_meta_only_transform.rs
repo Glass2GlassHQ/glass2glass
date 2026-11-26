@@ -24,13 +24,12 @@ use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::meta::{AnalyticsMeta, AnalyticsNode, BBox, ObjectDetection};
 use g2g_core::runtime::{run_source_transform_sink, LatencyProfile, SourceLoop};
 use g2g_core::wire::{decode_packet, encode_packet};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    MemoryDomain, OutputSink, PipelineClock, PipelinePacket, PropValue, Rate, RawVideoFormat,
+    OutputSink, PipelineClock, PipelinePacket, PropValue, Rate, RawVideoFormat,
 };
 
 use g2g_plugins::remotewstransform::RemoteWsTransform;
@@ -93,10 +92,8 @@ impl SourceLoop for CountSrc {
         Box::pin(async move {
             out.push(PipelinePacket::CapsChanged(test_caps())).await?;
             for i in 0..FRAMES {
-                out.push(PipelinePacket::DataFrame(Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(
-                        vec![i; PIXELS].into_boxed_slice(),
-                    )),
+                out.push(PipelinePacket::DataFrame(Frame::from_system_bytes(
+                    vec![i; PIXELS],
                     FrameTiming {
                         pts_ns: u64::from(i) * 1000,
                         ..FrameTiming::default()
@@ -172,11 +169,7 @@ async fn detect_server(listener: StdTcpListener) -> Result<usize, Box<dyn std::e
                     label: DETECTED_LABEL,
                     confidence: 0.5,
                 }));
-                let mut reply = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(Vec::new().into_boxed_slice())),
-                    frame.timing,
-                    frame.sequence,
-                );
+                let mut reply = Frame::from_system_bytes(Vec::new(), frame.timing, frame.sequence);
                 reply.meta.attach(meta);
                 let out = encode_packet(&PipelinePacket::DataFrame(reply))
                     .map_err(|e| format!("encode: {e:?}"))?;

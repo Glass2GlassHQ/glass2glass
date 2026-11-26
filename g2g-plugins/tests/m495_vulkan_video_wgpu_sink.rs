@@ -201,13 +201,12 @@ fn decode_to_texture_then_present_zero_copy() {
 fn au_frame(bytes: Vec<u8>, seq: u64) -> g2g_core::frame::Frame {
     use g2g_core::memory::SystemSlice;
     use g2g_core::FrameTiming;
-    g2g_core::frame::Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    g2g_core::frame::Frame::from_system_bytes(
+        bytes,
+        FrameTiming {
             pts_ns: seq * 33_000_000,
             ..Default::default()
         },
-        sequence: seq,
-        meta: Default::default(),
-    }
+        seq,
+    )
 }

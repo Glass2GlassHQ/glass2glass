@@ -13,11 +13,9 @@
 #![cfg(all(feature = "std", feature = "metadata"))]
 
 use g2g_core::frame::{Frame, FrameTiming};
-use g2g_core::memory::SystemSlice;
 use g2g_core::meta::HdrStaticMeta;
 use g2g_core::{
-    AsyncElement, Caps, Dim, G2gError, MemoryDomain, OutputSink, PipelinePacket, PushOutcome, Rate,
-    VideoCodec,
+    AsyncElement, Caps, Dim, G2gError, OutputSink, PipelinePacket, PushOutcome, Rate, VideoCodec,
 };
 use g2g_plugins::h264parse::H264Parse;
 use g2g_plugins::h265parse::H265Parse;
@@ -87,11 +85,7 @@ fn content_light_payload(cll: u16, fall: u16) -> Vec<u8> {
 }
 
 fn frame(bytes: Vec<u8>, seq: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        FrameTiming::default(),
-        seq,
-    ))
+    PipelinePacket::DataFrame(Frame::from_system_bytes(bytes, FrameTiming::default(), seq))
 }
 
 /// The IRAP access unit: both HDR SEI messages then the coded picture.

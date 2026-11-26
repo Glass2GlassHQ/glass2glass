@@ -15,7 +15,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::{
     AsyncElement, AudioFormat, ByteStreamEncoding, Caps, G2gError, MultiInputElement,
@@ -156,11 +155,7 @@ async fn loas_frames_ahead_of_the_first_config_decode() {
         })
         .expect("configures");
     let mut sink = CollectSink::default();
-    let input = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(loas.clone().into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    );
+    let input = Frame::from_system_bytes(loas.clone(), FrameTiming::default(), 0);
     decoder
         .process(PipelinePacket::DataFrame(input), &mut sink)
         .await
@@ -254,8 +249,8 @@ async fn demux(file: &[u8]) -> Vec<PipelinePacket> {
     let mut sink = CollectSink::default();
     demux
         .process(
-            PipelinePacket::DataFrame(Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(file.to_vec().into_boxed_slice())),
+            PipelinePacket::DataFrame(Frame::from_system_bytes(
+                file.to_vec(),
                 FrameTiming::default(),
                 0,
             )),
@@ -330,11 +325,7 @@ async fn tsdemux_frames(ts: Vec<u8>) -> Vec<Vec<u8>> {
     let mut sink = CollectSink::default();
     demux
         .process(
-            PipelinePacket::DataFrame(Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(ts.into_boxed_slice())),
-                FrameTiming::default(),
-                0,
-            )),
+            PipelinePacket::DataFrame(Frame::from_system_bytes(ts, FrameTiming::default(), 0)),
             &mut sink,
         )
         .await
@@ -366,8 +357,8 @@ async fn aacparse(loas_frames: &[Vec<u8>]) -> Parsed {
     for frame in loas_frames {
         parse
             .process(
-                PipelinePacket::DataFrame(Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(frame.clone().into_boxed_slice())),
+                PipelinePacket::DataFrame(Frame::from_system_bytes(
+                    frame.clone(),
                     FrameTiming::default(),
                     0,
                 )),

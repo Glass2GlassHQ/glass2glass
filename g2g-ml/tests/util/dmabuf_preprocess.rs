@@ -8,7 +8,7 @@
 
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
+use g2g_core::memory::MemoryDomain;
 use g2g_core::{
     AsyncElement, Caps, Dim, G2gError, OutputSink, PushOutcome, Rate, RawVideoFormat,
 };
@@ -177,12 +177,7 @@ async fn preprocess_system(caps: &Caps, pixels: Vec<u8>) -> Vec<f32> {
     let mut sink = Collect::default();
     element
         .process(
-            PipelinePacket::DataFrame(Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(pixels.into_boxed_slice())),
-                timing: FrameTiming::default(),
-                sequence: 0,
-                meta: Default::default(),
-            }),
+            PipelinePacket::DataFrame(Frame::from_system_bytes(pixels, FrameTiming::default(), 0)),
             &mut sink,
         )
         .await

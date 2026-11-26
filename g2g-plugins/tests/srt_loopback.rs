@@ -17,11 +17,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_simple_pipeline, LatencyProfile, SourceLoop};
 use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, FrameTiming, G2gError, MemoryDomain, NetworkFailure,
-    OutputSink, PipelineClock, PipelinePacket, PropValue, PushOutcome,
+    AsyncElement, Caps, ConfigureOutcome, FrameTiming, G2gError, NetworkFailure, OutputSink,
+    PipelineClock, PipelinePacket, PropValue, PushOutcome,
 };
 
 use g2g_plugins::srt;
@@ -167,15 +166,14 @@ async fn srt_handshake_and_arq_recover_a_dropped_payload() {
         let mut null = NullOut;
         for i in 0u8..(N * 2) {
             let payload = vec![i % N; 100];
-            let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
-                timing: FrameTiming {
+            let frame = Frame::from_system_bytes(
+                payload,
+                FrameTiming {
                     pts_ns: i as u64 * 10_000_000,
                     ..FrameTiming::default()
                 },
-                sequence: i as u64,
-                meta: Default::default(),
-            };
+                i as u64,
+            );
             // Once the listener hits its limit + leaves, a send may fail; that is fine.
             if sink
                 .process(PipelinePacket::DataFrame(frame), &mut null)
@@ -250,14 +248,7 @@ async fn listener_acks_on_its_timer_not_per_datagram() {
         .expect("configure");
         let mut null = NullOut;
         for i in 0..N {
-            let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(
-                    vec![i; 100].into_boxed_slice(),
-                )),
-                timing: FrameTiming::default(),
-                sequence: i as u64,
-                meta: Default::default(),
-            };
+            let frame = Frame::from_system_bytes(vec![i; 100], FrameTiming::default(), i as u64);
             sink.process(PipelinePacket::DataFrame(frame), &mut null)
                 .await
                 .expect("send");
@@ -318,15 +309,14 @@ async fn congestion_control_paces_egress_to_the_bandwidth_cap() {
         let start = std::time::Instant::now();
         for i in 0u8..N {
             let payload = vec![i; PAYLOAD];
-            let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
-                timing: FrameTiming {
+            let frame = Frame::from_system_bytes(
+                payload,
+                FrameTiming {
                     pts_ns: i as u64 * 10_000_000,
                     ..FrameTiming::default()
                 },
-                sequence: i as u64,
-                meta: Default::default(),
-            };
+                i as u64,
+            );
             // No inter-frame sleep: the pacing is the only thing slowing this down.
             if sink
                 .process(PipelinePacket::DataFrame(frame), &mut null)
@@ -369,12 +359,7 @@ async fn congestion_control_paces_egress_to_the_bandwidth_cap() {
 }
 
 fn tagged_frame(tag: u8) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(vec![tag; 100].into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: tag as u64,
-        meta: Default::default(),
-    }
+    Frame::from_system_bytes(vec![tag; 100], FrameTiming::default(), tag as u64)
 }
 
 async fn send_tagged(sink: &mut SrtSink, tag: u8) -> Result<(), G2gError> {

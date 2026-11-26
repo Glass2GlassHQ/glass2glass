@@ -15,7 +15,6 @@ use collect_sink::CollectSink;
 
 use g2g_core::element::{OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{Caps, Dim, G2gError, MultiInputElement, Rate, TagList, VideoCodec};
 use g2g_plugins::mp4muxn::Mp4MuxN;
@@ -59,17 +58,16 @@ fn frame_bytes(f: &Frame) -> &[u8] {
 }
 
 fn au_frame(bytes: Vec<u8>, pts_ns: u64, sequence: u64) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        bytes,
+        FrameTiming {
             pts_ns,
             dts_ns: pts_ns,
             duration_ns: 33_333_333,
             ..FrameTiming::default()
         },
         sequence,
-        meta: Default::default(),
-    }
+    )
 }
 
 /// A sink that concatenates the ISO-BMFF byte-stream frames `Mp4MuxN` forwards.

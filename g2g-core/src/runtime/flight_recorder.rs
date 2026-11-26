@@ -312,7 +312,7 @@ mod tests {
     use super::*;
     use crate::caps::ByteStreamEncoding;
     use crate::frame::{Frame, FrameTiming};
-    use crate::memory::{MemoryDomain, SystemSlice};
+    use crate::memory::MemoryDomain;
     use crate::wire::decode_packet;
 
     fn caps(encoding: ByteStreamEncoding) -> Caps {
@@ -320,10 +320,8 @@ mod tests {
     }
 
     fn frame(sequence: u64, len: usize) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(
-                alloc::vec![sequence as u8; len].into_boxed_slice(),
-            )),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            alloc::vec![sequence as u8; len],
             FrameTiming::default(),
             sequence,
         ))

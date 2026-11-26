@@ -51,7 +51,6 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{accept_async, MaybeTlsStream, WebSocketStream};
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::query::LatencyReport;
 use g2g_core::runtime::{run_graph, GraphNodeRef, LinkCapacity, RunStats, SourceLoop};
 use g2g_core::wire::{decode_packet, encode_packet};
@@ -221,11 +220,7 @@ impl WireStageSink {
         if !self.meta_only {
             return frame;
         }
-        let mut reply = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(Vec::new().into_boxed_slice())),
-            frame.timing,
-            frame.sequence,
-        );
+        let mut reply = Frame::from_system_bytes(Vec::new(), frame.timing, frame.sequence);
         reply.meta = frame.meta;
         reply
     }

@@ -31,11 +31,10 @@ use std::path::{Path, PathBuf};
 
 use g2g_core::frame::Frame;
 use g2g_core::log::short_type_name;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError,
-    MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::filesink::{io_err, path_io_err};
@@ -176,8 +175,8 @@ pub(crate) fn read_block(
         return Ok(None);
     }
     buf.truncate(read);
-    Ok(Some(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(buf.into_boxed_slice())),
+    Ok(Some(Frame::from_system_bytes(
+        buf,
         // A byte stream carries no timing; a demuxer downstream recovers it.
         FrameTiming::default(),
         sequence,

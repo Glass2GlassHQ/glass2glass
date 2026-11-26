@@ -24,8 +24,7 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::log::LogSource;
-use g2g_core::memory::SystemSlice;
-use g2g_core::{g2g_debug, FrameTiming, G2gError, MemoryDomain};
+use g2g_core::{g2g_debug, FrameTiming, G2gError};
 
 use web_transport_quinn::SendStream;
 
@@ -1018,15 +1017,14 @@ pub fn select_track(wanted: &str, tracks: &[CatalogTrack]) -> Option<CatalogTrac
 }
 
 pub fn byte_frame(bytes: Vec<u8>, sequence: u64) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        bytes,
+        FrameTiming {
             arrival_ns: g2g_core::metrics::monotonic_ns(),
             ..FrameTiming::default()
         },
         sequence,
-        meta: Default::default(),
-    }
+    )
 }
 
 impl AnyDriver {

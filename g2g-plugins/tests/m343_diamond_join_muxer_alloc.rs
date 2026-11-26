@@ -21,12 +21,11 @@ use std::boxed::Box;
 use std::sync::{Arc, Mutex};
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_graph, GraphNode, SourceLoop};
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
-    DomainSet, FrameTiming, G2gError, Graph, MemoryDomain, MemoryDomainKind, MultiInputElement,
-    OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
+    DomainSet, FrameTiming, G2gError, Graph, MemoryDomainKind, MultiInputElement, OutputSink,
+    PipelineClock, PipelinePacket, Rate, RawVideoFormat,
 };
 
 struct NullClock;
@@ -49,12 +48,11 @@ fn nv12(w: u32, h: u32) -> Caps {
 }
 
 fn frame(seq: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(vec![seq as u8].into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: seq,
-        meta: Default::default(),
-    })
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        vec![seq as u8],
+        FrameTiming::default(),
+        seq,
+    ))
 }
 
 /// Emits `count` NV12 frames, then EOS. No mid-stream change: these tests

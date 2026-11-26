@@ -412,15 +412,14 @@ fn build_frame(
     count: u64,
 ) -> Frame {
     let pts_ns = timeline.pts_ns(rtp_timestamp, clock.rate_hz());
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        bytes,
+        FrameTiming {
             pts_ns,
             ..FrameTiming::default()
         },
-        sequence: count,
-        meta: Default::default(),
-    }
+        count,
+    )
 }
 
 impl core::fmt::Debug for St2110VideoSrc {
@@ -782,15 +781,14 @@ mod tests {
     }
 
     fn raw_frame(bytes: Vec<u8>, pts_ns: u64) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            timing: FrameTiming {
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            bytes,
+            FrameTiming {
                 pts_ns,
                 ..FrameTiming::default()
             },
-            sequence: 0,
-            meta: Default::default(),
-        })
+            0,
+        ))
     }
 
     #[test]

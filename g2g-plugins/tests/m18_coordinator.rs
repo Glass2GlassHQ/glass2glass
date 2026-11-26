@@ -24,11 +24,10 @@ use std::boxed::Box;
 use std::sync::{Arc, Mutex};
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
+    OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
 };
 
 struct ZeroClock;
@@ -76,14 +75,8 @@ impl SourceLoop for NvSource {
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
             for i in 0..self.target_frames {
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(
-                        vec![i as u8].into_boxed_slice(),
-                    )),
-                    timing: FrameTiming::default(),
-                    sequence: i as u64,
-                    meta: Default::default(),
-                };
+                let frame =
+                    Frame::from_system_bytes(vec![i as u8], FrameTiming::default(), i as u64);
                 out.push(PipelinePacket::DataFrame(frame)).await?;
             }
             out.push(PipelinePacket::Eos).await?;

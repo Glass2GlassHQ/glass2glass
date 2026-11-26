@@ -10,7 +10,6 @@ use std::boxed::Box;
 use std::sync::{Arc, Mutex};
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_graph, GraphNode, SourceLoop};
 use g2g_core::{
     AspectRatio, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming,
@@ -82,14 +81,11 @@ impl SourceLoop for DecoderLikeSource {
             .await?;
             let size = frame_bytes(DECODED_FORMAT, DECODED_SIZE);
             for sequence in 0..FRAME_COUNT {
-                out.push(PipelinePacket::DataFrame(Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(
-                        vec![0u8; size].into_boxed_slice(),
-                    )),
-                    timing: FrameTiming::default(),
+                out.push(PipelinePacket::DataFrame(Frame::from_system_bytes(
+                    vec![0u8; size],
+                    FrameTiming::default(),
                     sequence,
-                    meta: Default::default(),
-                }))
+                )))
                 .await?;
             }
             out.push(PipelinePacket::Eos).await?;

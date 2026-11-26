@@ -775,7 +775,7 @@ mod tests {
     use super::*;
     use crate::av1parse::Av1Parse;
     use g2g_core::frame::Frame;
-    use g2g_core::memory::{MemoryDomain, SystemSlice};
+
     use g2g_core::{FrameTiming, PushOutcome};
 
     fn i420_grey(w: usize, h: usize) -> Vec<u8> {
@@ -846,10 +846,8 @@ mod tests {
         enc.configure_pipeline(&i420_caps(64, 64)).unwrap();
         let mut sink = CaptureSink::default();
         for i in 0..5u64 {
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(
-                    i420_grey(64, 64).into_boxed_slice(),
-                )),
+            let frame = Frame::from_system_bytes(
+                i420_grey(64, 64),
                 FrameTiming {
                     pts_ns: i * 33_000_000,
                     ..FrameTiming::default()
@@ -886,11 +884,7 @@ mod tests {
         parse.configure_pipeline(&sink.caps[0]).unwrap();
         let mut psink = CaptureSink::default();
         for data in &sink.frames {
-            let f = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(data.clone().into_boxed_slice())),
-                FrameTiming::default(),
-                0,
-            );
+            let f = Frame::from_system_bytes(data.clone(), FrameTiming::default(), 0);
             parse
                 .process(PipelinePacket::DataFrame(f), &mut psink)
                 .await
@@ -938,10 +932,8 @@ mod tests {
         let mut sink = PtsSink::default();
         let n = 40u64;
         for i in 0..n {
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(
-                    i420_grey(64, 64).into_boxed_slice(),
-                )),
+            let frame = Frame::from_system_bytes(
+                i420_grey(64, 64),
                 FrameTiming {
                     pts_ns: (i + 1) * 33_000_000,
                     ..FrameTiming::default()
@@ -997,10 +989,8 @@ mod tests {
         enc.configure_pipeline(&i420_caps(64, 64)).unwrap();
         let mut sink = CaptureSink::default();
         for i in 0..3u64 {
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(
-                    i420_grey(64, 64).into_boxed_slice(),
-                )),
+            let frame = Frame::from_system_bytes(
+                i420_grey(64, 64),
                 FrameTiming {
                     pts_ns: i * 33_000_000,
                     ..FrameTiming::default()
@@ -1013,10 +1003,8 @@ mod tests {
         }
         enc.set_target_bitrate(500_000);
         for i in 3..6u64 {
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(
-                    i420_grey(64, 64).into_boxed_slice(),
-                )),
+            let frame = Frame::from_system_bytes(
+                i420_grey(64, 64),
                 FrameTiming {
                     pts_ns: i * 33_000_000,
                     ..FrameTiming::default()
@@ -1129,10 +1117,8 @@ mod tests {
         enc.configure_pipeline(&i420_caps(64, 64)).unwrap();
         let mut sink = CaptureSink::default();
         async fn push(enc: &mut Av1Enc, sink: &mut CaptureSink, i: u64) {
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(
-                    i420_noise(64, 64, i as u32 + 1).into_boxed_slice(),
-                )),
+            let frame = Frame::from_system_bytes(
+                i420_noise(64, 64, i as u32 + 1),
                 FrameTiming {
                     pts_ns: i * 33_000_000,
                     ..FrameTiming::default()

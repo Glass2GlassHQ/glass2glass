@@ -24,11 +24,10 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::block_on;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, ClockPriority, FrameTiming, G2gError, MemoryDomain,
-    OutputSink, PipelineClock, PipelinePacket, PushOutcome,
+    AsyncElement, AudioFormat, Caps, ClockPriority, FrameTiming, G2gError, OutputSink,
+    PipelineClock, PipelinePacket, PushOutcome,
 };
 use g2g_plugins::alsasink::AlsaSink;
 
@@ -67,15 +66,14 @@ fn tone(frames: usize, phase0: usize) -> Vec<u8> {
 }
 
 fn pcm_frame(bytes: Vec<u8>, seq: u64) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        bytes,
+        FrameTiming {
             pts_ns: seq,
             ..Default::default()
         },
-        sequence: seq,
-        meta: Default::default(),
-    }
+        seq,
+    )
 }
 
 #[test]

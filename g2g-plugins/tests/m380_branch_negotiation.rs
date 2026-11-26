@@ -25,7 +25,6 @@ use std::sync::{Arc, Mutex};
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{run_graph, GraphNode, SourceLoop};
 use g2g_core::{
     AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
@@ -169,11 +168,7 @@ impl SourceLoop for BytesSrc {
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
             let bytes = self.bytes.take().unwrap_or_default();
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                FrameTiming::default(),
-                0,
-            );
+            let frame = Frame::from_system_bytes(bytes, FrameTiming::default(), 0);
             out.push(PipelinePacket::DataFrame(frame)).await?;
             out.push(PipelinePacket::Eos).await?;
             Ok(1)
@@ -203,8 +198,8 @@ impl OutputSink for Collect {
     }
 }
 fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        data,
         FrameTiming {
             pts_ns,
             dts_ns: pts_ns,

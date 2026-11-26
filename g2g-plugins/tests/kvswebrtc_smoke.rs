@@ -29,10 +29,9 @@ use core::task::{Context, Poll};
 use std::time::Duration;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, FrameTiming, G2gError, MemoryDomain, MultiOutputSource, OutputSink,
-    PipelinePacket, PushOutcome, VideoCodec,
+    AsyncElement, Caps, FrameTiming, G2gError, MultiOutputSource, OutputSink, PipelinePacket,
+    PushOutcome, VideoCodec,
 };
 use g2g_plugins::kvswebrtcsink::KvsWebRtcSink;
 use g2g_plugins::kvswebrtcsrc::KvsWebRtcSrc;
@@ -69,11 +68,7 @@ async fn publish(sink: &mut KvsWebRtcSink, units: &[Vec<u8>]) {
             pts_ns: sequence as u64 * interval.as_nanos() as u64,
             ..FrameTiming::default()
         };
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(unit.clone().into_boxed_slice())),
-            timing,
-            sequence as u64,
-        );
+        let frame = Frame::from_system_bytes(unit.clone(), timing, sequence as u64);
         sink.process(PipelinePacket::DataFrame(frame), &mut Discard)
             .await
             .expect("the master publishes");

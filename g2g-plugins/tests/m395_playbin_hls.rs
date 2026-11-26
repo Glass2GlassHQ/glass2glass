@@ -241,7 +241,7 @@ fn a_separate_audio_rendition_seeks_with_the_variant() {
 /// what an fMP4 HLS variant's tracks are discovered from.
 fn fmp4_init() -> Vec<u8> {
     use g2g_core::frame::{Frame, FrameTiming};
-    use g2g_core::memory::{MemoryDomain, SystemSlice};
+
     use g2g_core::runtime::block_on;
     use g2g_core::{MultiInputElement, PipelinePacket, PushOutcome};
     use g2g_plugins::mp4muxn::Mp4MuxN;
@@ -268,8 +268,8 @@ fn fmp4_init() -> Vec<u8> {
         }
     }
     fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            data,
             FrameTiming {
                 pts_ns,
                 dts_ns: pts_ns,

@@ -65,15 +65,14 @@ fn decode(access_units: Vec<Vec<u8>>) -> Decoded {
     let mut sink = CollectSink::default();
     let mut keyframe_requests = Vec::new();
     for (index, access_unit) in access_units.into_iter().enumerate() {
-        let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(access_unit.into_boxed_slice())),
-            timing: FrameTiming {
+        let frame = Frame::from_system_bytes(
+            access_unit,
+            FrameTiming {
                 pts_ns: index as u64 * 33_000_000,
                 ..Default::default()
             },
-            sequence: index as u64,
-            meta: Default::default(),
-        };
+            index as u64,
+        );
         block_on(decoder.process(PipelinePacket::DataFrame(frame), &mut sink))
             .expect("decode access unit");
         if decoder.take_reconfigure() == Some(Reconfigure::ForceKeyframe) {

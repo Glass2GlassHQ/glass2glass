@@ -163,10 +163,8 @@ impl SourceLoop for ObservingSrc {
             out.push(PipelinePacket::CapsChanged(rgba(8, 8))).await?;
             for seq in 0..self.frames {
                 let buf = vec![0u8; 8 * 8 * 4];
-                let frame = g2g_core::frame::Frame::new(
-                    g2g_core::MemoryDomain::System(g2g_core::memory::SystemSlice::from_boxed(
-                        buf.into_boxed_slice(),
-                    )),
+                let frame = g2g_core::frame::Frame::from_system_bytes(
+                    buf,
                     g2g_core::FrameTiming::default(),
                     seq,
                 );

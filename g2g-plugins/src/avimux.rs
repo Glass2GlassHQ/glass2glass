@@ -25,7 +25,6 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
     ElementMetadata, G2gError, InputAggregator, MultiInputElement, OutputSink, PadTemplate,
@@ -151,11 +150,7 @@ fn is_keyframe(stream: &AviWriteStream, timing: &FrameTiming) -> bool {
 
 /// Wrap a finished file as the single outgoing frame.
 fn file_frame(bytes: Vec<u8>) -> Frame {
-    Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    )
+    Frame::from_system_bytes(bytes, FrameTiming::default(), 0)
 }
 
 /// Writes one elementary stream into an AVI file.
@@ -547,17 +542,16 @@ mod tests {
     const FRAME_PERIOD_NS: u64 = 40_000_000;
 
     fn frame(payload: Vec<u8>, pts_ns: u64, keyframe: bool) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
-            timing: FrameTiming {
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            payload,
+            FrameTiming {
                 pts_ns,
                 dts_ns: pts_ns,
                 keyframe,
                 ..FrameTiming::default()
             },
-            sequence: 0,
-            meta: Default::default(),
-        })
+            0,
+        ))
     }
 
     #[test]

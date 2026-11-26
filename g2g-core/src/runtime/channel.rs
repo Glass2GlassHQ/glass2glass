@@ -2287,8 +2287,8 @@ mod link_tests {
 
     #[cfg(feature = "std")]
     fn frame_bytes(bytes: usize) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(alloc::vec![0u8; bytes].into())),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            alloc::vec![0u8; bytes],
             FrameTiming::default(),
             0,
         ))

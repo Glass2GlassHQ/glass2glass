@@ -32,11 +32,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
-    FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, SubPictureFormat,
+    FrameTiming, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, SubPictureFormat,
 };
 
 use crate::vobsub::{parse_idx, parse_spu};
@@ -139,11 +138,7 @@ impl VobSubDec {
     fn canvas_frame(&mut self, pixels: Vec<u8>, timing: FrameTiming) -> Frame {
         let seq = self.emitted;
         self.emitted += 1;
-        Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(pixels.into_boxed_slice())),
-            timing,
-            seq,
-        )
+        Frame::from_system_bytes(pixels, timing, seq)
     }
 
     /// Adopt the `.idx` configuration a `CodecPrivate` blob carries. `None` when
@@ -450,8 +445,8 @@ mod tests {
     }
 
     fn frame(bytes: &[u8], pts_ns: u64) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            bytes.to_vec(),
             FrameTiming {
                 pts_ns,
                 dts_ns: pts_ns,

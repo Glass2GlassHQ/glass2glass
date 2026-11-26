@@ -17,7 +17,7 @@ use core::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::{MemoryDomain, SystemSlice};
+use g2g_core::memory::MemoryDomain;
 use g2g_core::runtime::{
     run_source_transform_sink, GraphNodeRef, LatencyProfile, RunStats, SourceLoop,
 };
@@ -92,10 +92,8 @@ impl SourceLoop for CountSrc {
         Box::pin(async move {
             out.push(PipelinePacket::CapsChanged(test_caps())).await?;
             for i in 0..FRAMES {
-                out.push(PipelinePacket::DataFrame(Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(
-                        vec![i; FRAME_LEN].into_boxed_slice(),
-                    )),
+                out.push(PipelinePacket::DataFrame(Frame::from_system_bytes(
+                    vec![i; FRAME_LEN],
                     FrameTiming {
                         pts_ns: u64::from(i) * PTS_STEP_NS,
                         ..FrameTiming::default()

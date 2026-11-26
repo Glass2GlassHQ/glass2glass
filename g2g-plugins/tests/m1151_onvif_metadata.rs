@@ -412,8 +412,8 @@ impl CollectSink {
 }
 
 fn metadata_packet(document: Vec<u8>, pts_ns: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(document.into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        document,
         FrameTiming {
             pts_ns,
             ..Default::default()

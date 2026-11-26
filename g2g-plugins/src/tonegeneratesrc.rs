@@ -15,12 +15,11 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec,
+    G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec,
 };
 
 const DEFAULT_RATE: u32 = 44_100;
@@ -134,9 +133,9 @@ impl SourceLoop for ToneGenerateSrc {
                 let arrival_ns = g2g_core::metrics::monotonic_ns();
                 #[cfg(not(feature = "std"))]
                 let arrival_ns: u64 = 0;
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                    timing: FrameTiming {
+                let frame = Frame::from_system_bytes(
+                    bytes,
+                    FrameTiming {
                         pts_ns: pts,
                         dts_ns: pts,
                         duration_ns: buffer_duration_ns,
@@ -145,9 +144,8 @@ impl SourceLoop for ToneGenerateSrc {
                         keyframe: false,
                         ..FrameTiming::default()
                     },
-                    sequence: seq,
-                    meta: Default::default(),
-                };
+                    seq,
+                );
                 out.push(PipelinePacket::DataFrame(frame)).await?;
             }
             out.push(PipelinePacket::Eos).await?;

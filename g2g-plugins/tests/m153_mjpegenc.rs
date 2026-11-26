@@ -12,10 +12,9 @@
 #![cfg(all(feature = "mjpeg-encode", feature = "mjpeg"))]
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
-    PushOutcome, Rate, RawVideoFormat, VideoCodec,
+    AsyncElement, Caps, Dim, FrameTiming, G2gError, OutputSink, PipelinePacket, PushOutcome, Rate,
+    RawVideoFormat, VideoCodec,
 };
 use g2g_plugins::mjpegdec::MjpegDec;
 use g2g_plugins::mjpegenc::MjpegEnc;
@@ -78,8 +77,8 @@ async fn encodes_rgba_to_mjpeg_that_roundtrips_through_mjpegdec() {
     let mut esink = CaptureSink::default();
 
     let blue = rgba_solid(20, 40, 210);
-    let frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(blue.into_boxed_slice())),
+    let frame = Frame::from_system_bytes(
+        blue,
         FrameTiming {
             pts_ns: 0,
             ..FrameTiming::default()
@@ -120,11 +119,7 @@ async fn encodes_rgba_to_mjpeg_that_roundtrips_through_mjpegdec() {
     })
     .unwrap();
     let mut dsink = CaptureSink::default();
-    let jframe = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(jpeg.clone().into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    );
+    let jframe = Frame::from_system_bytes(jpeg.clone(), FrameTiming::default(), 0);
     dec.process(PipelinePacket::DataFrame(jframe), &mut dsink)
         .await
         .unwrap();
@@ -184,11 +179,7 @@ async fn encodes_i420_to_mjpeg_that_roundtrips_to_blue() {
 
     // Blue (20,40,210) in BT.601 limited range is roughly Y=62, U=205, V=107.
     let blue = i420_solid(62, 205, 107);
-    let frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(blue.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    );
+    let frame = Frame::from_system_bytes(blue, FrameTiming::default(), 0);
     enc.process(PipelinePacket::DataFrame(frame), &mut esink)
         .await
         .unwrap();
@@ -207,13 +198,7 @@ async fn encodes_i420_to_mjpeg_that_roundtrips_to_blue() {
     })
     .unwrap();
     let mut dsink = CaptureSink::default();
-    let jframe = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(
-            esink.frames[0].clone().into_boxed_slice(),
-        )),
-        FrameTiming::default(),
-        0,
-    );
+    let jframe = Frame::from_system_bytes(esink.frames[0].clone(), FrameTiming::default(), 0);
     dec.process(PipelinePacket::DataFrame(jframe), &mut dsink)
         .await
         .unwrap();
@@ -246,11 +231,7 @@ async fn encode_rgba(mut enc: MjpegEnc, pixels: Vec<u8>, w: u32, h: u32) -> Vec<
     })
     .unwrap();
     let mut sink = CaptureSink::default();
-    let frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(pixels.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    );
+    let frame = Frame::from_system_bytes(pixels, FrameTiming::default(), 0);
     enc.process(PipelinePacket::DataFrame(frame), &mut sink)
         .await
         .unwrap();
@@ -288,11 +269,7 @@ async fn mozjpeg_backend_encodes_a_decodable_jpeg_honouring_quality() {
     })
     .unwrap();
     let mut dsink = CaptureSink::default();
-    let jframe = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(jpeg.clone().into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    );
+    let jframe = Frame::from_system_bytes(jpeg.clone(), FrameTiming::default(), 0);
     dec.process(PipelinePacket::DataFrame(jframe), &mut dsink)
         .await
         .unwrap();

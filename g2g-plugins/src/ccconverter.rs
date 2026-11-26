@@ -27,11 +27,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ClosedCaptionFormat, ConfigureOutcome,
-    ElementMetadata, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec,
+    ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec,
 };
 
 use crate::cea::{
@@ -342,11 +341,7 @@ impl AsyncElement for CcConverter {
                             .await?;
                         self.caps_emitted = true;
                     }
-                    let new = Frame::new(
-                        MemoryDomain::System(SystemSlice::from_boxed(converted.into_boxed_slice())),
-                        frame.timing,
-                        frame.sequence,
-                    );
+                    let new = Frame::from_system_bytes(converted, frame.timing, frame.sequence);
                     out.push(PipelinePacket::DataFrame(new)).await.map(|_| ())
                 }
                 // The runner hands each element its own pre-fixed output caps as a

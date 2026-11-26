@@ -569,9 +569,9 @@ fn mpegts_contains_a_dropped_packet() -> bool {
 pub fn mp4() -> [MaturityRecord; 2] {
     use crate::fmp4::{parse_fragments, parse_header, FragmentStarts};
     use crate::mp4muxn::Mp4MuxN;
-    use g2g_core::memory::SystemSlice;
+
     use g2g_core::{
-        BitstreamAlignment, Caps, Colorimetry, Dim, Frame, FrameTiming, G2gError, MemoryDomain,
+        BitstreamAlignment, Caps, Colorimetry, Dim, Frame, FrameTiming, G2gError,
         MultiInputElement, OutputSink, PipelinePacket, PushOutcome, Rate, VideoCodec,
     };
 
@@ -612,10 +612,8 @@ pub fn mp4() -> [MaturityRecord; 2] {
         g2g_core::runtime::block_on(async {
             for (index, access_unit) in [&idr, &inter].into_iter().enumerate() {
                 let pts_ns = index as u64 * FRAME_DURATION_NS;
-                let frame = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(
-                        access_unit.clone().into_boxed_slice(),
-                    )),
+                let frame = Frame::from_system_bytes(
+                    access_unit.clone(),
                     FrameTiming {
                         pts_ns,
                         dts_ns: pts_ns,

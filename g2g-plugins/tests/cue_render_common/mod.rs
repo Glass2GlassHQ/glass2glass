@@ -11,10 +11,9 @@
 #![allow(dead_code)] // no one test file uses every helper here
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
-    PushOutcome, Rate, RawVideoFormat,
+    AsyncElement, Caps, Dim, FrameTiming, G2gError, OutputSink, PipelinePacket, PushOutcome, Rate,
+    RawVideoFormat,
 };
 use g2g_plugins::subparse::parse_webvtt;
 use g2g_plugins::textoverlay::TextOverlay;
@@ -85,11 +84,7 @@ pub(crate) fn black_frame() -> Frame {
     for _ in 0..W * H {
         bytes.extend_from_slice(&[0, 0, 0, 255]);
     }
-    Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    )
+    Frame::from_system_bytes(bytes, FrameTiming::default(), 0)
 }
 
 #[derive(Default)]

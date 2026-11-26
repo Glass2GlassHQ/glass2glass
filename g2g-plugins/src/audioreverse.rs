@@ -33,12 +33,10 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::{Frame, FrameTiming};
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     pcm_caps_any_rate_and_channels, AsyncElement, AudioFormat, Caps, CapsConstraint,
-    ConfigureOutcome, ElementMetadata, G2gError, MemoryDomain, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, ANY_CHANNELS,
-    ANY_SAMPLE_RATE,
+    ConfigureOutcome, ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
 use crate::audioconvert::{frame_bytes, ns_to_samples, pcm_formats, samples_to_ns};
@@ -214,11 +212,7 @@ impl AudioReverse {
                 duration_ns: end.saturating_sub(pts),
                 ..Default::default()
             };
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                timing,
-                self.emitted,
-            );
+            let frame = Frame::from_system_bytes(bytes, timing, self.emitted);
             self.emitted += 1;
             out.push(PipelinePacket::DataFrame(frame)).await?;
         }

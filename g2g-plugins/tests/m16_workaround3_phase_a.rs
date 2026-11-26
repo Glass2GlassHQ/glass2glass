@@ -30,11 +30,10 @@ use std::boxed::Box;
 use std::collections::VecDeque;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PipelineClock, PipelinePacket, Rate, RawVideoFormat, VideoCodec,
+    AsyncElement, Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, OutputSink, PipelineClock,
+    PipelinePacket, Rate, RawVideoFormat, VideoCodec,
 };
 use g2g_plugins::fakesink::FakeSink;
 
@@ -129,14 +128,8 @@ impl SourceLoop for ScriptedSource {
                         let _ = out.push(PipelinePacket::CapsChanged(c)).await?;
                     }
                     Step::DataFrame { tag } => {
-                        let frame = Frame {
-                            domain: MemoryDomain::System(SystemSlice::from_boxed(
-                                vec![tag].into_boxed_slice(),
-                            )),
-                            timing: FrameTiming::default(),
-                            sequence: emitted,
-                            meta: Default::default(),
-                        };
+                        let frame =
+                            Frame::from_system_bytes(vec![tag], FrameTiming::default(), emitted);
                         let _ = out.push(PipelinePacket::DataFrame(frame)).await?;
                         emitted += 1;
                     }
@@ -275,14 +268,8 @@ impl AsyncElement for FakeReorderDecoder {
                         }
                         let seq = self.out_sequence.get();
                         self.out_sequence.set(seq + 1);
-                        let drained = Frame {
-                            domain: MemoryDomain::System(SystemSlice::from_boxed(
-                                vec![tag].into_boxed_slice(),
-                            )),
-                            timing: FrameTiming::default(),
-                            sequence: seq,
-                            meta: Default::default(),
-                        };
+                        let drained =
+                            Frame::from_system_bytes(vec![tag], FrameTiming::default(), seq);
                         out.push(PipelinePacket::DataFrame(drained)).await?;
                     }
                 }
@@ -311,14 +298,8 @@ impl AsyncElement for FakeReorderDecoder {
                         }
                         let seq = self.out_sequence.get();
                         self.out_sequence.set(seq + 1);
-                        let drained = Frame {
-                            domain: MemoryDomain::System(SystemSlice::from_boxed(
-                                vec![tag].into_boxed_slice(),
-                            )),
-                            timing: FrameTiming::default(),
-                            sequence: seq,
-                            meta: Default::default(),
-                        };
+                        let drained =
+                            Frame::from_system_bytes(vec![tag], FrameTiming::default(), seq);
                         out.push(PipelinePacket::DataFrame(drained)).await?;
                     }
                     out.push(PipelinePacket::Eos).await?;
@@ -494,14 +475,8 @@ impl SourceLoop for ScriptedSourceBadCaps {
                         let _ = out.push(PipelinePacket::CapsChanged(c)).await?;
                     }
                     Step::DataFrame { tag } => {
-                        let frame = Frame {
-                            domain: MemoryDomain::System(SystemSlice::from_boxed(
-                                vec![tag].into_boxed_slice(),
-                            )),
-                            timing: FrameTiming::default(),
-                            sequence: emitted,
-                            meta: Default::default(),
-                        };
+                        let frame =
+                            Frame::from_system_bytes(vec![tag], FrameTiming::default(), emitted);
                         let _ = out.push(PipelinePacket::DataFrame(frame)).await?;
                         emitted += 1;
                     }

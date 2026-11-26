@@ -17,11 +17,10 @@
 #![cfg(all(feature = "wgpu-sink", feature = "metadata"))]
 
 use g2g_core::frame::{Frame, FrameTiming};
-use g2g_core::memory::SystemSlice;
 use g2g_core::meta::{MetaRequests, PlaneLayout, RequestPolicy};
 use g2g_core::{
-    AllocationParams, AsyncElement, Caps, Dim, G2gError, MemoryDomain, MultiInputElement,
-    OutputSink, PipelinePacket, PushOutcome, Rate, RawVideoFormat,
+    AllocationParams, AsyncElement, Caps, Dim, G2gError, MultiInputElement, OutputSink,
+    PipelinePacket, PushOutcome, Rate, RawVideoFormat,
 };
 use g2g_plugins::compositor::CompositorPad;
 use g2g_plugins::gpu::GpuContext;
@@ -81,8 +80,8 @@ fn pattern() -> std::vec::Vec<u8> {
 }
 
 fn frame_of(bytes: &[u8]) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        bytes.to_vec(),
         FrameTiming::default(),
         0,
     ))

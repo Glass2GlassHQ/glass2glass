@@ -1247,11 +1247,7 @@ fn emitted_frame(emitted: Emitted, anchor_timing: FrameTiming, sequence: u64) ->
         timing.pts_ns = pts_ns;
         timing.dts_ns = pts_ns;
     }
-    Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(emitted.payload.into_boxed_slice())),
-        timing,
-        sequence,
-    )
+    Frame::from_system_bytes(emitted.payload, timing, sequence)
 }
 
 /// Call the hosted element with writable views over the frames' System bytes.

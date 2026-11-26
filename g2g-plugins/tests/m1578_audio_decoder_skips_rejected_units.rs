@@ -15,7 +15,6 @@ mod collect_sink;
 use std::path::PathBuf;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{AsyncElement, AudioFormat, Caps, ANY_CHANNELS};
 use g2g_plugins::ffmpegaudiodec::FfmpegAudioDec;
 
@@ -27,11 +26,7 @@ const ADTS_HEADER_LEN: usize = 7;
 const CORRUPT_PAYLOAD_BYTE: u8 = 0x00;
 
 fn data_frame(data: Vec<u8>) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    ))
+    PipelinePacket::DataFrame(Frame::from_system_bytes(data, FrameTiming::default(), 0))
 }
 
 // the 13-bit frame length across bytes 3..6 of the header

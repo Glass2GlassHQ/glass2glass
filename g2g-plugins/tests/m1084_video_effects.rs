@@ -12,10 +12,7 @@
 mod collect_sink;
 use collect_sink::CollectSink;
 
-use g2g_core::memory::SystemSlice;
-use g2g_core::{
-    AsyncElement, Caps, Dim, Frame, FrameTiming, MemoryDomain, PipelinePacket, Rate, RawVideoFormat,
-};
+use g2g_core::{AsyncElement, Caps, Dim, Frame, FrameTiming, PipelinePacket, Rate, RawVideoFormat};
 
 use g2g_plugins::aspectratiocrop::AspectRatioCrop;
 use g2g_plugins::chromahold::ChromaHold;
@@ -39,9 +36,9 @@ fn raw(format: RawVideoFormat, w: u32, h: u32) -> Caps {
 }
 
 fn frame(bytes: Vec<u8>) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        bytes,
+        FrameTiming {
             pts_ns: 0,
             dts_ns: 0,
             duration_ns: 0,
@@ -50,9 +47,8 @@ fn frame(bytes: Vec<u8>) -> Frame {
             keyframe: false,
             ..FrameTiming::default()
         },
-        sequence: 0,
-        meta: Default::default(),
-    }
+        0,
+    )
 }
 
 /// Push one frame through a configured element and return everything it emits.

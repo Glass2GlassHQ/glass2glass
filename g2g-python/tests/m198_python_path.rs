@@ -40,9 +40,9 @@ fn frame_2x1_rgba(first: u8) -> Frame {
     // 2x1 RGBA = 8 bytes; only the first byte's value matters to the assertion.
     let mut bytes = vec![0u8; 8];
     bytes[0] = first;
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        bytes,
+        FrameTiming {
             pts_ns: 0,
             dts_ns: 0,
             duration_ns: 0,
@@ -51,9 +51,8 @@ fn frame_2x1_rgba(first: u8) -> Frame {
             keyframe: false,
             ..FrameTiming::default()
         },
-        sequence: 0,
-        meta: Default::default(),
-    }
+        0,
+    )
 }
 
 #[test]

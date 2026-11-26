@@ -1200,15 +1200,11 @@ mod tests {
 
     // ---- M580: scriptelement runtime transform ----
 
-    use g2g_core::{FrameTiming, SystemSlice};
+    use g2g_core::FrameTiming;
 
     fn rgba_frame(w: u32, h: u32) -> Frame {
         let bytes = std::vec![0u8; (w * h * 4) as usize];
-        Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        )
+        Frame::from_system_bytes(bytes, FrameTiming::default(), 0)
     }
 
     fn rgba_caps(w: u32, h: u32) -> Caps {

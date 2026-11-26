@@ -13,7 +13,6 @@
 
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{AudioFormat, Caps, G2gError};
 use g2g_plugins::mp4audiosink::Mp4AudioSink;
@@ -40,18 +39,17 @@ fn aac_au(index: usize) -> Vec<u8> {
 
 fn frame(bytes: Vec<u8>, index: usize) -> Frame {
     let pts = (index as u64) * 1024 * 1_000_000_000 / RATE as u64;
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        bytes,
+        FrameTiming {
             pts_ns: pts,
             dts_ns: pts,
             duration_ns: 1024 * 1_000_000_000 / RATE as u64,
             capture_ns: pts,
             ..FrameTiming::default()
         },
-        sequence: index as u64,
-        meta: Default::default(),
-    }
+        index as u64,
+    )
 }
 
 #[derive(Default)]
@@ -174,12 +172,7 @@ async fn pcm_aac_mp4_demux_decode_full_circle() {
                 data.extend_from_slice(&v.to_le_bytes());
             }
         }
-        let f = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-            timing: FrameTiming::default(),
-            sequence: i as u64,
-            meta: Default::default(),
-        };
+        let f = Frame::from_system_bytes(data, FrameTiming::default(), i as u64);
         enc.process(PipelinePacket::DataFrame(f), &mut encoded)
             .await
             .expect("encode");
@@ -235,12 +228,7 @@ async fn pcm_aac_mp4_demux_decode_full_circle() {
     dec.configure_pipeline(&probed).expect("decoder init");
     let mut pcm = Collect::default();
     for au in &demuxed.aus {
-        let f = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(au.clone().into_boxed_slice())),
-            timing: FrameTiming::default(),
-            sequence: 0,
-            meta: Default::default(),
-        };
+        let f = Frame::from_system_bytes(au.clone(), FrameTiming::default(), 0);
         dec.process(PipelinePacket::DataFrame(f), &mut pcm)
             .await
             .expect("decode");

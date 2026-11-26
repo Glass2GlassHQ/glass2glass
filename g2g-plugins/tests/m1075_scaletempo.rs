@@ -12,10 +12,9 @@ mod collect_sink;
 use collect_sink::CollectSink;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::segment::Segment;
-use g2g_core::{AsyncElement, AudioFormat, Caps, G2gError, MemoryDomain, PipelineClock, PropValue};
+use g2g_core::{AsyncElement, AudioFormat, Caps, G2gError, PipelineClock, PropValue};
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::scaletempo::ScaleTempo;
 
@@ -106,8 +105,8 @@ fn sine_buffer(first: u64, frames: u64) -> Vec<u8> {
 
 fn data_packet(pts: u64, bytes: Vec<u8>) -> PipelinePacket {
     let frames = bytes.len() as u64 / BYTES_PER_FRAME as u64;
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        bytes,
         FrameTiming {
             pts_ns: pts,
             dts_ns: pts,

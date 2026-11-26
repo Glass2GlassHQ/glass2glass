@@ -12,11 +12,10 @@ use core::future::Future;
 use core::pin::Pin;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_graph, GraphNode, GraphNodeRef, SourceLoop};
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, Graph, MemoryDomain,
-    OutputSink, PipelineClock, PipelinePacket, Rate, VideoCodec,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, Graph, OutputSink,
+    PipelineClock, PipelinePacket, Rate, VideoCodec,
 };
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::flvdemux::FlvDemux;
@@ -70,11 +69,7 @@ impl SourceLoop for H264Source {
             while self.next < self.aus.len() {
                 let au = core::mem::take(&mut self.aus[self.next]);
                 self.next += 1;
-                let frame = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-                    Default::default(),
-                    self.next as u64,
-                );
+                let frame = Frame::from_system_bytes(au, Default::default(), self.next as u64);
                 out.push(PipelinePacket::DataFrame(frame)).await?;
             }
             out.push(PipelinePacket::Eos).await?;

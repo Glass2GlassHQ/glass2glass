@@ -553,15 +553,14 @@ impl SourceLoop for St2110AudioSrc {
                 let pts_ns = timeline.pts_ns(p.rtp_timestamp, clock.rate_hz());
 
                 let bytes = samples_to_pcm(self.format, &p.samples);
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                    timing: FrameTiming {
+                let frame = Frame::from_system_bytes(
+                    bytes,
+                    FrameTiming {
                         pts_ns,
                         ..FrameTiming::default()
                     },
-                    sequence: count,
-                    meta: Default::default(),
-                };
+                    count,
+                );
                 out.push(PipelinePacket::DataFrame(frame)).await?;
                 count += 1;
             }
@@ -638,15 +637,14 @@ mod tests {
         for &s in samples {
             bytes.extend_from_slice(&s.to_le_bytes());
         }
-        PipelinePacket::DataFrame(Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            timing: FrameTiming {
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            bytes,
+            FrameTiming {
                 pts_ns,
                 ..FrameTiming::default()
             },
-            sequence: 0,
-            meta: Default::default(),
-        })
+            0,
+        ))
     }
 
     // regression: the receive loop once blocked the executor for the whole read timeout
@@ -843,15 +841,14 @@ mod tests {
         for &s in &input {
             bytes.extend_from_slice(&s.to_le_bytes());
         }
-        let frame = PipelinePacket::DataFrame(Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            timing: FrameTiming {
+        let frame = PipelinePacket::DataFrame(Frame::from_system_bytes(
+            bytes,
+            FrameTiming {
                 pts_ns: 0,
                 ..FrameTiming::default()
             },
-            sequence: 0,
-            meta: Default::default(),
-        });
+            0,
+        ));
         let mut null = Capture::default();
         block_on(sink.process(frame, &mut null)).expect("sink sends");
 
@@ -907,15 +904,14 @@ mod tests {
         for &s in &samples {
             bytes.extend_from_slice(&[s as u8, (s >> 8) as u8, (s >> 16) as u8]);
         }
-        let frame = PipelinePacket::DataFrame(Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.clone().into_boxed_slice())),
-            timing: FrameTiming {
+        let frame = PipelinePacket::DataFrame(Frame::from_system_bytes(
+            bytes.clone(),
+            FrameTiming {
                 pts_ns: 0,
                 ..FrameTiming::default()
             },
-            sequence: 0,
-            meta: Default::default(),
-        });
+            0,
+        ));
         let mut null = Capture::default();
         block_on(sink.process(frame, &mut null)).expect("sink sends");
 

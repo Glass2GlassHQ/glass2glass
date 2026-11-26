@@ -22,7 +22,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 #[cfg(any(feature = "opus", feature = "vorbis", feature = "ffmpeg"))]
 use g2g_core::runtime::parse_launch;
 use g2g_core::{
@@ -110,8 +109,8 @@ fn is_header(packet: &[u8]) -> bool {
 }
 
 fn chunk(data: &[u8]) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(data.to_vec().into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        data.to_vec(),
         FrameTiming::default(),
         0,
     ))
@@ -817,11 +816,7 @@ async fn only_a_segment_makes_a_repeated_opus_head_rebuild_the_decoder() {
         .expect("configure");
         let mut sink = CaptureSink::default();
         let head_packet = || {
-            PipelinePacket::DataFrame(Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(head(1).into_boxed_slice())),
-                FrameTiming::default(),
-                0,
-            ))
+            PipelinePacket::DataFrame(Frame::from_system_bytes(head(1), FrameTiming::default(), 0))
         };
         AsyncElement::process(&mut d, head_packet(), &mut sink)
             .await
@@ -841,8 +836,8 @@ async fn only_a_segment_makes_a_repeated_opus_head_rebuild_the_decoder() {
                     .await
                     .expect("restated head");
             }
-            let frame = PipelinePacket::DataFrame(Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(payload.clone().into_boxed_slice())),
+            let frame = PipelinePacket::DataFrame(Frame::from_system_bytes(
+                payload.clone(),
                 *timing,
                 i as u64,
             ));

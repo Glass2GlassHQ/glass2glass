@@ -18,12 +18,11 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::rtp::RtpHeader;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming, G2gError, HardwareError,
-    MemoryDomain, OutputSink, PipelineClock, PipelinePacket,
+    OutputSink, PipelineClock, PipelinePacket,
 };
 
 use g2g_plugins::bytestream::{
@@ -106,17 +105,14 @@ impl SourceLoop for PacedTsSource {
         Box::pin(async move {
             let mut emitted = 0u64;
             for chunk in self.stream.chunks(TS_DATAGRAM_PAYLOAD) {
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(
-                        chunk.to_vec().into_boxed_slice(),
-                    )),
-                    timing: FrameTiming {
+                let frame = Frame::from_system_bytes(
+                    chunk.to_vec(),
+                    FrameTiming {
                         pts_ns: emitted * SEND_INTERVAL.as_nanos() as u64,
                         ..FrameTiming::default()
                     },
-                    sequence: emitted,
-                    meta: Default::default(),
-                };
+                    emitted,
+                );
                 out.push(PipelinePacket::DataFrame(frame)).await?;
                 emitted += 1;
                 tokio::time::sleep(SEND_INTERVAL).await;

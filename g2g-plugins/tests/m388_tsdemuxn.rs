@@ -19,7 +19,7 @@ mod ts_continuity;
 
 use g2g_core::fanout::MultiOutputSink;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
+use g2g_core::memory::MemoryDomain;
 use g2g_core::{
     AudioFormat, Bus, BusMessage, ByteStreamEncoding, Caps, G2gError, MultiOutputElement,
     PushOutcome, VideoCodec,
@@ -166,11 +166,7 @@ impl MultiOutputSink for PortTap {
 }
 
 fn data_frame(bytes: Vec<u8>) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    ))
+    PipelinePacket::DataFrame(Frame::from_system_bytes(bytes, FrameTiming::default(), 0))
 }
 
 /// Build an A/V transport stream: PAT + PMT (H.264 video pid 256, AAC audio pid
@@ -310,8 +306,8 @@ async fn tsdemuxn_opens_an_opus_port_on_the_descriptor_channel_count() {
     .unwrap();
     let mut ts = ByteTap::default();
     for (index, packet) in packets.iter().enumerate() {
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(packet.clone().into_boxed_slice())),
+        let frame = Frame::from_system_bytes(
+            packet.clone(),
             FrameTiming {
                 pts_ns: index as u64 * 20_000_000,
                 ..FrameTiming::default()

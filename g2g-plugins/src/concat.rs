@@ -215,7 +215,7 @@ static CONCAT_PROPS: &[PropertySpec] = &[PropertySpec::new(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use g2g_core::{Frame, FrameTiming, MemoryDomain, PushOutcome, SystemSlice};
+    use g2g_core::{Frame, FrameTiming, PushOutcome};
 
     #[derive(Default)]
     struct CollectSink {
@@ -242,12 +242,7 @@ mod tests {
             duration_ns: dur_ns,
             ..FrameTiming::default()
         };
-        PipelinePacket::DataFrame(Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(vec![0u8; 4].into_boxed_slice())),
-            timing,
-            sequence: 0,
-            meta: Default::default(),
-        })
+        PipelinePacket::DataFrame(Frame::from_system_bytes(vec![0u8; 4], timing, 0))
     }
 
     #[tokio::test]

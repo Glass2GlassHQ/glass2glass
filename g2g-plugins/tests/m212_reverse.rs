@@ -158,10 +158,8 @@ impl SourceLoop for ReverseSrc {
             out.push(PipelinePacket::Segment(seg)).await?;
             for i in 0..self.count {
                 let pts = self.top - i * self.step; // descending
-                let f = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(
-                        std::vec![0u8; 4].into_boxed_slice(),
-                    )),
+                let f = Frame::from_system_bytes(
+                    std::vec![0u8; 4],
                     FrameTiming {
                         pts_ns: pts,
                         ..FrameTiming::default()

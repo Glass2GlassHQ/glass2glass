@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::graph::Graph;
-use g2g_core::memory::{MemoryDomain, SystemSlice};
+use g2g_core::memory::MemoryDomain;
 use g2g_core::runtime::{
     run_graph, run_graph_recorded, run_graph_with_progress, FlightRecorder, GraphNodeRef,
     PipelineProgress, SourceLoop, FLIGHT_RING_PACKETS,
@@ -60,13 +60,7 @@ fn frame_bytes(sequence: u64) -> Vec<u8> {
 }
 
 fn system_frame(sequence: u64) -> Frame {
-    Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(
-            frame_bytes(sequence).into_boxed_slice(),
-        )),
-        FrameTiming::default(),
-        sequence,
-    )
+    Frame::from_system_bytes(frame_bytes(sequence), FrameTiming::default(), sequence)
 }
 
 fn failure() -> G2gError {

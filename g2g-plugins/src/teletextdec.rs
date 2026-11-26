@@ -32,11 +32,10 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, TextFormat,
+    G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, TextFormat,
 };
 
 use crate::teletext::{parse_page_config, TeletextCue, TeletextDecoder};
@@ -120,10 +119,8 @@ impl TeletextDec {
 
     async fn emit(&mut self, cue: TeletextCue, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         self.announce(out).await?;
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(
-                cue.text.into_bytes().into_boxed_slice(),
-            )),
+        let frame = Frame::from_system_bytes(
+            cue.text.into_bytes(),
             FrameTiming {
                 pts_ns: cue.pts_ns,
                 dts_ns: cue.pts_ns,
@@ -288,8 +285,8 @@ mod tests {
     use alloc::string::String;
 
     fn frame(bytes: Vec<u8>, pts_ns: u64) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            bytes,
             FrameTiming {
                 pts_ns,
                 dts_ns: pts_ns,

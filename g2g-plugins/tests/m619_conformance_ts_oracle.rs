@@ -17,7 +17,6 @@ use std::process::Command;
 
 use g2g_core::conformance::{ConformanceDimension, Evidence, MaturityLevel};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{Caps, Dim, G2gError, MultiInputElement, OutputSink, PushOutcome, Rate, VideoCodec};
 use g2g_plugins::conformance::persist;
 use g2g_plugins::tsmuxn::TsMux;
@@ -45,8 +44,8 @@ impl OutputSink for CaptureSink {
 }
 
 fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        data,
         FrameTiming {
             pts_ns,
             dts_ns: pts_ns,

@@ -17,15 +17,14 @@ use std::sync::Arc;
 
 use g2g_core::element::DynAsyncElement;
 use g2g_core::frame::{Frame, FrameTiming};
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{
     block_on, run_duplex_session, run_fanin_session, run_graph, DynSourceLoop, GraphNodeRef,
     SourceLoop,
 };
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, DuplexInbound, G2gError, Graph,
-    MemoryDomain, MultiDuplexSession, MultiInputElement, MultiOutputSink, OutputSink,
-    PipelineClock, PipelinePacket, Rate, RawVideoFormat,
+    MultiDuplexSession, MultiInputElement, MultiOutputSink, OutputSink, PipelineClock,
+    PipelinePacket, Rate, RawVideoFormat,
 };
 
 /// Frames the duplex session takes before it returns, with its source still
@@ -59,8 +58,8 @@ fn caps() -> Caps {
 }
 
 fn frame(seq: u64) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(std::vec![0u8; 4].into())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        std::vec![0u8; 4],
         FrameTiming::default(),
         seq,
     ))

@@ -645,11 +645,7 @@ mod tests {
         }
 
         fn frame_with(rectangle: CropRectangle) -> PipelinePacket {
-            let mut frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(picture_bytes().into_boxed_slice())),
-                FrameTiming::default(),
-                0,
-            );
+            let mut frame = Frame::from_system_bytes(picture_bytes(), FrameTiming::default(), 0);
             frame.meta.attach(CropMeta { rectangle });
             PipelinePacket::DataFrame(frame)
         }

@@ -44,11 +44,10 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogSource};
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     g2g_error, AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, VideoCodec,
+    ElementMetadata, FrameTiming, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, VideoCodec,
 };
 
 /// What a delimiter line opens with, and what a closing one repeats at its end.
@@ -360,8 +359,8 @@ impl MultipartDemux {
             out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
             self.last_caps = Some(caps);
         }
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(body.into_boxed_slice())),
+        let frame = Frame::from_system_bytes(
+            body,
             FrameTiming {
                 arrival_ns: self.arrival_ns,
                 // every JPEG access unit decodes on its own.
@@ -664,8 +663,8 @@ impl MultipartMux {
     }
 
     fn frame(&mut self, bytes: Vec<u8>) -> PipelinePacket {
-        let packet = PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+        let packet = PipelinePacket::DataFrame(Frame::from_system_bytes(
+            bytes,
             FrameTiming::default(),
             self.emitted,
         ));
@@ -857,10 +856,8 @@ mod tests {
         block_on(async {
             element
                 .process(
-                    PipelinePacket::DataFrame(Frame::new(
-                        MemoryDomain::System(SystemSlice::from_boxed(
-                            stream.to_vec().into_boxed_slice(),
-                        )),
+                    PipelinePacket::DataFrame(Frame::from_system_bytes(
+                        stream.to_vec(),
                         FrameTiming::default(),
                         0,
                     )),
@@ -929,8 +926,8 @@ mod tests {
         block_on(async {
             declared
                 .process(
-                    PipelinePacket::DataFrame(Frame::new(
-                        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+                    PipelinePacket::DataFrame(Frame::from_system_bytes(
+                        bytes,
                         FrameTiming::default(),
                         0,
                     )),
@@ -953,8 +950,8 @@ mod tests {
         let result = block_on(async {
             element
                 .process(
-                    PipelinePacket::DataFrame(Frame::new(
-                        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+                    PipelinePacket::DataFrame(Frame::from_system_bytes(
+                        bytes,
                         FrameTiming::default(),
                         0,
                     )),
@@ -1084,10 +1081,8 @@ mod tests {
                 for piece in whole.chunks(chunk_len) {
                     element
                         .process(
-                            PipelinePacket::DataFrame(Frame::new(
-                                MemoryDomain::System(SystemSlice::from_boxed(
-                                    piece.to_vec().into_boxed_slice(),
-                                )),
+                            PipelinePacket::DataFrame(Frame::from_system_bytes(
+                                piece.to_vec(),
                                 FrameTiming::default(),
                                 0,
                             )),
@@ -1118,10 +1113,8 @@ mod tests {
             for _ in 0..2 {
                 element
                     .process(
-                        PipelinePacket::DataFrame(Frame::new(
-                            MemoryDomain::System(SystemSlice::from_boxed(
-                                SOI.to_vec().into_boxed_slice(),
-                            )),
+                        PipelinePacket::DataFrame(Frame::from_system_bytes(
+                            SOI.to_vec(),
                             FrameTiming::default(),
                             0,
                         )),

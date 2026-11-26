@@ -16,11 +16,10 @@ use std::collections::HashSet;
 use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_simple_pipeline, LatencyProfile};
 use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PipelineClock, PipelinePacket, PushOutcome, Rate, VideoCodec,
+    AsyncElement, Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, OutputSink, PipelineClock,
+    PipelinePacket, PushOutcome, Rate, VideoCodec,
 };
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::rtcp::{self, RtcpPacket};
@@ -349,15 +348,14 @@ async fn nack_recovers_dropped_packets_via_retransmission() {
         let mut null = NullOut;
         for i in 0u32..(N as u32 * 2) {
             let au = alloc_au((i & 0xFF) as u8);
-            let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-                timing: FrameTiming {
+            let frame = Frame::from_system_bytes(
+                au,
+                FrameTiming {
                     pts_ns: i as u64 * 33_000_000,
                     ..FrameTiming::default()
                 },
-                sequence: i as u64,
-                meta: Default::default(),
-            };
+                i as u64,
+            );
             sink.process(PipelinePacket::DataFrame(frame), &mut null)
                 .await
                 .expect("send");
@@ -405,15 +403,14 @@ async fn nack_recovers_dropped_packets_via_retransmission() {
 
 fn au_frame(index: u8) -> Frame {
     let au = alloc_au(index);
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-        timing: FrameTiming {
+    Frame::from_system_bytes(
+        au,
+        FrameTiming {
             pts_ns: u64::from(index) * 33_000_000,
             ..FrameTiming::default()
         },
-        sequence: u64::from(index),
-        meta: Default::default(),
-    }
+        u64::from(index),
+    )
 }
 
 #[tokio::test]
@@ -601,15 +598,14 @@ async fn rtx_resends_recover_dropped_packets() {
         let mut null = NullOut;
         for i in 0u32..(N as u32 * 2) {
             let au = alloc_au((i & 0xFF) as u8);
-            let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-                timing: FrameTiming {
+            let frame = Frame::from_system_bytes(
+                au,
+                FrameTiming {
                     pts_ns: i as u64 * 33_000_000,
                     ..FrameTiming::default()
                 },
-                sequence: i as u64,
-                meta: Default::default(),
-            };
+                i as u64,
+            );
             sink.process(PipelinePacket::DataFrame(frame), &mut null)
                 .await
                 .expect("send");
@@ -686,15 +682,14 @@ async fn fec_recovers_dropped_packets_without_retransmission() {
         let mut null = NullOut;
         for i in 0u32..N as u32 {
             let au = alloc_au(i as u8);
-            let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-                timing: FrameTiming {
+            let frame = Frame::from_system_bytes(
+                au,
+                FrameTiming {
                     pts_ns: i as u64 * 33_000_000,
                     ..FrameTiming::default()
                 },
-                sequence: i as u64,
-                meta: Default::default(),
-            };
+                i as u64,
+            );
             sink.process(PipelinePacket::DataFrame(frame), &mut null)
                 .await
                 .expect("send");
@@ -773,15 +768,14 @@ async fn interleaved_fec_recovers_a_consecutive_burst() {
         let mut null = NullOut;
         for i in 0u32..N as u32 {
             let au = alloc_au(i as u8);
-            let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-                timing: FrameTiming {
+            let frame = Frame::from_system_bytes(
+                au,
+                FrameTiming {
                     pts_ns: i as u64 * 33_000_000,
                     ..FrameTiming::default()
                 },
-                sequence: i as u64,
-                meta: Default::default(),
-            };
+                i as u64,
+            );
             sink.process(PipelinePacket::DataFrame(frame), &mut null)
                 .await
                 .expect("send");
@@ -857,15 +851,14 @@ async fn flexfec_2d_recovers_a_burst_row_of_losses() {
         let mut null = NullOut;
         for i in 0u32..N as u32 {
             let au = alloc_au(i as u8);
-            let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-                timing: FrameTiming {
+            let frame = Frame::from_system_bytes(
+                au,
+                FrameTiming {
                     pts_ns: i as u64 * 33_000_000,
                     ..FrameTiming::default()
                 },
-                sequence: i as u64,
-                meta: Default::default(),
-            };
+                i as u64,
+            );
             sink.process(PipelinePacket::DataFrame(frame), &mut null)
                 .await
                 .expect("send");
@@ -937,15 +930,14 @@ async fn flexfec_recovers_a_loss_in_a_group_beyond_ulpfec() {
         let mut null = NullOut;
         for i in 0u32..N as u32 {
             let au = alloc_au(i as u8);
-            let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-                timing: FrameTiming {
+            let frame = Frame::from_system_bytes(
+                au,
+                FrameTiming {
                     pts_ns: i as u64 * 33_000_000,
                     ..FrameTiming::default()
                 },
-                sequence: i as u64,
-                meta: Default::default(),
-            };
+                i as u64,
+            );
             sink.process(PipelinePacket::DataFrame(frame), &mut null)
                 .await
                 .expect("send");

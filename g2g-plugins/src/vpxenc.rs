@@ -602,7 +602,7 @@ mod tests {
     use super::*;
     use crate::vp9parse::Vp9Parse;
     use g2g_core::frame::Frame;
-    use g2g_core::memory::{MemoryDomain, SystemSlice};
+
     use g2g_core::{FrameTiming, PushOutcome};
 
     fn i420_grey(w: usize, h: usize) -> Vec<u8> {
@@ -679,8 +679,8 @@ mod tests {
             // Vary the luma so inter frames are not degenerate.
             let mut buf = i420_grey(64, 64);
             buf[0] = seq as u8;
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(buf.into_boxed_slice())),
+            let frame = Frame::from_system_bytes(
+                buf,
                 FrameTiming {
                     pts_ns: seq * 33_000_000,
                     ..FrameTiming::default()
@@ -735,10 +735,8 @@ mod tests {
         enc.configure_pipeline(&i420_caps(64, 64)).unwrap();
         let mut sink = CaptureSink::default();
         for i in 0..5u64 {
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(
-                    i420_grey(64, 64).into_boxed_slice(),
-                )),
+            let frame = Frame::from_system_bytes(
+                i420_grey(64, 64),
                 FrameTiming {
                     pts_ns: i * 33_000_000,
                     ..FrameTiming::default()
@@ -777,11 +775,7 @@ mod tests {
             .unwrap();
         let mut psink = CaptureSink::default();
         for data in &sink.frames {
-            let f = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(data.clone().into_boxed_slice())),
-                FrameTiming::default(),
-                0,
-            );
+            let f = Frame::from_system_bytes(data.clone(), FrameTiming::default(), 0);
             parse
                 .process(PipelinePacket::DataFrame(f), &mut psink)
                 .await

@@ -816,10 +816,8 @@ mod tests {
         pay.set_property("encrypt", PropValue::Bool(false)).unwrap();
         pay.configure_pipeline(&input_caps()[0]).unwrap();
         for pts_ns in 0..count {
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(
-                    access_unit_filling(1).into_boxed_slice(),
-                )),
+            let frame = Frame::from_system_bytes(
+                access_unit_filling(1),
                 g2g_core::FrameTiming {
                     pts_ns: pts_ns * 1000,
                     ..Default::default()

@@ -13,11 +13,10 @@ use core::future::Future;
 use core::pin::Pin;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_graph, GraphNode, GraphNodeRef, SourceLoop};
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, Graph,
-    MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate, VideoCodec,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, Graph, OutputSink,
+    PipelineClock, PipelinePacket, Rate, VideoCodec,
 };
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::mkvdemux::MkvDemux;
@@ -69,8 +68,8 @@ impl SourceLoop for Vp9Source {
             let mut n = 0u64;
             for i in 0..self.remaining {
                 let payload = vec![0x10 | i, 0x20, 0x30];
-                let frame = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
+                let frame = Frame::from_system_bytes(
+                    payload,
                     FrameTiming {
                         pts_ns: (i as u64) * 40_000_000,
                         ..FrameTiming::default()

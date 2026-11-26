@@ -15,11 +15,8 @@ use std::net::TcpListener as StdTcpListener;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{parse_launch, run_graph, LatencyProfile};
-use g2g_core::{
-    AsyncElement, Caps, Dim, FrameTiming, MemoryDomain, PipelinePacket, Rate, VideoCodec,
-};
+use g2g_core::{AsyncElement, Caps, Dim, FrameTiming, PipelinePacket, Rate, VideoCodec};
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::rtspserversink::RtspServerSink;
@@ -71,17 +68,14 @@ async fn rtspsrc_decodes_a_stream_whose_sps_has_no_frame_rate() {
                 break;
             }
             let sequence = index as u64;
-            let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(
-                    au.clone().into_boxed_slice(),
-                )),
-                timing: FrameTiming {
+            let frame = Frame::from_system_bytes(
+                au.clone(),
+                FrameTiming {
                     pts_ns: sequence * FRAME_PERIOD.as_nanos() as u64,
                     ..FrameTiming::default()
                 },
                 sequence,
-                meta: Default::default(),
-            };
+            );
             if server
                 .process(PipelinePacket::DataFrame(frame), &mut out)
                 .await

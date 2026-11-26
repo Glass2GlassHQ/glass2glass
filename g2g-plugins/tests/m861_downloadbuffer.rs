@@ -15,7 +15,6 @@
 #![cfg(feature = "std")]
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{parse_launch, SeekController};
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, G2gError, OutputSink, PropValue, PushOutcome, Seek,
@@ -58,8 +57,8 @@ impl OutputSink for CaptureSink {
 }
 
 fn bytes_frame(data: &[u8]) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(data.to_vec().into_boxed_slice())),
+    PipelinePacket::DataFrame(Frame::from_system_bytes(
+        data.to_vec(),
         FrameTiming::default(),
         0,
     ))
@@ -351,8 +350,8 @@ mod pushed_over_http {
         let mut sink = CaptureSink::default();
         m.configure_pipeline(0, &h264_caps()).expect("configures");
         for (i, (au, pts)) in aus.iter().enumerate() {
-            let f = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(au.clone().into_boxed_slice())),
+            let f = Frame::from_system_bytes(
+                au.clone(),
                 FrameTiming {
                     pts_ns: *pts,
                     ..FrameTiming::default()

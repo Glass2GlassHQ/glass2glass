@@ -87,7 +87,7 @@ mod sink {
 
     use g2g_core::element::AsyncElement;
     use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-    use g2g_core::memory::{MemoryDomain, SystemSlice};
+
     use g2g_core::{Caps, G2gError, PropValue};
     use g2g_plugins::cotsink::CotSink;
 
@@ -116,12 +116,7 @@ mod sink {
         // The platform event needs a platform position too.
         ls.sensor_lat_deg = Some(60.176822);
         ls.sensor_lon_deg = Some(24.828835);
-        let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(ls.encode().into_boxed_slice())),
-            timing: FrameTiming::default(),
-            sequence: 0,
-            meta: Default::default(),
-        };
+        let frame = Frame::from_system_bytes(ls.encode(), FrameTiming::default(), 0);
 
         let mut sink = CotSink::new(dest);
         sink.set_property("spi", PropValue::Bool(true))

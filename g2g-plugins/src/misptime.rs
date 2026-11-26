@@ -40,11 +40,10 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, TextFormat, VideoCodec,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, Rate, TextFormat, VideoCodec,
 };
 
 use crate::annexb::{add_emulation_prevention, vcl_start};
@@ -348,11 +347,7 @@ impl AsyncElement for MispTimeInsert {
                 // No VCL slice (e.g. a parameter-set-only AU): leave it unchanged.
                 None => bytes.extend_from_slice(au),
             }
-            let new = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                frame.timing,
-                frame.sequence,
-            );
+            let new = Frame::from_system_bytes(bytes, frame.timing, frame.sequence);
             out.push(PipelinePacket::DataFrame(new)).await.map(|_| ())
         })
     }
@@ -694,8 +689,8 @@ mod tests {
     }
 
     fn data_frame(au: Vec<u8>, pts: u64) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
+        PipelinePacket::DataFrame(Frame::from_system_bytes(
+            au,
             FrameTiming {
                 pts_ns: pts,
                 ..Default::default()

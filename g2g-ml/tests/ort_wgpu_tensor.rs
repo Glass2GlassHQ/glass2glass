@@ -70,12 +70,7 @@ const SECOND_LUMA: [u8; 8] = [235, 200, 145, 100, 81, 41, 16, 60];
 fn nv12_frame(luma: [u8; 8]) -> Frame {
     let chroma = [128u8, 128, 90, 200];
     let bytes: Vec<u8> = luma.iter().chain(&chroma).copied().collect();
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming::default(),
-        sequence: 0,
-        meta: Default::default(),
-    }
+    Frame::from_system_bytes(bytes, FrameTiming::default(), 0)
 }
 
 fn preprocessor(gpu_output: bool) -> WgpuPreprocess {

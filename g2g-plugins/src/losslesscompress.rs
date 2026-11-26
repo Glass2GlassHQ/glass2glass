@@ -15,7 +15,7 @@ use brotli::{
     Allocator, BrotliDecompressStream, BrotliResult, BrotliState, SliceWrapper, SliceWrapperMut,
 };
 use g2g_core::frame::Frame;
-use g2g_core::memory::{DomainSet, MemoryDomain, MemoryDomainKind, SystemSlice};
+use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
     FrameTiming, G2gError, LosslessCompression, OutputSink, PadCaps, PadDirection, PadTemplate,
@@ -76,15 +76,6 @@ fn compressed_caps(compression: LosslessCompression, original: Option<&Caps>) ->
     Caps::LosslesslyCompressed {
         compression,
         original: original.map(|original| Box::new(original.clone())),
-    }
-}
-
-fn system_frame(bytes: Vec<u8>, timing: FrameTiming, sequence: u64) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing,
-        sequence,
-        meta: Default::default(),
     }
 }
 
@@ -273,7 +264,8 @@ impl AsyncElement for LosslessCompress {
                         out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
                         self.last_caps = Some(caps);
                     }
-                    let mut out_frame = system_frame(compressed, frame.timing, frame.sequence);
+                    let mut out_frame =
+                        Frame::from_system_bytes(compressed, frame.timing, frame.sequence);
                     out_frame.meta = frame.meta;
                     out.push(PipelinePacket::DataFrame(out_frame)).await?;
                 }
@@ -622,8 +614,11 @@ impl AsyncElement for LosslessDecompress {
                         self.last_caps = Some(original);
                     }
                     for decompressed in finished {
-                        let out_frame =
-                            system_frame(decompressed.bytes, decompressed.timing, self.emitted);
+                        let out_frame = Frame::from_system_bytes(
+                            decompressed.bytes,
+                            decompressed.timing,
+                            self.emitted,
+                        );
                         self.emitted += 1;
                         out.push(PipelinePacket::DataFrame(out_frame)).await?;
                     }
