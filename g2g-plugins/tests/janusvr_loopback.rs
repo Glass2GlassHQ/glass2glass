@@ -37,10 +37,9 @@ use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, Input, Output, Rtc, RtcConfig};
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, FrameTiming, G2gError, MemoryDomain, MultiOutputSource,
-    NetworkFailure, OutputSink, PipelinePacket, PushOutcome, VideoCodec,
+    AsyncElement, AudioFormat, Caps, FrameTiming, G2gError, MultiOutputSource, NetworkFailure,
+    OutputSink, PipelinePacket, PushOutcome, VideoCodec,
 };
 use g2g_plugins::janusvrsink::JanusVrSink;
 use g2g_plugins::janusvrsrc::JanusVrSrc;

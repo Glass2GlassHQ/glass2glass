@@ -35,14 +35,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{
     run_fanin_session, run_fanout_session, run_source_transform_sink, DynSourceLoop, SourceLoop,
 };
 use g2g_core::{
     AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, ConfigureOutcome, Dim,
-    FrameTiming, G2gError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate,
-    VideoCodec,
+    FrameTiming, G2gError, OutputSink, PipelineClock, PipelinePacket, Rate, VideoCodec,
 };
 use g2g_plugins::filesrc::FileSrc;
 use g2g_plugins::livekit_signal::IceTransportPolicy;

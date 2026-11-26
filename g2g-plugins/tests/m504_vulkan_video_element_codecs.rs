@@ -29,11 +29,10 @@ mod collect_sink;
 use collect_sink::CollectSink;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::block_on;
 use g2g_core::{
     AsyncElement, Caps, ColorRange, Colorimetry, Dim, FrameTiming, MatrixCoefficients,
-    MemoryDomain, PipelinePacket, Rate, RawVideoFormat, VideoCodec,
+    PipelinePacket, Rate, RawVideoFormat, VideoCodec,
 };
 use g2g_plugins::vulkanvideo::{
     extract_av1_sequence_header, extract_h265_parameter_sets, open_av1_decode_device,

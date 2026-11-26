@@ -33,10 +33,9 @@ use serde_json::{json, Value};
 
 use g2g_core::frame::Frame;
 use g2g_core::log::{LogLevel, LogRecord, LogSink};
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, FrameTiming, G2gError, MemoryDomain, MultiOutputSource, OutputSink,
-    PipelinePacket, PushOutcome, VideoCodec,
+    AsyncElement, Caps, FrameTiming, G2gError, MultiOutputSource, OutputSink, PipelinePacket,
+    PushOutcome, VideoCodec,
 };
 use g2g_plugins::janusvrsink::JanusVrSink;
 use g2g_plugins::janusvrsrc::JanusVrSrc;

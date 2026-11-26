@@ -14,7 +14,6 @@
 #![cfg(feature = "vello-text-overlay")]
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
     PushOutcome, Rate, RawVideoFormat,

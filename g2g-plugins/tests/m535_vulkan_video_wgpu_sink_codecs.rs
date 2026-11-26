@@ -26,7 +26,6 @@
 ))]
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::runtime::block_on;
 use g2g_core::{

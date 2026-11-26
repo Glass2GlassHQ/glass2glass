@@ -16,11 +16,10 @@ mod collect_sink;
 
 use collect_sink::CollectSink;
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::block_on;
 use g2g_core::{
-    AsyncElement, BitstreamAlignment, Caps, Colorimetry, Dim, FrameTiming, MemoryDomain,
-    PipelinePacket, PixelAspect, Rate, Reconfigure, VideoCodec,
+    AsyncElement, BitstreamAlignment, Caps, Colorimetry, Dim, FrameTiming, PipelinePacket,
+    PixelAspect, Rate, Reconfigure, VideoCodec,
 };
 use g2g_plugins::vulkanvideo::{open_h264_decode_device, VulkanVideoDec, VulkanVideoError};
 

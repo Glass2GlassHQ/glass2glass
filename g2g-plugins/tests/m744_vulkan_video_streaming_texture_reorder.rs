@@ -32,7 +32,6 @@ mod collect_sink;
 use collect_sink::CollectSink;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::block_on;
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, Dim, DomainSet, FrameTiming, MemoryDomain,

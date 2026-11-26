@@ -32,13 +32,12 @@ use std::net::UdpSocket;
 
 use g2g_core::caps::{framerate_q16_from_fraction, framerate_q16_period_ns};
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome, Dim, ElementMetadata,
-    FrameTiming, G2gError, MediaClock, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, VideoCodec,
+    FrameTiming, G2gError, MediaClock, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, Rate, VideoCodec,
 };
 
 use crate::arrivalstamp::RtpArrivalTimeline;

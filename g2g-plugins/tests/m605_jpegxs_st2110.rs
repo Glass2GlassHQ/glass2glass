@@ -14,11 +14,10 @@
 use std::sync::Arc;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{block_on, SourceLoop};
 use g2g_core::{
-    AsyncElement, Caps, ClockSync, Dim, G2gError, MemoryDomain, MonotonicClock, OutputSink,
-    PipelinePacket, PropValue, PushOutcome, Rate, RawVideoFormat,
+    AsyncElement, Caps, ClockSync, Dim, G2gError, MonotonicClock, OutputSink, PipelinePacket,
+    PropValue, PushOutcome, Rate, RawVideoFormat,
 };
 
 use g2g_plugins::st2110jxsrtp::{St2110JxsSink, St2110JxsSrc};

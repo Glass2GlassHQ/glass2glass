@@ -30,15 +30,13 @@ use alloc::vec::Vec;
 use std::net::UdpSocket;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::time::ns_to_ticks;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome,
-    ElementMetadata, FrameTiming, G2gError, MediaClock, MemoryDomain, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, ANY_CHANNELS,
-    ANY_SAMPLE_RATE,
+    ElementMetadata, FrameTiming, G2gError, MediaClock, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
 use crate::arrivalstamp::RtpArrivalTimeline;

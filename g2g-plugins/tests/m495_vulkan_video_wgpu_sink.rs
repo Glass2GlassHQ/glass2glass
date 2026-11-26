@@ -199,7 +199,6 @@ fn decode_to_texture_then_present_zero_copy() {
 
 // Local Frame constructor (the crate's `Frame` type, system-memory input AU).
 fn au_frame(bytes: Vec<u8>, seq: u64) -> g2g_core::frame::Frame {
-    use g2g_core::memory::SystemSlice;
     use g2g_core::FrameTiming;
     g2g_core::frame::Frame::from_system_bytes(
         bytes,

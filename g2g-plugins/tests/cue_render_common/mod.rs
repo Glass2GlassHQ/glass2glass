@@ -314,6 +314,7 @@ pub(crate) async fn gpu_frame(
     ctx: &g2g_plugins::gpu::GpuContext,
     overlay: &mut g2g_plugins::vellooverlay::VelloTextOverlay,
 ) -> Vec<u8> {
+    use g2g_core::MemoryDomain;
     use g2g_plugins::gpu::{read_rgba_texture, texture_of};
     let mut sink = FrameSink::default();
     overlay

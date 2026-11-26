@@ -494,7 +494,7 @@ mod tests {
     use super::*;
     use crate::cea::CcTriple;
     use g2g_core::frame::Frame;
-    use g2g_core::memory::{MemoryDomain, SystemSlice};
+
     use g2g_core::runtime::block_on;
     use g2g_core::{FrameTiming, MonotonicClock, PushOutcome};
     use std::sync::Arc;

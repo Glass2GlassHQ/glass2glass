@@ -414,6 +414,7 @@ async fn span_background_fills_a_vertical_column() {
 #[cfg(feature = "vello-text-overlay")]
 mod gpu {
     use super::*;
+    use g2g_core::MemoryDomain;
     use g2g_plugins::gpu::{read_rgba_texture, texture_of, GpuContext};
     use g2g_plugins::vellooverlay::VelloTextOverlay;
 

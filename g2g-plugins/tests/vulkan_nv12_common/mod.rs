@@ -8,7 +8,7 @@
 #![allow(dead_code)] // no one test file uses every helper here
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::{DomainSet, MemoryDomainKind, SystemSlice};
+use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::runtime::{block_on, parse_launch, run_graph};
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink,
