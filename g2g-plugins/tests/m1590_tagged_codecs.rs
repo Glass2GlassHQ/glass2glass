@@ -51,13 +51,18 @@ fn temp_path(tag: &str) -> PathBuf {
 
 // what `filesrc ! decodebin ! <tail> ! filesink` writes for `input`
 async fn decode(input: &Path, tail: &str, tag: &str) -> Vec<u8> {
-    decode_from(&format!("filesrc location={}", input.display()), tail, tag).await
+    decode_from(
+        &format!("filesrc location={} ! decodebin", input.display()),
+        tail,
+        tag,
+    )
+    .await
 }
 
-async fn decode_from(source: &str, tail: &str, tag: &str) -> Vec<u8> {
+async fn decode_from(decoding_source: &str, tail: &str, tag: &str) -> Vec<u8> {
     let out = temp_path(tag);
     let line = format!(
-        "{source} ! decodebin ! {tail} ! filesink location={}",
+        "{decoding_source} ! {tail} ! filesink location={}",
         out.display()
     );
     let graph =
@@ -176,7 +181,7 @@ async fn a_wav_codec_known_only_by_its_tag_decodes() {
 async fn a_wav_xma2_stream_decodes_in_whole_packets_from_small_input_chunks() {
     const SMALL_INPUT_CHUNK: usize = 188;
     let source = format!(
-        "filesrc location={} blocksize={SMALL_INPUT_CHUNK}",
+        "filesrc location={} blocksize={SMALL_INPUT_CHUNK} ! decodebin",
         fixture(XMA2_WAV).display()
     );
     let decoded = decode_from(&source, "audioconvert ! audio/x-raw,format=S16LE", "xma2").await;
@@ -197,6 +202,13 @@ async fn a_wav_ms_adpcm_stream_past_stereo_decodes_one_block_per_channel() {
 #[tokio::test]
 async fn a_quicktime_sample_entry_codec_decodes() {
     let decoded = decode(&fixture(QTRLE_MOV), "video/x-raw,format=RGB", "qtrle").await;
+    assert_eq!(decoded, expected(&format!("{QTRLE_MOV}.rgb")));
+}
+
+#[tokio::test]
+async fn uridecodebin_decodes_a_quicktime_sample_entry_codec() {
+    let source = format!("uridecodebin uri=file://{}", fixture(QTRLE_MOV).display());
+    let decoded = decode_from(&source, "video/x-raw,format=RGB", "qtrle-uri").await;
     assert_eq!(decoded, expected(&format!("{QTRLE_MOV}.rgb")));
 }
 

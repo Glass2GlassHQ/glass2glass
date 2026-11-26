@@ -216,9 +216,17 @@ pub fn file_handler() -> UriSourceFactory {
                 encoding: ByteStreamEncoding::IsoBmff,
             } => {
                 let mut source = crate::mp4src::Mp4Src::new(path);
-                let (caps, has_clean_aperture) = source
-                    .probe_stream()
-                    .map_err(|_| UriError::UnknownContent)?;
+                // Mp4Src parses only avc1, hvc1, hev1, mp4v, av01 and encv sample entries
+                let Ok((caps, has_clean_aperture)) = source.probe_stream() else {
+                    let caps = Caps::ByteStream {
+                        encoding: ByteStreamEncoding::Mp4,
+                    };
+                    return Ok(UriSource {
+                        source: Box::new(crate::filesrc::FileSrc::new(path, caps.clone())),
+                        caps,
+                        has_clean_aperture: false,
+                    });
+                };
                 Ok(UriSource {
                     source: Box::new(source),
                     caps,

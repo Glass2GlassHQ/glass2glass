@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2613: `uridecodebin` and `edlsrc` decode MP4 and QuickTime files whose video codec `Mp4Src` cannot parse, such as FFV1.
 - M2612: The `web-gpu`, `release-aar` and `libcamera` builds compile and pass clippy again.
 - M2611: The MP4, Matroska and Ogg muxers share their AAC, Opus and Vorbis track header capture.
 - M2610: Elements and tests build system-memory frames with `Frame::from_system_bytes`.
