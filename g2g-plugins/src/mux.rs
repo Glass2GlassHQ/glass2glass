@@ -36,8 +36,10 @@ use crate::livemux::{wall_clock_ns, LiveMuxDeadline, LIVE_MUX_PROPS};
 use crate::aacparse::audio_specific_config_info;
 use crate::mpeg4videoparse::Mpeg4VideoCodec;
 use crate::mpegvideoparse::MpegVideoCodec;
+use crate::ogg::VORBIS_MAGIC;
 use crate::opusparse::{is_opus_config, parse_opus_head, OPUS_RATE_HZ};
 use crate::startcodeparse::StartCodeCodec;
+use crate::vorbiscomment::empty_vorbis_comment;
 
 // the solver lets any caps onto a fan-in muxer pad and reports no refusal itself
 pub(crate) fn refused_input(muxer: &'static str, caps: &Caps) -> G2gError {
@@ -304,19 +306,80 @@ pub(crate) struct AudioTrackParams {
     pub(crate) sample_rate: u32,
 }
 
-// an AAC track's layout and AudioSpecificConfig, None until a frame carries the config
 #[cfg(feature = "std")]
-pub(crate) fn aac_track_config(
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AudioTrackInit {
+    pub(crate) format: AudioFormat,
+    pub(crate) params: AudioTrackParams,
+    pub(crate) config: Vec<u8>,
+}
+
+#[cfg(feature = "std")]
+impl AudioTrackInit {
+    pub(crate) fn aac_config(&self) -> Option<&[u8]> {
+        (self.format == AudioFormat::Aac).then_some(self.config.as_slice())
+    }
+}
+
+// None until a frame carries the AudioSpecificConfig
+#[cfg(feature = "std")]
+pub(crate) fn aac_track_init(
     muxer: &'static str,
     channels: u8,
     sample_rate: u32,
     frame: &[u8],
-) -> Result<Option<(AudioTrackParams, Vec<u8>)>, G2gError> {
+) -> Result<Option<AudioTrackInit>, G2gError> {
     let Some(config) = crate::aacparse::muxer_audio_specific_config(frame, muxer)? else {
         return Ok(None);
     };
     let params = audio_track_params(muxer, AudioFormat::Aac, channels, sample_rate, &config)?;
-    Ok(Some((params, config)))
+    Ok(Some(AudioTrackInit {
+        format: AudioFormat::Aac,
+        params,
+        config,
+    }))
+}
+
+// the config is a leading in-band `OpusHead`, else empty, and None while an `OpusTags` leads instead
+#[cfg(feature = "std")]
+pub(crate) fn opus_track_init(
+    muxer: &'static str,
+    channels: u8,
+    sample_rate: u32,
+    packet: &[u8],
+) -> Result<Option<AudioTrackInit>, G2gError> {
+    let config = match parse_opus_head(packet) {
+        Some(_) => packet.to_vec(),
+        None if is_opus_config(packet) => return Ok(None),
+        None => Vec::new(),
+    };
+    let params = audio_track_params(muxer, AudioFormat::Opus, channels, sample_rate, &config)?;
+    Ok(Some(AudioTrackInit {
+        format: AudioFormat::Opus,
+        params,
+        config,
+    }))
+}
+
+#[derive(Debug)]
+pub(crate) struct VorbisHeaders<'a> {
+    pub(crate) identification: &'a [u8],
+    pub(crate) comment: Vec<u8>,
+    pub(crate) setup: &'a [u8],
+}
+
+// None until the identification and setup headers have both arrived
+pub(crate) fn vorbis_headers(headers: &[Vec<u8>]) -> Option<VorbisHeaders<'_>> {
+    let identification = xiph_header(headers, 1, VORBIS_MAGIC)?;
+    let setup = xiph_header(headers, 5, VORBIS_MAGIC)?;
+    let comment = xiph_header(headers, 3, VORBIS_MAGIC)
+        .map(<[u8]>::to_vec)
+        .unwrap_or_else(|| empty_vorbis_comment(b"\x03vorbis"));
+    Some(VorbisHeaders {
+        identification,
+        comment,
+        setup,
+    })
 }
 
 // demuxers leave channels or rate as any until parsed, and filling one in is no change

@@ -73,16 +73,16 @@ use crate::matroska::{
     text_codec_private, xiph_codec_private, MatroskaMuxer, MkvCodec, MkvTrackConfig, MkvTrackSpec,
 };
 use crate::mux::{
-    aac_track_config, audio_header_config, audio_layout_changed, audio_track_params,
-    every_track_header_ready, is_audio_config_packet, keyframe_codec_config, push_muxed_bytes,
-    refused_input, refused_input_because, require_header_config_at_end, video_header_config,
-    xiph_header, AudioTrackParams, InputPriming, CODEC_CONFIG,
+    aac_track_init, audio_header_config, audio_layout_changed, audio_track_params,
+    every_track_header_ready, is_audio_config_packet, keyframe_codec_config, opus_track_init,
+    push_muxed_bytes, refused_input, refused_input_because, require_header_config_at_end,
+    video_header_config, vorbis_headers, xiph_header, AudioTrackInit, AudioTrackParams,
+    InputPriming, CODEC_CONFIG,
 };
-use crate::ogg::{is_theora_header, THEORA_HEADER_TYPES, THEORA_MAGIC, VORBIS_MAGIC};
-use crate::opusparse::{is_opus_config, parse_opus_head, synth_opus_head, OPUS_ENCODER_PRE_SKIP};
+use crate::ogg::{is_theora_header, THEORA_HEADER_TYPES, THEORA_MAGIC};
+use crate::opusparse::{synth_opus_head, OPUS_ENCODER_PRE_SKIP};
 use crate::subparse::frame_subtitle_block;
 use crate::uncompressedvideo::raw_video_fourcc;
-use crate::vorbiscomment::empty_vorbis_comment;
 use crate::waveformat::wave_format_ex;
 
 /// The properties the Matroska muxer exposes.
@@ -254,12 +254,7 @@ enum TrackInit {
         format: RawVideoFormat,
         geometry: VideoGeometry,
     },
-    Audio {
-        format: AudioFormat,
-        channels: u8,
-        rate: u32,
-        config: Vec<u8>,
-    },
+    Audio(AudioTrackInit),
     /// A subtitle track: it needs nothing from the stream, so it is ready at
     /// configure. The on-disk syntax comes from the muxer's `subtitle-format`.
     Text,
@@ -493,11 +488,7 @@ impl MkvMuxN {
     // the AudioSpecificConfig captured for an AAC pad, None before its first frame
     fn aac_config(&self, input: usize) -> Option<&[u8]> {
         match &self.inits[input] {
-            Some(TrackInit::Audio {
-                format: AudioFormat::Aac,
-                config,
-                ..
-            }) => Some(config),
+            Some(TrackInit::Audio(audio)) => audio.aac_config(),
             _ => None,
         }
     }
@@ -586,16 +577,9 @@ impl MkvMuxN {
                 // AAC's AudioSpecificConfig is synthesised from the first ADTS
                 // header, or is the frame leading a raw stream.
                 AudioFormat::Aac => {
-                    if let Some((params, config)) =
-                        aac_track_config(short_type_name::<Self>(), channels, rate, au)?
-                    {
-                        self.inits[input] = Some(TrackInit::Audio {
-                            format,
-                            channels: params.channels,
-                            rate: params.sample_rate,
-                            config,
-                        });
-                    }
+                    self.inits[input] =
+                        aac_track_init(short_type_name::<Self>(), channels, rate, au)?
+                            .map(TrackInit::Audio);
                 }
                 // An Opus stream out of a container leads with its `OpusHead`
                 // (M791's in-band convention), which becomes the `CodecPrivate`
@@ -603,29 +587,19 @@ impl MkvMuxN {
                 // encoded one has none, so the header is synthesized with
                 // libopus' lookahead (M792).
                 AudioFormat::Opus => {
-                    let head = match parse_opus_head(au) {
-                        Some(_) => Some(au.to_vec()),
-                        // An `OpusTags` before the identification header is not
-                        // the config: wait for it rather than fix a synthesized one.
-                        None if is_opus_config(au) => return Ok(()),
-                        None => None,
+                    let Some(mut init) =
+                        opus_track_init(short_type_name::<Self>(), channels, rate, au)?
+                    else {
+                        return Ok(());
                     };
-                    let params = audio_track_params(
-                        short_type_name::<Self>(),
-                        format,
-                        channels,
-                        rate,
-                        head.as_deref().unwrap_or_default(),
-                    )?;
-                    let config = head.unwrap_or_else(|| {
-                        synth_opus_head(params.channels, params.sample_rate, OPUS_ENCODER_PRE_SKIP)
-                    });
-                    self.inits[input] = Some(TrackInit::Audio {
-                        format,
-                        channels: params.channels,
-                        rate: params.sample_rate,
-                        config,
-                    });
+                    if init.config.is_empty() {
+                        init.config = synth_opus_head(
+                            init.params.channels,
+                            init.params.sample_rate,
+                            OPUS_ENCODER_PRE_SKIP,
+                        );
+                    }
+                    self.inits[input] = Some(TrackInit::Audio(init));
                 }
                 // Remux only: without the codebooks there is no decodable stream
                 // to write, so the identification and setup headers must arrive in band.
@@ -634,41 +608,36 @@ impl MkvMuxN {
                         return Ok(());
                     }
                     self.xiph_headers[input].push(au.to_vec());
-                    let headers = &self.xiph_headers[input];
-                    let (Some(ident), Some(setup)) = (
-                        xiph_header(headers, 1, VORBIS_MAGIC),
-                        xiph_header(headers, 5, VORBIS_MAGIC),
-                    ) else {
+                    let Some(headers) = vorbis_headers(&self.xiph_headers[input]) else {
                         return Ok(());
                     };
-                    let comment = xiph_header(headers, 3, VORBIS_MAGIC)
-                        .map(<[u8]>::to_vec)
-                        .unwrap_or_else(|| empty_vorbis_comment(b"\x03vorbis"));
                     let params = audio_track_params(
                         short_type_name::<Self>(),
                         format,
                         channels,
                         rate,
-                        ident,
+                        headers.identification,
                     )?;
-                    let config = xiph_codec_private(&[ident, &comment, setup]);
-                    self.inits[input] = Some(TrackInit::Audio {
+                    let config = xiph_codec_private(&[
+                        headers.identification,
+                        &headers.comment,
+                        headers.setup,
+                    ]);
+                    self.inits[input] = Some(TrackInit::Audio(AudioTrackInit {
                         format,
-                        channels: params.channels,
-                        rate: params.sample_rate,
+                        params,
                         config,
-                    });
+                    }));
                 }
                 // the WAVEFORMATEX leads a tagged stream in band
                 AudioFormat::Tagged(_) => {
                     let params =
                         audio_track_params(short_type_name::<Self>(), format, channels, rate, &[])?;
-                    self.inits[input] = Some(TrackInit::Audio {
+                    self.inits[input] = Some(TrackInit::Audio(AudioTrackInit {
                         format,
-                        channels: params.channels,
-                        rate: params.sample_rate,
+                        params,
                         config: au.to_vec(),
-                    });
+                    }));
                 }
                 AudioFormat::Flac => {
                     if !is_audio_config_packet(format, au) {
@@ -676,12 +645,11 @@ impl MkvMuxN {
                     }
                     let params =
                         audio_track_params(short_type_name::<Self>(), format, channels, rate, au)?;
-                    self.inits[input] = Some(TrackInit::Audio {
+                    self.inits[input] = Some(TrackInit::Audio(AudioTrackInit {
                         format,
-                        channels: params.channels,
-                        rate: params.sample_rate,
+                        params,
                         config: au.to_vec(),
-                    });
+                    }));
                 }
                 _ => {
                     let params =
@@ -710,12 +678,11 @@ impl MkvMuxN {
                         }
                         _ => Vec::new(),
                     };
-                    self.inits[input] = Some(TrackInit::Audio {
+                    self.inits[input] = Some(TrackInit::Audio(AudioTrackInit {
                         format,
-                        channels: params.channels,
-                        rate: params.sample_rate,
+                        params,
                         config,
-                    });
+                    }));
                 }
             },
             // A raw video, text or bitmap subtitle track's init is fixed at configure; the
@@ -880,12 +847,11 @@ fn track_config(init: &TrackInit, subtitle_format: TextFormat) -> MkvTrackConfig
                 codec_private,
             }
         }
-        TrackInit::Audio {
+        TrackInit::Audio(AudioTrackInit {
             format,
-            channels,
-            rate,
+            params,
             config,
-        } => {
+        }) => {
             let mkv_codec = MkvMuxN::mkv_audio_codec(*format)
                 .expect("pad_kind_for admits only audio formats with a Matroska mapping");
             MkvTrackConfig {
@@ -894,8 +860,8 @@ fn track_config(init: &TrackInit, subtitle_format: TextFormat) -> MkvTrackConfig
                     width: 0,
                     height: 0,
                     pixel_aspect: PixelAspect::Any,
-                    channels: *channels,
-                    sample_rate: *rate,
+                    channels: params.channels,
+                    sample_rate: params.sample_rate,
                 },
                 codec_private: config.clone(),
             }
@@ -1236,7 +1202,7 @@ impl MultiInputElement for MkvMuxN {
                     }
                 }
                 for input in 0..self.inputs {
-                    if matches!(self.inits[input], Some(TrackInit::Audio { .. })) {
+                    if matches!(self.inits[input], Some(TrackInit::Audio(_))) {
                         let delay_ns = self.priming.priming_ns(input);
                         mux = mux.with_codec_delay(self.track_index(input), delay_ns);
                     }

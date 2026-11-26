@@ -69,13 +69,14 @@ use crate::mp4box::{
     BOX_HEADER_LEN, ISO_AUDIO_SAMPLE_SIZE, MATRIX, UNDETERMINED_MDHD_LANGUAGE,
 };
 use crate::mux::{
-    aac_track_config, audio_header_config, audio_layout_changed, audio_track_params,
-    every_track_header_ready, is_audio_config_packet, keyframe_codec_config, push_muxed_bytes,
-    refused_input, refused_input_because, require_header_config_at_end, video_header_config,
-    AudioTrackParams, ConfigChanges, InputPriming, CODEC_CONFIG,
+    aac_track_init, audio_header_config, audio_layout_changed, audio_track_params,
+    every_track_header_ready, is_audio_config_packet, keyframe_codec_config, opus_track_init,
+    push_muxed_bytes, refused_input, refused_input_because, require_header_config_at_end,
+    video_header_config, AudioTrackInit, AudioTrackParams, ConfigChanges, InputPriming,
+    CODEC_CONFIG,
 };
 use crate::opusparse::{
-    dops_from_opus_head, is_opus_config, parse_opus_head, synth_opus_head, OPUS_ENCODER_PRE_SKIP,
+    dops_from_opus_head, parse_opus_head, synth_opus_head, OPUS_ENCODER_PRE_SKIP,
 };
 use crate::rtcp;
 use crate::tagproperty::TagsProperty;
@@ -127,16 +128,10 @@ pub(crate) enum TrackInit {
         geometry: VideoGeometry,
         param_sets: Vec<Vec<u8>>,
     },
-    Audio {
-        format: AudioFormat,
-        channels: u8,
-        rate: u32,
-        /// The elementary stream's out-of-band config: the AAC
-        /// AudioSpecificConfig synthesised from the first ADTS header, or an
-        /// in-band Opus `OpusHead`. Empty when the stream carried none,
-        /// in which case the sample entry falls back to the caps.
-        config: Vec<u8>,
-    },
+    /// The config is the AAC AudioSpecificConfig synthesised from the first
+    /// ADTS header, or an in-band Opus `OpusHead`. Empty when the stream
+    /// carried none, in which case the sample entry falls back to the caps.
+    Audio(AudioTrackInit),
     ClosedCaption {
         format: ClosedCaptionFormat,
     },
@@ -154,7 +149,7 @@ impl TrackInit {
             TrackInit::Video { .. }
             | TrackInit::ClosedCaption { .. }
             | TrackInit::Uncompressed { .. } => VIDEO_TIMESCALE,
-            TrackInit::Audio { rate, .. } => *rate,
+            TrackInit::Audio(audio) => audio.params.sample_rate,
             TrackInit::Text => TEXT_TIMESCALE,
         }
     }
@@ -617,11 +612,7 @@ impl Mp4MuxN {
     // the AudioSpecificConfig captured for an AAC pad, None before its first frame
     fn aac_config(&self, input: usize) -> Option<&[u8]> {
         match &self.inits[input] {
-            Some(TrackInit::Audio {
-                format: AudioFormat::Aac,
-                config,
-                ..
-            }) => Some(config),
+            Some(TrackInit::Audio(audio)) => audio.aac_config(),
             _ => None,
         }
     }
@@ -682,42 +673,20 @@ impl Mp4MuxN {
                 // AAC's AudioSpecificConfig is synthesised from the first ADTS
                 // header, or is the frame leading a raw stream.
                 AudioFormat::Aac => {
-                    if let Some((params, config)) =
-                        aac_track_config(short_type_name::<Self>(), channels, rate, au)?
-                    {
-                        return Ok(Some(TrackInit::Audio {
-                            format,
-                            channels: params.channels,
-                            rate: params.sample_rate,
-                            config,
-                        }));
-                    }
+                    return Ok(
+                        aac_track_init(short_type_name::<Self>(), channels, rate, au)?
+                            .map(TrackInit::Audio),
+                    );
                 }
                 // An Opus stream leads with its `OpusHead` when it came from a
                 // container (M791), and the `dOps` is built from it; a freshly
                 // encoded one has none, so the track is ready at the first packet
                 // and the `dOps` falls back to the caps + libopus' lookahead.
                 AudioFormat::Opus => {
-                    let config = match parse_opus_head(au) {
-                        Some(_) => au.to_vec(),
-                        // An `OpusTags` ahead of the identification header is not
-                        // the config: wait rather than fix an empty one.
-                        None if is_opus_config(au) => return Ok(None),
-                        None => Vec::new(),
-                    };
-                    let params = audio_track_params(
-                        short_type_name::<Self>(),
-                        format,
-                        channels,
-                        rate,
-                        &config,
-                    )?;
-                    return Ok(Some(TrackInit::Audio {
-                        format,
-                        channels: params.channels,
-                        rate: params.sample_rate,
-                        config,
-                    }));
+                    return Ok(
+                        opus_track_init(short_type_name::<Self>(), channels, rate, au)?
+                            .map(TrackInit::Audio),
+                    );
                 }
                 // the `alac` atom leading the stream is the sample entry's child box verbatim
                 AudioFormat::Alac => {
@@ -725,12 +694,14 @@ impl Mp4MuxN {
                         return Ok(None);
                     }
                     let alac = crate::alac::alac_config(au)?;
-                    return Ok(Some(TrackInit::Audio {
+                    return Ok(Some(TrackInit::Audio(AudioTrackInit {
                         format,
-                        channels: alac.channels,
-                        rate: alac.sample_rate,
+                        params: AudioTrackParams {
+                            channels: alac.channels,
+                            sample_rate: alac.sample_rate,
+                        },
                         config: au.to_vec(),
-                    }));
+                    })));
                 }
                 // MP2 and MP3 frames describe themselves, and an AC-3 frame's header fills the `dac3`
                 _ => {
@@ -743,12 +714,11 @@ impl Mp4MuxN {
                     };
                     let params =
                         audio_track_params(short_type_name::<Self>(), format, channels, rate, &[])?;
-                    return Ok(Some(TrackInit::Audio {
+                    return Ok(Some(TrackInit::Audio(AudioTrackInit {
                         format,
-                        channels: params.channels,
-                        rate: params.sample_rate,
+                        params,
                         config,
-                    }));
+                    })));
                 }
             },
             // A caption track needs no out-of-band config: it is ready at its
@@ -1945,12 +1915,15 @@ fn trak_media(init: &TrackInit, clean_aperture: Option<CropRectangle>) -> TrakMe
             presentation_size: (0, 0),
             is_video: false,
         },
-        TrackInit::Audio {
+        TrackInit::Audio(AudioTrackInit {
             format,
-            channels,
-            rate,
+            params:
+                AudioTrackParams {
+                    channels,
+                    sample_rate: rate,
+                },
             config,
-        } => {
+        }) => {
             let (fourcc, sample_size, codec_box): (&[u8; 4], u16, Vec<u8>) = match format {
                 AudioFormat::Opus => (
                     b"Opus",
@@ -2157,11 +2130,11 @@ fn dops(channels: u8, rate: u32, head: &[u8]) -> Vec<u8> {
 /// for a non-Opus track.
 fn track_pre_skip(init: &TrackInit) -> u32 {
     match init {
-        TrackInit::Audio {
+        TrackInit::Audio(AudioTrackInit {
             format: AudioFormat::Opus,
             config,
             ..
-        } => parse_opus_head(config)
+        }) => parse_opus_head(config)
             .map(|(_, pre_skip)| u32::from(pre_skip))
             .unwrap_or(u32::from(OPUS_ENCODER_PRE_SKIP)),
         _ => 0,
@@ -2665,12 +2638,14 @@ mod tests {
                     alloc::vec![0x68, 0xce]
                 ],
             }),
-            Some(TrackInit::Audio {
+            Some(TrackInit::Audio(AudioTrackInit {
                 format: AudioFormat::Aac,
-                channels: 2,
-                rate: 48000,
+                params: AudioTrackParams {
+                    channels: 2,
+                    sample_rate: 48000,
+                },
                 config: alloc::vec![0x11, 0x90],
-            }),
+            })),
         ];
         let moov = av_moov(&tracks, None, &MoovMetadata::default(), &[]);
         let count = |needle: &[u8]| moov.windows(4).filter(|w| *w == needle).count();
@@ -2699,12 +2674,14 @@ mod tests {
                     alloc::vec![0x68, 0xce]
                 ],
             }),
-            Some(TrackInit::Audio {
+            Some(TrackInit::Audio(AudioTrackInit {
                 format: AudioFormat::Aac,
-                channels: 2,
-                rate: 48000,
+                params: AudioTrackParams {
+                    channels: 2,
+                    sample_rate: 48000,
+                },
                 config: alloc::vec![0x11, 0x90],
-            }),
+            })),
         ];
         let metadata = MoovMetadata {
             global: [
@@ -2749,12 +2726,14 @@ mod tests {
         // and trex must carry track_ID 2 to match the fragments emit_au writes.
         let tracks = [
             None,
-            Some(TrackInit::Audio {
+            Some(TrackInit::Audio(AudioTrackInit {
                 format: AudioFormat::Aac,
-                channels: 2,
-                rate: 48000,
+                params: AudioTrackParams {
+                    channels: 2,
+                    sample_rate: 48000,
+                },
                 config: alloc::vec![0x11, 0x90],
-            }),
+            })),
         ];
         let moov = av_moov(&tracks, None, &MoovMetadata::default(), &[]);
         let count = |needle: &[u8]| moov.windows(4).filter(|w| *w == needle).count();
@@ -2770,12 +2749,14 @@ mod tests {
 
     #[test]
     fn opus_track_writes_an_opus_sample_entry_with_dops() {
-        let tracks = [Some(TrackInit::Audio {
+        let tracks = [Some(TrackInit::Audio(AudioTrackInit {
             format: AudioFormat::Opus,
-            channels: 2,
-            rate: 48000,
+            params: AudioTrackParams {
+                channels: 2,
+                sample_rate: 48000,
+            },
             config: Vec::new(),
-        })];
+        }))];
         let moov = av_moov(&tracks, None, &MoovMetadata::default(), &[]);
         let count = |needle: &[u8]| moov.windows(needle.len()).filter(|w| *w == needle).count();
         assert_eq!(count(b"Opus"), 1, "Opus sample entry");
@@ -2808,12 +2789,14 @@ mod tests {
         head.extend_from_slice(&666u16.to_le_bytes()); // pre-skip
         head.extend_from_slice(&48_000u32.to_le_bytes());
         head.extend_from_slice(&[0, 0, 0]); // output gain, mapping family
-        let tracks = [Some(TrackInit::Audio {
+        let tracks = [Some(TrackInit::Audio(AudioTrackInit {
             format: AudioFormat::Opus,
-            channels: 2,
-            rate: 48000,
+            params: AudioTrackParams {
+                channels: 2,
+                sample_rate: 48000,
+            },
             config: head,
-        })];
+        }))];
         let moov = av_moov(&tracks, None, &MoovMetadata::default(), &[]);
         let dops = moov.windows(4).position(|w| w == b"dOps").unwrap();
         assert_eq!(

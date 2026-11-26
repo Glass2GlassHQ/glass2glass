@@ -169,12 +169,14 @@ impl AsyncElement for Mp4AudioSink {
                     }
 
                     if !self.header_written {
-                        let track = TrackInit::Audio {
+                        let track = TrackInit::Audio(AudioTrackInit {
                             format: AudioFormat::Aac,
-                            channels: self.channels,
-                            rate: self.sample_rate,
+                            params: AudioTrackParams {
+                                channels: self.channels,
+                                sample_rate: self.sample_rate,
+                            },
                             config: self.asc.clone(),
-                        };
+                        });
                         let moov = av_moov(&[Some(track)], None, &MoovMetadata::default(), &[]);
                         let header = [ftyp(), moov].concat();
                         let w = self.writer.as_mut().expect("checked above");
@@ -242,6 +244,7 @@ impl PadTemplates for Mp4AudioSink {
 
 use crate::mp4box::{ftyp, full_box};
 use crate::mp4muxn::{av_fragment, av_moov, FragmentSample, MoovMetadata, TrackInit};
+use crate::mux::{AudioTrackInit, AudioTrackParams};
 
 /// The one track's `track_ID`.
 const TRACK_ID: u32 = 1;

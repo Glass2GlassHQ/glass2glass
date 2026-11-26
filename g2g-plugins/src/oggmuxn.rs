@@ -71,9 +71,9 @@ use g2g_core::{
 use crate::livemux::{wall_clock_ns, LiveMuxDeadline, LIVE_MUX_LATENCY_PROPERTY};
 use crate::mux::{
     audio_header_config, audio_track_params, every_track_header_ready, is_audio_config_packet,
-    refused_input, require_header_config_at_end, xiph_header, CODEC_CONFIG,
+    refused_input, require_header_config_at_end, vorbis_headers, CODEC_CONFIG,
 };
-use crate::ogg::{OggPageWriter, VorbisLapping, VorbisTiming, VORBIS_MAGIC};
+use crate::ogg::{OggPageWriter, VorbisLapping, VorbisTiming};
 use crate::opusparse::{
     packet_samples as opus_packet_samples, synth_opus_head, OPUS_ENCODER_PRE_SKIP, OPUS_RATE_HZ,
 };
@@ -224,13 +224,9 @@ impl OggStreamMux {
     fn write_bos(&mut self, (bos, rest): HeaderPackets) -> Vec<u8> {
         // Vorbis timing needs the mode tables from ident + setup.
         if self.format == Some(AudioFormat::Vorbis) {
-            self.vorbis = match (
-                xiph_header(&self.headers, 1, VORBIS_MAGIC),
-                xiph_header(&self.headers, 5, VORBIS_MAGIC),
-            ) {
-                (Some(i), Some(s)) => VorbisTiming::parse(i, s).map(VorbisLapping::new),
-                _ => None,
-            };
+            self.vorbis = vorbis_headers(&self.headers)
+                .and_then(|headers| VorbisTiming::parse(headers.identification, headers.setup))
+                .map(VorbisLapping::new);
         }
         self.pending_rest = rest;
         self.writer.push_packet(bos, 0);
@@ -311,16 +307,12 @@ impl OggStreamMux {
             AudioFormat::Vorbis => {
                 // Remux only: without the codebooks there is no decodable stream
                 // to write, so the ident and setup headers must arrive in-band.
-                let (Some(ident), Some(setup)) = (
-                    xiph_header(&self.headers, 1, VORBIS_MAGIC),
-                    xiph_header(&self.headers, 5, VORBIS_MAGIC),
-                ) else {
-                    return Ok(None);
-                };
-                let comment = xiph_header(&self.headers, 3, VORBIS_MAGIC)
-                    .map(|c| c.to_vec())
-                    .unwrap_or_else(|| empty_vorbis_comment(b"\x03vorbis"));
-                Ok(Some((ident.to_vec(), Vec::from([comment, setup.to_vec()]))))
+                Ok(vorbis_headers(&self.headers).map(|headers| {
+                    (
+                        headers.identification.to_vec(),
+                        Vec::from([headers.comment, headers.setup.to_vec()]),
+                    )
+                }))
             }
             AudioFormat::Flac => Ok(self.headers.first().and_then(|first| flac_headers(first))),
             _ => Ok(None),
