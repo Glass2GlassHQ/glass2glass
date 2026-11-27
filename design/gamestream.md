@@ -5,7 +5,7 @@ clients pair with and stream from, the way they use Sunshine. It serves
 discovery, pairing, the app list with launched `--app` commands, encrypted
 H.264 or HEVC video from an X display, the desktop portal, a `--run` headless
 display or the Windows desktop at the size the client asks for, reference
-invalidation on Linux, encrypted stereo, 5.1 or 7.1 Opus audio from the
+invalidation with `nvenc`, encrypted stereo, 5.1 or 7.1 Opus audio from the
 default output, keyboard, mouse, scroll, text, touch, pen and gamepad input,
 and gamepad rumble back to the client. Open work is under "Moonlight host" in [TODO.md](TODO.md).
 
@@ -30,8 +30,9 @@ and gamepad rumble back to the client. Open work is under "Moonlight host" in [T
    packet, AES-CBC per audio packet, AES-GCM per control message.
 7. The stream has the size the client asks for, set by a caps filter after
    `cudascale` on Linux and after `d3d11convert` on Windows.
-8. H.264 and HEVC come from `nvenc` on Linux and `mfh264enc`/`mfh265enc` on
-   Windows. The software and VA-API encoders refuse `--protocol gamestream`.
+8. H.264 and HEVC come from `nvenc` on Linux. On Windows they come from `nvenc`
+   when the primary monitor is on an NVIDIA GPU and from `mfh264enc`/`mfh265enc`
+   otherwise. The software and VA-API encoders refuse `--protocol gamestream`.
 9. A PIN reaches the host on a localhost-only `POST /submit-pin`, and
    `g2g-desktop pin <PIN>` calls it.
 10. Video and audio leave through `udpsink`, which sends each
@@ -41,10 +42,10 @@ and gamepad rumble back to the client. Open work is under "Moonlight host" in [T
     asks for 1 when its decoder cannot invalidate references, and its decoder
     fails on every second P-frame of a stream with more. It asks for 0 when its
     decoder can, and the host then keeps 16, the most H.264 and HEVC allow.
-12. On Linux `DESCRIBE` offers reference invalidation, and a Moonlight client
-    whose decoder supports it reports lost frames instead of asking for an IDR.
-    The Windows host does not offer it, because the Media Foundation encoders
-    can only answer with a key frame.
+12. With `nvenc` `DESCRIBE` offers reference invalidation, and a Moonlight
+    client whose decoder supports it reports lost frames instead of asking for
+    an IDR. With the Media Foundation encoders it does not, because they can
+    only answer with a key frame.
 
 ## Ports
 
@@ -65,8 +66,8 @@ dmabuftocuda ! videorate drop-only=true ! video/x-raw,framerate=F`. Both
 sources send a frame only when the picture changes, and a `videorate` that
 repeats frames holds each one until the next change.
 Windows replaces the video front with
-`d3d11screencapturesrc ! d3d11convert ! video/x-raw,width=W,height=H ! mfh265enc`
-and the audio source with `wasapisrc loopback=true`, which plays silence to
+`d3d11screencapturesrc ! d3d11convert ! video/x-raw,width=W,height=H ! nvenc`,
+or `mfh265enc` in place of `nvenc` off NVIDIA, and the audio source with `wasapisrc loopback=true`, which plays silence to
 the output while it captures because Windows delivers no loopback packets while
 nothing plays. The session builds both
 graphs after RTSP `ANNOUNCE`, which carries the codec, size, frame rate,

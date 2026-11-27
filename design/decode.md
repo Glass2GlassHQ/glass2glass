@@ -101,6 +101,14 @@ goes back to the pool once the DPB no longer references it and downstream
 dropped the frame. The decode queue waits on a fence that wgpu's queue signals,
 so a recycled texture is not overwritten while wgpu still reads it.
 
+Up to four decodes are in flight. Each has its own command allocator and
+bitstream upload buffer, and the CPU waits only before reusing them, for the
+decode four pictures back. After each decode, wgpu's queue and the crop copy
+queue wait on the GPU for the decode fence, so a texture leaves the element
+before its decode finishes and every wgpu read of it is ordered after the
+decode. Dropping the decoder waits for its last decode, because D3D12 frees a
+released resource even while a queued decode still uses it.
+
 Output is either domain. In `WgpuTexture` the texture is wrapped through
 `texture_from_raw` with no copy. It keeps the padded coded size, and the caps
 carry the visible size, as GStreamer's d3d12 decoders do. A crop with a nonzero

@@ -200,6 +200,13 @@ pub fn monitor_bounds(monitor_index: i32) -> Result<MonitorBounds, G2gError> {
     with_physical_pixels(|| select_output(monitor_index).map(|selected| selected.bounds))
 }
 
+pub fn monitor_gpu_vendor_id(monitor_index: i32) -> Result<u32, G2gError> {
+    let selected = select_output(monitor_index)?;
+    // SAFETY: GetDesc1 fills and returns a plain struct.
+    let desc = unsafe { selected.adapter.GetDesc1() }.map_err(mf_err)?;
+    Ok(desc.VendorId)
+}
+
 #[derive(Debug)]
 pub struct D3D11ScreenCaptureSrc {
     monitor_index: i32,

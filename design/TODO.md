@@ -32,8 +32,6 @@ Highest leverage first:
 
 The plan is [remote.md](remote.md).
 
-- Encode with `d3d11convert ! nvenc` on a Windows host with an NVIDIA GPU,
-  falling back to `mfh264enc`.
 - The macOS client, then `display-index` on `screencapturesrc` and a macOS
   host through `vtencode`.
 - Pin `g2g-wayland-display` back to upstream smithay once it flushes in
@@ -190,15 +188,10 @@ libraries installed.
     with their decoders, as the H.264 code is in `h264parse` and `h264dpb`.
   - Run the JVT conformance streams through `d3d12h264dec` with a calliope
     adapter on japan.
-  - Pipeline `d3d12h264dec`: the CPU waits on a fence after every picture,
-    which is most of its 6.7 ms per 1080p frame.
   - Rebuild the decoder and heap on a mid-stream size change instead of
     refusing the stream.
   - The Media Foundation decoder MFT with a DXGI device manager stops producing
     output after about 120 frames, so `MfDecode` decodes in software only.
-- **`mfh265dec` without an HEVC decoder installed** fails with a bare
-  `Hardware(MediaFoundation(0x80040154))`. Find the call that fails and log
-  that the HEVC Video Extensions are missing.
 - **Decoder features:**
   - H.264 field pictures (PAFF) on `VulkanVideoDec` and `d3d12h264dec`.
   - Field-coded H.265 (`field_seq_flag`): an alternate-field interlace mode in

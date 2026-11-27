@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use std::io;
 
 use g2g_plugins::opusdec::ChannelMapping;
+
+use super::stream::StreamEncoder;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 const HEAD_LIMIT: usize = 16 * 1024;
@@ -18,11 +20,6 @@ const ENCRYPT_VIDEO: u32 = 0x2;
 const ENCRYPT_AUDIO: u32 = 0x4;
 // moonlight takes this sprop-parameter-sets value as the host offering HEVC
 const HEVC_MARKER: &str = "sprop-parameter-sets=AAAAAU";
-// nvenc invalidates references, the media foundation encoders answer an invalidation with a key frame
-#[cfg(target_os = "linux")]
-const REFERENCE_INVALIDATION: &str = "a=x-nv-video[0].refPicInvalidation:1\r\n";
-#[cfg(not(target_os = "linux"))]
-const REFERENCE_INVALIDATION: &str = "";
 const BITSTREAM_FORMAT_H264: u32 = 0;
 const BITSTREAM_FORMAT_HEVC: u32 = 1;
 // sunshine's opus bitrates for stereo, 5.1 and 7.1
@@ -169,7 +166,7 @@ impl RtspReply {
         }
     }
 
-    pub(crate) fn description() -> Self {
+    pub(crate) fn description(encoder: StreamEncoder) -> Self {
         let surround: String = AUDIO_BITRATES
             .iter()
             .filter(|bitrate| bitrate.channels > 2)
@@ -179,12 +176,18 @@ impl RtspReply {
         const PEN_TOUCH_EVENTS: u32 = 0x01;
         let supported = ENCRYPT_CONTROL | ENCRYPT_VIDEO | ENCRYPT_AUDIO;
         let requested = ENCRYPT_VIDEO | ENCRYPT_AUDIO;
+        // nvenc invalidates references, the media foundation encoders answer an invalidation with a key frame
+        let reference_invalidation = match encoder {
+            StreamEncoder::Nvenc => "a=x-nv-video[0].refPicInvalidation:1\r\n",
+            #[cfg(target_os = "windows")]
+            StreamEncoder::MediaFoundation => "",
+        };
         Self {
             body: format!(
                 "a=x-ss-general.featureFlags:{PEN_TOUCH_EVENTS}\r\n\
                  a=x-ss-general.encryptionSupported:{supported}\r\n\
                  a=x-ss-general.encryptionRequested:{requested}\r\n\
-                 {REFERENCE_INVALIDATION}\
+                 {reference_invalidation}\
                  {surround}\
                  {HEVC_MARKER}\r\n"
             ),
@@ -352,13 +355,13 @@ mod tests {
 
     #[test]
     fn the_description_asks_moonlight_for_touch_and_pen() {
-        let body = RtspReply::description().body;
+        let body = RtspReply::description(StreamEncoder::Nvenc).body;
         assert!(body.contains("a=x-ss-general.featureFlags:1\r\n"), "{body}");
     }
 
     #[test]
     fn the_description_gives_moonlight_the_5_1_layout_opusenc_encodes() {
-        let body = RtspReply::description().body;
+        let body = RtspReply::description(StreamEncoder::Nvenc).body;
         // the layout sunshine sends for 5.1, which libopus mapping family 1 produces too
         assert!(
             body.contains("a=fmtp:97 surround-params=642014235\r\n"),
@@ -366,14 +369,20 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
-    fn the_description_offers_reference_invalidation_on_linux() {
-        let body = RtspReply::description().body;
+    fn the_description_offers_reference_invalidation_with_nvenc() {
+        let body = RtspReply::description(StreamEncoder::Nvenc).body;
         assert!(
             body.contains("a=x-nv-video[0].refPicInvalidation:1\r\n"),
             "{body}"
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_description_offers_no_reference_invalidation_with_media_foundation() {
+        let body = RtspReply::description(StreamEncoder::MediaFoundation).body;
+        assert!(!body.contains("refPicInvalidation"), "{body}");
     }
 
     #[test]

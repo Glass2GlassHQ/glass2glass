@@ -27,10 +27,10 @@ use g2g_core::G2gError;
 #[cfg(target_os = "linux")]
 use g2g_core::PropValue;
 use g2g_desktop::client::{run_client, ClientError, ClientSettings, ClientTransport};
-#[cfg(feature = "gamestream")]
-use g2g_desktop::gamestream::ServedDesktop;
 #[cfg(all(target_os = "linux", feature = "gamestream"))]
 use g2g_desktop::gamestream::{LaunchableApp, ServedApps};
+#[cfg(feature = "gamestream")]
+use g2g_desktop::gamestream::{ServedDesktop, StreamEncoder};
 use g2g_desktop::host::{
     check_token_len, inject, run_session, HostCapture, HostEncoder, HostListener, HostSettings,
     RemotewtIdentity,
@@ -51,7 +51,9 @@ use g2g_desktop::windowsservice;
 #[cfg(target_os = "linux")]
 use g2g_desktop::xtest::XTestInjector;
 #[cfg(target_os = "windows")]
-use g2g_plugins::d3d11screencapturesrc::{monitor_bounds, D3D11ScreenCaptureSrc};
+use g2g_plugins::d3d11screencapturesrc::{
+    monitor_bounds, monitor_gpu_vendor_id, D3D11ScreenCaptureSrc,
+};
 use g2g_plugins::perfetto_trace::PerfettoTrace;
 #[cfg(target_os = "linux")]
 use g2g_plugins::pipewirevideosrc::PipeWireVideoSrc;
@@ -539,12 +541,37 @@ fn open_windows_injector(
 }
 
 #[cfg(target_os = "windows")]
+const NVIDIA_PCI_VENDOR_ID: u32 = 0x10de;
+
+#[cfg(target_os = "windows")]
+fn monitor_encoder(monitor_index: i32, settings: &HostSettings) -> Result<HostEncoder, String> {
+    let vendor_id = monitor_gpu_vendor_id(monitor_index)
+        .map_err(|e| format!("monitor {monitor_index}: {e:?}"))?;
+    if vendor_id != NVIDIA_PCI_VENDOR_ID {
+        return Ok(HostEncoder::MediaFoundation);
+    }
+    if settings.quality_vs_speed.is_some() {
+        return Err(
+            "--quality-vs-speed sets the Media Foundation encoder, and this monitor's NVIDIA GPU encodes with nvenc".into(),
+        );
+    }
+    Ok(HostEncoder::Nvenc)
+}
+
+#[cfg(target_os = "windows")]
 async fn host_monitor(
     listener: HostListener,
     settings: &HostSettings,
     capture: &CaptureSettings,
     trace: Option<Arc<PerfettoTrace>>,
 ) {
+    let encoder = match monitor_encoder(capture.monitor_index, settings) {
+        Ok(encoder) => encoder,
+        Err(e) => {
+            eprintln!("g2g-desktop host: {e}");
+            return;
+        }
+    };
     let source = D3D11ScreenCaptureSrc::new()
         .with_monitor_index(capture.monitor_index)
         .with_fps(capture.fps);
@@ -552,7 +579,7 @@ async fn host_monitor(
         cursor_shapes: Some(source.cursor_shapes()),
         clipboard_texts: None,
         nodes: vec![GraphNodeRef::source(source)],
-        encoder: HostEncoder::MediaFoundation,
+        encoder,
     };
     let monitor_index = capture.monitor_index;
     let open_injector = move |screen| open_windows_injector(screen, monitor_index);
@@ -697,6 +724,7 @@ async fn gamestream_headless(
     let launched = display.clone();
     let desktop = ServedDesktop {
         capture: Box::new(move |fps| gamestream_display_capture(&captured, fps)),
+        encoder: StreamEncoder::Nvenc,
         open_injector: Box::new(move |screen| {
             Ok(Box::new(WithGamepads {
                 desktop: WaylandDisplayInjector::new(screen, &injected),
@@ -739,6 +767,7 @@ async fn gamestream_host(flags: &Flags) -> Result<(), Box<dyn Error>> {
                 let display = display.clone();
                 move |fps| gamestream_x11_capture(&display, fps)
             }),
+            encoder: StreamEncoder::Nvenc,
             open_injector: Box::new(move |screen| {
                 Ok(Box::new(WithGamepads {
                     desktop: XTestInjector::new(&display, screen)?,
@@ -751,6 +780,7 @@ async fn gamestream_host(flags: &Flags) -> Result<(), Box<dyn Error>> {
             let token_path = portal_restore_token_path()?;
             ServedDesktop {
                 capture: Box::new(move |fps| gamestream_portal_capture(fps, &token_path)),
+                encoder: StreamEncoder::Nvenc,
                 open_injector: Box::new(|screen| {
                     Ok(Box::new(WithGamepads {
                         desktop: Injector::new(screen)?,
@@ -784,8 +814,15 @@ async fn gamestream_host(flags: &Flags) -> Result<(), Box<dyn Error>> {
         Some(state_directory) => PathBuf::from(state_directory).join("gamestream"),
         None => user_gamestream_directory()?,
     };
+    let vendor_id = monitor_gpu_vendor_id(PRIMARY_MONITOR)
+        .map_err(|e| format!("the primary monitor: {e:?}"))?;
+    let encoder = match vendor_id {
+        NVIDIA_PCI_VENDOR_ID => StreamEncoder::Nvenc,
+        _ => StreamEncoder::MediaFoundation,
+    };
     let desktop = ServedDesktop {
         capture: Box::new(gamestream_capture),
+        encoder,
         open_injector: Box::new(|screen| {
             Ok(Box::new(open_windows_injector(screen, PRIMARY_MONITOR)?))
         }),

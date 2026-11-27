@@ -204,7 +204,9 @@ d3d11screencapturesrc ! d3d11convert ! nvenc
 ```
 
 `nvenc` opens its session on the texture's `ID3D11Device` and registers the
-texture itself, so the frame never passes through CUDA.
+texture itself, so the frame never passes through CUDA. The host takes this
+graph when the DXGI adapter of the captured monitor has NVIDIA's PCI vendor id,
+so a laptop whose desktop is on the integrated GPU keeps `mfh264enc`.
 
 macOS:
 
@@ -255,12 +257,6 @@ capture side. Chrome is the target. Firefox stays untested until the native
 session is solid.
 
 ## Capture sources to add
-
-### nvenc on the Windows host
-
-The host encodes with `d3d11convert ! nvenc` on an NVIDIA GPU and falls back to
-`mfh264enc hardware=true`. Capture runs in the interactive session, never in
-session 0, and the host rebuilds the graph after `AccessLost` fails the source.
 
 ### display-index elsewhere
 

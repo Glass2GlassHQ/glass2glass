@@ -595,7 +595,8 @@ message as the token, with a 10 second limit, and compares it in constant time
 capture never starts. It then runs one graph: the capture nodes, a pass-through
 that publishes the capture size, the colour conversion and the encoder at the
 configured bitrate (`videoconvert ! ffmpegenc backend=software` on Linux,
-`d3d11convert ! mfh264enc hardware=true` on Windows, which keeps the frame on
+`d3d11convert ! nvenc` on Windows when the monitor is on an NVIDIA GPU and
+`d3d11convert ! mfh264enc hardware=true` otherwise, both keeping the frame on
 the GPU), and the sink. Later data channel messages are read as client packets
 and sent to the caller's event channel, and a malformed packet is logged and
 dropped.
@@ -630,7 +631,7 @@ up the video.
 `g2g-desktop host` makes a self-signed certificate at start, prints its
 SHA-256, and serves one client at a time on `--port`. `--send-window` and
 `--video-mode` set the sink's properties of the same names, and on Windows `--quality-vs-speed` sets `mfh264enc
-quality-vs-speed`. On Linux it captures a
+quality-vs-speed`, and the host refuses it when the monitor's GPU is NVIDIA. On Linux it captures a
 monitor through the ScreenCast portal, which asks the user on every session.
 On Windows it captures the monitor named by `--monitor-index` (-1 for the
 primary) with `d3d11screencapturesrc`. `g2g-desktop client --cert-hash` takes

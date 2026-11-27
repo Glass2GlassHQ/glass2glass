@@ -2743,12 +2743,14 @@ pub(crate) mod tests {
 
     /// Sends `reply` back to the encoder for the access unit at `reply_at`, and
     /// accepts every other push.
+    #[cfg(feature = "ffmpeg")]
     struct ReplySink {
         capture: CaptureSink,
         reply_at: usize,
         reply: g2g_core::PushOutcome,
     }
 
+    #[cfg(feature = "ffmpeg")]
     impl OutputSink for ReplySink {
         fn poll_push(
             &mut self,

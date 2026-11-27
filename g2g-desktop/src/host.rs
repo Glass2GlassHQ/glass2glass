@@ -251,7 +251,7 @@ pub enum HostEncoder {
     Software,
     #[cfg(target_os = "linux")]
     Vaapi { render_node: String },
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     Nvenc,
     #[cfg(target_os = "windows")]
     MediaFoundation,
@@ -275,6 +275,8 @@ impl HostEncoder {
             }
             #[cfg(target_os = "linux")]
             HostEncoder::Nvenc => format!("dmabuftocuda ! nvenc bitrate={bitrate}"),
+            #[cfg(target_os = "windows")]
+            HostEncoder::Nvenc => format!("d3d11convert ! nvenc bitrate={bitrate}"),
             #[cfg(target_os = "windows")]
             HostEncoder::MediaFoundation => {
                 let speed = settings

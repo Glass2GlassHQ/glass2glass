@@ -37,7 +37,7 @@ use http::{read_request, write_reply, Reply, Request};
 use identity::{HostIdentity, PairedClients};
 use pairing::Pairings;
 use rtsp::{RtspReply, RtspRequest, StreamSettings};
-pub use stream::{CaptureFactory, InjectorFactory, ServedDesktop};
+pub use stream::{CaptureFactory, InjectorFactory, ServedDesktop, StreamEncoder};
 use stream::{AUDIO_PORT, VIDEO_PORT};
 
 pub const HTTP_PORT: u16 = 47989;
@@ -396,7 +396,7 @@ impl Host {
         };
         match request.method.as_str() {
             "OPTIONS" => RtspReply::ok(),
-            "DESCRIBE" => RtspReply::description(),
+            "DESCRIBE" => RtspReply::description(self.desktop.encoder),
             "SETUP" => match request.target.split('/').next() {
                 Some("streamid=video") => RtspReply::setup(VIDEO_PORT),
                 Some("streamid=audio") => RtspReply::setup(AUDIO_PORT),

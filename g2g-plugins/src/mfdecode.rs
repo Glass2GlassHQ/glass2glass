@@ -34,6 +34,7 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+use windows::Win32::Foundation::REGDB_E_CLASSNOTREG;
 use windows::Win32::Media::MediaFoundation::{
     CLSID_MSH264DecoderMFT, CLSID_MSH265DecoderMFT, IMFTransform, MFCreateMediaType,
     MFMediaType_Video, MFShutdown, MFStartup, MFVideoFormat_H264, MFVideoFormat_HEVC,
@@ -547,8 +548,19 @@ fn decoder_ids(codec: VideoCodec) -> Result<(windows::core::GUID, windows::core:
 fn init_decoder(codec: VideoCodec, width: u32, height: u32) -> Result<DecoderState, G2gError> {
     let (clsid, subtype) = decoder_ids(codec)?;
     // SAFETY: COM object creation on the owning thread.
-    let transform: IMFTransform =
-        unsafe { CoCreateInstance(&clsid, None, CLSCTX_INPROC_SERVER) }.map_err(mf_err)?;
+    let transform: IMFTransform = unsafe {
+        CoCreateInstance(&clsid, None, CLSCTX_INPROC_SERVER)
+    }
+    .map_err(|error| {
+        // windows ships the HEVC decoder MFT only with the Store's HEVC Video Extensions
+        if codec == VideoCodec::H265 && error.code() == REGDB_E_CLASSNOTREG {
+            g2g_core::g2g_error!(
+                g2g_core::log::Target::category(g2g_core::log::short_type_name::<MfDecode>()),
+                "no HEVC decoder is installed, install the HEVC Video Extensions from the Microsoft Store"
+            );
+        }
+        mf_err(error)
+    })?;
 
     // SAFETY: media-type configuration on the owning thread; all arguments are
     // valid for the duration of each call.

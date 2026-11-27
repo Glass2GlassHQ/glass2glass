@@ -6,6 +6,10 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2626: The Windows Moonlight host encodes with `nvenc` and offers reference invalidation when the primary monitor is on an NVIDIA GPU.
+- M2625: The Windows remote desktop host encodes with `nvenc` when the captured monitor is on an NVIDIA GPU.
+- M2624: `d3d12h264dec` keeps up to four decodes in flight instead of waiting for each one on the CPU.
+- M2623: `mfh265dec` logs that the HEVC Video Extensions are missing when Windows has no HEVC decoder.
 - M2622: `mpeghuimanager` applies MPEG-H user interactivity from ActionEvent XML.
 - M2621: `mpeghdec` decodes MPEG-H 3D Audio through Fraunhofer's mpeghdec.
 - M2620: MP4 and MPEG-TS demuxers read MPEG-H 3D Audio tracks.

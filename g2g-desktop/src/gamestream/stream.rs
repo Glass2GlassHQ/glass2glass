@@ -50,8 +50,16 @@ impl fmt::Debug for SessionKey {
 pub type CaptureFactory = Box<dyn Fn(u32) -> Result<Vec<GraphNode>, String>>;
 pub type InjectorFactory = Box<dyn Fn(ScreenSize) -> Result<Box<dyn InjectEvents>, InjectError>>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamEncoder {
+    Nvenc,
+    #[cfg(target_os = "windows")]
+    MediaFoundation,
+}
+
 pub struct ServedDesktop {
     pub capture: CaptureFactory,
+    pub encoder: StreamEncoder,
     pub open_injector: InjectorFactory,
     pub apps: Option<super::ServedApps>,
 }
@@ -134,41 +142,42 @@ fn encoder_bitrate(settings: &StreamSettings) -> u64 {
 }
 
 // h264 and hevc keep at most 16, the most frames an invalidation can reach back over
-#[cfg(target_os = "linux")]
 const HOST_CHOSEN_REFERENCE_FRAMES: u32 = 16;
 
 #[cfg(target_os = "linux")]
-fn encoder_launch(settings: &StreamSettings) -> String {
-    use super::rtsp::VideoCodec;
-    let codec = match settings.codec {
-        VideoCodec::H264 => "h264",
-        VideoCodec::Hevc => "hevc",
-    };
-    format!(
-        "cudascale ! video/x-raw,width={},height={} ! nvenc codec={codec} bitrate={} ref-frames={}",
-        settings.width,
-        settings.height,
-        encoder_bitrate(settings),
-        match settings.reference_frames {
-            0 => HOST_CHOSEN_REFERENCE_FRAMES,
-            requested => requested,
-        }
-    )
-}
-
+const NVENC_SCALER: &str = "cudascale";
 #[cfg(target_os = "windows")]
-fn encoder_launch(settings: &StreamSettings) -> String {
+const NVENC_SCALER: &str = "d3d11convert";
+
+fn encoder_launch(settings: &StreamSettings, encoder: StreamEncoder) -> String {
     use super::rtsp::VideoCodec;
-    let element = match settings.codec {
-        VideoCodec::H264 => "mfh264enc",
-        VideoCodec::Hevc => "mfh265enc",
-    };
-    format!(
-        "d3d11convert ! video/x-raw,width={},height={} ! {element} hardware=true bitrate={}",
-        settings.width,
-        settings.height,
-        encoder_bitrate(settings)
-    )
+    let (width, height) = (settings.width, settings.height);
+    let bitrate = encoder_bitrate(settings);
+    match encoder {
+        StreamEncoder::Nvenc => {
+            let codec = match settings.codec {
+                VideoCodec::H264 => "h264",
+                VideoCodec::Hevc => "hevc",
+            };
+            let reference_frames = match settings.reference_frames {
+                0 => HOST_CHOSEN_REFERENCE_FRAMES,
+                requested => requested,
+            };
+            format!(
+                "{NVENC_SCALER} ! video/x-raw,width={width},height={height} ! nvenc codec={codec} bitrate={bitrate} ref-frames={reference_frames}"
+            )
+        }
+        #[cfg(target_os = "windows")]
+        StreamEncoder::MediaFoundation => {
+            let element = match settings.codec {
+                VideoCodec::H264 => "mfh264enc",
+                VideoCodec::Hevc => "mfh265enc",
+            };
+            format!(
+                "d3d11convert ! video/x-raw,width={width},height={height} ! {element} hardware=true bitrate={bitrate}"
+            )
+        }
+    }
 }
 
 fn payloader(settings: &StreamSettings, key: &[u8; 16]) -> Result<MoonlightVideoPay, StreamError> {
@@ -196,17 +205,17 @@ fn payloader(settings: &StreamSettings, key: &[u8; 16]) -> Result<MoonlightVideo
 async fn send_video(
     settings: &StreamSettings,
     client: SocketAddr,
-    capture: &CaptureFactory,
+    desktop: &ServedDesktop,
     pay: MoonlightVideoPay,
     sizes: watch::Sender<Option<ScreenSize>>,
 ) -> Result<(), StreamError> {
-    let mut nodes = capture(settings.frames_per_second)
+    let mut nodes = (desktop.capture)(settings.frames_per_second)
         .map_err(StreamError::Capture)?
         .into_iter();
     let source = nodes.next().expect("capture starts with a source");
     let registry = default_registry();
-    let encoder =
-        parse_chain(&registry, &encoder_launch(settings)).map_err(StreamError::Encoder)?;
+    let encoder = parse_chain(&registry, &encoder_launch(settings, desktop.encoder))
+        .map_err(StreamError::Encoder)?;
     let mut sink = UdpSink::new(client);
     sink.set_property("bind-port", PropValue::Uint(u64::from(VIDEO_PORT)))
         .map_err(|_| StreamError::Property("bind-port"))?;
@@ -369,7 +378,7 @@ pub(crate) async fn run(
         // udpsink binds the video port itself
         drop(video_socket);
         tokio::select! {
-            sent = send_video(&settings, destination, &desktop.capture, pay, sizes) => sent,
+            sent = send_video(&settings, destination, desktop, pay, sizes) => sent,
             () = audio => unreachable!("the audio future never completes"),
         }
     });

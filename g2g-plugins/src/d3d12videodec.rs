@@ -103,8 +103,10 @@ pub struct D3D12DecodeDevice {
     video_device: ID3D12VideoDevice,
     wgpu_queue: ID3D12CommandQueue,
     decode_queue: ID3D12CommandQueue,
-    allocator: ID3D12CommandAllocator,
+    decode_allocators: Vec<ID3D12CommandAllocator>,
     command_list: ID3D12VideoDecodeCommandList,
+    decode_fence: ID3D12Fence,
+    decode_fence_value: u64,
     copy_queue: ID3D12CommandQueue,
     copy_allocator: ID3D12CommandAllocator,
     copy_list: ID3D12GraphicsCommandList,
@@ -124,6 +126,8 @@ impl core::fmt::Debug for D3D12DecodeDevice {
             .finish_non_exhaustive()
     }
 }
+
+const DECODES_IN_FLIGHT: usize = 4;
 
 pub async fn open_d3d12_decode_device() -> Result<D3D12DecodeDevice, D3D12VideoError> {
     let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
@@ -170,12 +174,13 @@ pub async fn open_d3d12_decode_device() -> Result<D3D12DecodeDevice, D3D12VideoE
     };
     // SAFETY: each call gets valid descriptors and returns a new object.
     unsafe {
-        let allocator: ID3D12CommandAllocator =
-            raw_device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_VIDEO_DECODE)?;
+        let decode_allocators = (0..DECODES_IN_FLIGHT)
+            .map(|_| raw_device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_VIDEO_DECODE))
+            .collect::<Result<Vec<ID3D12CommandAllocator>, _>>()?;
         let command_list: ID3D12VideoDecodeCommandList = raw_device.CreateCommandList(
             0,
             D3D12_COMMAND_LIST_TYPE_VIDEO_DECODE,
-            &allocator,
+            &decode_allocators[0],
             None,
         )?;
         command_list.Close()?;
@@ -187,8 +192,10 @@ pub async fn open_d3d12_decode_device() -> Result<D3D12DecodeDevice, D3D12VideoE
         Ok(D3D12DecodeDevice {
             gpu: GpuContext::from_wgpu(instance, adapter, device, queue),
             decode_queue: raw_device.CreateCommandQueue(&queue_desc)?,
-            allocator,
+            decode_allocators,
             command_list,
+            decode_fence: raw_device.CreateFence(0, D3D12_FENCE_FLAG_NONE)?,
+            decode_fence_value: 0,
             copy_queue: raw_device.CreateCommandQueue(&copy_queue_desc)?,
             copy_allocator,
             copy_list,
@@ -359,23 +366,57 @@ impl D3D12DecodeDevice {
         Ok(())
     }
 
+    fn wait_for_fence(&self, fence: &ID3D12Fence, value: u64) -> Result<(), D3D12VideoError> {
+        // SAFETY: the fence belongs to `self.device`, and the event outlives the wait.
+        unsafe {
+            if fence.GetCompletedValue() < value {
+                fence.SetEventOnCompletion(value, self.fence_event.0)?;
+                WaitForSingleObject(self.fence_event.0, INFINITE);
+            }
+        }
+        Ok(())
+    }
+
     fn execute_and_wait(
         &mut self,
         queue: &ID3D12CommandQueue,
         list: ID3D12CommandList,
     ) -> Result<(), D3D12VideoError> {
         self.completion_fence_value += 1;
-        // SAFETY: the list was closed by the caller, and the event outlives the wait.
+        // SAFETY: the list was closed by the caller.
         unsafe {
             queue.ExecuteCommandLists(&[Some(list)]);
             queue.Signal(&self.completion_fence, self.completion_fence_value)?;
-            if self.completion_fence.GetCompletedValue() < self.completion_fence_value {
-                self.completion_fence
-                    .SetEventOnCompletion(self.completion_fence_value, self.fence_event.0)?;
-                WaitForSingleObject(self.fence_event.0, INFINITE);
-            }
+        }
+        self.wait_for_fence(&self.completion_fence, self.completion_fence_value)
+    }
+
+    fn free_decode_slot(&self) -> Result<usize, D3D12VideoError> {
+        let next = self.decode_fence_value + 1;
+        let in_flight = DECODES_IN_FLIGHT as u64;
+        // D3D12 resets a command allocator only after the GPU finished the lists recorded from it
+        if next > in_flight {
+            self.wait_for_fence(&self.decode_fence, next - in_flight)?;
+        }
+        Ok((next % in_flight) as usize)
+    }
+
+    fn execute_decode(&mut self, list: ID3D12CommandList) -> Result<(), D3D12VideoError> {
+        self.decode_fence_value += 1;
+        // SAFETY: the list was closed by the caller, and both queues and the fence belong to `self.device`.
+        unsafe {
+            self.decode_queue.ExecuteCommandLists(&[Some(list)]);
+            self.decode_queue
+                .Signal(&self.decode_fence, self.decode_fence_value)?;
+            // wgpu work submitted from here on reads the picture only after its decode
+            self.wgpu_queue
+                .Wait(&self.decode_fence, self.decode_fence_value)?;
         }
         Ok(())
+    }
+
+    fn wait_for_decodes(&self) -> Result<(), D3D12VideoError> {
+        self.wait_for_fence(&self.decode_fence, self.decode_fence_value)
     }
 
     fn copy_picture(
@@ -386,6 +427,8 @@ impl D3D12DecodeDevice {
     ) -> Result<(), D3D12VideoError> {
         let queue = self.copy_queue.clone();
         self.wait_for_wgpu(&queue)?;
+        // SAFETY: the fence belongs to `self.device`.
+        unsafe { queue.Wait(&self.decode_fence, self.decode_fence_value)? };
         // SAFETY: the allocator's previous list finished (`execute_and_wait`), the copy
         // locations borrow resources that outlive the recording, and copy queues
         // promote textures in COMMON to the copy states and decay them back after.
@@ -484,9 +527,21 @@ pub struct D3D12H264Decoder {
     session: H264DecodeSession,
     slot_textures: Vec<Option<Arc<DecodeTexture>>>,
     pool: Vec<Arc<DecodeTexture>>,
-    bitstream: Option<(ID3D12Resource, usize)>,
+    bitstreams: Vec<Option<(ID3D12Resource, usize)>>,
     // wgpu-hal unloads d3d12.dll when its last device drops
     device: D3D12DecodeDevice,
+}
+
+impl Drop for D3D12H264Decoder {
+    fn drop(&mut self) {
+        // D3D12 requires every resource a queued decode reads or writes to outlive it
+        if let Err(error) = self.device.wait_for_decodes() {
+            g2g_error!(
+                Target::category(D3D12Backend::LOG_CATEGORY),
+                "waiting for the last decodes failed: {error:?}"
+            );
+        }
+    }
 }
 
 impl core::fmt::Debug for D3D12H264Decoder {
@@ -542,7 +597,7 @@ impl D3D12H264Decoder {
             session: H264DecodeSession::new(sps),
             slot_textures: alloc::vec![None; slots],
             pool: Vec::new(),
-            bitstream: None,
+            bitstreams: alloc::vec![None; DECODES_IN_FLIGHT],
         })
     }
 
@@ -699,6 +754,7 @@ impl D3D12H264Decoder {
 
     fn upload_bitstream(
         &mut self,
+        slot: usize,
         slices: &[&[u8]],
     ) -> Result<(ID3D12Resource, usize, Vec<DxvaSliceH264Short>), D3D12VideoError> {
         let mut bytes = Vec::new();
@@ -715,21 +771,19 @@ impl D3D12H264Decoder {
         }
         let length = bytes.len();
         bytes.resize(length.next_multiple_of(BITSTREAM_ALIGNMENT), 0);
-        let fits = self
-            .bitstream
+        let fits = self.bitstreams[slot]
             .as_ref()
             .is_some_and(|(_, capacity)| *capacity >= bytes.len());
         if !fits {
             let buffer = self.device.create_upload_buffer(bytes.len())?;
-            self.bitstream = Some((buffer, bytes.len()));
+            self.bitstreams[slot] = Some((buffer, bytes.len()));
         }
-        let (buffer, _) = self
-            .bitstream
+        let (buffer, _) = self.bitstreams[slot]
             .as_ref()
             .expect("bitstream buffer allocated above");
         let mut mapped: *mut core::ffi::c_void = core::ptr::null_mut();
-        // SAFETY: the upload buffer holds at least `bytes.len()` bytes, the previous
-        // decode finished before this one started, and the mapping is released here.
+        // SAFETY: the upload buffer holds at least `bytes.len()` bytes, the decode that
+        // last read it finished (`free_decode_slot`), and the mapping is released here.
         unsafe {
             buffer.Map(0, None, Some(&mut mapped))?;
             core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.cast::<u8>(), bytes.len());
@@ -744,7 +798,8 @@ impl D3D12H264Decoder {
         slices: &[&[u8]],
         output: &ID3D12Resource,
     ) -> Result<(), D3D12VideoError> {
-        let (bitstream, bitstream_length, slice_controls) = self.upload_bitstream(slices)?;
+        let slot = self.device.free_decode_slot()?;
+        let (bitstream, bitstream_length, slice_controls) = self.upload_bitstream(slot, slices)?;
         let scaling_matrices = h264_flat_scaling_matrices();
         // slots without a picture, such as frames a frame_num gap inferred, point at the output texture
         let mut reference_textures: Vec<Option<ID3D12Resource>> = self
@@ -846,11 +901,14 @@ impl D3D12H264Decoder {
 
         let decode_queue = self.device.decode_queue.clone();
         self.device.wait_for_wgpu(&decode_queue)?;
-        // SAFETY: the allocator's previous list finished (`execute_and_wait`), and
-        // every pointer in the arguments outlives the recording and the wait.
+        let allocator = &self.device.decode_allocators[slot];
+        // SAFETY: the allocator's previous list finished (`free_decode_slot`), and every
+        // pointer in the arguments outlives the recording. The resources outlive the
+        // decode: the pool, the bitstream ring and the DPB hold them, and dropping the
+        // decoder waits for its decodes.
         let recorded = unsafe {
-            self.device.allocator.Reset()?;
-            self.device.command_list.Reset(&self.device.allocator)?;
+            allocator.Reset()?;
+            self.device.command_list.Reset(allocator)?;
             self.device.command_list.ResourceBarrier(&before);
             self.device
                 .command_list
@@ -860,7 +918,7 @@ impl D3D12H264Decoder {
         };
         let result = recorded.map_err(D3D12VideoError::from).and_then(|()| {
             let list: ID3D12CommandList = self.device.command_list.cast()?;
-            self.device.execute_and_wait(&decode_queue, list)
+            self.device.execute_decode(list)
         });
         // release the AddRefs the argument structs took
         drop(ManuallyDrop::into_inner(input.CompressedBitstream.pBuffer));

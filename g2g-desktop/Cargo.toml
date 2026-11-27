@@ -23,6 +23,7 @@ session = [
     "g2g-plugins/d3d11-screen-capture",
     "g2g-plugins/d3d11-convert",
     "g2g-plugins/mf-encode",
+    "g2g-plugins/nvenc",
     "g2g-plugins/d3d12-decode",
     "g2g-plugins/wasapi-src",
     "g2g-plugins/wasapi-sink",
