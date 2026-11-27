@@ -57,6 +57,16 @@ fn carriage_of_caps(caps: &Caps) -> Option<&'static CaptionCarriage> {
     CAPTION_CARRIAGES.iter().find(|c| c.caps() == *caps)
 }
 
+pub(crate) fn caption_format(packet: &AncPacket) -> Option<ClosedCaptionFormat> {
+    if packet.did != CAPTION_DID {
+        return None;
+    }
+    CAPTION_CARRIAGES
+        .iter()
+        .find(|carriage| carriage.sdid == packet.sdid)
+        .map(|carriage| carriage.format)
+}
+
 fn caption_caps_set() -> CapsSet {
     CapsSet::from_alternatives(
         CAPTION_CARRIAGES
@@ -404,7 +414,7 @@ impl AsyncElement for St2038AncToCc {
                     };
                     let captions = packets
                         .iter()
-                        .filter(|p| p.did == CAPTION_DID && p.sdid == carriage.sdid);
+                        .filter(|p| caption_format(p) == Some(carriage.format));
                     for caption in captions {
                         if !self.caps_emitted {
                             out.push(PipelinePacket::CapsChanged(carriage.caps()))
@@ -579,11 +589,12 @@ impl MultiOutputElement for St2038AncToCcDemux {
                         g2g_warn!(self, "dropped an ST 2038 payload that does not parse");
                         return Ok(());
                     };
-                    for caption in packets.iter().filter(|p| p.did == CAPTION_DID) {
-                        let Some(port) = self
-                            .port_carriages
-                            .iter()
-                            .position(|c| c.sdid == caption.sdid)
+                    for caption in &packets {
+                        let Some(format) = caption_format(caption) else {
+                            continue;
+                        };
+                        let Some(port) =
+                            self.port_carriages.iter().position(|c| c.format == format)
                         else {
                             continue;
                         };

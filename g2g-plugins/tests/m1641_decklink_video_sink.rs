@@ -256,7 +256,7 @@ fn the_mode_property_lists_every_mode_and_refuses_others() {
     assert_eq!(listed, expected);
 
     assert_eq!(
-        sink.set_property("mode", PropValue::Str("ntsc-widescreen".into())),
+        sink.set_property("mode", PropValue::Str("unknown-mode".into())),
         Err(PropError::Value)
     );
     sink.set_property("mode", PropValue::Str("2160p5994".into()))

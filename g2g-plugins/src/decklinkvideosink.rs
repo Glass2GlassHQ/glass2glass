@@ -19,9 +19,9 @@ use g2g_core::{
 };
 
 use crate::decklink::{
-    any_mode_caps, device_number_from_property, log_target, mode_for_caps, mode_from_property,
-    mode_property_value, sdk_opener, video_format_supported, DeckLinkOpener, DisplayMode,
-    AUTO_MODE, DISPLAY_MODES, MODE_VALUES, PIXEL_FORMATS,
+    any_mode_caps, device_number_from_property, log_target, mode_for_caps_with_aspect,
+    mode_from_property, mode_property_value, sdk_opener, video_format_supported, DeckLinkOpener,
+    DisplayMode, AUTO_MODE, DISPLAY_MODES, MODE_VALUES, PIXEL_FORMATS,
 };
 use crate::decklinkoutput::{claim_output, hold_until_due, sleep_ns, PictureLayout, SharedOutput};
 use crate::st291::AncillaryMeta;
@@ -88,6 +88,7 @@ impl DeckLinkVideoSink {
             height: Dim::Fixed(height),
             framerate: Rate::Fixed(framerate_q16),
             interlace,
+            pixel_aspect,
             ..
         } = *caps
         else {
@@ -106,23 +107,32 @@ impl DeckLinkVideoSink {
             return Err(G2gError::CapsMismatch);
         }
         let mode = match self.mode {
-            Some(mode) if mode.matches(width, height, framerate_q16, interlace) => mode,
+            Some(mode)
+                if mode.matches(width, height, framerate_q16, interlace)
+                    && mode.pixel_aspect().intersect(&pixel_aspect).is_some() =>
+            {
+                mode
+            }
             Some(mode) => {
                 g2g_error!(
                     log_target(),
-                    "{ELEMENT_NAME} mode {} is {}x{} at {}/{} fps, the caps are {caps:?}",
+                    "{ELEMENT_NAME} mode {} is {}x{} at {}/{} fps with {:?} pixel aspect, the caps are {caps:?}",
                     mode.name,
                     mode.width,
                     mode.height,
                     mode.framerate_numerator,
-                    mode.framerate_denominator
+                    mode.framerate_denominator,
+                    mode.pixel_aspect(),
                 );
                 return Err(G2gError::CapsMismatch);
             }
-            None => mode_for_caps(width, height, framerate_q16, interlace).ok_or_else(|| {
-                g2g_error!(log_target(), "{ELEMENT_NAME} has no mode for {caps:?}");
-                G2gError::CapsMismatch
-            })?,
+            None => {
+                mode_for_caps_with_aspect(width, height, framerate_q16, interlace, pixel_aspect)
+                    .ok_or_else(|| {
+                        g2g_error!(log_target(), "{ELEMENT_NAME} has no mode for {caps:?}");
+                        G2gError::CapsMismatch
+                    })?
+            }
         };
         let row_bytes = format.row_stride(width).ok_or(G2gError::CapsMismatch)?;
         let frame_bytes = format
@@ -217,7 +227,8 @@ impl AsyncElement for DeckLinkVideoSink {
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let layout = self.layout_for(absolute_caps)?;
         if let Some(configured) = self.layout {
-            if configured == layout {
+            if configured.mode.same_sdk_mode(layout.mode) && configured.format == layout.format {
+                self.layout = Some(layout);
                 return Ok(ConfigureOutcome::Accepted);
             }
             g2g_error!(

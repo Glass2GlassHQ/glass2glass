@@ -305,10 +305,7 @@ libraries installed.
   no way to replug one).
 - SDI audio capture for Blackmagic Design DeckLink (`decklinkaudiosrc`),
   sharing its input device with the `decklinkvideosrc` of the same number.
-- `decklinkvideosrc` properties GStreamer has: `output-cc` and `output-afd-bar`,
-  which attach captions and AFD/Bar from VANC as their own metas, and
-  `timecode-format`, which needs a timecode meta. `mode=auto` should also pick
-  the widescreen SD modes from AFD, as GStreamer does.
+- Add the `timecode-format` property to `decklinkvideosrc` and attach captured timecode.
 - `decklinkvideosrc` should hand downstream the SDK's frame instead of a copy.
 - Run `decklinkvideosrc` on a board: capture, input format detection, VANC and
   the board clock have only run against a mock device.
@@ -386,7 +383,6 @@ libraries installed.
 - Write the VUI sample aspect from `openh264enc` once the `openh264` crate can
   set `bAspectRatioPresent`, and carry the caps ratio through `mfencode`,
   `vtencode`, `mediacodecenc` and `webcodecsencode` into their bitstreams.
-- Map the caps ratio to the widescreen SD modes of `decklinkvideosink`.
 
 ## Transforms and effects
 

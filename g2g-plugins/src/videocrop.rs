@@ -18,6 +18,8 @@
 //! With every inset zero, a frame carrying a `CropMeta` (an MP4 clean aperture)
 //! is cut to its rectangle, the origin and size rounded down to whole
 //! chroma samples as ffmpeg's `crop` filter rounds them.
+//! `use-afd=true` also lets frame metadata select the active picture within
+//! a letterboxed or pillarboxed raster.
 //! Packed formats (`Rgba8`, `Bgra8`) crop at any inset. CPU-only `no_std`
 //! baseline.
 
@@ -34,10 +36,14 @@ use crate::pixel::{
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, PushOutcome, Rate, RawVideoFormat, Reconfigure,
+    AsyncElement, Caps, CapsConstraint, CapsSet, Colorimetry, ConfigureOutcome, Dim,
+    ElementMetadata, G2gError, Interlace, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, PixelAspect, PropError, PropKind, PropValue, PropertySpec, PushOutcome, Rate,
+    RawVideoFormat, Reconfigure,
 };
+
+#[cfg(feature = "metadata")]
+const USE_AFD: &str = "use-afd";
 
 pub(crate) const FORMATS: [RawVideoFormat; 16] = [
     RawVideoFormat::Rgba8,
@@ -75,9 +81,10 @@ pub struct VideoCrop {
     bottom: u32,
     left: u32,
     right: u32,
-    /// Format, dims, and framerate of the configured input stream, updated by
-    /// a mid-stream `CapsChanged`.
-    input: Option<(RawVideoFormat, u32, u32, Rate)>,
+    #[cfg(feature = "metadata")]
+    use_afd: bool,
+    /// Configured input stream, updated by a mid-stream `CapsChanged`.
+    input: Option<Caps>,
     configured: bool,
     last_caps: Option<Caps>,
     emitted: u64,
@@ -92,6 +99,8 @@ impl VideoCrop {
             bottom,
             left,
             right,
+            #[cfg(feature = "metadata")]
+            use_afd: false,
             input: None,
             configured: false,
             last_caps: None,
@@ -104,12 +113,11 @@ impl VideoCrop {
         (self.top, self.bottom, self.left, self.right)
     }
 
-    fn accept_input(&self, caps: &Caps) -> Result<(RawVideoFormat, u32, u32, Rate), G2gError> {
+    fn accept_input(&self, caps: &Caps) -> Result<(RawVideoFormat, u32, u32), G2gError> {
         let Caps::RawVideo {
             format,
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
-            framerate,
             ..
         } = caps
         else {
@@ -118,7 +126,46 @@ impl VideoCrop {
         if !FORMATS.contains(format) || *w == 0 || *h == 0 {
             return Err(G2gError::CapsMismatch);
         }
-        Ok((*format, *w, *h, framerate.clone()))
+        Ok((*format, *w, *h))
+    }
+
+    fn uses_afd(&self) -> bool {
+        #[cfg(feature = "metadata")]
+        {
+            self.use_afd && self.insets() == (0, 0, 0, 0)
+        }
+        #[cfg(not(feature = "metadata"))]
+        {
+            false
+        }
+    }
+
+    fn output_caps(&self, input: &Caps, width: Dim, height: Dim) -> Caps {
+        let Caps::RawVideo {
+            format,
+            framerate,
+            interlace,
+            colorimetry,
+            pixel_aspect,
+            ..
+        } = input
+        else {
+            unreachable!("only raw video caps reach videocrop's output");
+        };
+        let (interlace, colorimetry, pixel_aspect) = if self.uses_afd() {
+            (*interlace, *colorimetry, *pixel_aspect)
+        } else {
+            (Interlace::Any, Colorimetry::UNKNOWN, PixelAspect::Any)
+        };
+        Caps::RawVideo {
+            format: *format,
+            width,
+            height,
+            framerate: framerate.clone(),
+            interlace,
+            colorimetry,
+            pixel_aspect,
+        }
     }
 
     /// The insets must leave a non-empty frame (`left + right < in_w`,
@@ -163,16 +210,29 @@ impl VideoCrop {
         &self,
         frame: &Frame,
         format: RawVideoFormat,
-        in_w: u32,
-        in_h: u32,
+        size: (u32, u32),
+        pixel_aspect: PixelAspect,
+        interlace: Interlace,
     ) -> Result<(u32, u32, u32, u32), G2gError> {
-        let crop = frame.meta.get::<g2g_core::meta::CropMeta>();
-        match crop {
-            Some(crop) if self.insets() == (0, 0, 0, 0) => {
-                chroma_aligned(crop.rectangle, format, in_w, in_h)
-            }
-            _ => Ok(self.rect(in_w, in_h)),
+        let (in_w, in_h) = size;
+        let fallback = self.rect(in_w, in_h);
+        if self.insets() != (0, 0, 0, 0) {
+            return Ok(fallback);
         }
+        let align_fields = self.uses_afd() && interlace.is_interleaved();
+        if let Some(crop) = frame.meta.get::<g2g_core::meta::CropMeta>() {
+            return chroma_aligned(crop.rectangle, format, size, align_fields);
+        }
+        if !self.uses_afd() {
+            return Ok(fallback);
+        }
+        let active = frame
+            .meta
+            .get::<crate::afd::AfdBarMeta>()
+            .and_then(|afd| afd.active_rectangle(in_w, in_h, pixel_aspect, interlace))
+            .filter(|rect| rect.width != in_w || rect.height != in_h)
+            .and_then(|rect| chroma_aligned(rect, format, size, align_fields).ok());
+        Ok(active.unwrap_or(fallback))
     }
 
     #[cfg(not(feature = "metadata"))]
@@ -180,8 +240,9 @@ impl VideoCrop {
         &self,
         _frame: &Frame,
         _format: RawVideoFormat,
-        in_w: u32,
-        in_h: u32,
+        (in_w, in_h): (u32, u32),
+        _pixel_aspect: PixelAspect,
+        _interlace: Interlace,
     ) -> Result<(u32, u32, u32, u32), G2gError> {
         Ok(self.rect(in_w, in_h))
     }
@@ -191,10 +252,11 @@ impl VideoCrop {
 fn chroma_aligned(
     rectangle: g2g_core::meta::CropRectangle,
     format: RawVideoFormat,
-    in_w: u32,
-    in_h: u32,
+    (in_w, in_h): (u32, u32),
+    interleaved: bool,
 ) -> Result<(u32, u32, u32, u32), G2gError> {
     let (even_width, even_height) = even_dims_required(format);
+    let even_height = even_height || interleaved;
     let align = |value: u32, even: bool| if even { value & !1 } else { value };
     let (x, w) = (
         align(rectangle.left, even_width),
@@ -271,19 +333,10 @@ impl AsyncElement for VideoCrop {
                 format,
                 width,
                 height,
-                framerate,
                 ..
             } if FORMATS.contains(format) && even_insets_ok(*format) => {
                 match (shrink(width, lr), shrink(height, tb)) {
-                    (Some(w), Some(h)) => CapsSet::one(Caps::RawVideo {
-                        format: *format,
-                        width: w,
-                        height: h,
-                        framerate: framerate.clone(),
-                        interlace: g2g_core::Interlace::Any,
-                        colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                        pixel_aspect: g2g_core::PixelAspect::Any,
-                    }),
+                    (Some(w), Some(h)) => CapsSet::one(self.output_caps(input, w, h)),
                     _ => CapsSet::from_alternatives(Vec::new()),
                 }
             }
@@ -292,9 +345,9 @@ impl AsyncElement for VideoCrop {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let (format, w, h, rate) = self.accept_input(absolute_caps)?;
+        let (format, w, h) = self.accept_input(absolute_caps)?;
         self.validate_insets(format, w, h)?;
-        self.input = Some((format, w, h, rate));
+        self.input = Some(absolute_caps.clone());
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -310,17 +363,28 @@ impl AsyncElement for VideoCrop {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let (format, in_w, in_h, rate) = match &self.input {
-                        Some((f, w, h, r)) => (*f, *w, *h, r.clone()),
-                        None => return Err(G2gError::NotConfigured),
+                    let Some(
+                        input @ Caps::RawVideo {
+                            format,
+                            width: Dim::Fixed(in_w),
+                            height: Dim::Fixed(in_h),
+                            pixel_aspect,
+                            interlace,
+                            ..
+                        },
+                    ) = &self.input
+                    else {
+                        return Err(G2gError::NotConfigured);
                     };
+                    let (format, in_w, in_h) = (*format, *in_w, *in_h);
                     let src = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     if src.len() < frame_byte_size(format, in_w, in_h) {
                         return Err(G2gError::CapsMismatch);
                     }
-                    let (x, y, w, h) = self.frame_rect(&frame, format, in_w, in_h)?;
+                    let (x, y, w, h) =
+                        self.frame_rect(&frame, format, (in_w, in_h), *pixel_aspect, *interlace)?;
                     let cropped = crop(
                         src,
                         format,
@@ -328,15 +392,7 @@ impl AsyncElement for VideoCrop {
                         (x as usize, y as usize, w as usize, h as usize),
                     );
 
-                    let new_caps = Caps::RawVideo {
-                        format,
-                        width: Dim::Fixed(w),
-                        height: Dim::Fixed(h),
-                        framerate: rate,
-                        interlace: g2g_core::Interlace::Any,
-                        colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                        pixel_aspect: g2g_core::PixelAspect::Any,
-                    };
+                    let new_caps = self.output_caps(input, Dim::Fixed(w), Dim::Fixed(h));
                     if self.last_caps.as_ref() != Some(&new_caps) {
                         let outcome = out
                             .push(PipelinePacket::CapsChanged(new_caps.clone()))
@@ -413,6 +469,11 @@ impl AsyncElement for VideoCrop {
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        #[cfg(feature = "metadata")]
+        if name == USE_AFD {
+            self.use_afd = value.as_bool().ok_or(PropError::Type)?;
+            return Ok(());
+        }
         // GStreamer `videocrop` props are gint; `-1` means auto-crop, which we
         // don't implement, so negatives are rejected.
         let v = value.as_int().ok_or(PropError::Type)?;
@@ -431,6 +492,10 @@ impl AsyncElement for VideoCrop {
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
+        #[cfg(feature = "metadata")]
+        if name == USE_AFD {
+            return Some(PropValue::Bool(self.use_afd));
+        }
         let v = match name {
             "top" => self.top,
             "bottom" => self.bottom,
@@ -449,6 +514,13 @@ static VIDEOCROP_PROPS: &[PropertySpec] = &[
     PropertySpec::new("bottom", PropKind::Int, "pixels to crop at the bottom").with_default("0"),
     PropertySpec::new("left", PropKind::Int, "pixels to crop at the left").with_default("0"),
     PropertySpec::new("right", PropKind::Int, "pixels to crop at the right").with_default("0"),
+    #[cfg(feature = "metadata")]
+    PropertySpec::new(
+        USE_AFD,
+        PropKind::Bool,
+        "Crop to AFD or bar data when no insets or clean aperture are set",
+    )
+    .with_default("false"),
 ];
 
 impl PadTemplates for VideoCrop {

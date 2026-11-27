@@ -11,6 +11,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
+use g2g_core::meta::CaptionMeta;
 use g2g_core::runtime::{bounded, Receiver, SourceLoop};
 use g2g_core::{
     g2g_error, Caps, CaptureAnchor, ClockCandidate, ClockPriority, ClockSync, ConfigureOutcome,
@@ -19,6 +20,7 @@ use g2g_core::{
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec, RawVideoFormat,
 };
 
+use crate::afd::{AfdBar, AfdBarMeta};
 use crate::decklink::{
     any_mode_caps, device_number_from_property, log_target, mode_from_property,
     mode_property_value, sdk_input_opener, video_connection, CapturedVideoFrame, DeckLinkInput,
@@ -26,7 +28,7 @@ use crate::decklink::{
     MODE_VALUES, PIXEL_FORMATS,
 };
 use crate::inter::deliver_dropping_oldest;
-use crate::st291::AncillaryMeta;
+use crate::st291::{AncPacket, AncillaryMeta};
 
 const ELEMENT_NAME: &str = "decklinkvideosrc";
 
@@ -52,13 +54,15 @@ struct Capture {
     mode: &'static DisplayMode,
     format: RawVideoFormat,
     signal: bool,
+    detect_aspect: bool,
+    afd_widescreen: Option<bool>,
     // the frame intercept_caps read to learn the input mode
     first_frame: Option<CapturedVideoFrame>,
 }
 
 impl Capture {
     fn caps(&self) -> Caps {
-        self.mode.caps(self.format)
+        self.mode.capture_caps(self.format, self.afd_widescreen)
     }
 
     fn follow_input(
@@ -90,6 +94,9 @@ impl Capture {
             return Err(G2gError::CapsMismatch);
         }
         self.board.restart_video(mode, format)?;
+        if !self.mode.same_sdk_mode(mode) {
+            self.afd_widescreen = None;
+        }
         self.mode = mode;
         self.format = format;
         Ok(())
@@ -126,9 +133,37 @@ impl Capture {
             if frame.no_signal && drop_no_signal_frames {
                 continue;
             }
+            if self.signal && self.detect_aspect {
+                // If the fields disagree, the first field governs the picture.
+                let aspect = afd_entries(&frame.ancillary)
+                    .min_by_key(|entry| entry.line_number)
+                    .and_then(|entry| entry.widescreen);
+                self.afd_widescreen = aspect.or(self.afd_widescreen);
+            }
             return Ok(Some(frame));
         }
     }
+}
+
+fn afd_entries(packets: &[AncPacket]) -> impl Iterator<Item = AfdBar> + '_ {
+    packets.iter().filter_map(AfdBar::from_st2016_anc)
+}
+
+fn caption_meta(packets: &[AncPacket]) -> CaptionMeta {
+    let mut meta = CaptionMeta::new();
+    for packet in packets {
+        if let Some(format) = crate::st2038cc::caption_format(packet) {
+            let triples = crate::cea::parse_caption_transport(
+                &packet.user_data_bytes(),
+                format,
+                crate::cea::TransportParams::default(),
+            );
+            for triple in triples {
+                meta.push(triple.into());
+            }
+        }
+    }
+    meta
 }
 
 pub struct DeckLinkVideoSrc {
@@ -142,6 +177,8 @@ pub struct DeckLinkVideoSrc {
     buffer_size: usize,
     drop_no_signal_frames: bool,
     output_vanc: bool,
+    output_cc: bool,
+    output_afd_bar: bool,
     num_buffers: u64,
     // whether the last frame the board captured had an input signal
     signal: bool,
@@ -184,6 +221,8 @@ impl DeckLinkVideoSrc {
             buffer_size: DEFAULT_BUFFER_SIZE,
             drop_no_signal_frames: false,
             output_vanc: false,
+            output_cc: false,
+            output_afd_bar: false,
             num_buffers: u64::MAX,
             signal: false,
             opener,
@@ -220,6 +259,8 @@ impl DeckLinkVideoSrc {
             mode,
             format,
             signal: false,
+            detect_aspect: self.mode.is_none(),
+            afd_widescreen: None,
             first_frame: None,
         })
     }
@@ -332,6 +373,18 @@ impl DeckLinkVideoSrc {
                 0,
                 captured.row_bytes as usize,
             );
+            if self.output_cc && !captured.no_signal {
+                let captions = caption_meta(&captured.ancillary);
+                if !captions.is_empty() {
+                    frame.meta.attach(captions);
+                }
+            }
+            if self.output_afd_bar && !captured.no_signal {
+                let entries: Vec<_> = afd_entries(&captured.ancillary).collect();
+                if !entries.is_empty() {
+                    frame.meta.attach(AfdBarMeta { entries });
+                }
+            }
             if self.output_vanc && !captured.ancillary.is_empty() {
                 frame.meta.attach(AncillaryMeta {
                     packets: captured.ancillary,
@@ -434,6 +487,18 @@ impl SourceLoop for DeckLinkVideoSrc {
                 "Attach the VANC packets of each frame as AncillaryMeta",
             )
             .with_default("false"),
+            PropertySpec::new(
+                "output-cc",
+                PropKind::Bool,
+                "Attach closed captions from VANC as CaptionMeta",
+            )
+            .with_default("false"),
+            PropertySpec::new(
+                "output-afd-bar",
+                PropKind::Bool,
+                "Attach active format and bar data from VANC as AfdBarMeta",
+            )
+            .with_default("false"),
             crate::numbuffers::num_buffers_property("frames to capture then EOS (-1 = forever)"),
             PropertySpec::new(
                 "signal",
@@ -493,6 +558,8 @@ impl SourceLoop for DeckLinkVideoSrc {
                 self.drop_no_signal_frames = value.as_bool().ok_or(PropError::Type)?;
             }
             "output-vanc" => self.output_vanc = value.as_bool().ok_or(PropError::Type)?,
+            "output-cc" => self.output_cc = value.as_bool().ok_or(PropError::Type)?,
+            "output-afd-bar" => self.output_afd_bar = value.as_bool().ok_or(PropError::Type)?,
             "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.num_buffers, &value)?,
             "signal" => return Err(PropError::ReadOnly),
             _ => return Err(PropError::Unknown),
@@ -519,6 +586,8 @@ impl SourceLoop for DeckLinkVideoSrc {
             "buffer-size" => Some(PropValue::Uint(self.buffer_size as u64)),
             "drop-no-signal-frames" => Some(PropValue::Bool(self.drop_no_signal_frames)),
             "output-vanc" => Some(PropValue::Bool(self.output_vanc)),
+            "output-cc" => Some(PropValue::Bool(self.output_cc)),
+            "output-afd-bar" => Some(PropValue::Bool(self.output_afd_bar)),
             "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.num_buffers)),
             "signal" => Some(PropValue::Bool(self.signal)),
             _ => None,

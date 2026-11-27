@@ -380,13 +380,16 @@ number fails configure with `NotConfigured`, since the board schedules audio
 against the video frames. A second video or audio sink on one number fails
 configure too.
 
-`mode` takes GStreamer's mode names except the widescreen SD ones, which differ
-from the plain ones only in pixel aspect ratio, and the sink does not read the
-caps ratio. `auto`
-picks the first mode whose size, frame rate and scan match the caps, an
-undeclared scan counting as progressive. An explicit mode narrows the sink's
-caps to its own size and rate, and configure fails on caps of another mode. The
-video sink takes UYVY, BGRA, v210 and r210 at the strides `RawVideoFormat`
+`mode` takes GStreamer's mode names, including the widescreen SD variants.
+`auto` matches size, frame rate and scan, with undeclared scan counting as
+progressive. It selects the widescreen variant for NTSC 40:33 and PAL 16:11
+pixel aspect ratios and uses the base mode otherwise. An explicit widescreen
+mode also pins the ratio in caps. Both aspect variants use the same SDK
+timing, so an input caps change between them keeps the output running.
+Widescreen mode selection is a caps convention. SDI aspect signaling uses
+ancillary data supplied by the pipeline.
+
+The video sink takes UYVY, BGRA, v210 and r210 at the strides `RawVideoFormat`
 gives them. The audio sink takes 48 kHz S16LE or S32LE in 2, 8 or 16 channels,
 as GStreamer's does.
 
@@ -436,6 +439,14 @@ from the detected one fails the run, as in GStreamer. Frames flagged as having
 no input source still flow and clear `signal`, unless `drop-no-signal-frames`
 drops them. `output-vanc` attaches each frame's packets as `AncillaryMeta`, with
 the line numbers the SDK reports and 8-bit user data words.
+
+In automatic mode, the coded-frame aspect in a valid ST 2016 VANC packet
+selects the SD pixel aspect. It takes effect before the affected frame and
+holds until the next valid aspect or a display timing change. With a mode
+set explicitly, its caps govern the capture. `output-cc` attaches captions
+from CEA-708 CDP and CEA-608 S334-1A as `CaptionMeta`. `output-afd-bar`
+attaches `AfdBarMeta` from the shared `afd` parser, with the VANC line of each
+entry. Both properties default to false and work independently of `output-vanc`.
 
 The source offers the board clock at `LiveSource` priority, a `DriftClock` fed
 a hardware clock reading per frame through a `DeviceClockOffset`. GStreamer's

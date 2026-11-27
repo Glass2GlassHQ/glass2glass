@@ -666,6 +666,8 @@ pub mod st2110audio;
 pub mod st2110anc;
 // SMPTE ST 291 ANC packet words shared by ST 2110-40 and ST 2038.
 pub mod st291;
+// Active Format Description and bar data shared by SDI and video parsers.
+pub mod afd;
 // SMPTE ST 2038 ANC packet framing, the payload of meta/x-st-2038.
 pub mod st2038;
 // cctost2038anc and st2038anctocc: closed captions in and out of ST 2038 packets.

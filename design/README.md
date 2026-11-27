@@ -674,6 +674,22 @@ own size, the chroma plane at its rounded-up size with no resample, as GStreamer
 `videoflip` and ffmpeg's `hflip` / `vflip` / `transpose` do, and matches ffmpeg
 byte for byte.
 
+### Active picture
+
+With `metadata`, `h264parse` and `h265parse` attach `afd::AfdBarMeta` to
+the access unit from registered T.35 SEI. They combine its DTG1 active-format
+code and GA94 bar data. DeckLink capture produces the same metadata from
+ST 2016 ancillary packets. Decoders carry it with the corresponding picture.
+
+`videocrop use-afd=true` uses the metadata when no explicit inset or clean
+aperture is set. It derives the active picture from the frame dimensions and
+sample aspect ratio, or uses the signalled bars for bar-only, unknown, and
+wider-than-16:9 formats. It handles letterbox and pillarbox boundaries,
+including asymmetric bars. Top and bottom bars use broadcast line numbers
+and are applied to recognized SD and HD rasters. New output dimensions go
+downstream before the affected frame, with the input pixel aspect preserved.
+An aspect-preserving video sink then fits the cropped picture to its window.
+
 ### Pixel aspect ratio
 
 Both video variants carry `pixel_aspect: PixelAspect`, GStreamer's

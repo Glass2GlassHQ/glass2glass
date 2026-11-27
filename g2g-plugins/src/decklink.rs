@@ -12,8 +12,8 @@ use alloc::vec::Vec;
 
 use g2g_core::log::Target;
 use g2g_core::{
-    g2g_error, AudioFormat, Caps, CapsSet, Colorimetry, Dim, G2gError, HardwareError, Interlace,
-    PropError, PropValue, Rate, RawVideoFormat,
+    g2g_error, AspectRatio, AudioFormat, Caps, CapsSet, Colorimetry, Dim, G2gError, HardwareError,
+    Interlace, PixelAspect, PropError, PropValue, Rate, RawVideoFormat,
 };
 
 use crate::st291::AncPacket;
@@ -32,6 +32,12 @@ pub(crate) fn log_target() -> Target<'static> {
     Target::category("decklink")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SdFamily {
+    Ntsc,
+    Pal,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct DisplayMode {
     pub name: &'static str,
@@ -42,6 +48,8 @@ pub struct DisplayMode {
     pub interlaced: bool,
     framerate_q16: u32,
     fourcc: u32,
+    sd_family: Option<SdFamily>,
+    widescreen: bool,
 }
 
 impl DisplayMode {
@@ -51,6 +59,22 @@ impl DisplayMode {
     }
 
     pub fn caps(&self, format: RawVideoFormat) -> Caps {
+        self.caps_with_aspect(format, self.pixel_aspect())
+    }
+
+    pub(crate) fn capture_caps(
+        &self,
+        format: RawVideoFormat,
+        afd_widescreen: Option<bool>,
+    ) -> Caps {
+        let pixel_aspect = match afd_widescreen {
+            Some(widescreen) => self.sd_pixel_aspect(widescreen),
+            None => self.pixel_aspect(),
+        };
+        self.caps_with_aspect(format, pixel_aspect)
+    }
+
+    fn caps_with_aspect(&self, format: RawVideoFormat, pixel_aspect: PixelAspect) -> Caps {
         let interlace = if self.interlaced {
             Interlace::Interleaved
         } else {
@@ -63,7 +87,7 @@ impl DisplayMode {
             framerate: Rate::Fixed(self.framerate_q16),
             interlace,
             colorimetry: Colorimetry::UNKNOWN,
-            pixel_aspect: g2g_core::PixelAspect::Any,
+            pixel_aspect,
         }
     }
 
@@ -79,6 +103,34 @@ impl DisplayMode {
             && self.height == height
             && self.framerate_q16 == framerate_q16
             && self.interlaced == interlace.is_interleaved()
+    }
+
+    pub(crate) fn pixel_aspect(&self) -> PixelAspect {
+        if self.widescreen {
+            self.sd_pixel_aspect(true)
+        } else {
+            PixelAspect::Any
+        }
+    }
+
+    fn sd_pixel_aspect(&self, widescreen: bool) -> PixelAspect {
+        let (num, den) = match (self.sd_family, widescreen) {
+            (Some(SdFamily::Ntsc), false) => (10, 11),
+            (Some(SdFamily::Ntsc), true) => (40, 33),
+            (Some(SdFamily::Pal), false) => (12, 11),
+            (Some(SdFamily::Pal), true) => (16, 11),
+            (None, _) => return PixelAspect::Any,
+        };
+        PixelAspect::Exact(AspectRatio::new(num, den).expect("mode aspect"))
+    }
+
+    const fn with_sd_family(mut self, family: SdFamily) -> Self {
+        self.sd_family = Some(family);
+        self
+    }
+
+    pub(crate) fn same_sdk_mode(&self, other: &DisplayMode) -> bool {
+        self.fourcc == other.fourcc
     }
 }
 
@@ -103,16 +155,36 @@ const fn mode(
         interlaced,
         framerate_q16: framerate_q16 as u32,
         fourcc: u32::from_be_bytes(*fourcc),
+        sd_family: None,
+        widescreen: false,
     }
 }
 
-// GStreamer's decklink mode names and order, without its widescreen SD modes, which differ only in pixel aspect ratio
+const NTSC: DisplayMode =
+    mode("ntsc", b"ntsc", 720, 486, 30000, 1001, true).with_sd_family(SdFamily::Ntsc);
+const NTSC2398: DisplayMode =
+    mode("ntsc2398", b"nt23", 720, 486, 24000, 1001, true).with_sd_family(SdFamily::Ntsc);
+const PAL: DisplayMode = mode("pal", b"pal ", 720, 576, 25, 1, true).with_sd_family(SdFamily::Pal);
+const NTSC_P: DisplayMode =
+    mode("ntsc-p", b"ntsp", 720, 486, 30000, 1001, false).with_sd_family(SdFamily::Ntsc);
+const PAL_P: DisplayMode =
+    mode("pal-p", b"palp", 720, 576, 25, 1, false).with_sd_family(SdFamily::Pal);
+
+const fn widescreen_mode(base: DisplayMode, name: &'static str) -> DisplayMode {
+    DisplayMode {
+        name,
+        widescreen: true,
+        ..base
+    }
+}
+
+// GStreamer's decklink mode names and order. Widescreen SD aliases use the same SDK mode.
 pub const DISPLAY_MODES: &[DisplayMode] = &[
-    mode("ntsc", b"ntsc", 720, 486, 30000, 1001, true),
-    mode("ntsc2398", b"nt23", 720, 486, 24000, 1001, true),
-    mode("pal", b"pal ", 720, 576, 25, 1, true),
-    mode("ntsc-p", b"ntsp", 720, 486, 30000, 1001, false),
-    mode("pal-p", b"palp", 720, 576, 25, 1, false),
+    NTSC,
+    NTSC2398,
+    PAL,
+    NTSC_P,
+    PAL_P,
     mode("1080p2398", b"23ps", 1920, 1080, 24000, 1001, false),
     mode("1080p24", b"24ps", 1920, 1080, 24, 1, false),
     mode("1080p25", b"Hp25", 1920, 1080, 25, 1, false),
@@ -146,6 +218,11 @@ pub const DISPLAY_MODES: &[DisplayMode] = &[
     mode("2160p50", b"4k50", 3840, 2160, 50, 1, false),
     mode("2160p5994", b"4k59", 3840, 2160, 60000, 1001, false),
     mode("2160p60", b"4k60", 3840, 2160, 60, 1, false),
+    widescreen_mode(NTSC, "ntsc-widescreen"),
+    widescreen_mode(NTSC2398, "ntsc2398-widescreen"),
+    widescreen_mode(PAL, "pal-widescreen"),
+    widescreen_mode(NTSC_P, "ntsc-p-widescreen"),
+    widescreen_mode(PAL_P, "pal-p-widescreen"),
     mode("4kdcip2398", b"4d23", 4096, 2160, 24000, 1001, false),
     mode("4kdcip24", b"4d24", 4096, 2160, 24, 1, false),
     mode("4kdcip25", b"4d25", 4096, 2160, 25, 1, false),
@@ -196,7 +273,8 @@ pub(crate) const MODE_VALUES: &str =
 1080p25 | 1080p2997 | 1080p30 | 1080i50 | 1080i5994 | 1080i60 | 1080p50 | 1080p5994 | 1080p60 | \
 720p50 | 720p5994 | 720p60 | 1556p2398 | 1556p24 | 1556p25 | 2kdcip2398 | 2kdcip24 | 2kdcip25 | \
 2kdcip2997 | 2kdcip30 | 2kdcip50 | 2kdcip5994 | 2kdcip60 | 2160p2398 | 2160p24 | 2160p25 | \
-2160p2997 | 2160p30 | 2160p50 | 2160p5994 | 2160p60 | 4kdcip2398 | 4kdcip24 | 4kdcip25 | \
+2160p2997 | 2160p30 | 2160p50 | 2160p5994 | 2160p60 | ntsc-widescreen | ntsc2398-widescreen | \
+pal-widescreen | ntsc-p-widescreen | pal-p-widescreen | 4kdcip2398 | 4kdcip24 | 4kdcip25 | \
 4kdcip2997 | 4kdcip30 | 4kdcip50 | 4kdcip5994 | 4kdcip60 | 8kp2398 | 8kp24 | 8kp25 | 8kp2997 | \
 8kp30 | 8kp50 | 8kp5994 | 8kp60 | 8kdcip2398 | 8kdcip24 | 8kdcip25 | 8kdcip2997 | 8kdcip30 | \
 8kdcip50 | 8kdcip5994 | 8kdcip60 | 640x480p60 | 800x600p60 | 1440x900p50 | 1440x900p60 | \
@@ -235,9 +313,26 @@ pub fn mode_for_caps(
     framerate_q16: u32,
     interlace: Interlace,
 ) -> Option<&'static DisplayMode> {
-    DISPLAY_MODES
+    mode_for_caps_with_aspect(width, height, framerate_q16, interlace, PixelAspect::Any)
+}
+
+pub(crate) fn mode_for_caps_with_aspect(
+    width: u32,
+    height: u32,
+    framerate_q16: u32,
+    interlace: Interlace,
+    pixel_aspect: PixelAspect,
+) -> Option<&'static DisplayMode> {
+    let mut modes = DISPLAY_MODES
         .iter()
-        .find(|mode| mode.matches(width, height, framerate_q16, interlace))
+        .filter(|mode| mode.matches(width, height, framerate_q16, interlace));
+    let standard = modes.next()?;
+    match pixel_aspect {
+        PixelAspect::Exact(_) => modes
+            .find(|mode| mode.pixel_aspect() == pixel_aspect)
+            .or(Some(standard)),
+        PixelAspect::Any => Some(standard),
+    }
 }
 
 #[derive(Debug)]

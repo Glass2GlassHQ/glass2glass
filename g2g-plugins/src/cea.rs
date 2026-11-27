@@ -74,7 +74,7 @@ impl From<g2g_core::meta::CaptionTriple> for CcTriple {
 }
 
 /// ATSC A/53 user-identifier `GA94` marking a `cc_data` ATSC1 user-data SEI.
-const USER_IDENTIFIER_GA94: u32 = 0x4741_3934;
+pub(crate) const USER_IDENTIFIER_GA94: [u8; 4] = *b"GA94";
 /// `user_data_type_code` selecting `cc_data` within an ATSC1 user-data block.
 const USER_DATA_TYPE_CC: u8 = 0x03;
 
@@ -105,9 +105,8 @@ pub fn extract_mpeg2_cc_data(au: &[u8]) -> Vec<CcTriple> {
 pub(crate) fn cc_t35_payload(triples: &[CcTriple]) -> Vec<u8> {
     let cc_count = triples.len().min(0x1F);
     let mut payload = Vec::with_capacity(9 + cc_count * 3);
-    payload.push(0xB5); // itu_t_t35_country_code: USA
-    payload.extend_from_slice(&[0x00, 0x31]); // provider_code: ATSC
-    payload.extend_from_slice(&[0x47, 0x41, 0x39, 0x34]); // user_identifier: GA94
+    payload.extend_from_slice(&crate::sei::ATSC_T35_HEADER);
+    payload.extend_from_slice(&USER_IDENTIFIER_GA94);
     payload.push(USER_DATA_TYPE_CC); // user_data_type_code: cc_data
     payload.push(0xC0 | cc_count as u8); // reserved | process_cc_data_flag | cc_count
     payload.push(0xFF); // em_data
@@ -207,8 +206,7 @@ pub(crate) fn parse_caption_payload(p: &[u8], out: &mut Vec<CcTriple>) {
 /// `cc_count` outruns the bytes present is malformed, so it yields no triples
 /// rather than a partial read.
 pub(crate) fn parse_atsc_user_data(p: &[u8], out: &mut Vec<CcTriple>) {
-    let Some(id) = p.get(..4) else { return };
-    if u32::from_be_bytes([id[0], id[1], id[2], id[3]]) != USER_IDENTIFIER_GA94 {
+    if !p.starts_with(&USER_IDENTIFIER_GA94) {
         return;
     }
     if p.get(4) != Some(&USER_DATA_TYPE_CC) {

@@ -31,6 +31,8 @@ use crate::bereader::{be_u16, be_u32};
 pub const PAYLOAD_PIC_TIMING: usize = 1;
 /// `user_data_registered_itu_t_t35`, the ATSC A/53 closed-caption carrier.
 pub const PAYLOAD_USER_DATA_REGISTERED: usize = 4;
+// ITU-T T.35 country code for the US and the ATSC provider code.
+pub(crate) const ATSC_T35_HEADER: [u8; 3] = [0xB5, 0x00, 0x31];
 // `user_data_unregistered`: a 16-byte UUID, then the payload
 pub const PAYLOAD_USER_DATA_UNREGISTERED: usize = 5;
 /// `time_code`, the H.265 SMPTE 12M clock timestamps.
@@ -260,6 +262,8 @@ pub fn parse_pic_timing(p: &[u8], ctx: PicTimingContext) -> Option<g2g_core::met
 pub struct SeiInfo {
     /// ATSC A/53 closed-caption `cc_data` triples, in transmission order.
     pub captions: Vec<crate::cea::CcTriple>,
+    /// AFD and bar data carried by this access unit.
+    pub afd_bar: Option<crate::afd::AfdBar>,
     /// HDR10 static metadata, `None` when the AU carries neither payload.
     #[cfg(feature = "metadata")]
     pub hdr: Option<g2g_core::meta::HdrStaticMeta>,
@@ -313,6 +317,11 @@ pub(crate) fn parse_nals<'a>(
     for_each_message_in_nals(nals, codec, |ty, payload| match ty {
         PAYLOAD_USER_DATA_REGISTERED => {
             crate::cea::parse_caption_payload(payload, &mut info.captions);
+            if let Some(entry) = crate::afd::AfdBar::from_t35(payload) {
+                let afd_bar = info.afd_bar.get_or_insert_default();
+                afd_bar.active_format = entry.active_format.or(afd_bar.active_format);
+                afd_bar.bars = entry.bars.or(afd_bar.bars);
+            }
             #[cfg(feature = "metadata")]
             if let Some(hdr10_plus) = parse_hdr10_plus(payload) {
                 info.hdr10_plus = Some(hdr10_plus);
@@ -383,6 +392,11 @@ impl BitstreamMetaLatch {
         }
         if let Some(hdr10_plus) = info.hdr10_plus {
             frame.meta.attach(hdr10_plus);
+        }
+        if let Some(afd_bar) = info.afd_bar {
+            frame.meta.attach(crate::afd::AfdBarMeta {
+                entries: Vec::from([afd_bar]),
+            });
         }
     }
 }

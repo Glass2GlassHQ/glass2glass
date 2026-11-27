@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2619: DeckLink, H.264 and H.265 read AFD and bar data for active-picture cropping.
+- M2618: DeckLink video output selects widescreen SD modes from the pixel aspect ratio.
 - M2617: Scalers derive an open width that preserves display aspect when downstream pins pixel aspect.
 - M2616: `d3d11videosink` and `metalvideosink` size and letterbox their windows by display aspect.
 - M2615: `glsink` and `cudaglsink` size and letterbox their windows by display aspect.
