@@ -6,6 +6,9 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2622: `mpeghuimanager` applies MPEG-H user interactivity from ActionEvent XML.
+- M2621: `mpeghdec` decodes MPEG-H 3D Audio through Fraunhofer's mpeghdec.
+- M2620: MP4 and MPEG-TS demuxers read MPEG-H 3D Audio tracks.
 - M2619: DeckLink, H.264 and H.265 read AFD and bar data for active-picture cropping.
 - M2618: DeckLink video output selects widescreen SD modes from the pixel aspect ratio.
 - M2617: Scalers derive an open width that preserves display aspect when downstream pins pixel aspect.

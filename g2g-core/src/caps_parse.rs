@@ -210,6 +210,26 @@ fn expand_text_format(fv: Option<&FieldVal>) -> Option<Vec<TextFormat>> {
     })
 }
 
+fn parse_mpegh_stream_format(s: &str) -> Option<AudioFormat> {
+    match s {
+        "mhas" => Some(AudioFormat::MpeghMhas),
+        "raw" => Some(AudioFormat::MpeghRaw),
+        _ => None,
+    }
+}
+
+fn expand_mpegh_stream_format(fv: Option<&FieldVal>) -> Option<Vec<AudioFormat>> {
+    Some(match fv {
+        None => alloc::vec![AudioFormat::MpeghMhas, AudioFormat::MpeghRaw],
+        Some(FieldVal::One(s)) => alloc::vec![parse_mpegh_stream_format(s)?],
+        Some(FieldVal::List(xs)) => xs
+            .iter()
+            .map(|x| parse_mpegh_stream_format(x))
+            .collect::<Option<Vec<_>>>()?,
+        Some(FieldVal::Range(..) | FieldVal::Caps(_)) => return None,
+    })
+}
+
 fn expand_audio_format(fv: Option<&FieldVal>) -> Option<Vec<AudioFormat>> {
     Some(match fv {
         None => raw_audio_formats(),
@@ -523,6 +543,7 @@ impl CapsSet {
             "audio/x-adpcm" => audio_set(&[AudioFormat::ImaAdpcm]),
             "audio/x-vorbis" => audio_set(&[AudioFormat::Vorbis]),
             "audio/x-alac" => audio_set(&[AudioFormat::Alac]),
+            "audio/x-mpeg-h" => audio_set(&expand_mpegh_stream_format(fv("stream-format"))?),
             // gst names AAC `audio/mpeg` (with mpegversion=4, which we don't require).
             "audio/mpeg" => audio_set(&[AudioFormat::Aac]),
             // The text media types `Caps::to_gst_string` prints, so a caps a g2g

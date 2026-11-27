@@ -161,6 +161,8 @@ const AUDIO_STREAM_NAMES: &[(&str, AudioFormat)] = &[
     ("mp3", AudioFormat::Mp3),
     ("ac3", AudioFormat::Ac3),
     ("alac", AudioFormat::Alac),
+    ("mpegh", AudioFormat::MpeghMhas),
+    ("mpegh-raw", AudioFormat::MpeghRaw),
     ("pcm-u8", AudioFormat::PcmU8),
     ("pcm-s16le", AudioFormat::PcmS16Le),
     ("pcm-s24le", AudioFormat::PcmS24Le),
@@ -294,7 +296,7 @@ pub(crate) static MP4DEMUX_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "stream",
         PropKind::Str,
-        "track to emit: video (the default) | h264 | h265 | av1 | mpeg4part2 | mpeg2 | vp8 | mjpeg | dnxhd | prores-proxy | prores-lt | prores-standard | prores-hq | prores-4444 | prores-4444xq (the video track by codec) | raw-<format> (the uncompressed video track by GStreamer format name: raw-i420, raw-rggb, ...) | zlib-raw-<format> | deflate-raw-<format> | brotli-raw-<format> (one a lossless compressor wrapped) | aac | opus | mp3 | pcm-u8 | pcm-s16le | pcm-s24le | pcm-s32le | pcm-f32le | alaw | mulaw | vorbis (the audio track by format) | video-mov-<fourcc> | audio-mov-<fourcc> (a codec known only by its sample entry, with ffmpeg-long-tail)",
+        "track to emit: video (the default) | h264 | h265 | av1 | mpeg4part2 | mpeg2 | vp8 | mjpeg | dnxhd | prores-proxy | prores-lt | prores-standard | prores-hq | prores-4444 | prores-4444xq (the video track by codec) | raw-<format> (the uncompressed video track by GStreamer format name: raw-i420, raw-rggb, ...) | zlib-raw-<format> | deflate-raw-<format> | brotli-raw-<format> (one a lossless compressor wrapped) | aac | opus | mp3 | pcm-u8 | pcm-s16le | pcm-s24le | pcm-s32le | pcm-f32le | alaw | mulaw | vorbis | mpegh | mpegh-raw (the audio track by format) | video-mov-<fourcc> | audio-mov-<fourcc> (a codec known only by its sample entry, with ffmpeg-long-tail)",
     ),
     PropertySpec::new(
         "track-id",

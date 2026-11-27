@@ -627,6 +627,7 @@ cargo clippy --workspace --all-targets
 | `FfmpegVideoEnc` (`x264enc`, `ffmpegenc`), and `vah264enc` / `vah265enc` / `vaav1enc` on VA-API GPUs | `ffmpeg` | Linux + libavcodec (+ the GPU's VA-API driver), or Windows + a shared ffmpeg named by `FFMPEG_DIR` |
 | `OpenH264Dec` / `OpenH264Enc` (`openh264dec` / `openh264enc`, `num-slices` encodes the slices on separate threads) | `openh264` | Linux, OpenH264 built from source |
 | `AacDec` / `MpegAudioDec` (`aacdec` / `mpegaudiodec`, AAC-LC and MP2 / MP3 in pure Rust via symphonia) | `aac-decode`, `mpeg-audio-decode` | none |
+| `MpeghDec` / `MpeghUiManager` (`mpeghdec` / `mpeghuimanager`: MPEG-H 3D Audio from MP4 `mha1` / `mhm1` or MPEG-TS, decoded to a CICP speaker layout with loudness and DRC control, and user interactivity through ActionEvent XML) | `mpegh` | Linux + Fraunhofer's mpeghdec built from source (see [MPEG-H](#mpeg-h)) |
 | AVI / QuickTime / Matroska streams g2g has no caps type for (Cinepak, Indeo, Ut Video, QuickTime RLE, ADPCM, MACE, ...), demuxed under their container tag and decoded by `ffmpegdec` / `ffmpegaudiodec` | `ffmpeg-long-tail` | Linux + libavcodec + libavformat |
 | `MfDecode` / `MfEncode` / `MfAacEncode` / `MfAacDecode` | `mf-decode`, `mf-encode`, `mf-aac` | Windows + Media Foundation |
 | `D3D12H264Dec` (`d3d12h264dec`: 8-bit 4:2:0 H.264 on the D3D12 video decode API, zero-copy NV12 wgpu textures or system memory) | `d3d12-decode` | Windows + a GPU with D3D12 video decode |
@@ -1502,6 +1503,26 @@ library is missing reports which one. `Backend::NvdecCuvid` /
 
 The loopback RTSP relay is `mediamtx`, run from docker or as a single binary
 (see [A standing RTSP feed](#a-standing-rtsp-feed)).
+
+### MPEG-H
+
+Distros do not package Fraunhofer's mpeghdec, so build it from source. The
+`mpegh` feature needs 3.0.2 or later, and the tests pass against r4.0.1. The
+build also produces the `mpeghDecoder` program that decodes the reference WAVs.
+
+```sh
+git clone --branch r4.0.1 https://github.com/Fraunhofer-IIS/mpeghdec ~/opt/mpeghdec-src
+cmake -S ~/opt/mpeghdec-src -B ~/opt/mpeghdec-src/build -DCMAKE_BUILD_TYPE=Release \
+      -DBUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_INSTALL_PREFIX=$HOME/opt/mpeghdec
+cmake --build ~/opt/mpeghdec-src/build --target install
+export PKG_CONFIG_PATH=$HOME/opt/mpeghdec/share/pkgconfig LD_LIBRARY_PATH=$HOME/opt/mpeghdec/lib
+tools/mpegh-fixtures.sh
+cargo test -p g2g-plugins --features std,mpegh --test m2620_mpegh_demux --test m2621_mpeghdec --test m2622_mpeghuimanager
+```
+
+The test streams are CC BY-NC-ND, so `tools/mpegh-fixtures.sh` downloads them
+into the gitignored `g2g-plugins/tests/fixtures/mpegh` and the tests skip
+without them. `MPEGH_SOURCE` points the script at another source checkout.
 
 ## Layout
 

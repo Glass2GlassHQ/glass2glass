@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::{
     AudioFormat, Caps, CapsSet, ChannelLayout, FrameTiming, G2gError, OutputSink, PipelinePacket,
-    Segment, ANY_CHANNELS, ANY_SAMPLE_RATE,
+    Segment, ANY_SAMPLE_RATE,
 };
 
 use crate::pcmclip::clip_pcm_to_segment;
@@ -15,6 +15,7 @@ use crate::pcmclip::clip_pcm_to_segment;
 #[derive(Debug)]
 pub(crate) struct DecodedPcm {
     pub(crate) pcm: Vec<u8>,
+    pub(crate) format: AudioFormat,
     pub(crate) channels: u8,
     pub(crate) sample_rate: u32,
     pub(crate) channel_layout: ChannelLayout,
@@ -22,12 +23,16 @@ pub(crate) struct DecodedPcm {
 
 impl DecodedPcm {
     pub(crate) fn bytes_per_sample_frame(&self) -> usize {
-        usize::from(self.channels) * 2
+        let bytes_per_sample = self
+            .format
+            .bytes_per_sample()
+            .expect("decoders emit fixed-width PCM");
+        usize::from(self.channels) * bytes_per_sample
     }
 
     fn caps(&self) -> Caps {
         Caps::Audio {
-            format: AudioFormat::PcmS16Le,
+            format: self.format,
             channels: self.channels,
             sample_rate: self.sample_rate,
             channel_layout: self.channel_layout,
@@ -51,13 +56,17 @@ pub(crate) fn f32_to_s16(sample: f32) -> i16 {
         .clamp(-32768.0, 32767.0) as i16
 }
 
-pub(crate) fn pcm_s16_decoder_output() -> CapsSet {
+pub(crate) fn pcm_decoder_output(
+    format: AudioFormat,
+    channels: u8,
+    channel_layout: ChannelLayout,
+) -> CapsSet {
     // fixate cannot settle a lone ANY_SAMPLE_RATE
     let pcm = |sample_rate| Caps::Audio {
-        format: AudioFormat::PcmS16Le,
-        channels: ANY_CHANNELS,
+        format,
+        channels,
         sample_rate,
-        channel_layout: ChannelLayout::UNSPECIFIED,
+        channel_layout,
     };
     CapsSet::from_alternatives(alloc::vec![pcm(48_000), pcm(ANY_SAMPLE_RATE)])
 }

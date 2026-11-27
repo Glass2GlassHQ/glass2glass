@@ -54,12 +54,12 @@ use g2g_core::frame::FrameTiming;
 use g2g_core::log::{short_type_name, Target};
 use g2g_core::{
     g2g_warn, pcm_caps_any_rate_and_channels, AsyncElement, AudioFormat, Caps, CapsConstraint,
-    CapsSet, ConfigureOutcome, ElementMetadata, G2gError, HardwareError, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket,
+    CapsSet, ChannelLayout, ConfigureOutcome, ElementMetadata, G2gError, HardwareError, OutputSink,
+    PadTemplate, PadTemplates, PipelinePacket, ANY_CHANNELS,
 };
 
 use crate::audioframe::split_frames;
-use crate::pcmoutput::{f32_to_s16, pcm_s16_decoder_output, DecodedPcm, PcmOutput};
+use crate::pcmoutput::{f32_to_s16, pcm_decoder_output, DecodedPcm, PcmOutput};
 
 /// # Example
 ///
@@ -348,7 +348,11 @@ impl AsyncElement for FfmpegAudioDec {
     /// with no `audioresample` still fails loud at runtime.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::Audio { format, .. } if Self::decodes(*format) => pcm_s16_decoder_output(),
+            Caps::Audio { format, .. } if Self::decodes(*format) => pcm_decoder_output(
+                AudioFormat::PcmS16Le,
+                ANY_CHANNELS,
+                ChannelLayout::UNSPECIFIED,
+            ),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
@@ -659,6 +663,7 @@ fn to_s16_interleaved(frame: &FfAudio) -> Result<DecodedPcm, G2gError> {
     }
     Ok(DecodedPcm {
         pcm,
+        format: AudioFormat::PcmS16Le,
         channels: channels as u8,
         sample_rate: frame.rate(),
         channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,

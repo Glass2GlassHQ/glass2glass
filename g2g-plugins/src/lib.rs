@@ -886,6 +886,18 @@ mod video_pts_synth;
 mod audioframe;
 // The `alac` atom that carries the ALAC decoder config.
 mod alac;
+// The MPEG-H `mhaC` record and mpegh3daConfig fields the MP4 demuxers and the MPEG-H elements read.
+#[cfg(feature = "std")]
+mod mpeghconfig;
+// MPEG-H 3D Audio decoder over Fraunhofer's mpeghdec.
+#[cfg(feature = "mpegh")]
+pub mod mpeghdec;
+// MPEG-H 3D Audio interactivity over Fraunhofer's mpeghdec UI manager.
+#[cfg(feature = "mpegh")]
+pub mod mpeghuimanager;
+// MPEG-H access units cut out of an MHAS byte stream.
+#[cfg(all(feature = "std", any(test, feature = "mpegh")))]
+mod mhas;
 // Trims decoded PCM to the upstream segment, shared by every audio decoder.
 mod frame_clock;
 // The caps the compressed-audio parsers and taggers share.
@@ -902,6 +914,7 @@ mod pcmclip;
     feature = "vorbis",
     feature = "aac-decode",
     feature = "mpeg-audio-decode",
+    feature = "mpegh",
     all(windows, feature = "mf-aac")
 ))]
 mod pcmoutput;

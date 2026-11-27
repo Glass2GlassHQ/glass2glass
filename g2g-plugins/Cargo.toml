@@ -845,6 +845,11 @@ st2110 = ["std", "dep:libc", "metadata"]
 # via pkg-config (Fedora: build+install github.com/OpenVisualCloud/SVT-JPEG-XS, which
 # ships an `SvtJpegxs.pc`). Linux-only, implies std. CI-excluded (no SVT-JPEG-XS in CI).
 jpegxs = ["std"]
+# MPEG-H 3D Audio decode and interactivity (MpeghDec / MpeghUiManager): hand-rolled FFI
+# to Fraunhofer's mpeghdec library, which build.rs links via pkg-config. Not packaged by
+# distros, build it from github.com/Fraunhofer-IIS/mpeghdec (see README). Implies std.
+# CI-excluded (no mpeghdec in CI).
+mpegh = ["std"]
 # PTP system clock (PtpSystemClock, M593 phase C): reads the OS PTP-disciplined
 # CLOCK_TAI (disciplined by linuxptp / phc2sys) on a worker thread and feeds a
 # g2g-core PtpClock, so a PTP-synced host offers a grandmaster clock to election,

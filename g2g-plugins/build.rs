@@ -17,6 +17,7 @@ fn main() {
     println!("cargo:rerun-if-changed=csrc/gstwrap_host.c");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_GSTREAMER");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_JPEGXS");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_MPEGH");
 
     // JPEG XS (M605): link Intel SVT-JPEG-XS for `SvtJpegXsEnc` / `Dec`. pkg-config
     // emits the `-L` / `-lSvtJpegxs` lines; the struct layouts the FFI transcribes
@@ -25,6 +26,15 @@ fn main() {
         pkg_config::Config::new()
             .probe("SvtJpegxs")
             .expect("SvtJpegxs dev package (pkg-config) is required for the `jpegxs` feature");
+    }
+
+    // MPEG-H: link Fraunhofer's mpeghdec for `MpeghDec` and `MpeghUiManager`. 3.0.2 is the
+    // release gst's mpeghdec requires, and the struct layout `mpeghdec.rs` transcribes is asserted.
+    if std::env::var_os("CARGO_FEATURE_MPEGH").is_some() {
+        pkg_config::Config::new()
+            .atleast_version("3.0.2")
+            .probe("mpeghdec")
+            .expect("mpeghdec (pkg-config) is required for the `mpegh` feature");
     }
 
     #[cfg(feature = "vpx")]

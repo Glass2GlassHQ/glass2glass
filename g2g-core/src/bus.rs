@@ -284,6 +284,19 @@ pub enum BusMessage {
         peak_db: alloc::vec::Vec<f64>,
         rms_db: alloc::vec::Vec<f64>,
     },
+    // gst mpeghuimanager's `mpegh-ui-config` element message: the stream's AudioSceneConfig XML from that frame on
+    MpeghUiConfig {
+        element: alloc::string::String,
+        pts_ns: u64,
+        config: alloc::string::String,
+    },
+    // gst mpeghuimanager's `mpegh-ui-event-result`: an ActionEvent XML, and the UI manager's error code when it was not applied
+    MpeghUiEventResult {
+        element: alloc::string::String,
+        pts_ns: u64,
+        action_event: alloc::string::String,
+        outcome: Result<(), i32>,
+    },
 }
 
 /// What a restarting source is doing, gst `fallbacksrc`'s `status`.

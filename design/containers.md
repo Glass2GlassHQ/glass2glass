@@ -1432,6 +1432,59 @@ places each input at its own speaker and leaves the rest silent. Counts past the
 layout table, above 8, fall back to the layout-agnostic round-robin fold so no
 channel is silently dropped.
 
+## MPEG-H 3D Audio
+
+MPEG-H has two caps formats, `AudioFormat::MpeghMhas`
+(`audio/x-mpeg-h,stream-format=mhas`) and `AudioFormat::MpeghRaw`
+(`stream-format=raw`). `Caps::Audio` has no field for a codec config, and
+`mpeghuimanager` takes only MHAS, so the carriage is part of the format and a raw
+stream fails at negotiation.
+
+MP4 `mhm1` sample entries carry MHAS and `mha1` entries carry raw access units,
+with the `mhaC` box holding the decoder config. `fmp4` reads both, and
+`Mp4DemuxN` sends the whole `mhaC` box as a frame ahead of the first `mha1`
+sample. `mpeghdec` hands that box to the library as the config and decodes the
+raw access units after it. `mp4demux` names the pads `mpegh` and `mpegh-raw`.
+
+MPEG-TS carries MHAS under stream_type 0x2D (`TsStream::Mpegh`). A PES packet
+does not line up with access units, so `MhasFramer` (`mhas.rs`) splits the
+stream into access units. An access unit ends at the next packet with a label of
+16 or lower after a FRAME packet, or at a FRAME packet that ends the buffer.
+mpeghdec needs a distinct timestamp on each access unit. A PES pts stamps the
+first access unit that starts in it, and each later one is 1024 samples after
+the previous, the only frame length mpeghdec decodes.
+
+`mpeghdec` renders to the CICP speaker layout `target-layout` names, 6 (5.1) by
+default, as interleaved `PcmS32Le`. The CICP layouts with only the
+`ChannelPosition` speakers (1 to 6 and 9 to 12) carry a named `ChannelLayout`,
+and CICP 12 (7.1) moves the side pair behind the rear pair, since mpeghdec
+outputs the side pair first. Layouts with wide or height speakers decode in
+mpeghdec's order with `ChannelLayout::UNSPECIFIED`. Every property and default
+matches gst's `mpeghdec`: `target-ref-level` -24 LKFS, `drc-effect-type`
+general, both DRC factors 1.0, `album-mode` off. A new `target-layout` applies
+when the next stream opens the decoder.
+
+`mpeghuimanager` sits between the demuxer and `mpeghdec`, takes MHAS, and
+inserts the user's settings into each access unit as UI packets. Each
+`action-event` property write queues an ActionEvent XML string. Events stay
+queued until the stream has an audio scene, then each posts
+`BusMessage::MpeghUiEventResult` with the library's error code when it fails.
+Every new AudioSceneConfig posts `BusMessage::MpeghUiConfig`, and `config`
+reads back the latest one. `input-persistence` and `output-persistence` are
+the library's settings memory as base64, so an application restores the user's
+choices across sessions. An invalid `input-persistence` raises instead of
+starting empty. A frame the library cannot update, one over 64 KiB, one before
+the first config, or one an upstream UI manager already updated, passes through
+unchanged, as in gst.
+
+The tests compare against Fraunhofer's `mpeghDecoder` CLI, run with
+`-rl 96 -dse 6 -db 127 -dc 127 -dam 0` to match the element defaults, since the
+CLI defaults to no DRC effect. Stereo, 5.1 and `mha1` decode match it in the top
+24 bits of each sample. `mha1` is compared over the edit list range only,
+because g2g applies the `elst` and the CLI does not. Fraunhofer's test streams
+are CC BY-NC-ND, so `tools/mpegh-fixtures.sh` downloads them and the tests skip
+without them.
+
 ## FLV
 
 `g2g-plugins::flv::FlvDemuxer` parses the flat FLV tag stream on

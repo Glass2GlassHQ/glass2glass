@@ -481,6 +481,8 @@ fn audio_format_to_u8(f: AudioFormat) -> u8 {
         AudioFormat::PcmU8 => 15,
         AudioFormat::Tagged(_) => AUDIO_FORMAT_TAGGED,
         AudioFormat::Alac => 17,
+        AudioFormat::MpeghMhas => 18,
+        AudioFormat::MpeghRaw => 19,
     }
 }
 fn audio_format_from_u8(v: u8) -> Result<AudioFormat, WireError> {
@@ -502,6 +504,8 @@ fn audio_format_from_u8(v: u8) -> Result<AudioFormat, WireError> {
         14 => AudioFormat::PcmS32Le,
         15 => AudioFormat::PcmU8,
         17 => AudioFormat::Alac,
+        18 => AudioFormat::MpeghMhas,
+        19 => AudioFormat::MpeghRaw,
         _ => return Err(WireError::BadTag),
     })
 }
@@ -1891,6 +1895,8 @@ mod tests {
             AudioFormat::Alaw,
             AudioFormat::ImaAdpcm,
             AudioFormat::Alac,
+            AudioFormat::MpeghMhas,
+            AudioFormat::MpeghRaw,
             AudioFormat::Tagged(CodecTag {
                 namespace: TagNamespace::Riff,
                 tag: 0x0022,

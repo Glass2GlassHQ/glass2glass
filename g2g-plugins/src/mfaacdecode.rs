@@ -40,7 +40,7 @@ use crate::mfcommon::{
     feed_sample, make_input_sample, mf_err, output_provides_samples, process_output,
     read_sample_bytes, send_drain_command, OutputPull,
 };
-use crate::pcmoutput::{pcm_s16_decoder_output, DecodedPcm, PcmOutput};
+use crate::pcmoutput::{pcm_decoder_output, DecodedPcm, PcmOutput};
 use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     pcm_caps_any_rate_and_channels, AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet,
@@ -203,7 +203,11 @@ impl AsyncElement for MfAacDecode {
                 sample_rate,
                 ..
             } if *channels == ANY_CHANNELS || *sample_rate == ANY_SAMPLE_RATE => {
-                pcm_s16_decoder_output()
+                pcm_decoder_output(
+                    AudioFormat::PcmS16Le,
+                    ANY_CHANNELS,
+                    ChannelLayout::UNSPECIFIED,
+                )
             }
             Caps::Audio {
                 format: AudioFormat::Aac,
@@ -325,6 +329,7 @@ impl AsyncElement for MfAacDecode {
                 };
                 let decoded = DecodedPcm {
                     pcm,
+                    format: AudioFormat::PcmS16Le,
                     channels: self.channels,
                     sample_rate: self.sample_rate,
                     channel_layout: ChannelLayout::UNSPECIFIED,

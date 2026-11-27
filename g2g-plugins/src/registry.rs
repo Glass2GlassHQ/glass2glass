@@ -2407,6 +2407,11 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     reg.register(ElementFactory::of::<VorbisDec>("vorbisdec", |_| {
         Box::new(VorbisDec::new())
     }));
+    #[cfg(feature = "mpegh")]
+    reg.register(ElementFactory::of::<crate::mpeghdec::MpeghDec>(
+        "mpeghdec",
+        |_| Box::new(crate::mpeghdec::MpeghDec::new()),
+    ));
     // Negative rank so the GPU decoders and ffmpegdec win the auto-plug tiebreak.
     #[cfg(all(target_os = "linux", feature = "openh264"))]
     reg.register(
@@ -3188,6 +3193,8 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "opusenc" => "opus";
         "opusdec" => "opus";
         "vorbisdec" => "vorbis";
+        "mpeghdec" => "mpegh";
+        "mpeghuimanager" => "mpegh";
         "aacdec" => "aac-decode";
         "mpegaudiodec" => "mpeg-audio-decode";
         "openh264dec" => "openh264" on "linux";
@@ -3448,6 +3455,16 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(LaunchFactory::of::<VorbisDec>("vorbisdec", || {
         Box::new(VorbisDec::new())
     }));
+    #[cfg(feature = "mpegh")]
+    reg.register_launch(LaunchFactory::of::<crate::mpeghdec::MpeghDec>(
+        "mpeghdec",
+        || Box::new(crate::mpeghdec::MpeghDec::new()),
+    ));
+    #[cfg(feature = "mpegh")]
+    reg.register_launch(LaunchFactory::of::<crate::mpeghuimanager::MpeghUiManager>(
+        "mpeghuimanager",
+        || Box::new(crate::mpeghuimanager::MpeghUiManager::new()),
+    ));
     #[cfg(feature = "aac-decode")]
     reg.register_launch(LaunchFactory::of::<crate::symphoniadec::AacDec>(
         "aacdec",

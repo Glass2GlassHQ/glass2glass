@@ -48,11 +48,11 @@ use crate::mpegts::{
     TsPacketSplitter, STREAM_TYPE_AAC, STREAM_TYPE_AAC_LATM, STREAM_TYPE_AC3, STREAM_TYPE_H264,
     STREAM_TYPE_H265, STREAM_TYPE_JPEG_XS, STREAM_TYPE_METADATA_PES, STREAM_TYPE_MPEG1_AUDIO,
     STREAM_TYPE_MPEG1_VIDEO, STREAM_TYPE_MPEG2_AUDIO, STREAM_TYPE_MPEG2_VIDEO, STREAM_TYPE_MPEG4P2,
-    STREAM_TYPE_PRIVATE_PES, STREAM_TYPE_SCTE35, TAG_KEY_EVENT_DURATION, TAG_KEY_EVENT_NAME,
-    TAG_KEY_EVENT_START, TAG_KEY_EVENT_TEXT, TAG_KEY_NEXT_EVENT_DURATION, TAG_KEY_NEXT_EVENT_NAME,
-    TAG_KEY_NEXT_EVENT_START, TAG_KEY_NEXT_EVENT_TEXT, TAG_KEY_SCHEDULE_EVENT_DURATION,
-    TAG_KEY_SCHEDULE_EVENT_ID, TAG_KEY_SCHEDULE_EVENT_NAME, TAG_KEY_SCHEDULE_EVENT_START,
-    TAG_KEY_SCHEDULE_EVENT_TEXT, TAG_KEY_SERVICE_PROVIDER,
+    STREAM_TYPE_MPEGH_MHAS, STREAM_TYPE_PRIVATE_PES, STREAM_TYPE_SCTE35, TAG_KEY_EVENT_DURATION,
+    TAG_KEY_EVENT_NAME, TAG_KEY_EVENT_START, TAG_KEY_EVENT_TEXT, TAG_KEY_NEXT_EVENT_DURATION,
+    TAG_KEY_NEXT_EVENT_NAME, TAG_KEY_NEXT_EVENT_START, TAG_KEY_NEXT_EVENT_TEXT,
+    TAG_KEY_SCHEDULE_EVENT_DURATION, TAG_KEY_SCHEDULE_EVENT_ID, TAG_KEY_SCHEDULE_EVENT_NAME,
+    TAG_KEY_SCHEDULE_EVENT_START, TAG_KEY_SCHEDULE_EVENT_TEXT, TAG_KEY_SERVICE_PROVIDER,
 };
 use crate::oneport::OnePortElement;
 use crate::typefind::{elementary_video_caps, sized_by_sps};
@@ -360,6 +360,8 @@ pub enum TsStream {
     JpegXs,
     // the first metadata-in-PES (0x15) stream its descriptors name 'ID3 ', each PES payload one ID3v2 tag
     Id3,
+    // the first MPEG-H 3D Audio main stream (0x2D), its PES payloads MHAS packets the decoder frames
+    Mpegh,
 }
 
 /// Demuxes an MPEG-TS byte stream into one selected elementary stream.
@@ -454,6 +456,7 @@ fn output_caps(stream: TsStream) -> Caps {
         TsStream::Mp2 => compressed_audio(AudioFormat::Mp2),
         TsStream::Opus => compressed_audio(AudioFormat::Opus),
         TsStream::Ac3 => compressed_audio(AudioFormat::Ac3),
+        TsStream::Mpegh => compressed_audio(AudioFormat::MpeghMhas),
         TsStream::Klv => Caps::Klv,
         TsStream::St2038 => st2038_caps(),
         TsStream::JpegXs => elementary_video_caps(VideoCodec::JpegXs),
@@ -496,6 +499,7 @@ fn selected_stream_type(stream: TsStream) -> u8 {
         TsStream::St2038 => STREAM_TYPE_PRIVATE_PES,
         TsStream::JpegXs => STREAM_TYPE_JPEG_XS,
         TsStream::Id3 => STREAM_TYPE_METADATA_PES,
+        TsStream::Mpegh => STREAM_TYPE_MPEGH_MHAS,
     }
 }
 
@@ -567,6 +571,7 @@ fn es_to_stream(es: &crate::mpegts::ElementaryStream) -> Option<Stream> {
         }
         STREAM_TYPE_AC3 => audio(AudioFormat::Ac3),
         STREAM_TYPE_PRIVATE_PES if es.ac3 => audio(AudioFormat::Ac3),
+        STREAM_TYPE_MPEGH_MHAS => audio(AudioFormat::MpeghMhas),
         STREAM_TYPE_PRIVATE_PES if es.subtitling.is_some() => (
             StreamType::Text,
             Caps::SubPicture {
@@ -602,6 +607,7 @@ fn is_keyframe(stream: TsStream, au: &[u8]) -> bool {
         | TsStream::Mp2
         | TsStream::Opus
         | TsStream::Ac3
+        | TsStream::Mpegh
         | TsStream::Klv
         | TsStream::DvbSub
         | TsStream::Teletext
@@ -631,7 +637,7 @@ static ONE_PORT_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "stream",
         PropKind::Str,
-        "elementary stream to emit: h264 | h265 | av1 | mpeg2 | mpeg4part2 | aac | mp2 (or mp3) | opus | ac3 | klv | dvbsub | teletext | st2038 | jpegxs | id3",
+        "elementary stream to emit: h264 | h265 | av1 | mpeg2 | mpeg4part2 | aac | mp2 (or mp3) | opus | ac3 | klv | dvbsub | teletext | st2038 | jpegxs | id3 | mpegh",
     ),
     PROGRAM_NUMBER_PROP,
     PropertySpec::new(
@@ -674,6 +680,7 @@ fn ts_stream_from_str(s: &str) -> Option<TsStream> {
         "mp2" | "mp3" => Some(TsStream::Mp2),
         "opus" => Some(TsStream::Opus),
         "ac3" => Some(TsStream::Ac3),
+        "mpegh" => Some(TsStream::Mpegh),
         "klv" => Some(TsStream::Klv),
         "dvbsub" => Some(TsStream::DvbSub),
         "teletext" => Some(TsStream::Teletext),
@@ -685,7 +692,7 @@ fn ts_stream_from_str(s: &str) -> Option<TsStream> {
 }
 
 #[cfg(feature = "std")]
-const TS_STREAMS: [TsStream; 15] = [
+const TS_STREAMS: [TsStream; 16] = [
     TsStream::H264,
     TsStream::H265,
     TsStream::Mpeg4Part2,
@@ -701,6 +708,7 @@ const TS_STREAMS: [TsStream; 15] = [
     TsStream::St2038,
     TsStream::JpegXs,
     TsStream::Id3,
+    TsStream::Mpegh,
 ];
 
 // the first stream a consumer with sink caps `accepted` takes
@@ -739,6 +747,7 @@ pub(crate) fn ts_stream_to_str(stream: TsStream) -> &'static str {
         TsStream::St2038 => "st2038",
         TsStream::JpegXs => "jpegxs",
         TsStream::Id3 => "id3",
+        TsStream::Mpegh => "mpegh",
     }
 }
 
@@ -758,6 +767,7 @@ fn es_to_ts_stream(es: &crate::mpegts::ElementaryStream) -> Option<TsStream> {
         STREAM_TYPE_JPEG_XS if es.jpeg_xs.is_some() => Some(TsStream::JpegXs),
         STREAM_TYPE_AC3 => Some(TsStream::Ac3),
         STREAM_TYPE_PRIVATE_PES if es.ac3 => Some(TsStream::Ac3),
+        STREAM_TYPE_MPEGH_MHAS => Some(TsStream::Mpegh),
         // KLV and DVB subtitles stay out: this feeds the playbin fan-out, which
         // builds A/V decode branches only (their ports are selected explicitly
         // on a TsDemuxN port).
@@ -884,6 +894,7 @@ impl PadTemplates for TsDemux {
             output_caps(TsStream::Teletext),
             output_caps(TsStream::JpegXs),
             output_caps(TsStream::Id3),
+            output_caps(TsStream::Mpegh),
         ]));
         Vec::from([
             PadTemplate::sink(CapsSet::one(input_caps())),

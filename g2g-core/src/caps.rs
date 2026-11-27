@@ -965,6 +965,8 @@ fn audio_gst_media_type(f: AudioFormat) -> (String, Option<&'static str>) {
         AudioFormat::Flac => ("audio/x-flac", None),
         AudioFormat::Vorbis => ("audio/x-vorbis", None),
         AudioFormat::Alac => ("audio/x-alac", None),
+        AudioFormat::MpeghMhas => ("audio/x-mpeg-h,stream-format=mhas", None),
+        AudioFormat::MpeghRaw => ("audio/x-mpeg-h,stream-format=raw", None),
         // Named in `PCM_FORMATS`, but still listed so a format added to the enum
         // has to be given a media type here rather than falling into a wildcard.
         AudioFormat::PcmS16Le
@@ -3292,6 +3294,10 @@ pub enum AudioFormat {
     Tagged(CodecTag),
     // Apple Lossless (GStreamer `audio/x-alac`), container-framed, its `alac` atom riding in-band ahead of the audio
     Alac,
+    // MPEG-H 3D Audio in MHAS packets (GStreamer `audio/x-mpeg-h,stream-format=mhas`, MP4 `mhm1`), its config in-band
+    MpeghMhas,
+    // MPEG-H 3D Audio raw access units (GStreamer `audio/x-mpeg-h,stream-format=raw`, MP4 `mha1`), its `mhaC` box riding in-band ahead of the audio
+    MpeghRaw,
 }
 
 impl AudioFormat {
@@ -3314,6 +3320,8 @@ impl AudioFormat {
             | AudioFormat::Vorbis
             | AudioFormat::ImaAdpcm
             | AudioFormat::Alac
+            | AudioFormat::MpeghMhas
+            | AudioFormat::MpeghRaw
             | AudioFormat::Tagged(_) => None,
         }
     }
@@ -3969,6 +3977,37 @@ mod tests {
         assert!(pcm(6, five_one).is_fixed());
         assert_eq!(pcm(6, five_one).fixate(), Ok(pcm(6, five_one)));
         assert_eq!(pcm(ANY_CHANNELS, five_one).fixate(), Ok(pcm(2, five_one)));
+    }
+
+    #[test]
+    fn mpegh_framing_round_trips_through_the_gst_stream_format() {
+        for (format, stream_format) in [
+            (AudioFormat::MpeghMhas, "stream-format=mhas"),
+            (AudioFormat::MpeghRaw, "stream-format=raw"),
+        ] {
+            let caps = Caps::Audio {
+                format,
+                channels: 2,
+                sample_rate: 48_000,
+                channel_layout: crate::ChannelLayout::UNSPECIFIED,
+            };
+            let s = caps.to_gst_string();
+            assert!(
+                s.starts_with("audio/x-mpeg-h") && s.contains(stream_format),
+                "printed {s}"
+            );
+            assert_eq!(CapsSet::from_gst_string(&s).unwrap().alternatives(), [caps]);
+        }
+        let either = CapsSet::from_gst_string("audio/x-mpeg-h").unwrap();
+        let formats: Vec<AudioFormat> = either
+            .alternatives()
+            .iter()
+            .filter_map(|caps| match caps {
+                Caps::Audio { format, .. } => Some(*format),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(formats, [AudioFormat::MpeghMhas, AudioFormat::MpeghRaw]);
     }
 
     #[test]

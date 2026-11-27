@@ -1,0 +1,4 @@
+# Fetched on demand by tools/mpegh-fixtures.sh, not committed: Fraunhofer licenses its
+# MPEG-H test content CC BY-NC-ND 4.0. This dir tracks only this .gitignore.
+*
+!.gitignore

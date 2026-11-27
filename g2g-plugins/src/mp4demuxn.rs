@@ -1399,7 +1399,7 @@ impl Mp4DemuxN {
         }
 
         let mut data = sample.annexb;
-        // An Opus, Vorbis, ALAC, raw AAC or tagged track's config goes downstream as
+        // An Opus, Vorbis, ALAC, MPEG-H raw, raw AAC or tagged track's config goes downstream as
         // frames of its own ahead of the samples, so they are built here and pushed below.
         let mut lead_frames: Vec<Vec<u8>> = Vec::new();
         match kind {
@@ -1414,7 +1414,7 @@ impl Mp4DemuxN {
                 }
             }
             Some(TrackKind::Audio {
-                format: AudioFormat::Tagged(_) | AudioFormat::Alac,
+                format: AudioFormat::Tagged(_) | AudioFormat::Alac | AudioFormat::MpeghRaw,
                 config,
                 ..
             }) => {

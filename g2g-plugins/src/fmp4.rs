@@ -25,7 +25,7 @@ use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     g2g_warn, AspectRatio, AudioFormat, Chapter, ClosedCaptionFormat, FrameTiming, G2gError,
     LosslessCompression, PixelAspect, ProResVariant, RawVideoFormat, Segment, Tag, TagList,
-    TextFormat, VideoCodec,
+    TextFormat, VideoCodec, ANY_CHANNELS,
 };
 
 use crate::aiff::audio_from_comm;
@@ -1680,6 +1680,14 @@ fn parse_audio_entry(
             None,
         )));
     }
+    for (entry_type, format) in [
+        (b"mha1", AudioFormat::MpeghRaw),
+        (b"mhm1", AudioFormat::MpeghMhas),
+    ] {
+        if let Some(entry) = find_box(entries, entry_type) {
+            return Ok(Some((mpegh_track(entry, format, timescale)?, None)));
+        }
+    }
     if let Some(mp3) = find_box(entries, b".mp3") {
         let channels = sound_entry_channels(mp3)?;
         return Ok(Some((
@@ -1995,6 +2003,38 @@ pub(crate) const MPEG1_AUDIO_OBJECT_TYPE: u8 = 0x6B;
 const SOUND_ENTRY_V0_CHILDREN_AT: usize = 28;
 const SOUND_ENTRY_V1_CHILDREN_AT: usize = 44;
 const SOUND_ENTRY_V2_CHILDREN_AT: usize = 64;
+
+// `mha1` samples are raw access units whose decoder config is only in the `mhaC`, `mhm1`
+// samples are MHAS packets carrying their own config, so their `mhaC` is optional
+fn mpegh_track(entry: &[u8], format: AudioFormat, timescale: u32) -> Result<TrackKind, G2gError> {
+    let children = entry
+        .get(sound_entry_children_at(entry)?..)
+        .ok_or(G2gError::CapsMismatch)?;
+    let mhac = find_entry_child(children, b"mhaC");
+    let record = mhac
+        .map(|payload| crate::mpeghconfig::mha_config_record(payload).ok_or(G2gError::CapsMismatch))
+        .transpose()?;
+    let config = match (format, mhac) {
+        (AudioFormat::MpeghRaw, Some(payload)) => crate::mp4box::mp4_box(b"mhaC", payload),
+        (AudioFormat::MpeghRaw, None) => return Err(G2gError::CapsMismatch),
+        _ => Vec::new(),
+    };
+    let channels = record
+        .as_ref()
+        .and_then(|record| crate::mpeghconfig::cicp_channel_count(record.reference_channel_layout))
+        .unwrap_or(ANY_CHANNELS);
+    let sample_rate = record
+        .as_ref()
+        .and_then(|record| crate::mpeghconfig::mpegh_config_sample_rate(record.config))
+        .unwrap_or(timescale);
+    Ok(TrackKind::Audio {
+        format,
+        channels,
+        sample_rate,
+        config,
+        stored_pcm: None,
+    })
+}
 
 fn sound_entry_children_at(entry: &[u8]) -> Result<usize, G2gError> {
     let version = entry.get(8..10).ok_or(G2gError::CapsMismatch)?;
@@ -4777,6 +4817,57 @@ mod tests {
         entry[16..18].copy_from_slice(&2u16.to_be_bytes());
         entry.extend_from_slice(&mp4_box(b"dac3", &w.into_bytes()));
         assert_eq!(ac3_specific_channels(b"ac-3", &entry), Some(6));
+    }
+
+    #[test]
+    fn mpegh_entries_read_the_mhac_and_only_mha1_requires_it() {
+        use crate::mp4box::mp4_box;
+        const CICP_5_1: u8 = 6;
+        const MEDIA_TIMESCALE: u32 = 600;
+        let [profile, rate] = crate::mpeghconfig::MPEGH_CONFIG_48K_PREFIX;
+        let mhac = mp4_box(b"mhaC", &[1, profile, CICP_5_1, 0, 2, profile, rate]);
+        let sound_entry_fields = [0u8; 28];
+        let read = |kind: &[u8; 4], children: &[u8]| {
+            let entry = mp4_box(kind, &[&sound_entry_fields[..], children].concat());
+            parse_audio_entry(&entry, MEDIA_TIMESCALE)
+        };
+        for (kind, format, lead_config) in [
+            (b"mha1", AudioFormat::MpeghRaw, mhac.clone()),
+            (b"mhm1", AudioFormat::MpeghMhas, Vec::new()),
+        ] {
+            let Ok(Some((
+                TrackKind::Audio {
+                    format: read_format,
+                    channels,
+                    sample_rate,
+                    config,
+                    ..
+                },
+                None,
+            ))) = read(kind, &mhac)
+            else {
+                panic!("an {format:?} track");
+            };
+            assert_eq!(read_format, format);
+            assert_eq!(channels, 6, "CICP 6 is 5.1");
+            assert_eq!(sample_rate, 48_000, "the config's rate, not the timescale");
+            assert_eq!(config, lead_config);
+        }
+        assert!(matches!(
+            read(b"mhm1", &[]),
+            Ok(Some((
+                TrackKind::Audio {
+                    format: AudioFormat::MpeghMhas,
+                    channels: ANY_CHANNELS,
+                    ..
+                },
+                None
+            )))
+        ));
+        assert!(
+            read(b"mha1", &[]).is_err(),
+            "mha1 cannot decode without its mhaC"
+        );
     }
 
     #[test]

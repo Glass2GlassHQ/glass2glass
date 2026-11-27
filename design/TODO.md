@@ -367,6 +367,9 @@ libraries installed.
   and most ARM SoCs: stateful decode and encode (gst `v4l2h264dec`,
   `v4l2h264enc`), and stateless H.265 and VP8 decode.
 - Run `vaav1enc` on a GPU with VA-API AV1 encode (AMD RDNA3, Intel Arc).
+- **MPEG-H:** name the speakers of the CICP target layouts with wide or height
+  speakers, which need new `ChannelPosition` variants, and build and test the
+  `mpegh` feature on Windows and macOS.
 - **Pure-Rust / wasm decode** to drop the ffmpeg FFI: VP8 / VP9 decode and a
   pure-Rust Opus path (see the roadmap for why both are blocked).
 

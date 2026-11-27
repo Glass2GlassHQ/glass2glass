@@ -177,6 +177,8 @@ pub const STREAM_TYPE_AC3: u8 = 0x81;
 /// bytes off every 0x15 PES payload on the metadata stream_id. The demux accepts
 /// a bare payload too (see `unwrap_metadata_au_cells`).
 pub const STREAM_TYPE_METADATA_PES: u8 = 0x15;
+// ISO/IEC 23008-3 MPEG-H 3D Audio main stream in MHAS packets
+pub const STREAM_TYPE_MPEGH_MHAS: u8 = 0x2D;
 // SCTE 35 splice information, carried as sections rather than PES
 pub const STREAM_TYPE_SCTE35: u8 = 0x86;
 

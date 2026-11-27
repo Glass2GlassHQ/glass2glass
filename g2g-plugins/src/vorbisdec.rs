@@ -27,11 +27,11 @@ use alloc::vec::Vec;
 use g2g_core::time::{ns_to_ticks, ticks_to_ns};
 use g2g_core::{
     pcm_caps_any_rate_and_channels, AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet,
-    ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket,
+    ChannelLayout, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, OutputSink,
+    PadTemplate, PadTemplates, PipelinePacket, ANY_CHANNELS,
 };
 
-use crate::pcmoutput::{pcm_s16_decoder_output, DecodedPcm, PcmOutput};
+use crate::pcmoutput::{pcm_decoder_output, DecodedPcm, PcmOutput};
 use crate::symphoniadec::decode_to_s16;
 use crate::vorbischannels::vorbis_layout;
 
@@ -165,7 +165,11 @@ impl AsyncElement for VorbisDec {
             Caps::Audio {
                 format: AudioFormat::Vorbis,
                 ..
-            } => pcm_s16_decoder_output(),
+            } => pcm_decoder_output(
+                AudioFormat::PcmS16Le,
+                ANY_CHANNELS,
+                ChannelLayout::UNSPECIFIED,
+            ),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
