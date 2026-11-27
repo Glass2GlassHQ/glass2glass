@@ -88,9 +88,10 @@ enum MxfStream {
 const DEFAULT_STREAM: MxfStream = MxfStream::Video(VideoCodec::H264);
 
 // the `stream=` names of the picture codecs besides prores, which goes by its profile
-const VIDEO_STREAM_NAMES: [(&str, VideoCodec); 4] = [
+const VIDEO_STREAM_NAMES: [(&str, VideoCodec); 5] = [
     ("h264", VideoCodec::H264),
     ("mpeg2", VideoCodec::Mpeg2),
+    ("mpeg4", VideoCodec::Mpeg4Part2),
     ("jpeg2000", VideoCodec::Jpeg2000),
     ("dnxhd", VideoCodec::DnxHd),
 ];
@@ -192,6 +193,20 @@ pub fn forwardable_tracks(prefix: &[u8]) -> Vec<MxfTrackInfo> {
             video: is_video(track),
         })
         .collect()
+}
+
+// the essences of an mxf file prefix the demuxer has no caps for, by name
+pub fn unsupported_essences(prefix: &[u8]) -> Vec<String> {
+    let Some(metadata) = header_partition_metadata(prefix) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = metadata
+        .unsupported
+        .iter()
+        .map(crate::mxf::essence_container_name)
+        .collect();
+    names.dedup();
+    names
 }
 
 #[derive(Debug, Clone)]
@@ -469,6 +484,8 @@ fn landing(
 pub struct MxfDemuxN {
     buf: Vec<u8>,
     buf_at: u64,
+    // the header partition's file offset, where partition and index offsets count from
+    run_in: usize,
     tracks: Vec<EssenceTrack>,
     port_caps: Vec<Caps>,
     bus: Option<BusHandle>,
@@ -522,6 +539,7 @@ impl MxfDemuxN {
         Self {
             buf: Vec::new(),
             buf_at: 0,
+            run_in: 0,
             positions: alloc::vec![0; port_caps.len()],
             port_caps,
             tracks,
@@ -663,6 +681,7 @@ impl MxfDemuxN {
                 }
                 return Ok(());
             };
+            self.run_in = metadata.run_in;
             self.announce(&metadata.tracks, out).await?;
             let seekable = self.seek.upstream_len().is_some() && self.seek.takes_seeks_after_end();
             self.read = match seekable {
@@ -694,7 +713,10 @@ impl MxfDemuxN {
         if key_kind(&klv.key) != KeyKind::RandomIndexPack || klv.total_len()? != rip_len {
             return None;
         }
-        let mut partitions = random_index_pack(value)?;
+        let mut partitions = random_index_pack(value)?
+            .into_iter()
+            .map(|at| at.checked_add(self.run_in as u64))
+            .collect::<Option<Vec<u64>>>()?;
         partitions.retain(|at| *at < rip_at);
         partitions.sort_unstable();
         partitions.dedup();
@@ -838,7 +860,9 @@ impl MxfDemuxN {
 
     fn start_streaming(&mut self) {
         self.reordering = Reordering::of(&self.index);
-        self.read = MxfRead::Klvs { next: 0 };
+        self.read = MxfRead::Klvs {
+            next: self.run_in as u64,
+        };
         self.buf.clear();
         self.buf_at = 0;
     }
@@ -1123,7 +1147,9 @@ impl MxfDemuxN {
         }
         let Some(landing) = landing else {
             self.buf_at = 0;
-            self.read = MxfRead::Klvs { next: 0 };
+            self.read = MxfRead::Klvs {
+                next: self.run_in as u64,
+            };
             self.positions.iter_mut().for_each(|position| *position = 0);
             return;
         };
@@ -1191,13 +1217,19 @@ impl MxfDemuxN {
         if self.read == MxfRead::Head {
             let metadata = header_partition_metadata(&self.buf)
                 .ok_or_else(|| malformed("mxf: no header partition metadata"))?;
+            self.run_in = metadata.run_in;
             self.announce(&metadata.tracks, out).await?;
         }
+        const HELD_FILE_PIECE_BYTES: usize = 64 * 1024;
         let whole = core::mem::take(&mut self.buf);
-        self.observe(&whole, 0);
+        self.observe(&whole[self.run_in..], self.run_in as u64);
         self.start_streaming();
-        self.buf = whole;
-        self.emit_klvs(0, true, out).await
+        // skip_to drains each klv from the front of buf, which copies the rest of a held file every time
+        for piece in whole.chunks(HELD_FILE_PIECE_BYTES) {
+            self.buf.extend_from_slice(piece);
+            self.advance(false, out).await?;
+        }
+        self.advance(true, out).await
     }
 }
 
@@ -1403,7 +1435,7 @@ static ONE_PORT_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "stream",
         PropKind::Str,
-        "essence to emit: h264 | mpeg2 | jpeg2000 | dnxhd | prores-proxy | prores-lt | prores-standard | prores-hq | prores-4444 | prores-4444xq | S16LE | S24LE | S32LE",
+        "essence to emit: h264 | mpeg2 | mpeg4 | jpeg2000 | dnxhd | prores-proxy | prores-lt | prores-standard | prores-hq | prores-4444 | prores-4444xq | S16LE | S24LE | S32LE",
     )
     .with_default("h264"),
     PropertySpec::new(

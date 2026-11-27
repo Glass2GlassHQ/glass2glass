@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2628: `decodebin` names the MXF essences `mxfdemux` cannot read instead of failing on a default H.264 port.
+- M2627: `mxfdemux` reads run-ins, MPEG-4 Visual and Avid OP-Atom PCM, and demuxes unseekable sources in linear time.
 - M2626: The Windows Moonlight host encodes with `nvenc` and offers reference invalidation when the primary monitor is on an NVIDIA GPU.
 - M2625: The Windows remote desktop host encodes with `nvenc` when the captured monitor is on an NVIDIA GPU.
 - M2624: `d3d12h264dec` keeps up to four decodes in flight instead of waiting for each one on the CPU.

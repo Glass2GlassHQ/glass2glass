@@ -1681,11 +1681,18 @@ container data links to, or of every source package with a descriptor when
 there is none: timeline tracks with a non-zero track number, each matched to the
 sub-descriptor whose `LinkedTrackID` names it. Byte 13 of the descriptor's
 essence container label gives the codec: MPEG ES (H.264 when the picture coding
-label is one of the AVC profiles, MPEG-2 otherwise), D-10, AVC, JPEG 2000, VC-3
-(`DnxHd`), ProRes (the variant from the picture coding label) and PCM (16, 24 or
-32-bit from `QuantizationBits`). The picture size is the display size, falling
-back to the stored size, which is padded to whole macroblocks, and doubled for
-separate or mixed fields. The source clips of the material package are not
+label is one of the AVC profiles, MPEG-4 Visual for its coding label, MPEG-2
+otherwise), D-10, AVC, JPEG 2000, VC-3 (`DnxHd`), ProRes (the variant from the
+picture coding label) and PCM (16, 24 or 32-bit from `QuantizationBits`). A
+WAVE descriptor under Avid's private container label is PCM too. The hook names
+every other essence (DV-DIF, A-law, uncompressed picture) to `decodebin`, which
+fails with no decoder for it. A run-in of under 64 KiB before the header
+partition is skipped. Partition offsets in the random index pack count from the
+header partition, so the demuxer adds the run-in to them. A KLV key is either a
+SMPTE UL, starting with `0x06`, or a UUID with swapped halves, starting with
+`0x80` to `0xbf`, as Avid keys its private header sets. The picture size is the
+display size, falling back to the stored size, which is padded to whole
+macroblocks, and doubled for separate or mixed fields. The source clips of the material package are not
 applied, so a file plays its whole essence.
 
 `MxfDemux` is `MxfDemuxN` with one port, the element a bare `decodebin`,
@@ -1706,10 +1713,11 @@ the earlier partitions by byte offset. Each probe stops at the first essence
 key or the end of the partition. An index pack larger than the initial tail
 gets a second read from its start, up to 64 MiB. Once the index is loaded,
 the demuxer rewinds and emits each essence KLV as it arrives. Without a parked
-source it holds the file for an index pass at `Eos`. An index stream offset
-maps to the partition with the matching `BodySID` and the largest
-`BodyOffset` at or below the offset. The byte count begins at the first essence
-key, or after that key and length for clip-wrapped and OP-Atom essence.
+source it holds the file for an index pass at `Eos`, then emits it in 64 KiB
+pieces as if it were streamed. An index stream offset maps to the partition
+with the matching `BodySID` and the largest `BodyOffset` at or below the offset.
+The byte count begins at the first essence key, or after that key and length
+for clip-wrapped and OP-Atom essence.
 
 Pictures go out in stored order, with the stored position as the dts. The pts
 comes from the index: the temporal offset of display position `n` names the

@@ -1309,7 +1309,8 @@ pub fn mxf_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
     }
     let prefix = read_prefix(location)?;
     let mut infos = crate::mxfdemux::forwardable_tracks(&prefix);
-    if infos.is_empty() {
+    let unsupported = crate::mxfdemux::unsupported_essences(&prefix);
+    if infos.is_empty() && unsupported.is_empty() {
         return None;
     }
     infos.sort_by_key(|info| !info.video);
@@ -1328,7 +1329,7 @@ pub fn mxf_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
         .collect();
     Some(ContainerStreams {
         streams,
-        unsupported: Vec::new(),
+        unsupported,
     })
 }
 

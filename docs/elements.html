@@ -960,6 +960,7 @@ SRC:
 SRC:
   video/x-h264,width=[16,65535],height=[16,65535],framerate=[1/1,240/1],alignment=au
   video/mpeg,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/mpeg,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
   image/x-jpc,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
   video/x-dnxhd,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
   video/x-prores,variant=proxy,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
@@ -973,7 +974,7 @@ SRC:
   audio/x-raw,format=S24LE,layout=interleaved,channels=2,rate=48000
   audio/x-raw,format=S24LE,layout=interleaved
   audio/x-raw,format=S32LE,layout=interleaved,channels=2,rate=48000
-  audio/x-raw,format=S32LE,layout=interleaved</pre></div><div class="seg"><span class="seg-l">Properties</span><div class="props"><div class="prop"><code class="pn">stream</code> <span class="pt">String</span> <span class="pf">read / write</span><div class="pb">essence to emit: h264 | mpeg2 | jpeg2000 | dnxhd | prores-proxy | prores-lt | prores-standard | prores-hq | prores-4444 | prores-4444xq | S16LE | S24LE | S32LE</div><div class="pfacts">default: <code>h264</code></div></div><div class="prop"><code class="pn">track-number</code> <span class="pt">Unsigned Integer</span> <span class="pf">read / write</span><div class="pb">MXF track number of the track to emit among those carrying `stream` (0 = the first of them)</div><div class="pfacts">default: <code>0</code></div></div></div></div></article><article class="el-card" data-search="oggdemux ogg demuxer codec/demuxer demuxes an ogg bitstream into its logical streams stream" id="el-oggdemux"><div class="el-head"><h3><a href="#el-oggdemux">oggdemux</a></h3><span class="badge role-el">element</span></div><div class="classification">Codec/Demuxer</div><p class="desc">Demuxes an Ogg bitstream into its logical streams</p><div class="seg"><span class="seg-l">Pads</span><pre>SINK:
+  audio/x-raw,format=S32LE,layout=interleaved</pre></div><div class="seg"><span class="seg-l">Properties</span><div class="props"><div class="prop"><code class="pn">stream</code> <span class="pt">String</span> <span class="pf">read / write</span><div class="pb">essence to emit: h264 | mpeg2 | mpeg4 | jpeg2000 | dnxhd | prores-proxy | prores-lt | prores-standard | prores-hq | prores-4444 | prores-4444xq | S16LE | S24LE | S32LE</div><div class="pfacts">default: <code>h264</code></div></div><div class="prop"><code class="pn">track-number</code> <span class="pt">Unsigned Integer</span> <span class="pf">read / write</span><div class="pb">MXF track number of the track to emit among those carrying `stream` (0 = the first of them)</div><div class="pfacts">default: <code>0</code></div></div></div></div></article><article class="el-card" data-search="oggdemux ogg demuxer codec/demuxer demuxes an ogg bitstream into its logical streams stream" id="el-oggdemux"><div class="el-head"><h3><a href="#el-oggdemux">oggdemux</a></h3><span class="badge role-el">element</span></div><div class="classification">Codec/Demuxer</div><p class="desc">Demuxes an Ogg bitstream into its logical streams</p><div class="seg"><span class="seg-l">Pads</span><pre>SINK:
   application/ogg
 SRC:
   audio/x-opus

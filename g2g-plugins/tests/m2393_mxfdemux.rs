@@ -277,6 +277,24 @@ fn a_seekable_run_streams_what_a_held_file_sends() {
     });
 }
 
+#[test]
+fn a_run_in_before_the_header_partition_changes_no_packet() {
+    const RUN_IN_LEN: usize = 8;
+    block_on(async {
+        let file = fixture("mxf_mpeg2_pcm.mxf");
+        let with_run_in = [vec![0; RUN_IN_LEN], file.clone()].concat();
+        assert_eq!(
+            g2g_plugins::typefind::sniff(&with_run_in),
+            Some(ByteStreamEncoding::Mxf)
+        );
+        let whole = whole_file_units(&file).await;
+        assert_eq!(whole_file_units(&with_run_in).await.units, whole.units);
+        let mut streaming = streaming(&with_run_in).await;
+        feed(&mut streaming.demux, &with_run_in, &mut streaming.ports).await;
+        assert_eq!(streaming.ports.units, whole.units);
+    });
+}
+
 fn split_point(file: &[u8]) -> usize {
     file.len() * 3 / 4
 }

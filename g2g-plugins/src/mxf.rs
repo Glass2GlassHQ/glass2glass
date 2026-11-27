@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
+use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::{AudioFormat, ProResVariant, VideoCodec};
@@ -45,6 +47,8 @@ const ENCRYPTED_TRIPLET: [u8; 16] = [
 ];
 // the first byte of every key, smpte's object identifier
 const KEY_START: u8 = 0x06;
+// avid's private sets are keyed by uuids with swapped halves, which start with the rfc 4122 variant bits 10
+const SWAPPED_UUID_FIRST_BYTES: core::ops::RangeInclusive<u8> = 0x80..=0xbf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PartitionKind {
@@ -125,7 +129,7 @@ pub(crate) fn read_klv(data: &[u8]) -> Result<Klv, KlvError> {
         .ok_or(KlvError::Truncated)?
         .try_into()
         .map_err(|_| KlvError::Truncated)?;
-    if key[0] != KEY_START {
+    if key[0] != KEY_START && !SWAPPED_UUID_FIRST_BYTES.contains(&key[0]) {
         return Err(KlvError::Malformed);
     }
     let first = *data.get(KEY_LEN).ok_or(KlvError::Truncated)?;
@@ -342,7 +346,8 @@ const SEQUENCE: u8 = 0x0f;
 const ESSENCE_CONTAINER_DATA: u8 = 0x23;
 const MULTIPLE_DESCRIPTOR: u8 = 0x44;
 const PICTURE_DESCRIPTORS: [u8; 4] = [0x27, 0x28, 0x29, 0x51];
-const SOUND_DESCRIPTORS: [u8; 3] = [0x42, 0x47, 0x48];
+const WAVE_DESCRIPTOR: u8 = 0x48;
+const SOUND_DESCRIPTORS: [u8; 3] = [0x42, 0x47, WAVE_DESCRIPTOR];
 
 const PACKAGE_UID_TAG: u16 = 0x4401;
 const PACKAGE_TRACKS_TAG: u16 = 0x4403;
@@ -403,6 +408,8 @@ pub(crate) struct HeaderMetadata {
     pub tracks: Vec<EssenceTrack>,
     // tracks with an essence the demuxer has no caps for, by their essence container label
     pub unsupported: Vec<Label>,
+    // bytes before the header partition, which partition and index offsets do not count
+    pub run_in: usize,
 }
 
 pub(crate) fn header_metadata(data: &[u8], op_atom: bool) -> HeaderMetadata {
@@ -527,6 +534,32 @@ const JPEG2000_MAPPING: u8 = 0x0c;
 const AVC_MAPPING: u8 = 0x10;
 const VC3_MAPPING: u8 = 0x11;
 const PRORES_MAPPING: u8 = 0x1c;
+// the generic container mappings the demuxer reads no essence from, by the name decodebin reports
+const UNREAD_MAPPINGS: [(u8, &str); 3] = [
+    (0x02, "DV-DIF"),
+    (0x05, "uncompressed picture"),
+    (0x0a, "A-law audio"),
+];
+
+pub(crate) fn essence_container_name(label: &Label) -> String {
+    if *label == AVID_ESSENCE_CONTAINER {
+        return String::from("Avid essence");
+    }
+    let mapping = label_starts_with(label, &CONTAINER_LABEL)
+        .then(|| {
+            UNREAD_MAPPINGS
+                .iter()
+                .find(|(mapping, _)| *mapping == label[13])
+        })
+        .flatten();
+    match mapping {
+        Some((_, name)) => String::from(*name),
+        None => {
+            let hex: String = label.iter().map(|byte| format!("{byte:02x}")).collect();
+            format!("MXF essence container {hex}")
+        }
+    }
+}
 
 // byte 14 of the sound mappings: bwf and aes3, each frame then clip wrapped
 const PCM_CLIP_WRAPPINGS: [u8; 2] = [0x02, 0x04];
@@ -540,11 +573,19 @@ const PICTURE_CODING: [u8; 12] = [
 ];
 // byte 12 then 13 of a picture coding label, the h.264 profiles under mpeg compression
 const AVC_CODINGS: [[u8; 2]; 2] = [[0x01, 0x31], [0x01, 0x32]];
+const MPEG4_VISUAL_CODING: [u8; 2] = [0x01, 0x20];
 const PRORES_CODING: [u8; 2] = [0x03, 0x06];
 const MAX_CHANNELS: u32 = u8::MAX as u32;
+// avid media composer labels its op-atom essence with this private container label
+const AVID_ESSENCE_CONTAINER: Label = [
+    0x06, 0x0e, 0x2b, 0x34, 0x01, 0x01, 0x01, 0xff, 0x4b, 0x46, 0x41, 0x41, 0x00, 0x0d, 0x4d, 0x4f,
+];
 
 fn essence(descriptor: &LocalSet) -> Option<Essence> {
     let container = descriptor.label(ESSENCE_CONTAINER_TAG)?;
+    if container == AVID_ESSENCE_CONTAINER && descriptor.kind == WAVE_DESCRIPTOR {
+        return pcm(descriptor, PcmPacking::Packed);
+    }
     if !label_starts_with(&container, &CONTAINER_LABEL) {
         return None;
     }
@@ -564,6 +605,7 @@ fn essence(descriptor: &LocalSet) -> Option<Essence> {
         MPEG_ES_MAPPING if coding_bytes.is_some_and(|bytes| AVC_CODINGS.contains(&bytes)) => {
             VideoCodec::H264
         }
+        MPEG_ES_MAPPING if coding_bytes == Some(MPEG4_VISUAL_CODING) => VideoCodec::Mpeg4Part2,
         MPEG_ES_MAPPING => VideoCodec::Mpeg2,
         AVC_MAPPING => VideoCodec::H264,
         JPEG2000_MAPPING => VideoCodec::Jpeg2000,
@@ -763,8 +805,20 @@ fn skip_fill(file: &[u8], mut at: usize) -> Option<usize> {
     }
 }
 
-// the header partition's metadata at the start of `file`, None until all of it is in
+// smpte st 377-1 run-ins are under 64 KiB and never hold the first 11 bytes of a partition key
+const MAX_RUN_IN: usize = 64 * 1024 - 1;
+
+fn run_in_len(file: &[u8]) -> Option<usize> {
+    let searched = &file[..file.len().min(MAX_RUN_IN + PARTITION_PACK.len())];
+    searched
+        .windows(PARTITION_PACK.len())
+        .position(|window| label_starts_with(window, &PARTITION_PACK))
+}
+
+// the header partition's metadata after any run-in in `file`, None until all of it is in
 pub(crate) fn header_partition_metadata(file: &[u8]) -> Option<HeaderMetadata> {
+    let run_in = run_in_len(file)?;
+    let file = &file[run_in..];
     let (klv, value) = whole_klv(file).ok()?;
     if !matches!(key_kind(&klv.key), KeyKind::Partition(_)) {
         return None;
@@ -773,11 +827,17 @@ pub(crate) fn header_partition_metadata(file: &[u8]) -> Option<HeaderMetadata> {
     // header byte count starts at the primer pack, after the fill that pads the partition pack
     let start = skip_fill(file, klv.header_len + value.len())?;
     let end = start.checked_add(usize::try_from(pack.header_byte_count).ok()?)?;
-    Some(header_metadata(file.get(start..end)?, pack.op_atom))
+    Some(HeaderMetadata {
+        run_in,
+        ..header_metadata(file.get(start..end)?, pack.op_atom)
+    })
 }
 
 pub(crate) fn opens_header_partition(file: &[u8]) -> bool {
-    read_klv(file).is_ok_and(|klv| key_kind(&klv.key) == KeyKind::Partition(PartitionKind::Header))
+    run_in_len(file).is_some_and(|run_in| {
+        read_klv(&file[run_in..])
+            .is_ok_and(|klv| key_kind(&klv.key) == KeyKind::Partition(PartitionKind::Header))
+    })
 }
 
 #[cfg(test)]
@@ -896,6 +956,71 @@ mod tests {
                 packing: PcmPacking::Packed,
             }
         );
+    }
+
+    // every label in the file that starts with `prefix`, with `bytes` written from its byte `at`
+    fn with_labels_rewritten(file: &[u8], prefix: &[u8], at: usize, bytes: &[u8]) -> Vec<u8> {
+        let starts: Vec<usize> = file
+            .windows(prefix.len())
+            .enumerate()
+            .filter(|(_, window)| label_starts_with(window, prefix))
+            .map(|(start, _)| start)
+            .collect();
+        assert!(!starts.is_empty(), "the fixture holds the label");
+        let mut rewritten = file.to_vec();
+        for start in starts {
+            rewritten[start + at..start + at + bytes.len()].copy_from_slice(bytes);
+        }
+        rewritten
+    }
+
+    #[test]
+    fn swapped_uuid_keys_read_as_klvs_and_other_bytes_do_not() {
+        let mut klv = [0u8; KEY_LEN + 1];
+        klv[0] = 0x80;
+        assert_eq!(
+            read_klv(&klv).map(|klv| key_kind(&klv.key)),
+            Ok(KeyKind::Other)
+        );
+        klv[0] = 0x00;
+        assert_eq!(read_klv(&klv), Err(KlvError::Malformed));
+    }
+
+    #[test]
+    fn avid_labelled_wave_descriptors_read_as_pcm() {
+        let pcm_container = [CONTAINER_LABEL.as_slice(), &[PCM_MAPPING]].concat();
+        let avid = with_labels_rewritten(PCM_OPATOM, &pcm_container, 0, &AVID_ESSENCE_CONTAINER);
+        assert_eq!(
+            header_partition_metadata(&avid).unwrap().tracks,
+            header_partition_metadata(PCM_OPATOM).unwrap().tracks
+        );
+    }
+
+    #[test]
+    fn an_mpeg4_visual_coding_in_the_mpeg_mapping_reads_as_mpeg4() {
+        let mpeg4 = with_labels_rewritten(MPEG2_PCM, &PICTURE_CODING, 12, &MPEG4_VISUAL_CODING);
+        let metadata = header_partition_metadata(&mpeg4).unwrap();
+        assert!(matches!(
+            metadata.tracks[0].essence,
+            Essence::Video {
+                codec: VideoCodec::Mpeg4Part2,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn an_unread_mapping_is_named() {
+        const DV_MAPPING: u8 = 0x02;
+        let mpeg_container = [CONTAINER_LABEL.as_slice(), &[MPEG_ES_MAPPING]].concat();
+        let dv = with_labels_rewritten(MPEG2_PCM, &mpeg_container, 13, &[DV_MAPPING]);
+        let metadata = header_partition_metadata(&dv).unwrap();
+        let names: Vec<String> = metadata
+            .unsupported
+            .iter()
+            .map(essence_container_name)
+            .collect();
+        assert_eq!(names, ["DV-DIF"]);
     }
 
     #[test]

@@ -353,6 +353,11 @@ libraries installed.
 - **Demuxer features:** VP8 and VP9 alpha from Matroska BlockAdditions, ONVIF
   `metx` tracks and `cstb` start times in MP4, AVC-Intra fourccs in MOV, and
   AC-4 and E-AC-3 in MPEG-TS.
+- **MXF essences:** DV-DIF pictures, A-law sound, and uncompressed pictures
+  (the generic container's mapping and Avid's RGBA OP-Atom) in `mxfdemux`.
+  Sony MPEG-4 Visual files carry no VOL in the essence: read it from the
+  descriptor's dynamic local tag for UL `060e2b34.04010101.0e060602.02010000`
+  (found through the primer pack) and put it ahead of each keyframe.
 
 ## Codecs
 
