@@ -549,6 +549,7 @@ pub trait AsyncElement: ElementBound {
     /// this to declare *equal* cost between alternatives it does not care
     /// about (so a neighbour's preference decides) or a gap wide enough that a
     /// neighbour's preference cannot pull the chain onto its fallback.
+    /// A scaler can also prefer a width that preserves the input display aspect.
     fn caps_preferences(&self) -> Option<CapsPreferences> {
         None
     }

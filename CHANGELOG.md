@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2617: Scalers derive an open width that preserves display aspect when downstream pins pixel aspect.
 - M2616: `d3d11videosink` and `metalvideosink` size and letterbox their windows by display aspect.
 - M2615: `glsink` and `cudaglsink` size and letterbox their windows by display aspect.
 - M2614: The CUDA, HIP and D3D11 scalers keep display aspect through a resize.

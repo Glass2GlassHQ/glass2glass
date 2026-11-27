@@ -290,6 +290,7 @@ pub(crate) fn project_passthrough(out: &Caps, mask: PassthroughFields) -> Option
             width,
             height,
             framerate,
+            pixel_aspect,
             ..
         } => {
             if !mask.format {
@@ -312,7 +313,11 @@ pub(crate) fn project_passthrough(out: &Caps, mask: PassthroughFields) -> Option
                 // and no colorimetry one either.
                 interlace: Interlace::Any,
                 colorimetry: Colorimetry::UNKNOWN,
-                pixel_aspect: crate::PixelAspect::Any,
+                pixel_aspect: if mask.width && mask.height {
+                    *pixel_aspect
+                } else {
+                    PixelAspect::Any
+                },
             })
         }
         Caps::CompressedVideo {

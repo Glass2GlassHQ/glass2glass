@@ -16,9 +16,10 @@ use g2g_core::log::{short_type_name, Target};
 use g2g_core::memory::{DomainSet, GpuDevice, MemoryDomainKind, OwnedHipBuffer};
 use g2g_core::meta::{Orientation, PlaneLayout};
 use g2g_core::{
-    g2g_error, AsyncElement, Caps, CapsConstraint, CapsTransform, Colorimetry, ConfigureOutcome,
-    Dim, ElementMetadata, Frame, G2gError, MemoryDomain, OutputSink, PipelinePacket, PixelAspect,
-    PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
+    g2g_error, AsyncElement, Caps, CapsConstraint, CapsPreferences, CapsTransform, Colorimetry,
+    ConfigureOutcome, Dim, ElementMetadata, Frame, G2gError, MemoryDomain, OutputSink,
+    PipelinePacket, PixelAspect, PropError, PropKind, PropValue, PropertySpec, Rate,
+    RawVideoFormat,
 };
 
 use crate::compositor::{CompositorOperator, CompositorPad};
@@ -1139,6 +1140,15 @@ impl AsyncElement for HipConvertScale {
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
             transform.derive(&swap_dims(input))
         }))
+    }
+
+    fn caps_preferences(&self) -> Option<CapsPreferences> {
+        self.variant.changes_size.then(|| {
+            CapsPreferences::default().with_aspect_preserving_width(
+                core::num::NonZeroU32::MIN,
+                self.direction.swaps_dims(),
+            )
+        })
     }
 
     fn input_domains(&self) -> DomainSet {

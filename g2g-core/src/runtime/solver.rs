@@ -21,7 +21,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::caps::{
-    batch_alternatives, conflicting_fields, Caps, CapsSet, FieldConflict, PassthroughFields,
+    batch_alternatives, conflicting_fields, Caps, CapsSet, Dim, FieldConflict, PassthroughFields,
+    PixelAspect,
 };
 #[cfg(feature = "std")]
 use crate::caps_transform::CapsTransform;
@@ -218,7 +219,7 @@ pub fn solve_linear_preferred<'a>(
 
     // Validate and fixate.
     let mut domains = Vec::with_capacity(n_links);
-    let mut target = producer_target(source_set);
+    let mut target = producer_target(source_set).map(FixationTarget::new);
     for (li, slot) in links.iter().enumerate() {
         let set = slot
             .as_ref()
@@ -233,9 +234,18 @@ pub fn solve_linear_preferred<'a>(
                 downstream: li + 1,
             });
         }
-        if target.is_some() {
-            target = transform_target(constraints[li + 1], candidates[0].clone());
-        }
+        target = links
+            .get(li + 1)
+            .and_then(Option::as_ref)
+            .and_then(|output| {
+                output_target(
+                    constraints[li + 1],
+                    &candidates[0],
+                    target.as_ref(),
+                    output,
+                    preference_at(preferences, li + 1),
+                )
+            });
         domains.push(candidates);
     }
 
@@ -573,6 +583,17 @@ pub(crate) fn resolve_forward_output(
     downstream_feasible: Option<&CapsSet>,
     prev_output: Option<&Caps>,
 ) -> ForwardResolve {
+    resolve_forward_output_preferred(constraint, input, downstream_feasible, prev_output, None)
+}
+
+#[cfg(feature = "std")]
+pub(crate) fn resolve_forward_output_preferred(
+    constraint: &CapsConstraint<'_>,
+    input: &Caps,
+    downstream_feasible: Option<&CapsSet>,
+    prev_output: Option<&Caps>,
+    preferences: Option<&CapsPreferences>,
+) -> ForwardResolve {
     let fixated_with_unknown_rate = fixate_with_unknown_rate(input);
     let input = fixated_with_unknown_rate.as_ref().unwrap_or(input);
     // Index 1 is a placeholder: the link position is meaningful only inside
@@ -693,7 +714,10 @@ pub(crate) fn resolve_forward_output(
             [one] => Some(one.clone()),
             _ => None,
         }) {
-        Some(c) => ForwardResolve::Fixed(c),
+        Some(c) => {
+            let c = aspect_preserving_output(&narrowed, input, &c, preferences).unwrap_or(c);
+            ForwardResolve::Fixed(c)
+        }
         None => ForwardResolve::Defer,
     }
 }
@@ -1105,7 +1129,7 @@ pub fn solve_graph_preferred<E>(
     // alternative orders disagree). The search tries the greedy choice first, so a
     // chain or an independent fan-out fixates byte-for-byte as before and only a
     // genuinely coupled diamond ever explores alternatives.
-    let targets = fixation_targets(graph, constraints, &edges);
+    let targets = fixation_targets(graph, constraints, preferences, &edges);
     let mut domains: Vec<Vec<Caps>> = Vec::with_capacity(ne);
     for (id, slot) in edges.iter().enumerate() {
         let (up, down) = edge_endpoints(graph, id);
@@ -1166,10 +1190,10 @@ pub fn solve_graph_preferred<E>(
 /// in the set's own preference order, so an empty result means the same as
 /// [`CapsSet::fixate`]'s `None`. With no `preferred` caps the first entry is
 /// exactly what [`CapsSet::fixate`] would return.
-fn fixated_candidates(set: &CapsSet, preferred: Option<&Caps>) -> Vec<Caps> {
+fn fixated_candidates(set: &CapsSet, preferred: Option<&FixationTarget>) -> Vec<Caps> {
     let mut out: Vec<Caps> = Vec::new();
     for alt in set.alternatives() {
-        let toward_preferred = preferred.and_then(|p| alt.fixate_toward(p).ok());
+        let toward_preferred = preferred.and_then(|p| alt.fixate_toward(&p.caps).ok());
         // the minimum stays a candidate for when the preferred value breaks a node's relation
         for c in toward_preferred.into_iter().chain(alt.fixate().ok()) {
             if !out.contains(&c) {
@@ -1177,34 +1201,191 @@ fn fixated_candidates(set: &CapsSet, preferred: Option<&Caps>) -> Vec<Caps> {
             }
         }
     }
+    if let Some(target) = preferred.filter(|p| p.prefer_geometry) {
+        // The aspect choice can beat a passthrough-sized alternative, but keeps
+        // the first fixable format and pixel aspect in the set's order.
+        if let Some(Caps::RawVideo {
+            format,
+            pixel_aspect,
+            ..
+        }) = out.first()
+        {
+            if let Some(index) = out.iter().position(|candidate| {
+                matches!(
+                    candidate, Caps::RawVideo { format: f, pixel_aspect: par, .. }
+                    if f == format && par == pixel_aspect && candidate.dims() == target.caps.dims()
+                )
+            }) {
+                out[..=index].rotate_right(1);
+            }
+        }
+    }
     out
+}
+
+#[derive(Clone, Debug)]
+struct FixationTarget {
+    caps: Caps,
+    prefer_geometry: bool,
+}
+
+impl FixationTarget {
+    fn new(caps: Caps) -> Self {
+        Self {
+            caps,
+            prefer_geometry: false,
+        }
+    }
+}
+
+fn output_target(
+    constraint: &CapsConstraint<'_>,
+    input: &Caps,
+    input_target: Option<&FixationTarget>,
+    output: &CapsSet,
+    preferences: Option<&CapsPreferences>,
+) -> Option<FixationTarget> {
+    let mut target = input_target.and_then(|upstream| {
+        transform_target(constraint, input.clone()).map(|caps| FixationTarget {
+            caps,
+            prefer_geometry: upstream.prefer_geometry,
+        })
+    });
+    if preferences
+        .and_then(CapsPreferences::aspect_preserving_width)
+        .is_some()
+        && output.alternatives().iter().any(|caps| {
+            matches!(caps, Caps::RawVideo {
+            width, pixel_aspect: PixelAspect::Exact(_), ..
+        } if !width.is_fixed())
+        })
+    {
+        if let Some(default) = fixated_candidates(output, target.as_ref()).first() {
+            if let Some(caps) = aspect_preserving_output(output, input, default, preferences) {
+                target = Some(FixationTarget {
+                    caps,
+                    prefer_geometry: true,
+                });
+            }
+        }
+    }
+    target
+}
+
+// Choose a width for the selected format, height and downstream PAR. Only a
+// surviving open width enables the preference, so an explicit width always wins.
+fn aspect_preserving_output(
+    set: &CapsSet,
+    input: &Caps,
+    output: &Caps,
+    preferences: Option<&CapsPreferences>,
+) -> Option<Caps> {
+    let (alignment, transpose) = preferences?.aspect_preserving_width()?;
+    let Caps::RawVideo {
+        width: Dim::Fixed(input_width),
+        height: Dim::Fixed(input_height),
+        pixel_aspect: input_aspect,
+        ..
+    } = input
+    else {
+        return None;
+    };
+    let Caps::RawVideo {
+        height: Dim::Fixed(output_height),
+        pixel_aspect: PixelAspect::Exact(output_aspect),
+        ..
+    } = output
+    else {
+        return None;
+    };
+    if *input_width == 0 || *input_height == 0 || *output_height == 0 {
+        return None;
+    }
+
+    let aspect = input_aspect.or_square();
+    let (mut wide, mut tall) = (
+        u128::from(*input_width) * u128::from(aspect.numerator()),
+        u128::from(*input_height) * u128::from(aspect.denominator()),
+    );
+    if transpose {
+        core::mem::swap(&mut wide, &mut tall);
+    }
+    let numerator = wide * u128::from(*output_height) * u128::from(output_aspect.denominator());
+    let denominator = tall * u128::from(output_aspect.numerator()) * u128::from(alignment.get());
+    let nearest =
+        numerator / denominator + u128::from(numerator % denominator >= denominator.div_ceil(2));
+
+    let mut template = output.clone();
+    if let Caps::RawVideo { width, .. } = &mut template {
+        *width = Dim::Any;
+    }
+    let step = alignment.get();
+    let units = set
+        .alternatives()
+        .iter()
+        .filter_map(|alt| {
+            let Caps::RawVideo { width, .. } = alt else {
+                return None;
+            };
+            let (min, max) = match *width {
+                Dim::Fixed(_) => return None,
+                Dim::Range { min, max } => (min.max(1), max),
+                Dim::Any => (1, u32::MAX),
+            };
+            let (lo, hi) = (min.div_ceil(step), max / step);
+            (lo <= hi && alt.intersect(&template).is_ok())
+                .then(|| nearest.clamp(u128::from(lo), u128::from(hi)))
+        })
+        .min_by_key(|units| units.abs_diff(nearest))?;
+    if let Caps::RawVideo { width, .. } = &mut template {
+        *width = Dim::Fixed(units as u32 * step);
+    }
+    Some(template)
 }
 
 // per edge, a producer's first alternative when fixed, else what the node passes on from a feeding edge that has one
 fn fixation_targets<E>(
     graph: &ValidatedGraph<E>,
     constraints: &[NodeConstraint<'_>],
+    preferences: &[Option<CapsPreferences>],
     edges: &[Option<CapsSet>],
-) -> Vec<Option<Caps>> {
-    let mut targets: Vec<Option<Caps>> = alloc::vec![None; edges.len()];
+) -> Vec<Option<FixationTarget>> {
+    let mut targets: Vec<Option<FixationTarget>> = alloc::vec![None; edges.len()];
     for &node in graph.topo() {
         let first_fixation = |edge: usize| {
-            let target = targets[edge].as_ref()?;
-            fixated_candidates(edges[edge].as_ref()?, Some(target))
+            fixated_candidates(edges[edge].as_ref()?, targets[edge].as_ref())
                 .into_iter()
                 .next()
         };
+        let upstream_target = |edge: usize| {
+            let target: &FixationTarget = targets[edge].as_ref()?;
+            first_fixation(edge).map(|caps| FixationTarget {
+                caps,
+                prefer_geometry: target.prefer_geometry,
+            })
+        };
         let target = match (graph.kind(node), &constraints[node.0 as usize]) {
-            (_, NodeConstraint::Element(CapsConstraint::Produces(set))) => producer_target(set),
-            (NodeKind::Transform, NodeConstraint::Element(c)) => graph
-                .in_edges(node)
-                .first()
-                .and_then(|&e| first_fixation(e))
-                .and_then(|input| transform_target(c, input)),
+            (_, NodeConstraint::Element(CapsConstraint::Produces(set))) => {
+                producer_target(set).map(FixationTarget::new)
+            }
+            (NodeKind::Transform, NodeConstraint::Element(c)) => (|| {
+                let &edge = graph.in_edges(node).first()?;
+                let preference = preference_at(preferences, node.0 as usize);
+                if targets[edge].is_none()
+                    && preference
+                        .and_then(CapsPreferences::aspect_preserving_width)
+                        .is_none()
+                {
+                    return None;
+                }
+                let input = first_fixation(edge)?;
+                let output = edges[*graph.out_edges(node).first()?].as_ref()?;
+                output_target(c, &input, targets[edge].as_ref(), output, preference)
+            })(),
             (NodeKind::Tee(_), NodeConstraint::Element(_)) => graph
                 .in_edges(node)
                 .first()
-                .and_then(|&e| first_fixation(e)),
+                .and_then(|&e| upstream_target(e)),
             (
                 NodeKind::Muxer(_),
                 NodeConstraint::Muxer {
@@ -1214,7 +1395,7 @@ fn fixation_targets<E>(
                 .in_edges(node)
                 .iter()
                 .find(|&&e| graph.edge(e).dst.index as usize == *pad)
-                .and_then(|&e| first_fixation(e)),
+                .and_then(|&e| upstream_target(e)),
             _ => None,
         };
         for &edge in graph.out_edges(node) {
@@ -1255,7 +1436,7 @@ struct ChainNode<'c, 'a> {
 
 impl<'c, 'a> ChainNode<'c, 'a> {
     fn new(constraint: &'c CapsConstraint<'a>, preferences: Option<&'c CapsPreferences>) -> Self {
-        let preferences = preferences.filter(|p| !p.is_empty());
+        let preferences = preferences.filter(|p| !p.costs().is_empty());
         Self {
             constraint,
             preferences,
@@ -1386,7 +1567,7 @@ fn preferred_chain_assignment<E>(
     preferences: &[Option<CapsPreferences>],
     domains: &[Vec<Caps>],
 ) -> Option<Vec<Option<Caps>>> {
-    if !preferences.iter().any(Option::is_some) {
+    if !preferences.iter().flatten().any(|p| !p.costs().is_empty()) {
         return None;
     }
     let (nodes, edges) = chain_order(graph, constraints)?;
@@ -3923,6 +4104,38 @@ mod tests {
                     .with_height(FieldTransform::Fixed(range)),
             ],
         })
+    }
+
+    #[test]
+    fn linear_scaler_fixates_aspect_width_with_alignment_and_rotation() {
+        use core::num::NonZeroU32;
+
+        let source =
+            CapsConstraint::Produces(CapsSet::one(fixed_video(RawVideoFormat::Nv12, 14, 8, 30)));
+        let aspect = PixelAspect::Exact(crate::AspectRatio::new(2, 1).unwrap());
+        let mut output = video(
+            RawVideoFormat::Nv12,
+            Dim::Any,
+            Dim::Fixed(8),
+            Rate::Fixed(30 << 16),
+        );
+        if let Caps::RawVideo { pixel_aspect, .. } = &mut output {
+            *pixel_aspect = aspect;
+        }
+        let scale = scale_like();
+        let sink = CapsConstraint::Accepts(CapsSet::one(output));
+        let chain = [&source, &scale, &sink];
+        for (align, transpose, expected) in [(1, false, 7), (2, false, 8), (1, true, 2)] {
+            let scale_prefs = CapsPreferences::default()
+                .with_aspect_preserving_width(NonZeroU32::new(align).unwrap(), transpose);
+            let links = solve_linear_preferred(&chain, &[None, Some(scale_prefs), None]).unwrap();
+            assert!(
+                matches!(&links[1], Caps::RawVideo {
+                width: Dim::Fixed(w), height: Dim::Fixed(8), pixel_aspect, ..
+            } if *w == expected && *pixel_aspect == aspect),
+                "{links:?}"
+            );
+        }
     }
 
     /// A convert-like `DerivedFields`: passthrough geometry + framerate,

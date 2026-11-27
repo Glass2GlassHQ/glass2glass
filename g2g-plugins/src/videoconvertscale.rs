@@ -36,9 +36,10 @@ use alloc::vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::{DomainSet, SystemSlice};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsTransform, ConfigureOutcome, Dim, ElementMetadata,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PixelAspect,
-    PropError, PropKind, PropValue, PropertySpec, PushOutcome, RawVideoFormat, RawVideoShape,
+    AsyncElement, Caps, CapsConstraint, CapsPreferences, CapsTransform, ConfigureOutcome, Dim,
+    ElementMetadata, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PixelAspect, PropError, PropKind, PropValue, PropertySpec, PushOutcome, RawVideoFormat,
+    RawVideoShape,
 };
 
 /// Resample and convert in one pass over the output: each output pixel is
@@ -473,6 +474,10 @@ impl AsyncElement for VideoConvertScale {
             produce,
             shapes,
         })
+    }
+
+    fn caps_preferences(&self) -> Option<CapsPreferences> {
+        self.scale.caps_preferences()
     }
 
     /// Scaling goes first when the input format resamples; an input-only format

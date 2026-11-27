@@ -1279,6 +1279,14 @@ pub enum PixelAspect {
 impl PixelAspect {
     pub const SQUARE: Self = Self::Exact(AspectRatio::SQUARE);
 
+    /// The aspect used to display a pixel. An unspecified aspect means square pixels.
+    pub fn or_square(self) -> AspectRatio {
+        match self {
+            Self::Any => AspectRatio::SQUARE,
+            Self::Exact(ratio) => ratio,
+        }
+    }
+
     pub fn intersect(&self, other: &PixelAspect) -> Option<PixelAspect> {
         match (self, other) {
             (PixelAspect::Any, other) | (other, PixelAspect::Any) => Some(*other),

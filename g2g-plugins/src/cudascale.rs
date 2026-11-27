@@ -14,8 +14,8 @@ use g2g_core::caps_transform::CapsTransform;
 use g2g_core::log::{short_type_name, Target};
 use g2g_core::memory::{DomainSet, MemoryDomainKind, OwnedCudaBuffer};
 use g2g_core::{
-    g2g_error, AsyncElement, Caps, CapsConstraint, Colorimetry, ConfigureOutcome, Dim,
-    ElementMetadata, Frame, G2gError, Interlace, MemoryDomain, OutputSink, PipelinePacket,
+    g2g_error, AsyncElement, Caps, CapsConstraint, CapsPreferences, Colorimetry, ConfigureOutcome,
+    Dim, ElementMetadata, Frame, G2gError, Interlace, MemoryDomain, OutputSink, PipelinePacket,
     PixelAspect, Rate, RawVideoFormat,
 };
 
@@ -300,6 +300,13 @@ impl AsyncElement for CudaScale {
 
     fn input_domains(&self) -> DomainSet {
         DomainSet::only(MemoryDomainKind::Cuda)
+    }
+
+    fn caps_preferences(&self) -> Option<CapsPreferences> {
+        Some(
+            CapsPreferences::default()
+                .with_aspect_preserving_width(core::num::NonZeroU32::MIN, false),
+        )
     }
 
     fn output_memory(&self) -> MemoryDomainKind {

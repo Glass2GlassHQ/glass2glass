@@ -386,8 +386,6 @@ libraries installed.
 - Write the VUI sample aspect from `openh264enc` once the `openh264` crate can
   set `bAspectRatioPresent`, and carry the caps ratio through `mfencode`,
   `vtencode`, `mediacodecenc` and `webcodecsencode` into their bitstreams.
-- Derive an unpinned output width that keeps the display aspect when downstream
-  pins the pixel aspect ratio.
 - Map the caps ratio to the widescreen SD modes of `decklinkvideosink`.
 
 ## Transforms and effects

@@ -433,7 +433,13 @@ passthrough fields from the downstream set and widening its retargeted geometry
 / rate to `Any`. A retargeted format has no wildcard, so the sweep enumerates
 the transform's `accept` formats instead, keeping each one some shape derives
 into the downstream set. That is what lets a geometry pin below a caps-driven
-`videoconvert` reach a `videoscale` above it mid-stream. A transform with an
+`videoconvert` reach a `videoscale` above it mid-stream. A pinned pixel aspect
+ratio travels through the same geometry-passthrough chain. When a scaler
+declares an aspect-preserving width preference, the solver uses the input
+display aspect and the selected output height and pixel aspect ratio to choose
+the nearest permitted width. This is a fixation preference inside the
+negotiated range and applies at startup and during the forward re-solve.
+A transform with an
 empty `accept` list or a retargeted channel count imposes no feasibility.
 
 When `downstream_feasible[i]` is `None` (no backward snapshot reached this edge,

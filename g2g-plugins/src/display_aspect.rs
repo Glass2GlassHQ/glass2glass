@@ -37,13 +37,11 @@ pub(crate) const FORCE_ASPECT_RATIO_PROPERTY: PropertySpec = PropertySpec::new(
 
 // gst reads an absent pixel-aspect-ratio as square pixels
 pub(crate) fn pixel_aspect_fraction(pixel_aspect: PixelAspect) -> (u128, u128) {
-    match pixel_aspect {
-        PixelAspect::Any => (1, 1),
-        PixelAspect::Exact(ratio) => (
-            u128::from(ratio.numerator()),
-            u128::from(ratio.denominator()),
-        ),
-    }
+    let ratio = pixel_aspect.or_square();
+    (
+        u128::from(ratio.numerator()),
+        u128::from(ratio.denominator()),
+    )
 }
 
 #[cfg(any(

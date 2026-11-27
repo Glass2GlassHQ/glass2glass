@@ -27,10 +27,10 @@ use windows::Win32::Graphics::Dxgi::Common::{
 use g2g_core::frame::Frame;
 use g2g_core::memory::{DomainSet, MemoryDomainKind, SystemSlice};
 use g2g_core::{
-    AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, CapsTransform, ColorRange,
-    Colorimetry, ConfigureOutcome, Dim, ElementMetadata, FieldTransform, G2gError, HardwareError,
-    Interlace, MatrixCoefficients, MemoryDomain, OutputSink, OwnedD3D11Texture, PadTemplate,
-    PadTemplates, PipelinePacket, PixelAspect, Rate, RawVideoFormat,
+    AllocationParams, AsyncElement, Caps, CapsConstraint, CapsPreferences, CapsSet, CapsTransform,
+    ColorRange, Colorimetry, ConfigureOutcome, Dim, ElementMetadata, FieldTransform, G2gError,
+    HardwareError, Interlace, MatrixCoefficients, MemoryDomain, OutputSink, OwnedD3D11Texture,
+    PadTemplate, PadTemplates, PipelinePacket, PixelAspect, Rate, RawVideoFormat,
 };
 
 use crate::d3d11texture::{texture_frame, texture_objects, texture_proposal, TextureOwner};
@@ -347,6 +347,14 @@ impl AsyncElement for D3D11Convert {
                 .map(|shape| shape.with_format(FieldTransform::Fixed(RawVideoFormat::Nv12)))
                 .collect(),
         })
+    }
+
+    fn caps_preferences(&self) -> Option<CapsPreferences> {
+        // D3D11 NV12 textures require a width divisible by two.
+        Some(
+            CapsPreferences::default()
+                .with_aspect_preserving_width(core::num::NonZeroU32::new(2).unwrap(), false),
+        )
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {

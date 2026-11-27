@@ -108,8 +108,8 @@ use crate::runtime::seek_after_end::{
     shut_down_when_done, ArmFlushCount, SeekAfterEnd, SinkEndReport,
 };
 use crate::runtime::solver::{
-    graph_downstream_feasibility, resolve_forward_output, solve_graph_preferred, solve_linear,
-    ForwardResolve, NegotiationFailure, NodeConstraint,
+    graph_downstream_feasibility, resolve_forward_output_preferred, solve_graph_preferred,
+    solve_linear, ForwardResolve, NegotiationFailure, NodeConstraint,
 };
 use crate::runtime::state::{fallback_source_sync, pipeline_clock_sync, Flow, StateController};
 use crate::runtime::FlightRecorder;
@@ -5291,11 +5291,12 @@ pub(crate) async fn transform_arm_on<E: AsyncElement>(
                 // `Infeasible` fails the run loud (no producer renegotiates).
                 let (forward_caps, output_resolved) = {
                     let constraint = elem.caps_constraint_as_transform();
-                    match resolve_forward_output(
+                    match resolve_forward_output_preferred(
                         &constraint,
                         &new_caps,
                         downstream_feasible.as_ref(),
                         Some(&out_caps),
+                        elem.caps_preferences().as_ref(),
                     ) {
                         ForwardResolve::Fixed(caps) => (caps, true),
                         ForwardResolve::Defer => (new_caps.clone(), false),

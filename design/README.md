@@ -695,7 +695,10 @@ the same for display units 0 to 3, a missing side taking the pixel side), the MP
 `psdemux` reads. Decoders copy the ratio from their compressed input to their raw
 output, as they do the colorimetry. `videoscale`, `videoconvertscale`, `cudascale`,
 `d3d11convert` and the HIP converter and scalers derive an output pixel aspect
-ratio that keeps the picture's display aspect unless downstream pins a ratio.
+ratio that keeps the picture's display aspect. When downstream pins a ratio,
+these scalers use the nearest allowed width that preserves display aspect
+at the negotiated height. An explicit width takes precedence.
+The solver makes that choice at startup and again when input caps change.
 The HIP scalers account for rotation, and `add-borders` fits the picture into
 the output when downstream pins a ratio. `wgpusink` opens its window at the
 display size (gst's rule: keep the stored height when the display aspect

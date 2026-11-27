@@ -32,10 +32,10 @@ use crate::pixel::{chroma_420_size, frame_byte_size, planar_planes};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, CapsTransform, ConfigureOutcome, Dim,
-    ElementMetadata, FieldTransform, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
-    RawVideoShape,
+    AsyncElement, Caps, CapsConstraint, CapsPreferences, CapsSet, CapsTransform, ConfigureOutcome,
+    Dim, ElementMetadata, FieldTransform, G2gError, MemoryDomain, OutputSink, PadTemplate,
+    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
+    RawVideoFormat, RawVideoShape,
 };
 
 pub(crate) const FORMATS: [RawVideoFormat; 13] = [
@@ -150,7 +150,7 @@ impl VideoScale {
         (self.target_w, self.target_h)
     }
 
-    /// Auto / caps-driven mode: neither property pins the geometry.
+    /// Auto / caps-driven mode: at least one axis is left to negotiation.
     fn is_auto(&self) -> bool {
         self.target_w == 0 || self.target_h == 0
     }
@@ -247,12 +247,27 @@ impl AsyncElement for VideoScale {
             // capsfilter pins the target. Passthrough is the preferred (first)
             // alternative, so with no downstream constraint the output is the
             // input size (identity scale).
-            (FORMATS.to_vec(), input_size_or_any_size())
+            let shapes = input_size_or_any_size()
+                .into_iter()
+                .map(|shape| match (tw, th) {
+                    (0, 0) => shape,
+                    (0, height) => shape.with_height(FieldTransform::Fixed(Dim::Fixed(height))),
+                    (width, _) => shape.with_width(FieldTransform::Fixed(Dim::Fixed(width))),
+                })
+                .collect();
+            (FORMATS.to_vec(), shapes)
         };
         CapsConstraint::DerivedFields(CapsTransform::RawVideo {
             accept,
             produce: Vec::new(),
             shapes,
+        })
+    }
+
+    fn caps_preferences(&self) -> Option<CapsPreferences> {
+        (self.target_w == 0).then(|| {
+            CapsPreferences::default()
+                .with_aspect_preserving_width(core::num::NonZeroU32::MIN, false)
         })
     }
 

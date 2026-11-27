@@ -9,6 +9,7 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::num::NonZeroU32;
 
 use crate::caps::{Caps, CapsSet};
 use crate::caps_transform::CapsTransform;
@@ -131,29 +132,48 @@ impl CapsConstraint<'_> {
 /// element does not care and a neighbour's preference should decide, and a
 /// large gap, meaning a fallback is much worse than the first choice so a
 /// neighbour's mild preference must not pull the chain onto it.
+/// A scaler can also recommend a width for ranged output geometry.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CapsPreferences {
     costs: Vec<u32>,
+    aspect_preserving_width: Option<(NonZeroU32, bool)>,
 }
 
 impl CapsPreferences {
     /// Declare one cost per advertised alternative, in the same order.
     pub fn new(costs: Vec<u32>) -> Self {
-        Self { costs }
+        Self {
+            costs,
+            ..Self::default()
+        }
     }
 
     /// The implicit default stated explicitly: alternative `i` costs `i`.
     pub fn by_order(count: usize) -> Self {
-        Self {
-            costs: (0..count as u32).collect(),
-        }
+        Self::new((0..count as u32).collect())
     }
 
     /// Every alternative equally acceptable, so neighbours decide.
     pub fn indifferent(count: usize) -> Self {
-        Self {
-            costs: alloc::vec![0; count],
-        }
+        Self::new(alloc::vec![0; count])
+    }
+
+    /// Prefer the width that preserves display aspect when an output pins its
+    /// pixel aspect ratio and allows a range of widths. Round to a multiple of
+    /// `width_alignment`. Set `transpose` for transforms that swap the axes
+    /// of the input picture before scaling.
+    pub fn with_aspect_preserving_width(
+        mut self,
+        width_alignment: NonZeroU32,
+        transpose: bool,
+    ) -> Self {
+        self.aspect_preserving_width = Some((width_alignment, transpose));
+        self
+    }
+
+    #[cfg(feature = "runtime")]
+    pub(crate) fn aspect_preserving_width(&self) -> Option<(NonZeroU32, bool)> {
+        self.aspect_preserving_width
     }
 
     /// The declared costs, in alternative order.
@@ -164,7 +184,7 @@ impl CapsPreferences {
     /// True when nothing is declared, which the solver reads the same as
     /// no preferences at all.
     pub fn is_empty(&self) -> bool {
-        self.costs.is_empty()
+        self.costs.is_empty() && self.aspect_preserving_width.is_none()
     }
 
     /// Cost of alternative `index`. An index past the declared costs falls
@@ -184,9 +204,8 @@ pub trait FormatElement: ElementBound {
     /// links. Read by the solver during negotiation.
     fn caps_constraint(&self) -> CapsConstraint<'_>;
 
-    /// Optional per-alternative costs for this element's advertised
-    /// constraint. Defaults to `None`, meaning the solver uses the
-    /// constraint's own preference order (cost = alternative index).
+    /// Optional fixation preferences for this element's advertised
+    /// constraint. Defaults to the constraint's own alternative order.
     fn caps_preferences(&self) -> Option<CapsPreferences> {
         None
     }
