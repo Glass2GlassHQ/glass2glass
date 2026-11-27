@@ -787,14 +787,18 @@ mod tests {
                 }
             };
             let rendered = render_window(gl, video, (8, 7), force_aspect, &white).unwrap();
-            for (row, bytes) in rendered.chunks_exact(8 * 4).enumerate() {
+            for (row, bytes) in rendered.as_chunks::<{ 8 * 4 }>().0.iter().enumerate() {
                 let expected = if !force_aspect || (1..5).contains(&row) {
                     [255; 4]
                 } else {
                     [0, 0, 0, 255]
                 };
                 assert!(
-                    bytes.chunks_exact(4).all(|pixel| pixel == expected),
+                    bytes
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .all(|pixel| *pixel == expected),
                     "row {row}"
                 );
             }
