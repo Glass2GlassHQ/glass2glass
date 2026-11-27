@@ -19,11 +19,26 @@ const FRAMES: u64 = 10;
 
 #[tokio::test]
 async fn autovideosink_presents_system_frames_through_d3d11() {
-    let reg = default_registry();
     let line = format!(
         "videotestsrc num-buffers={FRAMES} ! video/x-raw,format=NV12,width=320,height=240 ! autovideosink"
     );
-    let graph = parse_launch(&reg, &line).unwrap_or_else(|e| panic!("{line:?} parse: {e:?}"));
+    assert_presents(&line).await;
+}
+
+#[tokio::test]
+async fn d3d11videosink_accepts_aspect_caps_rewritten_by_a_scaler() {
+    for force in [true, false] {
+        let line = format!(
+            "videotestsrc num-buffers={FRAMES} ! video/x-raw,format=NV12,width=320,height=180 \
+             ! videoscale ! video/x-raw,width=320,height=240 ! d3d11videosink force-aspect-ratio={force}"
+        );
+        assert_presents(&line).await;
+    }
+}
+
+async fn assert_presents(line: &str) {
+    let reg = default_registry();
+    let graph = parse_launch(&reg, line).unwrap_or_else(|e| panic!("{line:?} parse: {e:?}"));
     let stats = run_graph(graph, &ZeroClock, 4)
         .await
         .unwrap_or_else(|e| panic!("{line:?} runs: {e:?}"));

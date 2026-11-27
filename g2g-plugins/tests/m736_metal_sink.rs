@@ -19,8 +19,8 @@ use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::MemoryDomain;
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, Dim, Interlace, PipelineClock, Rate, RawVideoFormat,
-    VideoCodec,
+    AspectRatio, AsyncElement, Caps, ConfigureOutcome, Dim, Interlace, PipelineClock, PixelAspect,
+    PropValue, Rate, RawVideoFormat, VideoCodec,
 };
 use g2g_plugins::metalvideosink::MetalVideoSink;
 use g2g_plugins::registry::default_registry;
@@ -182,6 +182,65 @@ async fn presents_packed_system_frames() {
     }
     let frames = decode_fixture(false).await;
     present_and_check(frames).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn letterboxes_a_non_square_picture_in_the_host_drawable() {
+    if !MetalVideoSink::device_available() {
+        eprintln!("skipping: no Metal device");
+        return;
+    }
+    const SIDE: u32 = 64;
+    let layer = objc2_quartz_core::CAMetalLayer::layer();
+    layer.setDrawableSize(objc2_core_foundation::CGSize::new(
+        f64::from(SIDE),
+        f64::from(SIDE),
+    ));
+    // SAFETY: the layer lives through the test and has no view hierarchy.
+    let mut sink = unsafe { MetalVideoSink::new().with_layer(core::ptr::NonNull::from(&*layer)) }
+        .with_readback();
+    let caps = Caps::RawVideo {
+        format: RawVideoFormat::Nv12,
+        width: Dim::Fixed(SIDE),
+        height: Dim::Fixed(SIDE),
+        framerate: Rate::Any,
+        interlace: Interlace::Progressive,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: PixelAspect::Exact(AspectRatio::new(2, 1).unwrap()),
+    };
+    sink.configure_pipeline(&caps).unwrap();
+    let luma_len = (SIDE * SIDE) as usize;
+    let mut white = vec![235; luma_len];
+    white.resize(luma_len * 3 / 2, 128);
+    let mut out = CollectSink::default();
+    for force in [true, false] {
+        sink.set_property("force-aspect-ratio", PropValue::Bool(force))
+            .unwrap();
+        assert_eq!(
+            sink.get_property("force-aspect-ratio"),
+            Some(PropValue::Bool(force))
+        );
+        let frame = Frame::from_system_bytes(white.clone(), FrameTiming::default(), 0);
+        sink.process(PipelinePacket::DataFrame(frame), &mut out)
+            .await
+            .unwrap();
+        let rgba = sink.last_rgba().expect("readback");
+        assert_eq!(rgba.len(), luma_len * 4, "the host owns the drawable size");
+        for (row, bytes) in rgba.chunks_exact(SIDE as usize * 4).enumerate() {
+            let bright = !force || (16..48).contains(&row);
+            assert!(
+                bytes.chunks_exact(4).all(|px| {
+                    px[3] == 255
+                        && if bright {
+                            px[..3].iter().all(|&v| v >= 240)
+                        } else {
+                            px[..3] == [0, 0, 0]
+                        }
+                }),
+                "canvas row {row}, force-aspect-ratio={force}"
+            );
+        }
+    }
 }
 
 /// The launch path: decode -> present in a text pipeline, with the

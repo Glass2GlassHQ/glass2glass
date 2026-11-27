@@ -75,10 +75,10 @@ use g2g_core::memory::OwnedCudaBuffer;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AllocationParams, AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate,
-    ClockPriority, ClockSync, Colorimetry, ConfigureOutcome, Dim, Frame, G2gError, HardwareError,
-    MemoryDomain, OutputSink, PipelineClock, PipelinePacket, PresentationPacer, PropError,
-    PropValue, PropertySpec, Rate, RawVideoFormat, MAX_LATENESS_PROPERTY,
-    PROCESSING_DEADLINE_PROPERTY, QOS_INTERVAL_PROPERTY, SYNC_PROPERTY,
+    ClockPriority, ClockSync, ConfigureOutcome, Dim, Frame, G2gError, HardwareError, MemoryDomain,
+    OutputSink, PipelineClock, PipelinePacket, PresentationPacer, PropError, PropValue,
+    PropertySpec, Rate, RawVideoFormat, MAX_LATENESS_PROPERTY, PROCESSING_DEADLINE_PROPERTY,
+    QOS_INTERVAL_PROPERTY, SYNC_PROPERTY,
 };
 
 use crate::clock::wait_to_present;
@@ -86,8 +86,9 @@ use crate::cuda::nv12_byte_size;
 use crate::cudadeviceid::{
     get_cuda_device_id, set_cuda_device_id, CUDA_DEVICE_ID_PROP, DEFAULT_CUDA_DEVICE_ID,
 };
+use crate::display_aspect::{FORCE_ASPECT_RATIO_NAME, FORCE_ASPECT_RATIO_PROPERTY};
 use crate::glnv12::{GlMode, GlState};
-use crate::glwindow::{open_cuda_display, run_gl_window, FramePresenter};
+use crate::glwindow::{open_cuda_display, run_gl_window, FramePresenter, GlVideo};
 use crate::windowworker::{present_on_worker, WindowParams, WorkerChannels, WorkerCmd};
 use g2g_core::log::Target;
 
@@ -121,10 +122,8 @@ pub struct CudaGlSink {
     app_id: String,
     cmd_tx: Option<CalloopSender<WorkerCmd<OwnedCudaBuffer>>>,
     worker: Option<JoinHandle<()>>,
-    width: u32,
-    height: u32,
-    /// Colorimetry the worker built its convert program for.
-    colorimetry: Colorimetry,
+    video: Option<GlVideo>,
+    force_aspect: Arc<AtomicBool>,
     frames_presented: Arc<AtomicU64>,
     window_closed: Arc<AtomicBool>,
     latency: Arc<LatencyHistogram>,
@@ -139,8 +138,7 @@ impl core::fmt::Debug for CudaGlSink {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("CudaGlSink")
             .field("title", &self.title)
-            .field("width", &self.width)
-            .field("height", &self.height)
+            .field("video", &self.video)
             .field(
                 "frames_presented",
                 &self.frames_presented.load(Ordering::Relaxed),
@@ -162,9 +160,8 @@ impl CudaGlSink {
             app_id: String::from("io.glass2glass.CudaGlSink"),
             cmd_tx: None,
             worker: None,
-            width: 0,
-            height: 0,
-            colorimetry: Colorimetry::UNKNOWN,
+            video: None,
+            force_aspect: Arc::new(AtomicBool::new(true)),
             frames_presented: Arc::new(AtomicU64::new(0)),
             window_closed: Arc::default(),
             latency: Arc::new(LatencyHistogram::new()),
@@ -308,6 +305,7 @@ impl AsyncElement for CudaGlSink {
 
     fn properties(&self) -> &'static [PropertySpec] {
         const PROPS: &[PropertySpec] = &[
+            FORCE_ASPECT_RATIO_PROPERTY,
             MAX_LATENESS_PROPERTY,
             PROCESSING_DEADLINE_PROPERTY,
             QOS_INTERVAL_PROPERTY,
@@ -318,6 +316,11 @@ impl AsyncElement for CudaGlSink {
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        if name == FORCE_ASPECT_RATIO_NAME {
+            let force = value.as_bool().ok_or(PropError::Type)?;
+            self.force_aspect.store(force, Ordering::Relaxed);
+            return Ok(());
+        }
         if name == "cuda-device-id" {
             return set_cuda_device_id(&mut self.cuda_device_id, self.worker.is_some(), &value);
         }
@@ -327,6 +330,9 @@ impl AsyncElement for CudaGlSink {
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
+        if name == FORCE_ASPECT_RATIO_NAME {
+            return Some(PropValue::Bool(self.force_aspect.load(Ordering::Relaxed)));
+        }
         if name == "cuda-device-id" {
             return Some(get_cuda_device_id(self.cuda_device_id));
         }
@@ -361,26 +367,31 @@ impl AsyncElement for CudaGlSink {
         self.pacer.adopt_framerate(absolute_caps);
         // NV12 only. Caps do not encode the memory domain, so the Cuda-vs-
         // System distinction is checked per frame in `process`.
-        let (w, h, colorimetry) = match absolute_caps {
+        let (w, h, colorimetry, pixel_aspect) = match absolute_caps {
             Caps::RawVideo {
                 format: RawVideoFormat::Nv12,
                 width: Dim::Fixed(w),
                 height: Dim::Fixed(h),
                 colorimetry,
+                pixel_aspect,
                 ..
-            } => (*w, *h, *colorimetry),
+            } => (*w, *h, *colorimetry, *pixel_aspect),
             _ => return Err(G2gError::CapsMismatch),
         };
-        if w % 2 != 0 || h % 2 != 0 {
+        if w == 0 || h == 0 || w % 2 != 0 || h % 2 != 0 {
             return Err(G2gError::CapsMismatch);
         }
 
-        // Mid-stream geometry change: same dims is a no-op; new dims tear down
-        // the worker and respawn (M16 5j), as WaylandSink does. A colorimetry
-        // refinement goes the same way: its weights are compiled into the
-        // worker's convert program.
+        let video = GlVideo {
+            width: w,
+            height: h,
+            mode: GlMode::Nv12,
+            colorimetry,
+            pixel_aspect,
+        };
+        // The worker owns the textures, shader and window. Reopen it when their caps change.
         if self.worker.is_some() {
-            if w == self.width && h == self.height && colorimetry == self.colorimetry {
+            if self.video == Some(video) {
                 return Ok(ConfigureOutcome::Accepted);
             }
             self.shutdown();
@@ -390,9 +401,11 @@ impl AsyncElement for CudaGlSink {
         let presented = Arc::clone(&self.frames_presented);
         let window_closed = Arc::clone(&self.window_closed);
         let latency = Arc::clone(&self.latency);
+        let force_aspect = Arc::clone(&self.force_aspect);
+        let (width, height) = video.window_size(force_aspect.load(Ordering::Relaxed));
         let params = WindowParams {
-            width: w,
-            height: h,
+            width,
+            height,
             title: self.title.clone(),
             app_id: self.app_id.clone(),
             fullscreen: false,
@@ -418,11 +431,8 @@ impl AsyncElement for CudaGlSink {
                     cursor_shapes: None,
                     clipboard: None,
                 };
-                let presenter = CudaPresenter {
-                    colorimetry,
-                    cuda_device_id,
-                };
-                if let Err(e) = run_gl_window(presenter, params, channels) {
+                let presenter = CudaPresenter { cuda_device_id };
+                if let Err(e) = run_gl_window(presenter, video, force_aspect, params, channels) {
                     std::eprintln!("{WORKER_NAME} worker error: {e:?}");
                 }
             })
@@ -436,9 +446,7 @@ impl AsyncElement for CudaGlSink {
 
         self.cmd_tx = Some(tx);
         self.worker = Some(join);
-        self.width = w;
-        self.height = h;
-        self.colorimetry = colorimetry;
+        self.video = Some(video);
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -511,23 +519,14 @@ impl AsyncElement for CudaGlSink {
 /// the CUDA-GL interop copy into the NV12 textures; the window, the EGL context
 /// and the present are the shared worker's ([`crate::glwindow`]).
 struct CudaPresenter {
-    colorimetry: Colorimetry,
     cuda_device_id: i32,
 }
 
 impl FramePresenter for CudaPresenter {
     type Frame = OwnedCudaBuffer;
 
-    fn mode(&self) -> GlMode {
-        GlMode::Nv12
-    }
-
-    fn colorimetry(&self) -> Colorimetry {
-        self.colorimetry
-    }
-
-    fn present(&mut self, gl: &mut GlState, frame: &OwnedCudaBuffer) -> Result<(), G2gError> {
-        gl.upload_and_draw(frame)
+    fn upload(&mut self, gl: &mut GlState, frame: &OwnedCudaBuffer) -> Result<(), G2gError> {
+        gl.upload_cuda(frame)
     }
 
     fn open_display(

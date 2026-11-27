@@ -42,11 +42,11 @@ use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_video::{CVPixelBuffer, CVPixelBufferGetIOSurface};
 use objc2_foundation::NSString;
 use objc2_metal::{
-    MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
-    MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary, MTLOrigin, MTLPixelFormat,
-    MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
+    MTLBlitCommandEncoder, MTLBuffer, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder,
+    MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary, MTLLoadAction, MTLOrigin,
+    MTLPixelFormat, MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
     MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceOptions, MTLSize,
-    MTLStorageMode, MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
+    MTLStorageMode, MTLStoreAction, MTLTexture, MTLTextureDescriptor, MTLTextureUsage, MTLViewport,
 };
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer, CATransaction};
 
@@ -55,10 +55,14 @@ use g2g_core::{
     AsyncElement, BusHandle, Caps, CapsConstraint, ClockCandidate, ClockPriority, ClockSync,
     ConfigureOutcome, DomainSet, ElementMetadata, G2gError, HardwareError, MemoryDomain,
     MemoryDomainKind, OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket,
-    PresentationPacer, PropError, PropValue, PropertySpec, RawVideoFormat, PACING_PROPERTIES,
+    PresentationPacer, PropError, PropValue, PropertySpec, RawVideoFormat, MAX_LATENESS_PROPERTY,
+    PROCESSING_DEADLINE_PROPERTY, QOS_INTERVAL_PROPERTY, SYNC_PROPERTY,
 };
 
 use crate::clock::wait_to_present;
+use crate::display_aspect::{
+    display_size, letterbox, FORCE_ASPECT_RATIO_NAME, FORCE_ASPECT_RATIO_PROPERTY,
+};
 use crate::videoconvert::display::{display_sink_caps, DisplayInput};
 
 use alloc::boxed::Box;
@@ -199,21 +203,35 @@ impl AppKitWindow {
         });
     }
 
-    fn is_closed(&self) -> bool {
+    fn sync_drawable(&self, layer: &CAMetalLayer) -> Result<(), G2gError> {
         let window_address = self.0;
-        let mut closed = false;
-        let closed_out = &mut closed;
+        let layer_address = layer as *const CAMetalLayer as usize;
+        let mut result = Ok(());
+        let out = &mut result;
         DispatchQueue::main().exec_sync(move || {
             // SAFETY: work on the main queue runs on the main thread.
             let mtm = unsafe { MainThreadMarker::new_unchecked() };
-            // SAFETY: the sink's reference keeps the window alive.
-            let window = unsafe { &*(window_address as *const NSWindow) };
+            // SAFETY: the sink retains the window and the caller holds the layer during this call.
+            let (window, layer) = unsafe {
+                (
+                    &*(window_address as *const NSWindow),
+                    &*(layer_address as *const CAMetalLayer),
+                )
+            };
             // appkit also reports a minimized window, or one in a hidden app, as not visible
-            *closed_out = !window.isVisible()
-                && !window.isMiniaturized()
-                && !NSApplication::sharedApplication(mtm).isHidden();
+            if !window.isVisible() {
+                if !window.isMiniaturized() && !NSApplication::sharedApplication(mtm).isHidden() {
+                    *out = Err(G2gError::WindowClosed);
+                }
+            } else if let Some(view) = window.contentView() {
+                let size = view.convertSizeToBacking(view.bounds().size);
+                let size = CGSize::new(size.width.round(), size.height.round());
+                if size.width > 0.0 && size.height > 0.0 && layer.drawableSize() != size {
+                    layer.setDrawableSize(size);
+                }
+            }
         });
-        closed
+        result
     }
 }
 
@@ -272,6 +290,7 @@ pub struct MetalVideoSink {
     external_layer: Option<Retained<CAMetalLayer>>,
     /// The window the sink's own layer shows in, when the main thread runs AppKit.
     window: Option<AppKitWindow>,
+    force_aspect: bool,
     /// Test hook: read each presented drawable back to CPU RGBA.
     readback: bool,
     last_rgba: Option<Vec<u8>>,
@@ -301,6 +320,7 @@ impl MetalVideoSink {
             state: None,
             external_layer: None,
             window: None,
+            force_aspect: true,
             readback: false,
             last_rgba: None,
             presented: 0,
@@ -310,7 +330,8 @@ impl MetalVideoSink {
 
     /// Present into an app-owned `CAMetalLayer` (a retained `CAMetalLayer*`),
     /// so the video shows in the app's window. The sink retains the layer and
-    /// configures its device / pixel format / drawable size.
+    /// configures its device and pixel format. The app can set the layer's
+    /// drawable size, which the sink initializes if empty.
     ///
     /// # Safety
     ///
@@ -376,7 +397,45 @@ impl MetalVideoSink {
         G2gError::Hardware(HardwareError::Other)
     }
 
-    fn build_state(&mut self, width: u32, height: u32) -> Result<(), G2gError> {
+    fn size_layer(&mut self, layer: &CAMetalLayer, input: DisplayInput) {
+        let size = layer.drawableSize();
+        if self.external_layer.is_some() && size.width > 0.0 && size.height > 0.0 {
+            return;
+        }
+        let (width, height) = if self.force_aspect {
+            display_size(input.width, input.height, input.pixel_aspect)
+        } else {
+            (input.width, input.height)
+        };
+        layer.setDrawableSize(CGSize::new(f64::from(width), f64::from(height)));
+        if self.external_layer.is_none() && APPKIT_MAIN_LOOP.load(Ordering::Acquire) {
+            match &self.window {
+                Some(window) => window.show(layer, width, height),
+                None => self.window = Some(AppKitWindow::open(layer, width, height)),
+            }
+        }
+    }
+
+    fn configure_input(&mut self, input: DisplayInput) -> Result<(), G2gError> {
+        match self.state.as_ref() {
+            Some(st) if (st.width, st.height) == (input.width, input.height) => {
+                if self
+                    .input
+                    .is_some_and(|previous| previous.pixel_aspect != input.pixel_aspect)
+                {
+                    let layer = st.layer.clone();
+                    self.size_layer(&layer, input);
+                }
+            }
+            _ => self.build_state(input)?,
+        }
+        self.input = Some(input);
+        self.configured = true;
+        Ok(())
+    }
+
+    fn build_state(&mut self, input: DisplayInput) -> Result<(), G2gError> {
+        let (width, height) = (input.width, input.height);
         let device = MTLCreateSystemDefaultDevice().ok_or_else(Self::hw)?;
         let queue = device.newCommandQueue().ok_or_else(Self::hw)?;
 
@@ -408,20 +467,11 @@ impl MetalVideoSink {
         layer.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
         // Readable drawables (the readback blit); presenting still works.
         layer.setFramebufferOnly(false);
-        layer.setDrawableSize(CGSize {
-            width: width as f64,
-            height: height as f64,
-        });
-        if self.external_layer.is_none() && APPKIT_MAIN_LOOP.load(Ordering::Acquire) {
-            match &self.window {
-                Some(window) => window.show(&layer, width, height),
-                None => self.window = Some(AppKitWindow::open(&layer, width, height)),
-            }
-        }
 
         let staging_y = make_plane_texture(&device, MTLPixelFormat::R8Unorm, width, height)?;
         let staging_cbcr =
             make_plane_texture(&device, MTLPixelFormat::RG8Unorm, width / 2, height / 2)?;
+        self.size_layer(&layer, input);
 
         self.state = Some(RenderState {
             device,
@@ -443,19 +493,45 @@ impl MetalVideoSink {
         cbcr: &ProtocolObject<dyn MTLTexture>,
     ) -> Result<(), G2gError> {
         let st = self.state.as_ref().ok_or(G2gError::NotConfigured)?;
+        let input = self.input.ok_or(G2gError::NotConfigured)?;
         let drawable = st.layer.nextDrawable().ok_or_else(Self::hw)?;
         let target = drawable.texture();
+        let (width, height) = (target.width(), target.height());
 
         let cmd = st.queue.commandBuffer().ok_or_else(Self::hw)?;
         let pass = MTLRenderPassDescriptor::new();
-        // The fullscreen triangle covers every pixel: no clear needed.
         // SAFETY: index 0 is a valid color attachment slot.
         let att = unsafe { pass.colorAttachments().objectAtIndexedSubscript(0) };
         att.setTexture(Some(&*target));
+        att.setLoadAction(MTLLoadAction::Clear);
+        att.setStoreAction(MTLStoreAction::Store);
+        att.setClearColor(MTLClearColor {
+            red: 0.0,
+            green: 0.0,
+            blue: 0.0,
+            alpha: 1.0,
+        });
         let enc = cmd
             .renderCommandEncoderWithDescriptor(&pass)
             .ok_or_else(Self::hw)?;
         enc.setRenderPipelineState(&st.pipeline);
+        if self.force_aspect {
+            let viewport = letterbox(
+                st.width,
+                st.height,
+                input.pixel_aspect,
+                u32::try_from(width).map_err(|_| G2gError::CapsMismatch)?,
+                u32::try_from(height).map_err(|_| G2gError::CapsMismatch)?,
+            );
+            enc.setViewport(MTLViewport {
+                originX: f64::from(viewport.x),
+                originY: f64::from(viewport.y),
+                width: f64::from(viewport.width),
+                height: f64::from(viewport.height),
+                znear: 0.0,
+                zfar: 1.0,
+            });
+        }
         // SAFETY: texture indices 0/1 match the shader bindings; 3 vertices
         // draw the fullscreen triangle.
         unsafe {
@@ -468,13 +544,10 @@ impl MetalVideoSink {
         // Readback (test hook): blit the rendered drawable into a shared
         // buffer before it is presented.
         let read_buf = if self.readback {
-            let bytes_per_row = (st.width as usize) * 4;
+            let bytes_per_row = width * 4;
             let buf = st
                 .device
-                .newBufferWithLength_options(
-                    bytes_per_row * st.height as usize,
-                    MTLResourceOptions::empty(),
-                )
+                .newBufferWithLength_options(bytes_per_row * height, MTLResourceOptions::empty())
                 .ok_or_else(Self::hw)?;
             let blit = cmd.blitCommandEncoder().ok_or_else(Self::hw)?;
             // SAFETY: the region is within the drawable texture; the buffer is
@@ -486,14 +559,14 @@ impl MetalVideoSink {
                     0,
                     MTLOrigin { x: 0, y: 0, z: 0 },
                     MTLSize {
-                        width: st.width as usize,
-                        height: st.height as usize,
+                        width,
+                        height,
                         depth: 1,
                     },
                     &buf,
                     0,
                     bytes_per_row,
-                    bytes_per_row * st.height as usize,
+                    bytes_per_row * height,
                 );
             }
             blit.endEncoding();
@@ -511,7 +584,7 @@ impl MetalVideoSink {
         cmd.waitUntilCompleted();
 
         if let Some(buf) = read_buf {
-            let len = (st.width * st.height * 4) as usize;
+            let len = width * height * 4;
             // SAFETY: shared-storage buffer of exactly `len` bytes, GPU work
             // completed above.
             let bytes =
@@ -725,25 +798,35 @@ impl AsyncElement for MetalVideoSink {
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
-        PACING_PROPERTIES
+        &[
+            FORCE_ASPECT_RATIO_PROPERTY,
+            SYNC_PROPERTY,
+            MAX_LATENESS_PROPERTY,
+            PROCESSING_DEADLINE_PROPERTY,
+            QOS_INTERVAL_PROPERTY,
+        ]
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        if name == FORCE_ASPECT_RATIO_NAME {
+            self.force_aspect = value.as_bool().ok_or(PropError::Type)?;
+            return Ok(());
+        }
         self.pacer
             .set_property(name, &value)
             .unwrap_or(Err(PropError::Unknown))
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
+        if name == FORCE_ASPECT_RATIO_NAME {
+            return Some(PropValue::Bool(self.force_aspect));
+        }
         self.pacer.get_property(name)
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         self.pacer.adopt_framerate(absolute_caps);
-        let input = display_input(absolute_caps)?;
-        self.build_state(input.width, input.height)?;
-        self.input = Some(input);
-        self.configured = true;
+        self.configure_input(display_input(absolute_caps)?)?;
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -761,8 +844,8 @@ impl AsyncElement for MetalVideoSink {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    if self.window.as_ref().is_some_and(AppKitWindow::is_closed) {
-                        return Err(G2gError::WindowClosed);
+                    if let (Some(window), Some(st)) = (&self.window, &self.state) {
+                        window.sync_drawable(&st.layer)?;
                     }
                     // PTS pacing: hold the frame until its deadline on the elected
                     // clock, or drop it when it is already too late (the QoS bound)
@@ -786,18 +869,7 @@ impl AsyncElement for MetalVideoSink {
                     })?;
                 }
                 PipelinePacket::CapsChanged(c) => {
-                    // A geometry change rebuilds the layer + textures. (A sink
-                    // has no downstream, so there is no pre-fixed output caps
-                    // case here.)
-                    let input = display_input(&c)?;
-                    let dims_changed = self
-                        .state
-                        .as_ref()
-                        .is_some_and(|st| (st.width, st.height) != (input.width, input.height));
-                    if dims_changed {
-                        self.build_state(input.width, input.height)?;
-                    }
-                    self.input = Some(input);
+                    self.configure_input(display_input(&c)?)?;
                 }
                 PipelinePacket::Eos => {}
                 // Track the playback segment so PTS maps to running time (correct

@@ -27,7 +27,7 @@ use core::task::{Context, Poll};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use crate::display_aspect::scaled_pixel_aspect;
+use crate::display_aspect::pixel_aspect_at;
 use crate::pixel::{chroma_420_offsets, chroma_420_size, frame_byte_size};
 use crate::videoconvert::VideoConvert;
 use crate::videoscale::{bilerp, map_axis, map_axis_scaled, VideoScale};
@@ -261,21 +261,6 @@ fn retarget(
             pixel_aspect: pixel_aspect_at(caps, width, height, pixel_aspect),
         },
         other => other.clone(),
-    }
-}
-
-fn pixel_aspect_at(input: &Caps, width: u32, height: u32, requested: PixelAspect) -> PixelAspect {
-    match (requested, input) {
-        (
-            PixelAspect::Any,
-            Caps::RawVideo {
-                width: Dim::Fixed(in_w),
-                height: Dim::Fixed(in_h),
-                pixel_aspect,
-                ..
-            },
-        ) => scaled_pixel_aspect(*in_w, *in_h, *pixel_aspect, width, height),
-        _ => requested,
     }
 }
 

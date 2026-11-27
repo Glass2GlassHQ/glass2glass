@@ -693,16 +693,24 @@ containers declare it too: Matroska `DisplayWidth` / `DisplayHeight` (gst's form
 the same for display units 0 to 3, a missing side taking the pixel side), the MP4
 `pasp` box, the y4m `A` parameter (`A0:0` is unknown) and the MPEG sequence header
 `psdemux` reads. Decoders copy the ratio from their compressed input to their raw
-output, as they do the colorimetry. `videoscale` and `videoconvertscale` pick the
-output pixel aspect ratio that keeps the input's display aspect unless downstream
-pins one. `wgpusink` opens its window at the display size (gst's rule: keep
-the stored height when the display aspect divides it, else the width) and, with
-`force-aspect-ratio` on (the default),
+output, as they do the colorimetry. `videoscale`, `videoconvertscale`, `cudascale`,
+`d3d11convert` and the HIP converter and scalers derive an output pixel aspect
+ratio that keeps the picture's display aspect unless downstream pins a ratio.
+The HIP scalers account for rotation, and `add-borders` fits the picture into
+the output when downstream pins a ratio. `wgpusink` opens its window at the
+display size (gst's rule: keep the stored height when the display aspect
+divides it, else the width) and, with `force-aspect-ratio` on (the default),
 letterboxes the picture through the render pass viewport when the window takes
-another shape. `waylandsink` opens at the display size and follows any size the
-compositor configures: its window surface is a black buffer scaled to that
-size and the picture is a subsurface letterboxed inside it, both through
-`wp_viewporter`. A caps change to a new size in the same format resizes that
+another shape. `glsink` and `cudaglsink` use the same display sizing and
+`force-aspect-ratio` property. Their EGL window follows the compositor size
+and the GL viewport places the picture within it. `d3d11videosink` opens at the
+display size and fits the DXGI swapchain's child window within a black Win32
+client area. `metalvideosink` opens an AppKit window at the display size and
+fits the Metal viewport to the drawable, including app-supplied drawables.
+Both expose `force-aspect-ratio`. `waylandsink` opens at the
+display size and follows the compositor size. Its window surface is a black
+buffer scaled to that size and the picture is a subsurface letterboxed inside
+it, both through `wp_viewporter`. A caps change to a new size in the same format resizes that
 window rather than opening another. Encoders carry the input ratio to their output caps.
 `x264enc` and `ffmpegenc` set libavcodec's `sample_aspect_ratio`, which its encoders
 write as the VUI sample aspect, and `nvenc` sets NVENC's display aspect, from which

@@ -58,11 +58,19 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
     DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
-use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
+use windows::Win32::UI::WindowsAndMessaging::{
+    DestroyWindow, SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER,
+};
 
+use crate::display_aspect::{
+    display_size, letterbox, transpose_pixel_aspect, ViewportRectangle, FORCE_ASPECT_RATIO_NAME,
+    FORCE_ASPECT_RATIO_PROPERTY,
+};
 use crate::videoconvert::display::{display_sink_caps, DisplayInput};
 use crate::videoflip::frame_orientation;
-use crate::win32window::{create_window, pump_messages, resize_client};
+use crate::win32window::{
+    client_size, create_swapchain_child, create_window, pump_messages, resize_client,
+};
 use crate::worker_ready::Handshake;
 use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::frame::Frame;
@@ -72,9 +80,9 @@ use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AllocationParams, AsyncElement, BusHandle, Caps, CapsConstraint, ClockCandidate, ClockPriority,
     ClockSync, ConfigureOutcome, ElementMetadata, G2gError, HardwareError, MemoryDomain,
-    OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PresentationPacer,
-    PropError, PropKind, PropValue, PropertySpec, RawVideoFormat, MAX_LATENESS_PROPERTY,
-    PROCESSING_DEADLINE_PROPERTY, QOS_INTERVAL_PROPERTY, SYNC_PROPERTY,
+    OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PixelAspect,
+    PresentationPacer, PropError, PropKind, PropValue, PropertySpec, RawVideoFormat,
+    MAX_LATENESS_PROPERTY, PROCESSING_DEADLINE_PROPERTY, QOS_INTERVAL_PROPERTY, SYNC_PROPERTY,
 };
 
 use crate::clock::wait_to_present;
@@ -90,6 +98,8 @@ enum WorkerCmd {
         domain: MemoryDomain,
         arrival_ns: u64,
         orientation: Orientation,
+        pixel_aspect: PixelAspect,
+        force_aspect: bool,
         ack: tokio::sync::oneshot::Sender<()>,
     },
     Shutdown,
@@ -114,6 +124,7 @@ pub struct D3D11Sink {
     width: u32,
     height: u32,
     input: Option<DisplayInput>,
+    force_aspect: bool,
     frames_presented: Arc<AtomicU64>,
     window_closed: Arc<AtomicBool>,
     latency: Arc<LatencyHistogram>,
@@ -152,6 +163,7 @@ impl D3D11Sink {
             width: 0,
             height: 0,
             input: None,
+            force_aspect: true,
             frames_presented: Arc::new(AtomicU64::new(0)),
             window_closed: Arc::new(AtomicBool::new(false)),
             latency: Arc::new(LatencyHistogram::new()),
@@ -290,6 +302,7 @@ impl AsyncElement for D3D11Sink {
     fn properties(&self) -> &'static [PropertySpec] {
         const PROPS: &[PropertySpec] = &[
             PropertySpec::new("title", PropKind::Str, "window title").with_default("glass2glass"),
+            FORCE_ASPECT_RATIO_PROPERTY,
             MAX_LATENESS_PROPERTY,
             PROCESSING_DEADLINE_PROPERTY,
             QOS_INTERVAL_PROPERTY,
@@ -304,6 +317,10 @@ impl AsyncElement for D3D11Sink {
                 self.title = value.as_str().ok_or(PropError::Type)?.into();
                 Ok(())
             }
+            FORCE_ASPECT_RATIO_NAME => {
+                self.force_aspect = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
             _ => self
                 .pacer
                 .set_property(name, &value)
@@ -314,6 +331,7 @@ impl AsyncElement for D3D11Sink {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "title" => Some(PropValue::Str(self.title.clone())),
+            FORCE_ASPECT_RATIO_NAME => Some(PropValue::Bool(self.force_aspect)),
             _ => self.pacer.get_property(name),
         }
     }
@@ -343,7 +361,7 @@ impl AsyncElement for D3D11Sink {
         self.pacer.adopt_framerate(absolute_caps);
         let input = DisplayInput::from_caps(absolute_caps, NATIVE_FORMATS)?;
         let (w, h) = (input.width, input.height);
-        if w % 2 != 0 || h % 2 != 0 {
+        if w == 0 || h == 0 || w % 2 != 0 || h % 2 != 0 {
             return Err(G2gError::CapsMismatch);
         }
         self.input = Some(input);
@@ -362,13 +380,19 @@ impl AsyncElement for D3D11Sink {
             latency: Arc::clone(&self.latency),
         };
         let title = self.title.clone();
+        let picture = WindowPicture {
+            width: w,
+            height: h,
+            pixel_aspect: input.pixel_aspect,
+            force_aspect: self.force_aspect,
+        };
         let ready = Arc::new(Handshake::new());
         let ready_for_worker = Arc::clone(&ready);
 
         let join = thread::Builder::new()
             .name(String::from("g2g-d3d11sink"))
             .spawn(move || {
-                if let Err(e) = worker_main(w, h, title, rx, reports, ready_for_worker) {
+                if let Err(e) = worker_main(picture, title, rx, reports, ready_for_worker) {
                     std::eprintln!("g2g-d3d11sink worker error: {e:?}");
                 }
             })
@@ -413,11 +437,9 @@ impl AsyncElement for D3D11Sink {
                     if !wait_to_present(self.pacer.judge(&timing, presented)).await {
                         return Ok(());
                     }
+                    let input = self.input.ok_or(G2gError::NotConfigured)?;
                     let converted = match domain.as_system_slice() {
-                        Some(slice) => self
-                            .input
-                            .ok_or(G2gError::NotConfigured)?
-                            .convert_frame(slice)?,
+                        Some(slice) => input.convert_frame(slice)?,
                         None => None,
                     };
                     let domain = match converted {
@@ -430,6 +452,8 @@ impl AsyncElement for D3D11Sink {
                         domain,
                         arrival_ns: timing.arrival_ns,
                         orientation,
+                        pixel_aspect: input.pixel_aspect,
+                        force_aspect: self.force_aspect,
                         ack: ack_tx,
                     })
                     .map_err(|_| self.worker_gone_error())?;
@@ -494,17 +518,126 @@ struct WorkerReports {
     latency: Arc<LatencyHistogram>,
 }
 
-fn worker_main(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WindowPicture {
     width: u32,
     height: u32,
+    pixel_aspect: PixelAspect,
+    force_aspect: bool,
+}
+
+impl WindowPicture {
+    fn oriented(self, orientation: Orientation) -> Self {
+        if orientation.swaps_dims() {
+            Self {
+                width: self.height,
+                height: self.width,
+                pixel_aspect: transpose_pixel_aspect(self.pixel_aspect),
+                ..self
+            }
+        } else {
+            self
+        }
+    }
+
+    fn preferred_size(self) -> (u32, u32) {
+        if self.force_aspect {
+            display_size(self.width, self.height, self.pixel_aspect)
+        } else {
+            (self.width, self.height)
+        }
+    }
+
+    fn viewport(self, (width, height): (u32, u32)) -> ViewportRectangle {
+        if self.force_aspect {
+            letterbox(self.width, self.height, self.pixel_aspect, width, height)
+        } else {
+            ViewportRectangle::whole(width, height)
+        }
+    }
+}
+
+// The child lets DXGI scale the video from a picture-sized swapchain. The
+// parent supplies the black surround on both the video and software paths.
+struct VideoWindow {
+    parent: HWND,
+    child: HWND,
+    picture: WindowPicture,
+    viewport: Option<ViewportRectangle>,
+}
+
+impl VideoWindow {
+    fn new(title: &str, picture: WindowPicture) -> Result<Self, G2gError> {
+        let parent = create_window(title, picture.preferred_size(), false).map_err(win_err)?;
+        let mut window = Self {
+            parent,
+            child: HWND::default(),
+            picture,
+            viewport: None,
+        };
+        window.child = create_swapchain_child(parent).map_err(win_err)?;
+        window.fit()?;
+        Ok(window)
+    }
+
+    fn set_picture(&mut self, picture: WindowPicture) -> Result<(), G2gError> {
+        if (picture.width, picture.height) != (self.picture.width, self.picture.height)
+            || (picture.force_aspect && picture.pixel_aspect != self.picture.pixel_aspect)
+        {
+            resize_client(self.parent, picture.preferred_size()).map_err(win_err)?;
+        }
+        self.picture = picture;
+        self.fit()
+    }
+
+    fn fit(&mut self) -> Result<(), G2gError> {
+        let viewport = self
+            .picture
+            .viewport(client_size(self.parent).map_err(win_err)?);
+        if self.viewport != Some(viewport) {
+            // SAFETY: the child belongs to this thread. The rectangle fits inside the parent's client area.
+            unsafe {
+                SetWindowPos(
+                    self.child,
+                    None,
+                    viewport.x as i32,
+                    viewport.y as i32,
+                    viewport.width as i32,
+                    viewport.height as i32,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                )
+                .map_err(win_err)?;
+            }
+            self.viewport = Some(viewport);
+        }
+        Ok(())
+    }
+}
+
+impl Drop for VideoWindow {
+    fn drop(&mut self) {
+        // SAFETY: this thread created the parent. Win32 destroys its child with it.
+        unsafe {
+            let _ = DestroyWindow(self.parent);
+        }
+    }
+}
+
+fn worker_main(
+    picture: WindowPicture,
     title: String,
     rx: Receiver<WorkerCmd>,
     reports: WorkerReports,
     ready: Arc<Handshake>,
 ) -> Result<(), G2gError> {
-    let hwnd = create_window(&title, (width, height), false).map_err(win_err)?;
+    let mut window = VideoWindow::new(&title, picture)?;
     // d3d11 device and swapchain creation takes about 300 ms, enough to make the opening frames late when it waits for the first one
-    let mut gpu = Some(init_gpu(create_device()?, width, height, hwnd)?);
+    let mut gpu = Some(init_gpu(
+        create_device()?,
+        picture.width,
+        picture.height,
+        window.child,
+    )?);
     ready.notify();
 
     loop {
@@ -518,9 +651,17 @@ fn worker_main(
                 domain,
                 arrival_ns,
                 orientation,
+                pixel_aspect,
+                force_aspect,
                 ack,
             }) => {
-                if let Err(e) = present_frame(&mut gpu, hwnd, &domain, width, height, orientation) {
+                let picture = WindowPicture {
+                    pixel_aspect,
+                    force_aspect,
+                    ..picture
+                };
+                if let Err(e) = present_frame(&mut gpu, &mut window, &domain, picture, orientation)
+                {
                     std::eprintln!("g2g-d3d11sink present error: {e:?}");
                 } else {
                     reports.presented.fetch_add(1, Ordering::Relaxed);
@@ -537,14 +678,10 @@ fn worker_main(
                 let _ = ack.send(());
             }
             Ok(WorkerCmd::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
-            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Timeout) => window.fit()?,
         }
     }
 
-    // SAFETY: the window was created on this thread and is not used after.
-    unsafe {
-        let _ = DestroyWindow(hwnd);
-    }
     Ok(())
 }
 
@@ -677,12 +814,12 @@ fn upload_system(
 /// and `Present`.
 fn present_frame(
     gpu: &mut Option<GpuState>,
-    hwnd: HWND,
+    window: &mut VideoWindow,
     domain: &MemoryDomain,
-    width: u32,
-    height: u32,
+    picture: WindowPicture,
     orientation: Orientation,
 ) -> Result<(), G2gError> {
+    let (width, height) = (picture.width, picture.height);
     let decoded = match domain {
         MemoryDomain::D3D11Texture(texture) => Some((texture, texture_objects(texture)?)),
         _ => None,
@@ -704,9 +841,9 @@ fn present_frame(
     if gpu.is_none() {
         *gpu = Some(match &decoded {
             Some((texture, (device, _))) => {
-                init_gpu(device.clone(), texture.width, texture.height, hwnd)?
+                init_gpu(device.clone(), texture.width, texture.height, window.child)?
             }
-            None => init_gpu(create_device()?, width, height, hwnd)?,
+            None => init_gpu(create_device()?, width, height, window.child)?,
         });
     }
     let gpu = gpu.as_mut().ok_or(G2gError::NotConfigured)?;
@@ -715,7 +852,12 @@ fn present_frame(
         let bytes = domain
             .as_system_slice()
             .ok_or(G2gError::UnsupportedDomain)?;
-        return present_converted(gpu, bytes, width, height, orientation);
+        // Turning or mirroring needs the video processor this device lacks.
+        if orientation != Orientation::Identity {
+            return Err(G2gError::Hardware(HardwareError::Other));
+        }
+        window.set_picture(picture)?;
+        return present_converted(gpu, bytes, width, height);
     }
     let (input_tex, subresource, picture_width, picture_height) = match decoded {
         Some((texture, (_, input))) => (input, texture.subresource, texture.width, texture.height),
@@ -726,7 +868,8 @@ fn present_frame(
             (upload_system(gpu, bytes, width, height)?, 0, width, height)
         }
     };
-    apply_orientation(gpu, hwnd, picture_width, picture_height, orientation)?;
+    apply_orientation(gpu, picture_width, picture_height, orientation)?;
+    window.set_picture(picture.oriented(orientation))?;
     let video = gpu.video.as_ref().ok_or(G2gError::NotConfigured)?;
 
     // SAFETY: `input_tex` holds its own reference for this call, and a decoded
@@ -749,14 +892,9 @@ fn present_converted(
     bytes: &[u8],
     width: u32,
     height: u32,
-    orientation: Orientation,
 ) -> Result<(), G2gError> {
     if bytes.len() < crate::pixel::frame_byte_size(RawVideoFormat::Nv12, width, height) {
         return Err(G2gError::CapsMismatch);
-    }
-    // turning or mirroring needs the video processor this device lacks
-    if orientation != Orientation::Identity {
-        return Err(G2gError::Hardware(HardwareError::Other));
     }
     let bgra = crate::videoconvert::convert(
         bytes,
@@ -825,7 +963,6 @@ fn has_feature(
 
 fn apply_orientation(
     gpu: &mut GpuState,
-    hwnd: HWND,
     picture_width: u32,
     picture_height: u32,
     orientation: Orientation,
@@ -878,7 +1015,7 @@ fn apply_orientation(
         } else {
             (picture_width, picture_height)
         };
-        // SAFETY: `present_frame` drops its buffer views, and `hwnd` was created on this thread.
+        // SAFETY: `present_frame` drops its buffer views before the next frame.
         unsafe {
             gpu.swapchain
                 .ResizeBuffers(
@@ -890,7 +1027,6 @@ fn apply_orientation(
                 )
                 .map_err(win_err)?;
         }
-        resize_client(hwnd, (width, height)).map_err(win_err)?;
     }
     gpu.orientation = orientation;
     Ok(())
@@ -904,7 +1040,37 @@ fn win_err(e: windows::core::Error) -> G2gError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use g2g_core::{Dim, Interlace, Rate, VideoCodec};
+    use g2g_core::{AspectRatio, Dim, Interlace, Rate, VideoCodec};
+
+    #[test]
+    fn window_picture_fits_a_rotated_non_square_frame() {
+        let picture = WindowPicture {
+            width: 720,
+            height: 576,
+            pixel_aspect: PixelAspect::Exact(AspectRatio::new(16, 15).unwrap()),
+            force_aspect: true,
+        };
+        assert_eq!(picture.preferred_size(), (768, 576));
+        let rotated = picture.oriented(Orientation::Rotate90Cw);
+        assert_eq!(rotated.preferred_size(), (540, 720));
+        assert_eq!(
+            rotated.viewport((640, 480)),
+            ViewportRectangle {
+                x: 140,
+                y: 0,
+                width: 360,
+                height: 480
+            }
+        );
+        assert_eq!(
+            WindowPicture {
+                force_aspect: false,
+                ..rotated
+            }
+            .viewport((640, 480)),
+            ViewportRectangle::whole(640, 480)
+        );
+    }
 
     fn nv12(w: u32, h: u32) -> Caps {
         Caps::RawVideo {

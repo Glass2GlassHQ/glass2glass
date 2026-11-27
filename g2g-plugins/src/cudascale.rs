@@ -21,6 +21,7 @@ use g2g_core::{
 
 use crate::cuda::{CudaDevice, CudaEvent, CudaStream, FramePool, UploadedFrame};
 use crate::cuda_driver_ffi as ffi;
+use crate::display_aspect::scaled_video_caps;
 use crate::gpurelease::release_after;
 use crate::videoscale::input_size_or_any_size;
 
@@ -164,7 +165,7 @@ impl ScaleGpu {
 
 #[derive(Debug, Default)]
 pub struct CudaScale {
-    format: Option<RawVideoFormat>,
+    input_caps: Option<Caps>,
     output_caps: Option<Caps>,
     last_caps: Option<Caps>,
     gpu: Option<ScaleGpu>,
@@ -181,9 +182,15 @@ impl CudaScale {
                 width: Dim::Fixed(width),
                 height: Dim::Fixed(height),
                 ..
-            }) => Ok((*width, *height)),
+            }) if *width > 0 && *height > 0 => Ok((*width, *height)),
             _ => Err(G2gError::NotConfigured),
         }
+    }
+
+    fn output_caps(&self) -> Result<Caps, G2gError> {
+        let input = self.input_caps.as_ref().ok_or(G2gError::NotConfigured)?;
+        let output = self.output_caps.as_ref().ok_or(G2gError::NotConfigured)?;
+        Ok(scaled_video_caps(input, output))
     }
 
     fn gpu_for(&mut self, buffer: &OwnedCudaBuffer) -> Result<&mut ScaleGpu, G2gError> {
@@ -195,7 +202,10 @@ impl CudaScale {
     }
 
     fn scale(&mut self, input: OwnedCudaBuffer) -> Result<OwnedCudaBuffer, G2gError> {
-        let format = self.format.ok_or(G2gError::NotConfigured)?;
+        let Some(Caps::RawVideo { format, .. }) = &self.input_caps else {
+            return Err(G2gError::NotConfigured);
+        };
+        let format = *format;
         let (width, height) = self.output_size()?;
         let gpu = self.gpu_for(&input)?;
         gpu.stream.wait_for(&input)?;
@@ -303,13 +313,23 @@ impl AsyncElement for CudaScale {
         if !FORMATS.contains(format) {
             return Err(G2gError::CapsMismatch);
         }
-        self.format = Some(*format);
+        self.input_caps = Some(absolute_caps.clone());
         Ok(ConfigureOutcome::Accepted)
     }
 
     fn configure_output(&mut self, output_caps: &Caps) -> Result<(), G2gError> {
+        let Caps::RawVideo {
+            width: Dim::Fixed(width),
+            height: Dim::Fixed(height),
+            ..
+        } = output_caps
+        else {
+            return Err(G2gError::CapsMismatch);
+        };
+        if *width == 0 || *height == 0 {
+            return Err(G2gError::CapsMismatch);
+        }
         self.output_caps = Some(output_caps.clone());
-        self.output_size()?;
         Ok(())
     }
 
@@ -320,13 +340,16 @@ impl AsyncElement for CudaScale {
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
             match packet {
-                PipelinePacket::DataFrame(frame) => {
-                    let output_caps = self.output_caps.clone().ok_or(G2gError::NotConfigured)?;
+                PipelinePacket::CapsChanged(_) | PipelinePacket::DataFrame(_) => {
+                    let output_caps = self.output_caps()?;
                     if self.last_caps.as_ref() != Some(&output_caps) {
                         out.push(PipelinePacket::CapsChanged(output_caps.clone()))
                             .await?;
                         self.last_caps = Some(output_caps);
                     }
+                    let PipelinePacket::DataFrame(frame) = packet else {
+                        return Ok(());
+                    };
                     let Frame {
                         domain,
                         timing,
@@ -353,11 +376,6 @@ impl AsyncElement for CudaScale {
                         meta,
                     }))
                     .await?;
-                }
-                // the runner sends this element's own output caps, which go downstream as they are
-                PipelinePacket::CapsChanged(caps) => {
-                    out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
-                    self.last_caps = Some(caps);
                 }
                 PipelinePacket::Flush => {
                     self.last_caps = None;

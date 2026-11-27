@@ -2,14 +2,32 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
-use g2g_core::{AspectRatio, PixelAspect};
-#[cfg(any(feature = "wgpu-sink", feature = "wayland-sink"))]
+use g2g_core::{AspectRatio, Caps, Dim, PixelAspect};
+#[cfg(any(
+    feature = "wgpu-sink",
+    feature = "wayland-sink",
+    all(windows, feature = "d3d11-sink"),
+    all(target_os = "macos", feature = "metal-sink"),
+    all(target_os = "linux", any(feature = "gl-sink", feature = "cuda-gl"))
+))]
 use g2g_core::{PropKind, PropertySpec};
 
-#[cfg(any(feature = "wgpu-sink", feature = "wayland-sink"))]
+#[cfg(any(
+    feature = "wgpu-sink",
+    feature = "wayland-sink",
+    all(windows, feature = "d3d11-sink"),
+    all(target_os = "macos", feature = "metal-sink"),
+    all(target_os = "linux", any(feature = "gl-sink", feature = "cuda-gl"))
+))]
 pub(crate) const FORCE_ASPECT_RATIO_NAME: &str = "force-aspect-ratio";
 
-#[cfg(any(feature = "wgpu-sink", feature = "wayland-sink"))]
+#[cfg(any(
+    feature = "wgpu-sink",
+    feature = "wayland-sink",
+    all(windows, feature = "d3d11-sink"),
+    all(target_os = "macos", feature = "metal-sink"),
+    all(target_os = "linux", any(feature = "gl-sink", feature = "cuda-gl"))
+))]
 pub(crate) const FORCE_ASPECT_RATIO_PROPERTY: PropertySpec = PropertySpec::new(
     FORCE_ASPECT_RATIO_NAME,
     PropKind::Bool,
@@ -18,12 +36,26 @@ pub(crate) const FORCE_ASPECT_RATIO_PROPERTY: PropertySpec = PropertySpec::new(
 .with_default("true");
 
 // gst reads an absent pixel-aspect-ratio as square pixels
-fn pixel_aspect_fraction(pixel_aspect: PixelAspect) -> (u128, u128) {
+pub(crate) fn pixel_aspect_fraction(pixel_aspect: PixelAspect) -> (u128, u128) {
     match pixel_aspect {
         PixelAspect::Any => (1, 1),
         PixelAspect::Exact(ratio) => (
             u128::from(ratio.numerator()),
             u128::from(ratio.denominator()),
+        ),
+    }
+}
+
+#[cfg(any(
+    all(windows, feature = "d3d11-sink"),
+    all(target_os = "linux", feature = "hip")
+))]
+pub(crate) fn transpose_pixel_aspect(pixel_aspect: PixelAspect) -> PixelAspect {
+    match pixel_aspect {
+        PixelAspect::Any => PixelAspect::Any,
+        PixelAspect::Exact(ratio) => PixelAspect::Exact(
+            AspectRatio::new(ratio.denominator(), ratio.numerator())
+                .expect("aspect ratio is nonzero"),
         ),
     }
 }
@@ -56,6 +88,8 @@ pub(crate) fn display_aspect(
     feature = "wgpu-sink",
     feature = "wayland-sink",
     feature = "gl-render",
+    all(windows, feature = "d3d11-sink"),
+    all(target_os = "macos", feature = "metal-sink"),
     feature = "kms-sink"
 ))]
 fn saturate(value: u128) -> u32 {
@@ -66,7 +100,10 @@ fn saturate(value: u128) -> u32 {
 #[cfg(any(
     feature = "wgpu-present",
     feature = "wayland-sink",
-    feature = "kms-sink"
+    feature = "kms-sink",
+    all(windows, feature = "d3d11-sink"),
+    all(target_os = "macos", feature = "metal-sink"),
+    all(target_os = "linux", any(feature = "gl-sink", feature = "cuda-gl"))
 ))]
 pub(crate) fn display_size(width: u32, height: u32, pixel_aspect: PixelAspect) -> (u32, u32) {
     let Some((numerator, denominator)) = display_aspect(width, height, pixel_aspect) else {
@@ -74,7 +111,7 @@ pub(crate) fn display_size(width: u32, height: u32, pixel_aspect: PixelAspect) -
     };
     let (wide, tall) = (u128::from(width), u128::from(height));
     if tall % denominator == 0 || wide % numerator != 0 {
-        (saturate(tall * numerator / denominator), height)
+        (saturate(tall * numerator / denominator).max(1), height)
     } else {
         (width, saturate(wide * denominator / numerator))
     }
@@ -108,12 +145,61 @@ pub(crate) fn scaled_pixel_aspect(
     }
 }
 
+pub(crate) fn pixel_aspect_at(
+    input: &Caps,
+    width: u32,
+    height: u32,
+    requested: PixelAspect,
+) -> PixelAspect {
+    match (requested, input) {
+        (
+            PixelAspect::Any,
+            Caps::RawVideo {
+                width: Dim::Fixed(in_w),
+                height: Dim::Fixed(in_h),
+                pixel_aspect,
+                ..
+            },
+        ) => scaled_pixel_aspect(*in_w, *in_h, *pixel_aspect, width, height),
+        _ => requested,
+    }
+}
+
+#[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
+pub(crate) fn scaled_video_caps(input: &Caps, output: &Caps) -> Caps {
+    let mut caps = output.clone();
+    if let Caps::RawVideo {
+        width: Dim::Fixed(width),
+        height: Dim::Fixed(height),
+        pixel_aspect,
+        ..
+    } = &mut caps
+    {
+        *pixel_aspect = pixel_aspect_at(input, *width, *height, *pixel_aspect);
+    }
+    caps
+}
+
 #[cfg(any(
     feature = "wgpu-sink",
     feature = "gl-render",
     feature = "wayland-sink",
+    all(windows, feature = "d3d11-sink"),
+    all(target_os = "macos", feature = "metal-sink"),
     feature = "kms-sink"
 ))]
+#[cfg_attr(
+    not(any(
+        feature = "wgpu-sink",
+        feature = "gl-render",
+        feature = "wayland-sink",
+        feature = "kms-sink"
+    )),
+    allow(
+        unreachable_pub,
+        reason = "the native sinks use the rectangle internally"
+    )
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ViewportRectangle {
     pub x: u32,
@@ -126,6 +212,8 @@ pub struct ViewportRectangle {
     feature = "wgpu-sink",
     feature = "gl-render",
     feature = "wayland-sink",
+    all(windows, feature = "d3d11-sink"),
+    all(target_os = "macos", feature = "metal-sink"),
     feature = "kms-sink"
 ))]
 impl ViewportRectangle {
@@ -168,6 +256,8 @@ pub(crate) fn picture_point_in(
     feature = "wgpu-sink",
     feature = "gl-render",
     feature = "wayland-sink",
+    all(windows, feature = "d3d11-sink"),
+    all(target_os = "macos", feature = "metal-sink"),
     feature = "kms-sink"
 ))]
 pub(crate) fn letterbox(
@@ -177,6 +267,9 @@ pub(crate) fn letterbox(
     target_width: u32,
     target_height: u32,
 ) -> ViewportRectangle {
+    if target_width == 0 || target_height == 0 {
+        return ViewportRectangle::whole(target_width, target_height);
+    }
     let Some((numerator, denominator)) = display_aspect(width, height, pixel_aspect) else {
         return ViewportRectangle::whole(target_width, target_height);
     };
@@ -184,11 +277,11 @@ pub(crate) fn letterbox(
     let (fitted_width, fitted_height) = if target_wide * denominator <= target_tall * numerator {
         (
             target_width,
-            saturate(target_wide * denominator / numerator),
+            saturate(target_wide * denominator / numerator).max(1),
         )
     } else {
         (
-            saturate(target_tall * numerator / denominator),
+            saturate(target_tall * numerator / denominator).max(1),
             target_height,
         )
     };
@@ -236,6 +329,83 @@ mod tests {
             PixelAspect::Any,
             "a uniform scale of unknown pixels stays unknown"
         );
+    }
+
+    #[cfg(any(
+        all(any(target_os = "linux", windows), feature = "cuda"),
+        all(windows, feature = "d3d11-convert")
+    ))]
+    async fn check_scaler_caps(
+        mut scaler: impl g2g_core::AsyncElement,
+        format: g2g_core::RawVideoFormat,
+        output_format: g2g_core::RawVideoFormat,
+    ) {
+        use crate::testutil::CollectSink;
+        use g2g_core::{Colorimetry, Interlace, PipelinePacket, Rate};
+
+        let raw = |format, width, height, pixel_aspect| Caps::RawVideo {
+            format,
+            width: Dim::Fixed(width),
+            height: Dim::Fixed(height),
+            framerate: Rate::Fixed(30 << 16),
+            interlace: Interlace::Progressive,
+            colorimetry: Colorimetry::UNKNOWN,
+            pixel_aspect,
+        };
+        let mut out = CollectSink::default();
+        for (input_ratio, requested_ratio, expected) in [
+            (exact(16, 15), PixelAspect::Any, exact(4, 3)),
+            (PixelAspect::SQUARE, PixelAspect::Any, exact(5, 4)),
+            (
+                PixelAspect::SQUARE,
+                PixelAspect::SQUARE,
+                PixelAspect::SQUARE,
+            ),
+        ] {
+            let input = raw(format, 720, 576, input_ratio);
+            let output = raw(output_format, 576, 576, requested_ratio);
+            scaler.configure_pipeline(&input).unwrap();
+            scaler.configure_output(&output).unwrap();
+            out.packets.clear();
+            // The runner sends its fixed output caps after configuring both pads.
+            for _ in 0..2 {
+                scaler
+                    .process(PipelinePacket::CapsChanged(output.clone()), &mut out)
+                    .await
+                    .unwrap();
+            }
+            assert!(
+                matches!(
+                    out.packets.as_slice(),
+                    [PipelinePacket::CapsChanged(Caps::RawVideo {
+                        pixel_aspect, width: Dim::Fixed(576), height: Dim::Fixed(576), ..
+                    })] if *pixel_aspect == expected
+                ),
+                "{:?}",
+                out.packets
+            );
+        }
+    }
+
+    #[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
+    #[tokio::test]
+    async fn cuda_scaler_emits_the_resized_pixel_aspect() {
+        use g2g_core::RawVideoFormat::Rgba8;
+        check_scaler_caps(crate::cudascale::CudaScale::new(), Rgba8, Rgba8).await;
+    }
+
+    #[cfg(all(target_os = "linux", feature = "hip"))]
+    #[tokio::test]
+    async fn hip_scaler_emits_the_resized_pixel_aspect() {
+        use g2g_core::RawVideoFormat::Rgba8;
+        check_scaler_caps(crate::hipconvertscale::HipConvertScale::new(), Rgba8, Rgba8).await;
+    }
+
+    #[cfg(all(windows, feature = "d3d11-convert"))]
+    #[tokio::test]
+    async fn d3d11_converter_emits_the_resized_pixel_aspect() {
+        use g2g_core::RawVideoFormat::{Bgra8, Nv12};
+        check_scaler_caps(crate::d3d11convert::D3D11Convert::new(), Bgra8, Nv12).await;
     }
 
     #[cfg(feature = "wgpu-sink")]

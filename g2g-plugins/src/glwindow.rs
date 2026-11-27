@@ -12,17 +12,19 @@
 //! [`crate::cudaglsink`], a `glTexSubImage2D` for [`crate::glsink`]).
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use core::ffi::c_void;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use khronos_egl as egl;
 use smithay_client_toolkit::reexports::client::{protocol::wl_surface, Connection, Proxy};
 use wayland_egl::WlEglSurface;
 
-use crate::display_aspect::{picture_point_in, ViewportRectangle};
+use crate::display_aspect::{display_size, letterbox, picture_point_in, ViewportRectangle};
 use crate::glnv12::{GlMode, GlState};
 use crate::waylandwindow::run_window;
 use crate::windowworker::{WindowParams, WindowRenderer, WorkerChannels, WorkerCmd};
-use g2g_core::{Colorimetry, G2gError, HardwareError};
+use g2g_core::{Colorimetry, G2gError, HardwareError, PixelAspect};
 use smithay_client_toolkit::reexports::calloop::channel::Channel;
 
 const EGL_PLATFORM_WAYLAND_KHR: egl::Enum = 0x31D8;
@@ -34,14 +36,8 @@ pub(crate) trait FramePresenter: 'static {
     /// Payload the sink hands over the channel (a CUDA buffer, a byte vector).
     type Frame: Send + 'static;
 
-    /// Pixel layout the [`GlState`] is built for, from the negotiated caps.
-    fn mode(&self) -> GlMode;
-
-    /// Colorimetry the convert shader is compiled for, from the negotiated caps.
-    fn colorimetry(&self) -> Colorimetry;
-
-    /// Upload `frame` into `gl`'s textures and draw it. The worker presents.
-    fn present(&mut self, gl: &mut GlState, frame: &Self::Frame) -> Result<(), G2gError>;
+    /// Upload `frame` into `gl`'s textures. The worker draws and presents them.
+    fn upload(&mut self, gl: &mut GlState, frame: &Self::Frame) -> Result<(), G2gError>;
 
     fn open_display(
         &self,
@@ -60,6 +56,38 @@ pub(crate) trait FramePresenter: 'static {
                 &[egl::ATTRIB_NONE],
             )
         }?)
+    }
+}
+
+/// The caps fields that determine the textures, convert shader and window geometry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GlVideo {
+    pub width: u32,
+    pub height: u32,
+    pub mode: GlMode,
+    pub colorimetry: Colorimetry,
+    pub pixel_aspect: PixelAspect,
+}
+
+impl GlVideo {
+    pub(crate) fn window_size(self, force_aspect: bool) -> (u32, u32) {
+        if force_aspect {
+            display_size(self.width, self.height, self.pixel_aspect)
+        } else {
+            (self.width, self.height)
+        }
+    }
+
+    pub(crate) fn viewport(
+        self,
+        force_aspect: bool,
+        (width, height): (u32, u32),
+    ) -> ViewportRectangle {
+        if force_aspect {
+            letterbox(self.width, self.height, self.pixel_aspect, width, height)
+        } else {
+            ViewportRectangle::whole(width, height)
+        }
     }
 }
 
@@ -91,6 +119,8 @@ pub(crate) fn open_cuda_display(
 /// thread and returns when the loop exits.
 pub(crate) fn run_gl_window<P: FramePresenter>(
     presenter: P,
+    video: GlVideo,
+    force_aspect: Arc<AtomicBool>,
     params: WindowParams,
     channels: WorkerChannels<Channel<WorkerCmd<P::Frame>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -100,12 +130,15 @@ pub(crate) fn run_gl_window<P: FramePresenter>(
             // SAFETY: `gl` wraps the GL ES 3 context `EglWindow::new` made
             // current on this thread.
             let state = unsafe {
-                GlState::build(gl, width, height, presenter.mode(), presenter.colorimetry())
+                GlState::build(gl, video.width, video.height, video.mode, video.colorimetry)
             }?;
             Ok(GlRenderer {
                 gl: state,
                 egl,
                 presenter,
+                video,
+                force_aspect,
+                target_size: (width, height),
             })
         },
         params,
@@ -113,29 +146,47 @@ pub(crate) fn run_gl_window<P: FramePresenter>(
     )
 }
 
-/// The GL half of the worker: the sink's upload + draw, then `eglSwapBuffers`.
+/// The GL half of the worker: upload, draw into the viewport, then `eglSwapBuffers`.
 /// `gl` is declared before `egl` so the GL state is dropped while its context is
 /// still alive.
 struct GlRenderer<P: FramePresenter> {
     gl: GlState,
     egl: EglWindow,
     presenter: P,
+    video: GlVideo,
+    force_aspect: Arc<AtomicBool>,
+    target_size: (u32, u32),
+}
+
+impl<P: FramePresenter> GlRenderer<P> {
+    fn viewport(&self) -> ViewportRectangle {
+        self.video
+            .viewport(self.force_aspect.load(Ordering::Relaxed), self.target_size)
+    }
 }
 
 impl<P: FramePresenter> WindowRenderer for GlRenderer<P> {
     type Frame = P::Frame;
 
     fn present(&mut self, frame: &Self::Frame) -> Result<(), G2gError> {
-        self.presenter.present(&mut self.gl, frame)?;
+        let viewport = self.viewport();
+        self.presenter.upload(&mut self.gl, frame)?;
+        self.gl.draw_in_window(viewport, self.target_size.1);
         self.egl.swap()
     }
 
+    fn resize(&mut self, width: u32, height: u32) {
+        if (width, height) != self.target_size {
+            self.egl.wl_egl.resize(width as i32, height as i32, 0, 0);
+            self.target_size = (width, height);
+        }
+    }
+
     fn picture_point(&self, surface_x: f64, surface_y: f64) -> Option<(u32, u32)> {
-        let (width, height) = self.gl.size();
         picture_point_in(
-            ViewportRectangle::whole(width, height),
-            width,
-            height,
+            self.viewport(),
+            self.video.width,
+            self.video.height,
             surface_x,
             surface_y,
         )
@@ -158,7 +209,7 @@ struct EglWindow {
     display: egl::Display,
     surface: egl::Surface,
     context: egl::Context,
-    _wl_egl: WlEglSurface,
+    wl_egl: WlEglSurface,
 }
 
 impl EglWindow {
@@ -232,7 +283,7 @@ impl EglWindow {
                 display,
                 surface,
                 context,
-                _wl_egl: wl_egl,
+                wl_egl,
             },
             gl,
         ))
@@ -251,7 +302,7 @@ impl Drop for EglWindow {
         // mid-stream resolution change respawns the worker, so without this each
         // resize leaks an EGL context + surface. Best-effort; the worker is
         // exiting. Releasing the current context first, then destroying the
-        // surface here (this Drop runs before the `_wl_egl` field drops its
+        // surface here (this Drop runs before the `wl_egl` field drops its
         // backing `wl_egl_window`) keeps the required outlives ordering.
         let _ = self.egl.make_current(self.display, None, None, None);
         let _ = self.egl.destroy_surface(self.display, self.surface);

@@ -17,11 +17,14 @@ use g2g_core::memory::{DomainSet, GpuDevice, MemoryDomainKind, OwnedHipBuffer};
 use g2g_core::meta::{Orientation, PlaneLayout};
 use g2g_core::{
     g2g_error, AsyncElement, Caps, CapsConstraint, CapsTransform, Colorimetry, ConfigureOutcome,
-    Dim, ElementMetadata, Frame, G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
+    Dim, ElementMetadata, Frame, G2gError, MemoryDomain, OutputSink, PipelinePacket, PixelAspect,
+    PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
 use crate::compositor::{CompositorOperator, CompositorPad};
+use crate::display_aspect::{
+    display_aspect, pixel_aspect_fraction, scaled_video_caps, transpose_pixel_aspect,
+};
 use crate::hip::{
     HipDevice, HipEvent, HipKernel, HipKernelModule, HipMemory, HipMemoryPool, HipStream,
     KernelArgument,
@@ -543,6 +546,7 @@ struct Picture {
     width: u32,
     height: u32,
     colorimetry: Colorimetry,
+    pixel_aspect: PixelAspect,
 }
 
 impl Picture {
@@ -553,6 +557,7 @@ impl Picture {
                 width: Dim::Fixed(width),
                 height: Dim::Fixed(height),
                 colorimetry,
+                pixel_aspect,
                 ..
             } if *width > 0 && *height > 0 => Ok(Self {
                 format: *format,
@@ -560,6 +565,7 @@ impl Picture {
                 width: *width,
                 height: *height,
                 colorimetry: *colorimetry,
+                pixel_aspect: *pixel_aspect,
             }),
             _ => Err(G2gError::CapsMismatch),
         }
@@ -596,7 +602,18 @@ fn picture_rect(
     add_borders: bool,
     direction: Orientation,
 ) -> PictureRect {
-    if !add_borders {
+    let (mut wide, mut tall) = display_aspect(input.width, input.height, input.pixel_aspect)
+        .expect("Picture requires nonzero dimensions");
+    if direction.swaps_dims() {
+        core::mem::swap(&mut wide, &mut tall);
+    }
+    let (out_pixel_width, out_pixel_height) = pixel_aspect_fraction(output.pixel_aspect);
+    // Express the source display aspect in the output's pixel units.
+    wide *= out_pixel_height;
+    tall *= out_pixel_width;
+    let available_width = u128::from(output.width) * tall;
+    let available_height = u128::from(output.height) * wide;
+    if !add_borders || available_width == available_height {
         return PictureRect {
             x: 0,
             y: 0,
@@ -604,19 +621,16 @@ fn picture_rect(
             height: output.height,
         };
     }
-    let (input_width, input_height) = match direction.swaps_dims() {
-        true => (input.height, input.width),
-        false => (input.width, input.height),
+    let (width, height) = if available_width < available_height {
+        (output.width, ((available_width + wide / 2) / wide) as u32)
+    } else {
+        (((available_height + tall / 2) / tall) as u32, output.height)
     };
-    let scale = f64::min(
-        f64::from(output.width) / f64::from(input_width),
-        f64::from(output.height) / f64::from(input_height),
-    );
     let subsampled = output.format.plane_rows(1, output.height) != Some(output.height);
     // a 4:2:0 output keeps the picture on whole chroma samples
     let even = |value: u32| if subsampled { value & !1 } else { value };
-    let width = even((f64::from(input_width) * scale).round() as u32).clamp(1, output.width);
-    let height = even((f64::from(input_height) * scale).round() as u32).clamp(1, output.height);
+    let width = even(width).clamp(1, output.width);
+    let height = even(height).clamp(1, output.height);
     PictureRect {
         x: even((output.width - width) / 2),
         y: even((output.height - height) / 2),
@@ -939,7 +953,7 @@ fn swap_dims(caps: &Caps) -> Caps {
             framerate,
             interlace,
             colorimetry,
-            pixel_aspect: _,
+            pixel_aspect,
         } => Caps::RawVideo {
             format: *format,
             width: height.clone(),
@@ -947,7 +961,7 @@ fn swap_dims(caps: &Caps) -> Caps {
             framerate: framerate.clone(),
             interlace: *interlace,
             colorimetry: *colorimetry,
-            pixel_aspect: g2g_core::PixelAspect::Any,
+            pixel_aspect: transpose_pixel_aspect(*pixel_aspect),
         },
         other => other.clone(),
     }
@@ -1007,10 +1021,10 @@ impl HipConvertScale {
             Some(gpu) if on_device(&gpu) => gpu,
             _ => {
                 let input = self.input_caps.as_ref().ok_or(G2gError::NotConfigured)?;
-                let output = self.output_caps.as_ref().ok_or(G2gError::NotConfigured)?;
+                let output = self.output_caps()?;
                 let device = HipDevice::open(buffer.vendor, buffer.device_ordinal)?;
                 let converter =
-                    HipConverter::new(&device, input, output, self.add_borders, self.direction)?;
+                    HipConverter::new(&device, input, &output, self.add_borders, self.direction)?;
                 ConvertGpu {
                     stream: HipStream::new(&device)?,
                     pool: HipMemoryPool::new(&device, converter.output_len()?),
@@ -1042,13 +1056,29 @@ impl HipConvertScale {
         memory.into_buffer(ready, len)
     }
 
-    fn passthrough(&self) -> bool {
-        let picture = |caps: &Option<Caps>| caps.as_ref().and_then(|caps| Picture::of(caps).ok());
-        let (input, output) = (picture(&self.input_caps), picture(&self.output_caps));
+    fn output_caps(&self) -> Result<Caps, G2gError> {
+        let input = self.input_caps.as_ref().ok_or(G2gError::NotConfigured)?;
+        let output = self.output_caps.as_ref().ok_or(G2gError::NotConfigured)?;
+        if self.direction.swaps_dims() {
+            Ok(scaled_video_caps(&swap_dims(input), output))
+        } else {
+            Ok(scaled_video_caps(input, output))
+        }
+    }
+
+    fn passthrough(&self, output: &Caps) -> bool {
+        let input = self
+            .input_caps
+            .as_ref()
+            .and_then(|caps| Picture::of(caps).ok());
+        let output = Picture::of(output).ok();
         let same_picture = input.is_some_and(|input| {
             output.is_some_and(|output| {
                 (input.format, input.width, input.height)
                     == (output.format, output.width, output.height)
+                    && (!self.add_borders
+                        || pixel_aspect_fraction(input.pixel_aspect)
+                            == pixel_aspect_fraction(output.pixel_aspect))
             })
         });
         same_picture && self.direction == Orientation::Identity
@@ -1186,14 +1216,17 @@ impl AsyncElement for HipConvertScale {
                 return Err(G2gError::NotConfigured);
             }
             match packet {
-                PipelinePacket::DataFrame(frame) => {
-                    let output_caps = self.output_caps.clone().ok_or(G2gError::NotConfigured)?;
+                PipelinePacket::CapsChanged(_) | PipelinePacket::DataFrame(_) => {
+                    let output_caps = self.output_caps()?;
                     if self.last_caps.as_ref() != Some(&output_caps) {
                         out.push(PipelinePacket::CapsChanged(output_caps.clone()))
                             .await?;
-                        self.last_caps = Some(output_caps);
+                        self.last_caps = Some(output_caps.clone());
                     }
-                    if self.passthrough() {
+                    let PipelinePacket::DataFrame(frame) = packet else {
+                        return Ok(());
+                    };
+                    if self.passthrough(&output_caps) {
                         out.push(PipelinePacket::DataFrame(frame)).await?;
                         return Ok(());
                     }
@@ -1214,11 +1247,6 @@ impl AsyncElement for HipConvertScale {
                     }))
                     .await?;
                 }
-                // the runner sends this element's own output caps, which go downstream as they are
-                PipelinePacket::CapsChanged(caps) => {
-                    out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
-                    self.last_caps = Some(caps);
-                }
                 PipelinePacket::Flush => {
                     self.last_caps = None;
                     out.push(PipelinePacket::Flush).await?;
@@ -1231,5 +1259,42 @@ impl AsyncElement for HipConvertScale {
             }
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use g2g_core::AspectRatio;
+
+    #[test]
+    fn hip_borders_follow_pixel_aspect_and_rotation() {
+        let caps = |width, height, pixel_aspect| Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
+            width: Dim::Fixed(width),
+            height: Dim::Fixed(height),
+            framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Progressive,
+            colorimetry: Colorimetry::UNKNOWN,
+            pixel_aspect,
+        };
+        let anamorphic = caps(4, 4, PixelAspect::Exact(AspectRatio::new(2, 1).unwrap()));
+        let square = caps(8, 8, PixelAspect::SQUARE);
+        let source = Picture::of(&anamorphic).unwrap();
+        let target = Picture::of(&square).unwrap();
+        let wide = picture_rect(&source, &target, true, Orientation::Identity);
+        assert_eq!((wide.x, wide.y, wide.width, wide.height), (0, 2, 8, 4));
+        let tall = picture_rect(&source, &target, true, Orientation::Rotate90Cw);
+        assert_eq!((tall.x, tall.y, tall.width, tall.height), (2, 0, 4, 8));
+
+        let output = caps(8, 8, PixelAspect::Any);
+        let refined = scaled_video_caps(&swap_dims(&anamorphic), &output);
+        let target = Picture::of(&refined).unwrap();
+        assert_eq!(
+            target.pixel_aspect,
+            PixelAspect::Exact(AspectRatio::new(1, 2).unwrap())
+        );
+        let full = picture_rect(&source, &target, true, Orientation::Rotate90Cw);
+        assert_eq!((full.x, full.y, full.width, full.height), (0, 0, 8, 8));
     }
 }

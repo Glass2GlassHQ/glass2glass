@@ -6,6 +6,9 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2616: `d3d11videosink` and `metalvideosink` size and letterbox their windows by display aspect.
+- M2615: `glsink` and `cudaglsink` size and letterbox their windows by display aspect.
+- M2614: The CUDA, HIP and D3D11 scalers keep display aspect through a resize.
 - M2613: `uridecodebin` and `edlsrc` decode MP4 and QuickTime files whose video codec `Mp4Src` cannot parse, such as FFV1.
 - M2612: The `web-gpu`, `release-aar` and `libcamera` builds compile and pass clippy again.
 - M2611: The MP4, Matroska and Ogg muxers share their AAC, Opus and Vorbis track header capture.

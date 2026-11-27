@@ -633,11 +633,13 @@ fn outer_size(
     extended_style: WINDOW_EX_STYLE,
     (width, height): (u32, u32),
 ) -> windows::core::Result<(i32, i32)> {
+    let too_large =
+        |_| windows::core::Error::from_hresult(windows::Win32::Foundation::E_INVALIDARG);
     let mut rect = RECT {
         left: 0,
         top: 0,
-        right: width as i32,
-        bottom: height as i32,
+        right: i32::try_from(width).map_err(too_large)?,
+        bottom: i32::try_from(height).map_err(too_large)?,
     };
     // SAFETY: `rect` is a valid local the call adjusts in place.
     unsafe { AdjustWindowRectEx(&mut rect, style, false, extended_style)? };
@@ -678,7 +680,9 @@ pub(crate) fn create_window(
                 GetSystemMetrics(SM_CYSCREEN),
             )
         } else {
-            let style = WS_OVERLAPPEDWINDOW | WS_VISIBLE;
+            let style = WS_OVERLAPPEDWINDOW
+                | WS_VISIBLE
+                | windows::Win32::UI::WindowsAndMessaging::WS_CLIPCHILDREN;
             let (width, height) = outer_size(style, WINDOW_EX_STYLE::default(), client_size)?;
             (style, CW_USEDEFAULT, CW_USEDEFAULT, width, height)
         };
@@ -717,8 +721,51 @@ pub(crate) fn resize_client(hwnd: HWND, client_size: (u32, u32)) -> windows::cor
     }
 }
 
-#[cfg(feature = "wgpu-present")]
-fn client_size(hwnd: HWND) -> windows::core::Result<(u32, u32)> {
+#[cfg(feature = "d3d11-sink")]
+unsafe extern "system" fn swapchain_child_proc(
+    hwnd: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+) -> LRESULT {
+    // SAFETY: the system passed these arguments to the window procedure.
+    unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
+}
+
+#[cfg(feature = "d3d11-sink")]
+pub(crate) fn create_swapchain_child(parent: HWND) -> windows::core::Result<HWND> {
+    use windows::Win32::UI::WindowsAndMessaging::WS_CHILD;
+
+    // SAFETY: standard Win32 window creation on the thread that owns the parent.
+    unsafe {
+        let instance = GetModuleHandleW(None)?;
+        let class = w!("g2g_swapchain_child");
+        // The swapchain is the only renderer on this HWND. The parent paints the bars.
+        let _ = RegisterClassExW(&WNDCLASSEXW {
+            cbSize: core::mem::size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(swapchain_child_proc),
+            hInstance: instance.into(),
+            lpszClassName: class,
+            ..Default::default()
+        });
+        CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            class,
+            w!(""),
+            WS_CHILD | WS_VISIBLE,
+            0,
+            0,
+            1,
+            1,
+            Some(parent),
+            None,
+            Some(instance.into()),
+            None,
+        )
+    }
+}
+
+pub(crate) fn client_size(hwnd: HWND) -> windows::core::Result<(u32, u32)> {
     let mut rect = RECT::default();
     // SAFETY: `hwnd` is a live window and `rect` a valid local.
     unsafe { windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rect)? };

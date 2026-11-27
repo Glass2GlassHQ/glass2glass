@@ -10,9 +10,9 @@
 //! shader carrying the caps colorimetry's weights; planar 10 and 12 bit YUV
 //! uses one `R16` texture per plane and the same convert; RGBA uses one `RGBA8`
 //! texture and a passthrough shader.
-//! Pixels arrive either from CUDA device memory (`upload_and_draw`, the CUDA-GL
+//! Pixels arrive either from CUDA device memory (`upload_cuda`, the CUDA-GL
 //! interop registered lazily on the first frame) or from a system-memory slice
-//! (`upload_system_and_draw`).
+//! (`upload_system`).
 //!
 //! The caller owns the EGL context and the *present* (Wayland `eglSwapBuffers`
 //! for `glwindow`, GBM lock + DRM page-flip for
@@ -459,10 +459,9 @@ impl GlState {
 
     /// Upload the decoded NV12 planes into the GL textures via CUDA (lazily making
     /// the decoder's context current and registering the textures on the first
-    /// frame), then draw the fullscreen quad through the NV12->RGB shader. The
-    /// caller presents (swap / flip) afterwards.
+    /// frame).
     #[cfg(any(feature = "cuda-gl", feature = "cuda-kms"))]
-    pub(crate) fn upload_and_draw(&mut self, buf: &OwnedCudaBuffer) -> Result<(), G2gError> {
+    pub(crate) fn upload_cuda(&mut self, buf: &OwnedCudaBuffer) -> Result<(), G2gError> {
         let (y_tex, uv_tex) = match &self.textures {
             Textures::SemiPlanar { y_tex, uv_tex, .. } => (*y_tex, *uv_tex),
             Textures::Planar16 { .. } | Textures::Rgba { .. } => {
@@ -487,37 +486,28 @@ impl GlState {
 
         buf.keep_alive().wait_until_ready()?;
         // SAFETY: textures registered, CUDA context current, planes valid.
-        unsafe { self.interop.as_ref().unwrap().upload(buf)? };
-
-        self.draw(
-            self.whole_frame(),
-            UPRIGHT_ON_DEFAULT_FRAMEBUFFER,
-            dither_step(None),
-        );
-        Ok(())
+        unsafe { self.interop.as_ref().unwrap().upload(buf) }
     }
 
-    /// Upload one system-memory frame into the GL textures (`glTexSubImage2D`)
-    /// and draw it. `bytes` is the packed frame in the built mode's layout: NV12
-    /// = the `width * height` luma plane followed by the interleaved chroma
-    /// plane, RGBA = `width * height * 4` bytes.
-    #[cfg(feature = "gl-sink")]
-    pub(crate) fn upload_system_and_draw(&mut self, bytes: &[u8]) -> Result<(), G2gError> {
-        self.upload_system(bytes)?;
-        self.draw(
-            self.whole_frame(),
-            UPRIGHT_ON_DEFAULT_FRAMEBUFFER,
-            dither_step(None),
+    #[cfg(feature = "cuda-kms")]
+    pub(crate) fn upload_and_draw(&mut self, buf: &OwnedCudaBuffer) -> Result<(), G2gError> {
+        self.upload_cuda(buf)?;
+        self.draw_in_window(
+            ViewportRectangle::whole(self.width, self.height),
+            self.height,
         );
         Ok(())
     }
 
     #[cfg(any(feature = "gl-sink", feature = "cuda-gl", feature = "cuda-kms"))]
-    fn whole_frame(&self) -> ViewportRectangle {
-        ViewportRectangle::whole(self.width, self.height)
+    pub(crate) fn draw_in_window(&mut self, mut viewport: ViewportRectangle, height: u32) {
+        // Window coordinates start at the top, while the GL viewport starts at the bottom.
+        viewport.y = height - viewport.y - viewport.height;
+        self.draw(viewport, UPRIGHT_ON_DEFAULT_FRAMEBUFFER, dither_step(None));
     }
 
-    fn upload_system(&mut self, bytes: &[u8]) -> Result<(), G2gError> {
+    /// Upload a system-memory frame in the built mode's packed layout into the GL textures.
+    pub(crate) fn upload_system(&mut self, bytes: &[u8]) -> Result<(), G2gError> {
         let (w, h) = (self.width as usize, self.height as usize);
         // SAFETY: the GL context is current on this thread for the worker's life;
         // every slice passed below is bounds-checked against the texture extent
@@ -781,11 +771,6 @@ impl GlState {
             gl.disable(glow::BLEND);
             gl.disable_vertex_attrib_array(overlay.color_loc);
         }
-    }
-
-    #[cfg(any(feature = "cuda-gl", feature = "gl-sink"))]
-    pub(crate) fn size(&self) -> (u32, u32) {
-        (self.width, self.height)
     }
 
     /// The GL context the state renders with, for a caller that needs its own

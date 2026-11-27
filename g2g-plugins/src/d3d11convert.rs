@@ -35,6 +35,7 @@ use g2g_core::{
 
 use crate::d3d11texture::{texture_frame, texture_objects, texture_proposal, TextureOwner};
 use crate::d3d11video::VideoProcessor;
+use crate::display_aspect::scaled_pixel_aspect;
 use crate::mfcommon::mf_err;
 use crate::texturepool::take_from_pool;
 use crate::videoscale::input_size_or_any_size;
@@ -68,6 +69,7 @@ pub struct D3D11Convert {
     input: Option<InputStream>,
     output_size: Option<(u32, u32)>,
     output_colorimetry: Colorimetry,
+    output_pixel_aspect: PixelAspect,
     last_caps: Option<Caps>,
     gpu: Option<ConvertGpu>,
 }
@@ -145,6 +147,7 @@ impl D3D11Convert {
             input: None,
             output_size: None,
             output_colorimetry: Colorimetry::UNKNOWN,
+            output_pixel_aspect: PixelAspect::Any,
             last_caps: None,
             gpu: None,
         }
@@ -268,7 +271,16 @@ impl D3D11Convert {
                 transfer: input.colorimetry.transfer,
                 primaries: input.colorimetry.primaries,
             },
-            pixel_aspect: input.pixel_aspect,
+            pixel_aspect: match self.output_pixel_aspect {
+                PixelAspect::Any => scaled_pixel_aspect(
+                    input.width,
+                    input.height,
+                    input.pixel_aspect,
+                    width,
+                    height,
+                ),
+                pinned => pinned,
+            },
         })
     }
 }
@@ -375,6 +387,7 @@ impl AsyncElement for D3D11Convert {
             width: Dim::Fixed(width),
             height: Dim::Fixed(height),
             colorimetry,
+            pixel_aspect,
             ..
         } = output_caps
         else {
@@ -390,6 +403,7 @@ impl AsyncElement for D3D11Convert {
             self.gpu = None;
         }
         self.output_colorimetry = *colorimetry;
+        self.output_pixel_aspect = *pixel_aspect;
         self.output_size = output_size;
         Ok(())
     }
@@ -404,16 +418,19 @@ impl AsyncElement for D3D11Convert {
                 return Err(G2gError::NotConfigured);
             }
             match packet {
-                PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::D3D11Texture(texture) = &frame.domain else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
-                    let domain = self.convert(texture)?;
+                PipelinePacket::CapsChanged(_) | PipelinePacket::DataFrame(_) => {
                     let caps = self.output_caps()?;
                     if self.last_caps.as_ref() != Some(&caps) {
                         out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
                         self.last_caps = Some(caps);
                     }
+                    let PipelinePacket::DataFrame(frame) = packet else {
+                        return Ok(());
+                    };
+                    let MemoryDomain::D3D11Texture(texture) = &frame.domain else {
+                        return Err(G2gError::UnsupportedDomain);
+                    };
+                    let domain = self.convert(texture)?;
                     out.push(PipelinePacket::DataFrame(Frame {
                         domain,
                         timing: frame.timing,
@@ -421,11 +438,6 @@ impl AsyncElement for D3D11Convert {
                         meta: frame.meta,
                     }))
                     .await?;
-                }
-                // the runner configures this element before it pushes its own output caps here
-                PipelinePacket::CapsChanged(caps) => {
-                    out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
-                    self.last_caps = Some(caps);
                 }
                 PipelinePacket::Flush => {
                     self.last_caps = None;

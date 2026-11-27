@@ -60,8 +60,9 @@ use alloc::vec::Vec;
 use smithay_client_toolkit::reexports::calloop::channel::{channel, Sender as CalloopSender};
 
 use crate::clock::wait_to_present;
+use crate::display_aspect::{FORCE_ASPECT_RATIO_NAME, FORCE_ASPECT_RATIO_PROPERTY};
 use crate::glnv12::{GlMode, GlState};
-use crate::glwindow::{run_gl_window, FramePresenter};
+use crate::glwindow::{run_gl_window, FramePresenter, GlVideo};
 use crate::windowworker::{present_on_worker, WindowParams, WorkerChannels, WorkerCmd};
 use crate::worker_ready::Handshake;
 use g2g_core::element::{PresentationStats, QosMessage};
@@ -69,9 +70,9 @@ use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
-    ClockSync, Colorimetry, ConfigureOutcome, Dim, ElementMetadata, Frame, G2gError, HardwareError,
-    OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PresentationPacer,
-    PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, MAX_LATENESS_PROPERTY,
+    ClockSync, ConfigureOutcome, Dim, ElementMetadata, Frame, G2gError, HardwareError, OutputSink,
+    PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PresentationPacer, PropError,
+    PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, MAX_LATENESS_PROPERTY,
     PROCESSING_DEADLINE_PROPERTY, QOS_INTERVAL_PROPERTY, SYNC_PROPERTY,
 };
 
@@ -96,10 +97,8 @@ pub struct GlSink {
     app_id: String,
     cmd_tx: Option<CalloopSender<WorkerCmd<Vec<u8>>>>,
     worker: Option<JoinHandle<()>>,
-    width: u32,
-    height: u32,
-    /// Colorimetry the worker built its convert program for.
-    colorimetry: Colorimetry,
+    video: Option<GlVideo>,
+    force_aspect: Arc<AtomicBool>,
     frames_presented: Arc<AtomicU64>,
     window_closed: Arc<AtomicBool>,
     latency: Arc<LatencyHistogram>,
@@ -113,8 +112,7 @@ impl core::fmt::Debug for GlSink {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("GlSink")
             .field("title", &self.title)
-            .field("width", &self.width)
-            .field("height", &self.height)
+            .field("video", &self.video)
             .field(
                 "frames_presented",
                 &self.frames_presented.load(Ordering::Relaxed),
@@ -136,9 +134,8 @@ impl GlSink {
             app_id: String::from("io.glass2glass.GlSink"),
             cmd_tx: None,
             worker: None,
-            width: 0,
-            height: 0,
-            colorimetry: Colorimetry::UNKNOWN,
+            video: None,
+            force_aspect: Arc::new(AtomicBool::new(true)),
             frames_presented: Arc::new(AtomicU64::new(0)),
             window_closed: Arc::default(),
             latency: Arc::new(LatencyHistogram::new()),
@@ -317,6 +314,7 @@ impl AsyncElement for GlSink {
             PropertySpec::new("title", PropKind::Str, "window title").with_default("glass2glass"),
             PropertySpec::new("app-id", PropKind::Str, "Wayland xdg app id")
                 .with_default("io.glass2glass.GlSink"),
+            FORCE_ASPECT_RATIO_PROPERTY,
             MAX_LATENESS_PROPERTY,
             PROCESSING_DEADLINE_PROPERTY,
             QOS_INTERVAL_PROPERTY,
@@ -326,6 +324,11 @@ impl AsyncElement for GlSink {
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        if name == FORCE_ASPECT_RATIO_NAME {
+            let force = value.as_bool().ok_or(PropError::Type)?;
+            self.force_aspect.store(force, Ordering::Relaxed);
+            return Ok(());
+        }
         match name {
             "title" => {
                 self.title = value.as_str().ok_or(PropError::Type)?.into();
@@ -343,6 +346,9 @@ impl AsyncElement for GlSink {
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
+        if name == FORCE_ASPECT_RATIO_NAME {
+            return Some(PropValue::Bool(self.force_aspect.load(Ordering::Relaxed)));
+        }
         match name {
             "title" => Some(PropValue::Str(self.title.clone())),
             "app-id" => Some(PropValue::Str(self.app_id.clone())),
@@ -352,14 +358,15 @@ impl AsyncElement for GlSink {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         self.pacer.adopt_framerate(absolute_caps);
-        let (format, w, h, colorimetry) = match absolute_caps {
+        let (format, w, h, colorimetry, pixel_aspect) = match absolute_caps {
             Caps::RawVideo {
                 format,
                 width: Dim::Fixed(w),
                 height: Dim::Fixed(h),
                 colorimetry,
+                pixel_aspect,
                 ..
-            } => (*format, *w, *h, *colorimetry),
+            } => (*format, *w, *h, *colorimetry, *pixel_aspect),
             _ => return Err(G2gError::CapsMismatch),
         };
         let mode = match format {
@@ -375,12 +382,16 @@ impl AsyncElement for GlSink {
             return Err(G2gError::CapsMismatch);
         }
 
-        // Mid-stream geometry change: same dims is a no-op; new dims tear down
-        // the worker and respawn, as WaylandSink does. A colorimetry refinement
-        // goes the same way: the convert weights are compiled into the worker's
-        // program, so a new matrix means a new program.
+        let video = GlVideo {
+            width: w,
+            height: h,
+            mode,
+            colorimetry,
+            pixel_aspect,
+        };
+        // The worker owns the textures, shader and window. Reopen it when their caps change.
         if self.worker.is_some() {
-            if w == self.width && h == self.height && colorimetry == self.colorimetry {
+            if self.video == Some(video) {
                 return Ok(ConfigureOutcome::Accepted);
             }
             self.shutdown();
@@ -390,9 +401,11 @@ impl AsyncElement for GlSink {
         let presented = Arc::clone(&self.frames_presented);
         let window_closed = Arc::clone(&self.window_closed);
         let latency = Arc::clone(&self.latency);
+        let force_aspect = Arc::clone(&self.force_aspect);
+        let (width, height) = video.window_size(force_aspect.load(Ordering::Relaxed));
         let params = WindowParams {
-            width: w,
-            height: h,
+            width,
+            height,
             title: self.title.clone(),
             app_id: self.app_id.clone(),
             fullscreen: false,
@@ -417,8 +430,8 @@ impl AsyncElement for GlSink {
                     cursor_shapes: None,
                     clipboard: None,
                 };
-                let presenter = SystemPresenter { mode, colorimetry };
-                if let Err(e) = run_gl_window(presenter, params, channels) {
+                let presenter = SystemPresenter;
+                if let Err(e) = run_gl_window(presenter, video, force_aspect, params, channels) {
                     std::eprintln!("{WORKER_NAME} worker error: {e:?}");
                 }
             })
@@ -433,9 +446,7 @@ impl AsyncElement for GlSink {
 
         self.cmd_tx = Some(tx);
         self.worker = Some(join);
-        self.width = w;
-        self.height = h;
-        self.colorimetry = colorimetry;
+        self.video = Some(video);
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -491,31 +502,20 @@ impl AsyncElement for GlSink {
 
 /// System-memory half of the shared GL worker: the frame bytes go into the
 /// textures with `glTexSubImage2D`, in the layout negotiation settled on.
-struct SystemPresenter {
-    mode: GlMode,
-    colorimetry: Colorimetry,
-}
+struct SystemPresenter;
 
 impl FramePresenter for SystemPresenter {
     type Frame = Vec<u8>;
 
-    fn mode(&self) -> GlMode {
-        self.mode
-    }
-
-    fn colorimetry(&self) -> Colorimetry {
-        self.colorimetry
-    }
-
-    fn present(&mut self, gl: &mut GlState, frame: &Self::Frame) -> Result<(), G2gError> {
-        gl.upload_system_and_draw(frame)
+    fn upload(&mut self, gl: &mut GlState, frame: &Self::Frame) -> Result<(), G2gError> {
+        gl.upload_system(frame)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use g2g_core::VideoCodec;
+    use g2g_core::{Colorimetry, VideoCodec};
 
     fn caps(format: RawVideoFormat, w: u32, h: u32) -> Caps {
         Caps::RawVideo {
@@ -596,6 +596,20 @@ mod tests {
                 el.properties().iter().any(|p| p.name == "title"),
                 "{name} exposes title"
             );
+            assert!(el
+                .properties()
+                .iter()
+                .any(|p| p.name == FORCE_ASPECT_RATIO_NAME));
+            assert_eq!(
+                el.get_property(FORCE_ASPECT_RATIO_NAME),
+                Some(PropValue::Bool(true))
+            );
+            el.set_property(FORCE_ASPECT_RATIO_NAME, PropValue::Bool(false))
+                .unwrap();
+            assert_eq!(
+                el.get_property(FORCE_ASPECT_RATIO_NAME),
+                Some(PropValue::Bool(false))
+            );
             el.set_property("title", PropValue::Str(String::from("wall")))
                 .expect("title is settable through the registry element");
             assert_eq!(
@@ -666,12 +680,29 @@ mod tests {
         colorimetry: Colorimetry,
         frame: &[u8],
     ) -> Result<Vec<u8>, String> {
+        let video = GlVideo {
+            width: w,
+            height: h,
+            mode,
+            colorimetry,
+            pixel_aspect: g2g_core::PixelAspect::Any,
+        };
+        render_window(gl, video, (w, h), false, frame)
+    }
+
+    fn render_window(
+        gl: glow::Context,
+        video: GlVideo,
+        (w, h): (u32, u32),
+        force_aspect: bool,
+        frame: &[u8],
+    ) -> Result<Vec<u8>, String> {
         // SAFETY: the caller's context is current on this thread; the FBO and its
-        // colour texture are created here and sized w x h, which is also the
-        // viewport GlState draws with and the extent read back below.
+        // colour texture are created here and sized w x h, the extent read back below.
         unsafe {
             let mut state =
-                GlState::build(gl, w, h, mode, colorimetry).map_err(|e| alloc::format!("{e}"))?;
+                GlState::build(gl, video.width, video.height, video.mode, video.colorimetry)
+                    .map_err(|e| alloc::format!("{e}"))?;
             let gl = state.gl();
             let color = gl.create_texture()?;
             gl.bind_texture(glow::TEXTURE_2D, Some(color));
@@ -700,8 +731,9 @@ mod tests {
             }
 
             state
-                .upload_system_and_draw(frame)
+                .upload_system(frame)
                 .map_err(|e| alloc::format!("{e:?}"))?;
+            state.draw_in_window(video.viewport(force_aspect, (w, h)), h);
 
             let gl = state.gl();
             let mut flipped = alloc::vec![0u8; (w * h * 4) as usize];
@@ -728,6 +760,44 @@ mod tests {
                 out[r * row..(r + 1) * row].copy_from_slice(&flipped[src..src + row]);
             }
             Ok(out)
+        }
+    }
+
+    #[test]
+    fn window_uses_pixel_aspect_and_centres_the_picture_after_resize() {
+        use g2g_core::{AspectRatio, PixelAspect};
+
+        let video = GlVideo {
+            width: 4,
+            height: 4,
+            mode: GlMode::Rgba,
+            colorimetry: Colorimetry::UNKNOWN,
+            pixel_aspect: PixelAspect::Exact(AspectRatio::new(2, 1).unwrap()),
+        };
+        assert_eq!(video.window_size(true), (8, 4));
+        assert_eq!(video.window_size(false), (4, 4));
+
+        let white = [255; 4 * 4 * 4];
+        for force_aspect in [true, false] {
+            let (_headless, gl) = match headless_context(HeadlessApi::GlEs3) {
+                Ok(context) => context,
+                Err(err) => {
+                    std::eprintln!("skipped: no headless GL ES context: {err}");
+                    return;
+                }
+            };
+            let rendered = render_window(gl, video, (8, 7), force_aspect, &white).unwrap();
+            for (row, bytes) in rendered.chunks_exact(8 * 4).enumerate() {
+                let expected = if !force_aspect || (1..5).contains(&row) {
+                    [255; 4]
+                } else {
+                    [0, 0, 0, 255]
+                };
+                assert!(
+                    bytes.chunks_exact(4).all(|pixel| pixel == expected),
+                    "row {row}"
+                );
+            }
         }
     }
 
