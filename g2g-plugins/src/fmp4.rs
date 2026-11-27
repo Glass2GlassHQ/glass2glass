@@ -2693,7 +2693,11 @@ pub(crate) fn parse_fragments(
 /// Single video track (the first `trak`, matching [`parse_header`]); the absolute
 /// chunk offsets are read straight from `data`, so the `mdat` box framing (and
 /// any 64-bit `largesize`) never matters.
-pub(crate) fn parse_progressive(data: &[u8], timescale: u32) -> Result<Vec<Sample>, G2gError> {
+pub(crate) fn parse_progressive(
+    data: &[u8],
+    timescale: u32,
+    codec: VideoCodec,
+) -> Result<Vec<Sample>, G2gError> {
     let moov = find_box(data, b"moov").ok_or(G2gError::CapsMismatch)?;
     let trak = find_box(moov, b"trak").ok_or(G2gError::CapsMismatch)?;
     let mdia = find_box(trak, b"mdia").ok_or(G2gError::CapsMismatch)?;
@@ -2708,7 +2712,7 @@ pub(crate) fn parse_progressive(data: &[u8], timescale: u32) -> Result<Vec<Sampl
         .filter(|entries| {
             find_box(entries, b"mp4v").is_some() || find_box(entries, b"av01").is_some()
         })
-        .map_or(SampleFraming::Video, |_| SampleFraming::PassThrough);
+        .map_or(SampleFraming::Video(codec), |_| SampleFraming::PassThrough);
     parse_progressive_track(data, stbl, timescale, framing)
 }
 
@@ -2718,7 +2722,7 @@ pub(crate) fn parse_progressive(data: &[u8], timescale: u32) -> Result<Vec<Sampl
 /// 2-byte length prefix to the UTF-8 cue.
 #[derive(Debug, Clone, Copy)]
 enum SampleFraming {
-    Video,
+    Video(VideoCodec),
     PassThrough,
     // a long-tail video track, which also keeps a sample cut short by the end of a truncated file
     TaggedVideo,
@@ -2744,7 +2748,9 @@ impl SampleFraming {
     /// The de-framing a track's [`TrackKind`] selects.
     fn of(kind: &TrackKind) -> Self {
         match kind {
-            TrackKind::Video { codec, .. } if length_prefixed(*codec) => SampleFraming::Video,
+            TrackKind::Video { codec, .. } if length_prefixed(*codec) => {
+                SampleFraming::Video(*codec)
+            }
             TrackKind::Video {
                 codec: VideoCodec::Tagged(_),
                 ..
@@ -2857,6 +2863,8 @@ pub(crate) struct ProgressiveTrackIndex {
     timescale: u32,
     pub(crate) samples: Vec<StoredSample>,
     description_param_sets: Vec<Option<EntryParamSets>>,
+    // libavformat parses the keyframes from the video headers when the stss lists no sample
+    keyframes_unlisted: bool,
     // stts (count, delta) runs, which give a PCM chunk cut short by the end of the file its duration
     stts_runs: Vec<(u32, u32)>,
 }
@@ -2883,6 +2891,7 @@ impl ProgressiveTrackIndex {
                     timescale,
                     samples: quicktime_chunk_samples(&chunks, timescale, sound, default_size),
                     description_param_sets: Vec::new(),
+                    keyframes_unlisted: false,
                     stts_runs: Vec::new(),
                 });
             }
@@ -2991,6 +3000,7 @@ impl ProgressiveTrackIndex {
             timescale,
             samples: Vec::new(),
             description_param_sets: Vec::new(),
+            keyframes_unlisted: false,
             stts_runs,
         };
         if let SampleFraming::Pcm(pcm) = framing {
@@ -3010,9 +3020,10 @@ impl ProgressiveTrackIndex {
             ),
             None => None,
         };
+        index.keyframes_unlisted = sync.as_ref().is_some_and(Vec::is_empty);
 
         // a sample description switch carries its own parameter sets, so they go in-band
-        if let SampleFraming::Video = framing {
+        if let SampleFraming::Video(_) = framing {
             index.description_param_sets = video_entry_param_sets(stbl)?;
         }
         let mut previous_description = FIRST_SAMPLE_DESCRIPTION;
@@ -3085,7 +3096,7 @@ impl ProgressiveTrackIndex {
             return Ok(None);
         };
         let annexb = match self.framing {
-            SampleFraming::Video => {
+            SampleFraming::Video(_) => {
                 let annexb = avcc_to_annexb(raw)?;
                 let switched_sets = stored.switched_description.and_then(|description| {
                     self.description_param_sets
@@ -3108,8 +3119,15 @@ impl ProgressiveTrackIndex {
             #[cfg(feature = "ffmpeg-long-tail")]
             SampleFraming::QuickTimeChunks(_) => raw.to_vec(),
         };
+        let keyframe = match self.framing {
+            SampleFraming::Video(codec) if self.keyframes_unlisted => {
+                au_is_keyframe(codec, &annexb)
+            }
+            _ => stored.keyframe,
+        };
         Ok(Some(Sample {
             annexb,
+            keyframe,
             ..stored.without_bytes()
         }))
     }
@@ -4645,12 +4663,12 @@ mod tests {
         };
         // stco offset is filled once the moov length is known (it is constant in
         // the offset value, so a placeholder build gives the right length).
-        let build = |chunk_off: u32| {
+        let build = |chunk_off: u32, stss: &[u8]| {
             let mut stco_body = 1u32.to_be_bytes().to_vec();
             stco_body.extend_from_slice(&chunk_off.to_be_bytes());
             let stco = full_box(b"stco", 0, 0, &stco_body);
             let mut stbl = Vec::new();
-            for t in [&stsz, &stts, &stsc, &stco, &stss] {
+            for t in [&stsz[..], &stts, &stsc, &stco, stss] {
                 stbl.extend_from_slice(t);
             }
             let stbl = mp4_box(b"stbl", &stbl);
@@ -4659,12 +4677,16 @@ mod tests {
             let trak = mp4_box(b"trak", &mdia);
             mp4_box(b"moov", &trak)
         };
-        let moov_len = build(0).len();
-        let chunk_off = (moov_len + 8) as u32; // mdat payload starts after its header
-        let mut file = build(chunk_off);
-        file.extend_from_slice(&mp4_box(b"mdat", &mdat_body));
+        let file_with = |stss: &[u8]| {
+            let moov_len = build(0, stss).len();
+            let chunk_off = (moov_len + 8) as u32; // mdat payload starts after its header
+            let mut file = build(chunk_off, stss);
+            file.extend_from_slice(&mp4_box(b"mdat", &mdat_body));
+            file
+        };
+        let file = file_with(&stss);
 
-        let samples = parse_progressive(&file, 1000).expect("progressive parse");
+        let samples = parse_progressive(&file, 1000, VideoCodec::H264).expect("progressive parse");
         assert_eq!(samples.len(), 2);
         // AVCC length prefixes became Annex-B start codes.
         assert_eq!(samples[0].annexb, alloc::vec![0, 0, 0, 1, 0x65, 0xAA]);
@@ -4675,9 +4697,20 @@ mod tests {
         assert_eq!(samples[1].pts_ns, 1_000_000_000); // 1000 / timescale 1000 s
 
         // a file cut inside the last sample keeps the whole ones
-        let truncated = parse_progressive(&file[..file.len() - 1], 1000).expect("truncated parse");
+        let truncated = parse_progressive(&file[..file.len() - 1], 1000, VideoCodec::H264)
+            .expect("truncated parse");
         assert_eq!(truncated.len(), 1);
         assert_eq!(truncated[0].annexb, samples[0].annexb);
+
+        let no_sync_samples = file_with(&full_box(b"stss", 0, 0, &0u32.to_be_bytes()));
+        let sniffed =
+            parse_progressive(&no_sync_samples, 1000, VideoCodec::H264).expect("progressive parse");
+        let keyframes: Vec<bool> = sniffed.iter().map(|sample| sample.keyframe).collect();
+        assert_eq!(
+            keyframes,
+            [true, false],
+            "an empty stss keys the IDR from its NAL type"
+        );
 
         // a long-tail video track also keeps what remains of the cut sample
         let cut_file = &file[..file.len() - 1];
@@ -4787,7 +4820,7 @@ mod tests {
         let mut file = build(mdat_start);
         file.extend_from_slice(&mp4_box(b"mdat", &mdat_body));
 
-        let samples = parse_progressive(&file, 1).expect("progressive parse");
+        let samples = parse_progressive(&file, 1, VideoCodec::H264).expect("progressive parse");
         assert_eq!(samples.len(), sample_count as usize);
         for (index, sample) in samples.iter().enumerate() {
             assert_eq!(sample.annexb, alloc::vec![0, 0, 0, 1, index as u8]);
@@ -5664,6 +5697,7 @@ mod tests {
             timescale: u32::from(SAMPLE_RATE),
             samples: quicktime_chunk_samples(&chunks, u32::from(SAMPLE_RATE), sound, 1),
             description_param_sets: Vec::new(),
+            keyframes_unlisted: false,
             stts_runs: Vec::new(),
         };
         let samples = index.unpack_all(&data).expect("the chunks unpack");
@@ -5742,6 +5776,7 @@ mod tests {
                 })
                 .collect(),
             description_param_sets: Vec::new(),
+            keyframes_unlisted: false,
             stts_runs: Vec::new(),
         };
         let samples = index.unpack_all(&[short, &stored].concat()).unwrap();

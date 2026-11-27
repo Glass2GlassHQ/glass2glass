@@ -1297,8 +1297,17 @@ impl Mp4DemuxN {
         let Some(port) = self.port_of(track_id) else {
             return Ok(()); // a track no port forwards
         };
+        let edit_start_ns = track_by_id(tracks, track_id).presentation_segment().start;
+        // ffmpeg -ss counts from an edit list's first presented pts, which B frames put before the first decoded sample's
+        let seek_origin_ns = if edit_start_ns > 0 {
+            self.port_first_presented_ns[port]
+                .expect("learn_presentation_start ran on the samples being admitted")
+                .saturating_add(edit_start_ns)
+        } else {
+            sample.pts_ns
+        };
         self.seek
-            .note_track_unit(u64::from(track_id), sample.pts_ns);
+            .note_track_unit(u64::from(track_id), seek_origin_ns);
         let admitted = self
             .seek
             .admit(port, sample.pts_ns, sample.keyframe, sample);

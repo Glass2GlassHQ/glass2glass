@@ -1286,7 +1286,9 @@ earlier than its edit-list start plus that presentation start and counts stream
 time from there, so the tracks keep one origin and a position read back seeks to
 its frame. A fragmented file that also keeps samples in its `moov` (ffmpeg's
 `frag_keyframe` without `empty_moov`) is read whole at EOS: the sample-table run
-and the fragments after it, in decode order.
+and the fragments after it, in decode order. An H.264 or H.265 track whose `stss`
+lists no sample takes its keyframes from the NAL types of each sample, as
+libavformat does.
 
 `AviDemuxN` (`avidemux` with named pads) reads the `hdrl` and the header of the
 first `movi` list as they arrive. In a run that parks the source at the end of

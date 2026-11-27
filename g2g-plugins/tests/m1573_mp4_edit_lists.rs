@@ -9,8 +9,8 @@ mod audio_mp4;
 
 use std::path::PathBuf;
 
-use g2g_core::runtime::{parse_launch, run_graph};
-use g2g_core::{PipelineClock, RawVideoFormat};
+use g2g_core::runtime::{attach_seek, parse_launch, run_graph};
+use g2g_core::{PipelineClock, RawVideoFormat, Seek};
 use g2g_plugins::registry::default_registry;
 
 use audio_mp4::{full_box, mp4_box};
@@ -112,7 +112,12 @@ fn temp_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("g2g-m1573-{}-{name}", std::process::id()))
 }
 
-async fn decoded_frames(edits: &[Edit], decode_chain: &str, name: &str) -> Vec<Vec<u8>> {
+async fn decoded_frames(
+    edits: &[Edit],
+    decode_chain: &str,
+    name: &str,
+    seek_ns: Option<u64>,
+) -> Vec<Vec<u8>> {
     let fixture = std::fs::read(FIXTURE).expect("fixture reads");
     let input = temp_path(&format!("{name}.mp4"));
     std::fs::write(&input, with_elst(&fixture, &elst(edits))).expect("edited file writes");
@@ -122,7 +127,10 @@ async fn decoded_frames(edits: &[Edit], decode_chain: &str, name: &str) -> Vec<V
         input.display(),
         output.display()
     );
-    let graph = parse_launch(&default_registry(), &line).expect("launch line parses");
+    let mut graph = parse_launch(&default_registry(), &line).expect("launch line parses");
+    let _seek = seek_ns.map(|target_ns| {
+        attach_seek(&mut graph, Seek::flush_to(target_ns)).expect("the seek attaches")
+    });
     run_graph(graph, &ZeroClock, 4).await.expect("decode runs");
     let raw = std::fs::read(&output).expect("decode output reads");
     let _ = std::fs::remove_file(&input);
@@ -154,6 +162,7 @@ async fn presents_both_edits(decode_chain: &str, name: &str) {
         &[Edit::Media(ALL_FRAMES)],
         decode_chain,
         &format!("{name}-all"),
+        None,
     )
     .await;
     assert_eq!(all.len(), FRAME_COUNT);
@@ -161,6 +170,7 @@ async fn presents_both_edits(decode_chain: &str, name: &str) {
         &[Edit::Media(FIRST_EDIT), Edit::Media(SECOND_EDIT)],
         decode_chain,
         name,
+        None,
     )
     .await;
     assert_eq!(edited.len(), FIRST_EDIT.count + SECOND_EDIT.count);
@@ -183,15 +193,46 @@ async fn an_empty_first_edit_keeps_the_media_edit_after_it() {
         first: 3,
         count: 12,
     };
-    let all = decoded_frames(&[Edit::Media(ALL_FRAMES)], "decodebin", "empty-first-all").await;
+    let all = decoded_frames(
+        &[Edit::Media(ALL_FRAMES)],
+        "decodebin",
+        "empty-first-all",
+        None,
+    )
+    .await;
     let edited = decoded_frames(
         &[Edit::Empty { count: 5 }, Edit::Media(MEDIA_EDIT)],
         "decodebin",
         "empty-first",
+        None,
     )
     .await;
     assert_eq!(edited.len(), MEDIA_EDIT.count);
     assert!(edited == presented(&all, &[MEDIA_EDIT]));
+}
+
+// the edit starts presenting three frames past the first decoded sample, and ffmpeg -ss counts from the edit's start
+#[tokio::test]
+async fn a_seek_counts_from_where_the_edit_starts() {
+    const MEDIA_EDIT: Frames = Frames {
+        first: 3,
+        count: 20,
+    };
+    const TARGET_FRAMES: usize = 6;
+    let all = decoded_frames(&[Edit::Media(ALL_FRAMES)], "decodebin", "seek-all", None).await;
+    let target_ns = TARGET_FRAMES as u64 * 1_000_000_000 / u64::from(FRAMES_PER_SECOND);
+    let seeked = decoded_frames(
+        &[Edit::Media(MEDIA_EDIT)],
+        "decodebin",
+        "seek",
+        Some(target_ns),
+    )
+    .await;
+    let after_target = Frames {
+        first: MEDIA_EDIT.first + TARGET_FRAMES,
+        count: MEDIA_EDIT.count - TARGET_FRAMES,
+    };
+    assert!(seeked == presented(&all, &[after_target]));
 }
 
 // mono AAC-LC at 48 kHz, its moov after its mdat and its one edit starting past the encoder priming

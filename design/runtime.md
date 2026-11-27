@@ -703,8 +703,10 @@ index lookup (Matroska `Cues`, the Ogg guess) waits for it and rescans from the 
 start until then. `tsdemux` holds every PID's units while a seek waits for the stream
 start, until each PMT stream has shown a stamped unit (or EOS, or 5 MB, ffmpeg's
 probesize), and counts from the earliest of those first stamps, so a file whose audio
-starts before its video seeks as ffmpeg does. `Mp4Src` counts from the first sample, `Mp4Demux` from the later of
-the edit-list start and the first sample. Positions use the same origin. Until a
+starts before its video seeks as ffmpeg does. `Mp4Src` counts from the first sample.
+`Mp4Demux` counts from the later of the edit-list start and the first presented sample
+when the edit list starts past the media start, since B frames can present before the
+first decoded sample, and from the first decoded sample otherwise. Positions use the same origin. Until a
 seek, a unit presenting before the segment start or the stream start lowers both, as
 does another FLV track's earlier first pts, and the demuxer sends the lowered segment again on every port that opened, as
 `matroskademux` does. `tsdemux` compares by pts, so its opening at the first DTS stays.

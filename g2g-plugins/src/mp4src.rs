@@ -269,7 +269,7 @@ impl SourceLoop for Mp4Src {
                     None,
                 )?
             } else {
-                parse_progressive(&data, header.timescale)?
+                parse_progressive(&data, header.timescale, header.codec)?
             };
             let framerate_q16 = header.framerate_q16.or_else(|| {
                 find_box(&data, b"moof")
