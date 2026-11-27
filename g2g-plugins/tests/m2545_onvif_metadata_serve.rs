@@ -17,7 +17,6 @@ use annexb::access_units;
 use collect_sink::CollectSink;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::meta::{
     AnalyticsMeta, AnalyticsNode, BBox, ObjectDetection, RelationKind, Tracking, WallClockMeta,
 };

@@ -26,8 +26,7 @@ use std::thread;
 use aes::cipher::{block_padding::NoPadding, BlockEncryptMut, KeyIvInit};
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    G2gError, MemoryDomain, MultiOutputElement, MultiOutputSink, OutputSink, PipelinePacket,
-    PushOutcome,
+    G2gError, MultiOutputElement, MultiOutputSink, OutputSink, PipelinePacket, PushOutcome,
 };
 use g2g_plugins::cenc::{new_key_handle, CencKeyHandle};
 use g2g_plugins::hlssrc::HlsSrc;
@@ -88,7 +87,6 @@ impl MultiOutputSink for PortCapture {
 
 fn byte_frame(bytes: Vec<u8>) -> PipelinePacket {
     use g2g_core::frame::{Frame, FrameTiming};
-    use g2g_core::memory::SystemSlice;
     PipelinePacket::DataFrame(Frame::from_system_bytes(bytes, FrameTiming::default(), 0))
 }
 

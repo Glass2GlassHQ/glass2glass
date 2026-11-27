@@ -52,9 +52,7 @@ use std::time::Instant;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::MemoryDomain;
 use g2g_core::metrics::{monotonic_ns, LatencySnapshot};
-use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, Dim, Rate, RawVideoFormat, SystemSlice, VideoCodec,
-};
+use g2g_core::{AsyncElement, Caps, ConfigureOutcome, Dim, Rate, RawVideoFormat, VideoCodec};
 use g2g_plugins::cudaglsink::CudaGlSink;
 use g2g_plugins::ffmpegdec::{Backend, FfmpegVideoDec, OutputFormat};
 use g2g_plugins::waylandsink::WaylandSink;
