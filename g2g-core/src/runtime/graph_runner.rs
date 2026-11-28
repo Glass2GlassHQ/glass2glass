@@ -4342,7 +4342,10 @@ pub fn copy_plan(
             continue;
         }
         let source = edge.src.node;
-        if let Some(domain) = vg.element(source).and_then(|node| node.output_domains().preferred()) {
+        if let Some(domain) = vg
+            .element(source)
+            .and_then(|node| node.output_domains().preferred())
+        {
             if !domain.is_system() {
                 let label = caps_label(vg, source);
                 plan.device_fallbacks
