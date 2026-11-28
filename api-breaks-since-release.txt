@@ -10,11 +10,13 @@ auto_trait_impl_removed: type OwnedDmaBuf is no longer RefUnwindSafe
 auto_trait_impl_removed: type OwnedDmaBuf is no longer UnwindSafe
 auto_trait_impl_removed: type PipelineProgress is no longer RefUnwindSafe
 auto_trait_impl_removed: type PipelineProgress is no longer UnwindSafe
+constructible_struct_adds_field: field CopyPlan.device_fallbacks
 constructible_struct_adds_field: field ElementDesc.derive_output
 constructible_struct_adds_field: field ElementLatency.age_at_process
 constructible_struct_adds_field: field StageVisit.age_ns
 enum_discriminants_undefined_non_unit_variant: enum RawVideoFormat
 enum_marked_non_exhaustive: enum Reconfigure
+enum_variant_added: variant CopyPolicy:DenyDeviceFallback
 enum_variant_added: variant GraphNodeRef:Duplex
 enum_variant_added: variant NodeConstraint:Duplex
 enum_variant_added: variant NodeKind:Duplex

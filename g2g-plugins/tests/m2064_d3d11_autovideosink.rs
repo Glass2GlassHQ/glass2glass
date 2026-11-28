@@ -17,10 +17,11 @@ impl PipelineClock for ZeroClock {
 
 const FRAMES: u64 = 10;
 
+// Disable clock pacing so runner timing cannot drop a frame before it reaches the swapchain.
 #[tokio::test]
 async fn autovideosink_presents_system_frames_through_d3d11() {
     let line = format!(
-        "videotestsrc num-buffers={FRAMES} ! video/x-raw,format=NV12,width=320,height=240 ! autovideosink"
+        "videotestsrc num-buffers={FRAMES} ! video/x-raw,format=NV12,width=320,height=240 ! autovideosink sync=false"
     );
     assert_presents(&line).await;
 }
@@ -30,7 +31,8 @@ async fn d3d11videosink_accepts_aspect_caps_rewritten_by_a_scaler() {
     for force in [true, false] {
         let line = format!(
             "videotestsrc num-buffers={FRAMES} ! video/x-raw,format=NV12,width=320,height=180 \
-             ! videoscale ! video/x-raw,width=320,height=240 ! d3d11videosink force-aspect-ratio={force}"
+             ! videoscale ! video/x-raw,width=320,height=240 \
+             ! d3d11videosink force-aspect-ratio={force} sync=false"
         );
         assert_presents(&line).await;
     }
@@ -45,12 +47,11 @@ async fn assert_presents(line: &str) {
     assert_eq!(stats.frames_consumed, FRAMES, "{line}");
     // d3d11videosink provides the pipeline clock, fakevideosink provides none
     assert_eq!(stats.clock_priority, ClockPriority::Provider, "{line}");
-    // a failing present still consumes the frame, so count what reached the swapchain
-    let presented: u64 = stats
+    // A failing present still consumes the frame, so count what reached the swapchain.
+    let presentation = stats
         .per_element
         .iter()
-        .filter_map(|e| e.presentation)
-        .map(|p| p.presented)
-        .sum();
-    assert_eq!(presented, FRAMES, "{line}");
+        .find_map(|e| e.presentation)
+        .expect("d3d11videosink reports presentation stats");
+    assert_eq!(presentation.presented, FRAMES, "{line}: {presentation:?}");
 }
