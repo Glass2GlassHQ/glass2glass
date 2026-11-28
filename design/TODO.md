@@ -40,7 +40,6 @@ The plan is [remote.md](remote.md).
 - Rotate the Windows service host's remotewt certificate before it expires
   once a browser client exists, since browsers reject an expired pinned
   certificate.
-- Apply a periodic effect's envelope on the virtual uinput pad.
 - Feel the remote desktop's rumble on a real pad on the Linux and Windows
   clients.
 - A Chrome client on the same signaling and the same data channel.

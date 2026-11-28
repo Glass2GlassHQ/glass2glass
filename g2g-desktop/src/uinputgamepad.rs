@@ -13,8 +13,8 @@ use std::time::Duration;
 use evdev::uinput::{VirtualDevice, VirtualEventStream};
 use evdev::{
     AbsInfo, AbsoluteAxisCode, AbsoluteAxisEvent, AttributeSet, BusType, EventSummary,
-    FFEffectCode, FFEffectKind, FFReplay, InputEvent, InputId, KeyCode, KeyEvent, UInputCode,
-    UinputAbsSetup,
+    FFEffectCode, FFEffectData, FFEffectKind, FFEnvelope, FFReplay, InputEvent, InputId, KeyCode,
+    KeyEvent, UInputCode, UinputAbsSetup,
 };
 use tokio::time::{Instant, Sleep};
 
@@ -33,6 +33,8 @@ const XBOX_360_PRODUCT: u16 = 0x028e;
 const XBOX_360_VERSION: u16 = 0x0110;
 // the linux xpad driver holds this many force feedback effects per pad
 const RUMBLE_EFFECTS: u32 = 16;
+// Linux's memless driver updates the envelope every 50 ms during a ramp.
+const ENVELOPE_STEP_MS: u64 = 50;
 // linux's memless force feedback layer adds the periodic waveforms and gain to every xpad pad, and gilrs requires them
 const FORCE_FEEDBACK_CODES: [FFEffectCode; 8] = [
     FFEffectCode::FF_RUMBLE,
@@ -97,21 +99,131 @@ fn build_gamepad() -> io::Result<VirtualDevice> {
 }
 
 #[derive(Debug, Clone, Copy)]
+enum RumbleStrength {
+    Motors(MotorLevels),
+    Periodic {
+        magnitude: u16,
+        envelope: FFEnvelope,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
 struct RumbleEffect {
-    motors: MotorLevels,
+    strength: RumbleStrength,
     replay: FFReplay,
+}
+
+impl From<FFEffectData> for RumbleEffect {
+    fn from(effect: FFEffectData) -> Self {
+        let strength = match effect.kind {
+            FFEffectKind::Rumble {
+                strong_magnitude,
+                weak_magnitude,
+            } => RumbleStrength::Motors(MotorLevels {
+                low_frequency: strong_magnitude,
+                high_frequency: weak_magnitude,
+            }),
+            FFEffectKind::Periodic {
+                magnitude,
+                envelope,
+                ..
+            } => RumbleStrength::Periodic {
+                magnitude: magnitude.unsigned_abs(),
+                envelope,
+            },
+            _ => unreachable!("linux uploads only the effect types the pad declares"),
+        };
+        Self {
+            strength,
+            replay: effect.replay,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
 struct PlayingEffect {
     starts: Instant,
     ends: Option<Instant>,
+    replay_ms: u16,
 }
 
 impl PlayingEffect {
-    fn is_on(&self, now: Instant) -> bool {
-        self.starts <= now && self.ends.is_none_or(|ends| now < ends)
+    fn sample(self, strength: RumbleStrength, now: Instant) -> (MotorLevels, Option<Instant>) {
+        if now < self.starts {
+            return (MotorLevels::default(), Some(self.starts));
+        }
+        if self.ends.is_some_and(|end| now >= end) {
+            return (MotorLevels::default(), None);
+        }
+        match strength {
+            RumbleStrength::Motors(motors) => (motors, self.ends),
+            RumbleStrength::Periodic {
+                magnitude,
+                envelope,
+            } => self.sample_periodic(magnitude, envelope, now),
+        }
     }
+
+    fn sample_periodic(
+        self,
+        magnitude: u16,
+        envelope: FFEnvelope,
+        now: Instant,
+    ) -> (MotorLevels, Option<Instant>) {
+        let elapsed_ms = u64::try_from((now - self.starts).as_millis()).unwrap_or(u64::MAX);
+        let replay_ms = u64::from(self.replay_ms);
+        let position_ms = elapsed_ms.checked_rem(replay_ms).unwrap_or(elapsed_ms);
+        let attack_ms = u64::from(envelope.attack_length);
+        let fade_ms = u64::from(envelope.fade_length);
+
+        // Each replay starts its own attack. An indefinite effect has no fade.
+        let (level, next_ms) = if position_ms < attack_ms {
+            let attack_end = if replay_ms == 0 {
+                attack_ms
+            } else {
+                attack_ms.min(replay_ms)
+            };
+            (
+                ramp_level(envelope.attack_level, magnitude, position_ms, attack_ms),
+                Some((position_ms + ENVELOPE_STEP_MS).min(attack_end)),
+            )
+        } else if replay_ms != 0 && fade_ms != 0 {
+            let remaining_ms = replay_ms - position_ms;
+            if remaining_ms <= fade_ms {
+                (
+                    ramp_level(envelope.fade_level, magnitude, remaining_ms, fade_ms),
+                    Some((position_ms + ENVELOPE_STEP_MS).min(replay_ms)),
+                )
+            } else {
+                (magnitude, Some(replay_ms - fade_ms))
+            }
+        } else {
+            (
+                magnitude,
+                (replay_ms != 0 && attack_ms != 0).then_some(replay_ms),
+            )
+        };
+
+        // Linux's memless layer drives both motors at the periodic magnitude.
+        let level = u32::from(level) * u32::from(u16::MAX) / i16::MAX as u32;
+        let level = u16::try_from(level).unwrap_or(u16::MAX);
+        let next = next_ms.map(|position| {
+            self.starts + Duration::from_millis(elapsed_ms - position_ms + position)
+        });
+        (
+            MotorLevels {
+                low_frequency: level,
+                high_frequency: level,
+            },
+            next.into_iter().chain(self.ends).min(),
+        )
+    }
+}
+
+fn ramp_level(endpoint: u16, magnitude: u16, distance_ms: u64, duration_ms: u64) -> u16 {
+    let endpoint = i64::from(endpoint.min(i16::MAX as u16));
+    let delta = i64::from(magnitude) - endpoint;
+    (endpoint + delta * distance_ms as i64 / duration_ms as i64) as u16
 }
 
 #[derive(Debug)]
@@ -156,37 +268,37 @@ impl RumbleEffects {
         let ends = (replay.length != 0).then(|| {
             starts + Duration::from_millis(u64::from(replay.length)) * count.unsigned_abs()
         });
-        self.playing.insert(id, PlayingEffect { starts, ends });
+        self.playing.insert(
+            id,
+            PlayingEffect {
+                starts,
+                ends,
+                replay_ms: replay.length,
+            },
+        );
     }
 
     // linux adds the magnitudes of rumble effects that play at once, then applies the gain
-    fn motors(&self, now: Instant) -> MotorLevels {
-        let sum = self
-            .playing
-            .iter()
-            .filter(|(_, playing)| playing.is_on(now))
-            .map(|(id, _)| self.uploaded[id].motors)
-            .fold(MotorLevels::default(), |sum, motors| MotorLevels {
-                low_frequency: sum.low_frequency.saturating_add(motors.low_frequency),
-                high_frequency: sum.high_frequency.saturating_add(motors.high_frequency),
-            });
+    fn sample(&self, now: Instant) -> (MotorLevels, Option<Instant>) {
+        let mut sum = MotorLevels::default();
+        let mut next_change = None;
+        for (id, playing) in &self.playing {
+            let (motors, next) = playing.sample(self.uploaded[id].strength, now);
+            sum.low_frequency = sum.low_frequency.saturating_add(motors.low_frequency);
+            sum.high_frequency = sum.high_frequency.saturating_add(motors.high_frequency);
+            next_change = next_change.into_iter().chain(next).min();
+        }
         let scaled = |level: u16| {
             let level = u32::from(level) * u32::from(self.gain) / u32::from(u16::MAX);
             u16::try_from(level).expect("a gain of at most one keeps the level in range")
         };
-        MotorLevels {
-            low_frequency: scaled(sum.low_frequency),
-            high_frequency: scaled(sum.high_frequency),
-        }
-    }
-
-    fn next_change(&self, now: Instant) -> Option<Instant> {
-        self.playing
-            .values()
-            .flat_map(|playing| [Some(playing.starts), playing.ends])
-            .flatten()
-            .filter(|&at| at > now)
-            .min()
+        (
+            MotorLevels {
+                low_frequency: scaled(sum.low_frequency),
+                high_frequency: scaled(sum.high_frequency),
+            },
+            next_change,
+        )
     }
 }
 
@@ -220,30 +332,8 @@ impl Pad {
         match event.destructure() {
             EventSummary::UInput(upload, UInputCode::UI_FF_UPLOAD, _) => {
                 let upload = self.device.device_mut().process_ff_upload(upload)?;
-                let effect = upload.effect();
-                let motors = match effect.kind {
-                    FFEffectKind::Rumble {
-                        strong_magnitude,
-                        weak_magnitude,
-                    } => MotorLevels {
-                        low_frequency: strong_magnitude,
-                        high_frequency: weak_magnitude,
-                    },
-                    // linux's memless layer drives both motors at a periodic effect's magnitude
-                    FFEffectKind::Periodic { magnitude, .. } => {
-                        let level = u32::from(magnitude.unsigned_abs()) * u32::from(u16::MAX)
-                            / i16::MAX as u32;
-                        let level = u16::try_from(level).unwrap_or(u16::MAX);
-                        MotorLevels {
-                            low_frequency: level,
-                            high_frequency: level,
-                        }
-                    }
-                    _ => unreachable!("linux uploads only the effect types the pad declares"),
-                };
-                let replay = effect.replay;
                 self.effects
-                    .upload(upload.effect_id(), RumbleEffect { motors, replay });
+                    .upload(upload.effect_id(), upload.effect().into());
             }
             EventSummary::UInput(erase, UInputCode::UI_FF_ERASE, _) => {
                 let erase = self.device.device_mut().process_ff_erase(erase)?;
@@ -269,13 +359,13 @@ impl Pad {
             self.handle(event?)?;
         }
         let now = Instant::now();
-        if let Some(at) = self.effects.next_change(now) {
+        let (motors, next_change) = self.effects.sample(now);
+        if let Some(at) = next_change {
             self.next_change.as_mut().reset(at);
             if self.next_change.as_mut().poll(cx).is_ready() {
                 cx.waker().wake_by_ref();
             }
         }
-        let motors = self.effects.motors(now);
         if motors == self.sent {
             return Poll::Pending;
         }
@@ -374,50 +464,121 @@ impl InjectEvents for UinputGamepads {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use evdev::{FFTrigger, FFWaveform};
+
+    fn levels(low_frequency: u16, high_frequency: u16) -> MotorLevels {
+        MotorLevels {
+            low_frequency,
+            high_frequency,
+        }
+    }
 
     fn effect(low_frequency: u16, high_frequency: u16, delay: u16, length: u16) -> RumbleEffect {
         RumbleEffect {
-            motors: MotorLevels {
-                low_frequency,
-                high_frequency,
-            },
+            strength: RumbleStrength::Motors(levels(low_frequency, high_frequency)),
             replay: FFReplay { length, delay },
         }
+    }
+
+    fn periodic(magnitude: i16, delay: u16, length: u16, envelope: FFEnvelope) -> RumbleEffect {
+        FFEffectData {
+            direction: 0,
+            trigger: FFTrigger::default(),
+            replay: FFReplay { length, delay },
+            kind: FFEffectKind::Periodic {
+                waveform: FFWaveform::Sine,
+                period: 20,
+                magnitude,
+                offset: 0,
+                phase: 0,
+                envelope,
+            },
+        }
+        .into()
     }
 
     #[test]
     fn playing_effects_add_up_within_their_replay_times() {
         let now = Instant::now();
         let at = |milliseconds| now + Duration::from_millis(milliseconds);
-        let levels = |low_frequency, high_frequency| MotorLevels {
-            low_frequency,
-            high_frequency,
-        };
         let mut effects = RumbleEffects::default();
         effects.upload(0, effect(0x9000, 0x1000, 0, 100));
         effects.upload(1, effect(0x9000, 0x2000, 50, 0));
         effects.play(0, 2, now);
         effects.play(1, 1, now);
 
-        assert_eq!(effects.motors(now), levels(0x9000, 0x1000));
-        assert_eq!(effects.next_change(now), Some(at(50)));
-        assert_eq!(effects.motors(at(50)), levels(u16::MAX, 0x3000));
+        assert_eq!(effects.sample(now), (levels(0x9000, 0x1000), Some(at(50))));
         assert_eq!(
-            effects.next_change(at(50)),
-            Some(at(200)),
+            effects.sample(at(50)),
+            (levels(u16::MAX, 0x3000), Some(at(200))),
             "two plays of 100 ms"
         );
-        assert_eq!(effects.motors(at(200)), levels(0x9000, 0x2000));
         assert_eq!(
-            effects.next_change(at(200)),
-            None,
+            effects.sample(at(200)),
+            (levels(0x9000, 0x2000), None),
             "length zero plays until stopped"
         );
 
         effects.play(1, 0, at(300));
-        assert_eq!(effects.motors(at(300)), MotorLevels::default());
+        assert_eq!(effects.sample(at(300)), (MotorLevels::default(), None));
         effects.play(0, 1, at(300));
         effects.erase(0);
-        assert_eq!(effects.motors(at(300)), MotorLevels::default());
+        assert_eq!(effects.sample(at(300)), (MotorLevels::default(), None));
+    }
+
+    #[test]
+    fn periodic_effect_schedules_attack_and_fade_on_each_replay() {
+        let now = Instant::now();
+        let at = |ms| now + Duration::from_millis(ms);
+        let mut effects = RumbleEffects::default();
+        let envelope = FFEnvelope {
+            attack_length: 100,
+            attack_level: 0,
+            fade_length: 120,
+            fade_level: 4_000,
+        };
+        effects.upload(0, periodic(-24_000, 25, 300, envelope));
+        effects.play(0, 2, now);
+
+        for (elapsed, level, next) in [
+            (0, 0, Some(25)),
+            (25, 0, Some(75)),
+            (75, 24_000, Some(125)),
+            (125, 48_000, Some(205)),
+            (205, 48_000, Some(255)),
+            (255, 31_332, Some(305)),
+            (305, 14_666, Some(325)),
+            (325, 0, Some(375)),
+            (605, 14_666, Some(625)),
+            (625, 0, None),
+        ] {
+            assert_eq!(
+                effects.sample(at(elapsed)),
+                (levels(level, level), next.map(at)),
+                "at {elapsed} ms"
+            );
+        }
+    }
+
+    #[test]
+    fn an_indefinite_periodic_effect_stays_at_its_magnitude_after_attack() {
+        let now = Instant::now();
+        let at = |ms| now + Duration::from_millis(ms);
+        let mut effects = RumbleEffects::default();
+        let envelope = FFEnvelope {
+            attack_length: 30,
+            attack_level: u16::MAX,
+            fade_length: 100,
+            fade_level: 0,
+        };
+        effects.upload(0, periodic(15_000, 0, 0, envelope));
+        effects.play(0, 1, now);
+
+        assert_eq!(
+            effects.sample(now),
+            (levels(u16::MAX, u16::MAX), Some(at(30)))
+        );
+        assert_eq!(effects.sample(at(30)), (levels(30_000, 30_000), None));
+        assert_eq!(effects.sample(at(500)), (levels(30_000, 30_000), None));
     }
 }

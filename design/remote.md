@@ -288,16 +288,17 @@ sends a centred state for each pad that moved. A pad's removal is sent even
 without focus. Rumble plays as a gilrs effect that repeats until the next level
 replaces it. On Windows gilrs reads pads only while the window has focus.
 Injection is a virtual uinput gamepad on Linux and ViGEm on Windows. The uinput
-pad declares the periodic waveforms and gain a real xpad pad gets from linux's
-memless layer, which gilrs requires before it rumbles a pad, and drives both
-motors at a periodic effect's magnitude. A gamepad event carries XInput's button
-bits, thumbsticks with up positive and triggers from 0 to 255. Both hosts
-inject it through `UinputGamepads` and `ViGEmGamepads`, which plug in a pad the
-first time its device number arrives. Type 7 sends the client a pad's low and
-high frequency motor levels each time a game changes them, and the levels hold
-until the next type 7. macOS injection waits until a virtual
-HID device is chosen. The packet still parses there, and the router counts it
-as undelivered.
+pad declares the periodic waveforms and gain a real xpad pad gets from Linux's
+memless layer, which gilrs requires before it rumbles a pad. It drives both
+motors from the periodic effect's magnitude, ramps through the attack and fade
+on each replay, and sends changed levels during those ramps. A gamepad event
+carries XInput's button bits, thumbsticks with up positive and triggers from
+0 to 255. The hosts inject it through `UinputGamepads` and `ViGEmGamepads`,
+which plug in a pad the first time its device number arrives. Type 7 sends the
+client a pad's low and high frequency motor levels each time a game changes
+them, and the levels hold until the next type 7. macOS injection waits until a
+virtual HID device is chosen. The packet still parses there, and the router
+counts it as undelivered.
 
 Cursor: the host sends type 8 each time the pointer shape or its visibility
 changes, starting with the first captured frame, and a 0x0 shape while the
