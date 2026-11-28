@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2632: `mxfdemux` seeks count from the leading B frames of a file that opens on an open GOP.
 - M2631: `g2g-launch-py --device-path` reports video link memory and refuses implicit frame downloads.
 - M2630: `qtdemux` takes keyframes from the bitstream when an MP4 `stss` lists no sample.
 - M2629: `qtdemux` seeks count from where an edit list starts presenting.

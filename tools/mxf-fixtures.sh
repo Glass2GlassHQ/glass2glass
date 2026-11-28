@@ -47,6 +47,14 @@ ffmpeg -v error -y -f lavfi -i "$(picture 64x48)" -f lavfi -i "$sound" \
 copy "$mpeg2" v
 copy "$mpeg2" a
 
+# two six-frame gops cut at an open gop's second keyframe, so the two pictures stored after it present first
+open_gop="$fixtures/mxf_mpeg2_open_gop.mxf"
+open_gop_stream="$(mktemp --suffix=.ts)"
+ffmpeg -v error -y -f lavfi -i "testsrc2=size=64x48:rate=25:duration=1.2" \
+    -c:v mpeg2video -g 6 -bf 2 -flags -cgop "$open_gop_stream"
+ffmpeg -v error -y -ss 0.24 -i "$open_gop_stream" -c copy -frames:v 12 -f mxf "$open_gop"
+rm "$open_gop_stream"
+
 opatom="$fixtures/mxf_pcm_opatom.mxf"
 ffmpeg -v error -y -f lavfi -i "$sound" -c:a pcm_s24le -f mxf_opatom "$opatom"
 copy "$opatom" a

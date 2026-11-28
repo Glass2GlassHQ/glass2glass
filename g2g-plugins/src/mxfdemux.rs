@@ -1121,6 +1121,7 @@ impl MxfDemuxN {
         let pts_ns = unit.timing.pts_ns;
         let port = unit.port;
         self.seek.note_track_unit(port as u64, pts_ns);
+        self.seek.lower_seek_stream_start(pts_ns);
         let admitted = self.seek.admit(port, pts_ns, resync_point, unit);
         if let Some(seek_segment) = admitted.segment {
             for port in 0..self.port_caps.len() {

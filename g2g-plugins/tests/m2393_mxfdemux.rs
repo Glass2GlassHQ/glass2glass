@@ -10,7 +10,7 @@ use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::runtime::{block_on, parse_launch, RunBuilder, SeekController};
 use g2g_core::{
     Bus, BusMessage, ByteStreamEncoding, G2gError, MultiOutputElement, MultiOutputSink,
-    PushOutcome, Seek,
+    PushOutcome, Seek, Segment,
 };
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::mxfdemux::{forwardable_tracks, MxfDemuxN};
@@ -47,6 +47,7 @@ struct Unit {
 #[derive(Debug, Default)]
 struct Ports {
     units: Vec<Vec<Unit>>,
+    segments: Vec<Segment>,
 }
 
 impl Ports {
@@ -69,7 +70,11 @@ impl MultiOutputSink for Ports {
         port: usize,
         packet_slot: &mut Option<PipelinePacket>,
     ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        if let PipelinePacket::DataFrame(frame) = packet_slot.take().expect("a packet") {
+        let packet = packet_slot.take().expect("a packet");
+        if let PipelinePacket::Segment(segment) = packet {
+            self.segments.push(segment);
+        }
+        if let PipelinePacket::DataFrame(frame) = packet {
             self.units[port].push(Unit {
                 pts_ns: frame.timing.pts_ns,
                 dts_ns: frame.timing.dts_ns,
@@ -97,6 +102,7 @@ fn demuxer(file: &[u8]) -> (MxfDemuxN, Ports) {
     let tracks = forwardable_tracks(file);
     let ports = Ports {
         units: vec![Vec::new(); tracks.len()],
+        segments: Vec::new(),
     };
     (MxfDemuxN::new(tracks), ports)
 }
@@ -346,6 +352,35 @@ fn a_picture_seek_lands_on_the_keyframe_the_index_names() {
         let video = &streaming.ports.units[0];
         assert!(video[0].keyframe);
         assert_eq!(video[..], whole.units[0][SECOND_GOP_FRAME..]);
+    });
+}
+
+// ffmpeg -ss counts from the earliest picture shown, which a cut at an open gop keyframe stores after that keyframe
+#[test]
+fn a_seek_before_the_first_picture_counts_from_the_earliest_one_shown() {
+    const SEEK_NS: u64 = 200_000_000;
+    block_on(async {
+        let file = fixture("mxf_mpeg2_open_gop.mxf");
+        let whole = whole_file_units(&file).await;
+        let pictures = &whole.units[0];
+        let first_shown_ns = pictures.iter().map(|unit| unit.pts_ns).min().unwrap();
+        assert!(first_shown_ns < pictures[0].pts_ns);
+        let mut streaming = streaming(&file).await;
+        streaming.app.seek(Seek::flush_to(SEEK_NS));
+        feed(&mut streaming.demux, &file[..1], &mut streaming.ports).await;
+        let landing = streaming
+            .upstream
+            .take_seek(Ok)
+            .expect("the demuxer byte-seeks its source")
+            .start as usize;
+        send(
+            &mut streaming.demux,
+            PipelinePacket::Flush,
+            &mut streaming.ports,
+        )
+        .await;
+        feed(&mut streaming.demux, &file[landing..], &mut streaming.ports).await;
+        assert_eq!(streaming.ports.segments[0].start, first_shown_ns + SEEK_NS);
     });
 }
 
