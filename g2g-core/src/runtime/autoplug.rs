@@ -1891,6 +1891,7 @@ mod factory {
         /// carries the factory; `None` (the default) leaves a domain mismatch to
         /// fail loud at negotiation, as it did before.
         domain_converter: Option<DomainConverterHook>,
+        forbid_implicit_downloads: bool,
         transfer_costs: Vec<DomainTransferCost>,
         rank_overridden: Vec<&'static str>,
     }
@@ -2273,6 +2274,12 @@ mod factory {
             self
         }
 
+        /// Require a download element to be named in the launch line.
+        pub fn forbid_implicit_downloads(&mut self) -> &mut Self {
+            self.forbid_implicit_downloads = true;
+            self
+        }
+
         /// Price the converter the domain-converter factory builds for one edge,
         /// so the cost-based search can weigh a chain whose output needs it.
         pub fn register_transfer_cost(&mut self, transfer: DomainTransferCost) -> &mut Self {
@@ -2287,6 +2294,9 @@ mod factory {
             match self.domain_converter {
                 Some(factory) => {
                     crate::runtime::auto_plug_domain_converters(graph, &|from, to, device| {
+                        if self.forbid_implicit_downloads && !from.is_system() && to.is_system() {
+                            return None;
+                        }
                         factory(from, to, device)
                     })
                 }

@@ -47,6 +47,8 @@ use std::process;
 use std::time::{Duration, Instant};
 
 use g2g_core::runtime::{parse_launch, PipelineProgress, Registry, RunBuilder, RunStats};
+
+mod device_path;
 use g2g_core::G2gError;
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::perfetto_trace::PerfettoTrace;
@@ -58,7 +60,7 @@ use g2g_plugins::TokioThreadSpawner;
 const LINK_CAPACITY: usize = 4;
 
 const USAGE: &str =
-    "usage: g2g-launch-py [-q] [--threads] [--trace <file>] [--profile <file>] [--placement-profile <file>] [--objective latency|throughput] <element> [key=value ...] ! <element> ! ...
+    "usage: g2g-launch-py [-q] [--threads] [--device-path] [--trace <file>] [--profile <file>] [--placement-profile <file>] [--objective latency|throughput] <element> [key=value ...] ! <element> ! ...
        g2g-launch-py --inspect [g2g-inspect arguments]
        g2g-launch-py --inspect pyelement|pyaggregator|pysink module=<module> class=<class>
        g2g-launch-py --docgen [out.html]
@@ -72,6 +74,7 @@ fn main() {
     // gst-launch flags so a pasted line still runs.
     let mut quiet = false;
     let mut threads = false;
+    let mut report_device_path = false;
     let mut trace_path: Option<String> = None;
     let mut profile_path: Option<String> = None;
     let mut placement_profile_path: Option<String> = None;
@@ -84,6 +87,7 @@ fn main() {
             match arg.as_str() {
                 "-q" | "--quiet" => quiet = true,
                 "--threads" => threads = true,
+                "--device-path" => report_device_path = true,
                 "--trace" => match args.next() {
                     Some(path) => trace_path = Some(path),
                     None => {
@@ -149,8 +153,15 @@ fn main() {
         std::env::set_var("WAYLAND_DISPLAY", "wayland-0");
     }
 
-    let reg = registry();
+    let mut reg = registry();
+    if report_device_path {
+        reg.forbid_implicit_downloads();
+    }
 
+    if report_device_path && profile_path.is_some() {
+        eprintln!("g2g-launch-py: --device-path and --profile both use the runtime observer");
+        process::exit(2);
+    }
     if profile_path.is_some() && trace_path.is_some() {
         eprintln!(
             "g2g-launch-py: --profile and --trace both record every frame's timing, pick one"
@@ -242,6 +253,8 @@ fn main() {
             g2g_plugins::placement::ProfileRun::prepare(&mut graph),
         )
     });
+    let mut device_path = report_device_path.then(|| device_path::Report::new(&graph));
+    let observer = g2g_core::runtime::Observer::new();
     let clock = WallClock::new();
     let progress = PipelineProgress::new();
     let started = Instant::now();
@@ -257,6 +270,11 @@ fn main() {
         if let Some((_, run)) = &profile {
             run_builder = run_builder.with_observer(run.observer());
         }
+        if report_device_path {
+            run_builder = run_builder
+                .with_observer(&observer)
+                .with_copy_policy(g2g_core::copyplan::CopyPolicy::DenyDeviceFallback);
+        }
         // one OS thread per element, so a CPU-bound convert does not hold up every other element's handoff
         // a profile run on the shared thread times each element's wait behind the others' work
         let mut run: Pin<Box<dyn Future<Output = Result<RunStats, G2gError>> + '_>> =
@@ -269,6 +287,9 @@ fn main() {
             match tokio::time::timeout(Duration::from_secs(1), &mut run).await {
                 Ok(r) => break r,
                 Err(_elapsed) => {
+                    if let Some(report) = &mut device_path {
+                        report.print(&observer);
+                    }
                     if !quiet && std::io::stderr().is_terminal() {
                         let pos = match progress.position() {
                             Some(ns) => format!("t={:.1}s", ns as f64 / 1.0e9),
@@ -295,7 +316,14 @@ fn main() {
             process::exit(1);
         }
     }
+    if let Some(report) = &mut device_path {
+        report.print(&observer);
+    }
     match result {
+        Err(G2gError::CopyBudget | G2gError::AllocationConflict) if report_device_path => {
+            eprintln!("g2g-launch-py: unsupported device path; add an explicit frame downloader where system memory is required");
+            process::exit(1);
+        }
         Ok(stats) => {
             if !quiet {
                 let elapsed = started.elapsed().as_secs_f64();

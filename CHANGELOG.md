@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2631: `g2g-launch-py --device-path` reports video link memory and refuses implicit frame downloads.
 - M2630: `qtdemux` takes keyframes from the bitstream when an MP4 `stss` lists no sample.
 - M2629: `qtdemux` seeks count from where an edit list starts presenting.
 - M2628: `decodebin` names the MXF essences `mxfdemux` cannot read instead of failing on a default H.264 port.

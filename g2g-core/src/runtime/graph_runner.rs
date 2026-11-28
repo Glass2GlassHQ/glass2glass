@@ -2492,7 +2492,13 @@ fn enforce_copy_policy(
     policy: crate::copyplan::CopyPolicy,
 ) -> Result<(), G2gError> {
     let plan = copy_plan(vg, solution, &edge_memory(vg));
-    plan.check(policy).map_err(|_| G2gError::CopyBudget)
+    plan.check(policy).map_err(|error| {
+        crate::g2g_error!(
+            crate::log::Target::category(crate::log::RUNTIME_CATEGORY),
+            "{error}"
+        );
+        G2gError::CopyBudget
+    })
 }
 
 /// One graph node's arm with its element and every link and handle it runs on,
@@ -4330,7 +4336,21 @@ pub fn copy_plan(
             }
         })
         .collect();
-    crate::copyplan::CopyPlan::analyze(&nodes, &edges)
+    let mut plan = crate::copyplan::CopyPlan::analyze(&nodes, &edges);
+    for (edge, (caps, memory)) in vg.edges().iter().zip(edge_caps.iter().zip(edge_memory)) {
+        if !matches!(caps, Caps::RawVideo { .. }) || !memory.is_system() {
+            continue;
+        }
+        let source = edge.src.node;
+        if let Some(domain) = vg.element(source).and_then(|node| node.output_domains().preferred()) {
+            if !domain.is_system() {
+                let label = caps_label(vg, source);
+                plan.device_fallbacks
+                    .push(alloc::format!("{label}: {domain:?} -> {memory:?}"));
+            }
+        }
+    }
+    plan
 }
 
 struct CascadeOutcome {

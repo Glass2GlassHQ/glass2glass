@@ -169,6 +169,8 @@ pub struct CopyPlan {
     pub hops: Vec<Hop>,
     /// Domain transitions (the converter / transfer points), in node order.
     pub transfers: Vec<Transfer>,
+    /// GPU producers that negotiated raw output in system memory.
+    pub device_fallbacks: Vec<String>,
 }
 
 /// A graph-level budget on memory-domain copies, enforced by [`CopyPlan::check`].
@@ -181,6 +183,9 @@ pub enum CopyPolicy {
     /// Pass only with zero frame copies: the strict zero-copy contract
     /// (equivalent to `AtMost(0)`).
     DenyAll,
+    /// Refuse raw video output falling back from a device domain to system memory.
+    /// Pair with a launch registry that forbids automatically inserted downloads.
+    DenyDeviceFallback,
 }
 
 /// A [`CopyPolicy`] violation: the plan had more frame copies than the budget.
@@ -249,7 +254,11 @@ impl CopyPlan {
                 });
             }
         }
-        CopyPlan { hops, transfers }
+        CopyPlan {
+            hops,
+            transfers,
+            device_fallbacks: Vec::new(),
+        }
     }
 
     /// The number of counted frame copies: byte-copying transfers of a raw heavy
@@ -281,6 +290,17 @@ impl CopyPlan {
             CopyPolicy::Allow => return Ok(()),
             CopyPolicy::DenyAll => 0,
             CopyPolicy::AtMost(n) => n as usize,
+            CopyPolicy::DenyDeviceFallback => {
+                return if self.device_fallbacks.is_empty() {
+                    Ok(())
+                } else {
+                    Err(CopyBudgetError {
+                        copies: self.device_fallbacks.len(),
+                        budget: 0,
+                        offenders: self.device_fallbacks.clone(),
+                    })
+                };
+            }
         };
         let copies = self.frame_copies();
         if copies <= budget {
